@@ -1,0 +1,68 @@
+# Roadmap
+
+From `SPEC.md` (approved 2026-11-02) to 1.0: *Animal Crossing: New Horizons* 3.0.2, 3.0.3, 2.0.7 or 1.0.0, built from my own game folder, on the AMD handheld, the Strix Halo tablet, the RTX 3090 Ti desktop, a Mac, an iPhone or iPad, and an Adreno Android device; a week of island life on the AMD handheld (M12); the same island on each through save-relay; and our code in Rust. The code map is `docs/code-map.md`, the words are `GLOSSARY.md`, the decisions are `docs/adr/` (0001 workspace, 0002 prep tools then recompiler then runtime to Rust, 0003 Slint launcher, 0004 build hubs, 0005 Android keeps upstream's route, 0006 Apple builds the same recompiled code). Every piece is an issue titled `<id>: ...`; `Blocked by` in each issue sets the order.
+
+## Features, by Must
+
+| Must | Pieces |
+|---|---|
+| M1 build from my game folder, four versions only | 1.02 (`version`), 1.03 (`nso`), 1.04 (`gamefolder`), 1.07 (`recipe`), 1.22 (`prepare`), 1.27-1.31 (the prep tools in Rust), 2.01, 2.05; one real build per hub: 6.01, 7.01, 8.02 |
+| M2 Steam with artwork, the handheld profile | 1.05 (`config`), 1.06 (`profile`), 1.11-1.15 (`vdf`, `steam`, `artwork`), 1.23 (`write_shortcut`), 2.05; 6.01, 6.02 |
+| M3 the Windows desktop | 7.01, 7.02 |
+| M4 Mac app, iOS app over a cable | 8.01, 8.02, 8.03, 8.06 |
+| M5 iPhone/iPad with a controller | 8.04, 8.07 |
+| M6 save-relay before and after every game | 1.08 (`saves` and the manifest), 1.24 (`launch::play`), 1.26 (the save-relay adapter), 8.05, 9.03, 10.01 |
+| M7 updates back the island up | 1.10 (`backup`), 1.25 (`update`) |
+| M8 daily upstream sync, fixes offered upstream | the daily sync is process (R21), not an issue; a conflict becomes an `upstream-sync` issue taken first; the About list is 2.08 |
+| M9 Android on Adreno | 9.01-9.04 |
+| M10 Continue screen | 1.09 (`savecard`), 2.02, 2.04, 2.05, 2.06, 11.01 |
+| M11 pull from a hub, fleet | 1.17-1.21 (`bundle`, `fleet`, the address check), 5.01-5.05, 2.07 |
+| M12 a week on the island | 6.03 (needs my developed island as a JKSV backup) |
+| M13 our code in Rust | stage 1 (prep tools), 2.10 (retire `launcher/`), stage 3 (recompiler), stage 4 (runtime) |
+| M14 no game files | `tools/check_no_game_data.sh` in CI (present, `check.yml`), 1.16 (`redact`), 1.17 (`bundle::is_forbidden`), PR review |
+| M15 every build verified | 0.01, 0.02, 7.01 |
+
+## Stages
+
+Each stage names its platforms (R04). Stages overlap: anything not blocked can be taken. Upstream keeps moving; once a module of ours is Rust, an upstream change to the code it replaced becomes an `upstream-sync` issue that ports the change by hand.
+
+0. **Housekeeping** (Linux, Android, iOS in CI). 0.01 the C++ unit tests (`NX_TESTS=ON`, `tests/*_test.cpp`) build and pass on the self-hosted Linux runner in `check.yml`; 0.02 the workspace cross-builds for `aarch64-linux-android` and is checked for `aarch64-apple-ios` in `check.yml` (M15).
+1. **Engine core: the prep tools in Rust** (Linux, Windows, macOS in CI). Each module of `crates/core` gets its final behaviour; the generic ones come from iannitram/totk-universal (MIT) with credit. Easy: 1.01 `platform`; 1.02 `version` (the four-version gate); 1.03 `nso` (the build id); 1.04 `gamefolder`; 1.05 `config` (`config.ini`, `launcher.ini`); 1.06 `profile`; 1.07 `recipe` (hubs, stages, outputs); 1.08 `saves` and the save-relay manifest; 1.09 `savecard`; 1.10 `backup`; 1.11 `vdf` write; 1.12 `vdf` read; 1.13 `steam` ids; 1.14 `steam` entry and upsert; 1.15 `artwork`; 1.16 `prepare::redact`; 1.17 `bundle` text and `is_forbidden`; 1.18 `bundle` manifest and verify; 1.19 `bundle::install`; 1.20 `fleet`; 1.21 `hub::is_home_network`. Medium: 1.22 `prepare::step` and the stage runner (upstream's scripts first, so a build works at every step); 1.23 `steam::write_shortcut` and `userdata_roots`; 1.24 `launch::play`; 1.25 `update`; 1.26 the save-relay adapter (`relay`, feature `relay`; waits on iannitram/save-relay#49); 1.27 `romfs.pak` and `spirv.pak` (`pack_romfs.py`, `pack_spirv.py`); 1.28 `nso2bin` (`nso2bin.py`: LZ4 segments to a flat image); 1.29 shaders and SARC (`extract_shaders.py`, `sarc_endian.py`); 1.30 fonts (`msg_rewrap.py`); 1.31 retire `tools/setup_acnh.py` and the scripts it runs (the toolchain fetch and the build stage move into `prepare`).
+2. **Faces** (Linux, Windows, macOS; Android with 9.01). 2.01 the `acnh-universal` CLI (`check`, `build`, `play`, `steam-add`, `fleet`; `hub` with stage 5); 2.02 the Continue screen brief, shared with totk-universal (design first: the Continue screen is the product); 2.03 the Slint app scaffold with gilrs input, built in CI; 2.04 the Continue screen; 2.05 the guided first run (hub: game folder, check, build, Add to Steam; client: pair, pull); 2.06 Saves and Settings (device profile, `config.ini` values); 2.07 Fleet; 2.08 About (upstream's credit, the fixes offered upstream (M8), licences, the Slint notice); 2.09 release builds (AppImage, Windows zip, Mac app) replacing `tools/package_release_*.sh`; 2.10 retire `launcher/` (SDL3 + ImGui) and `tools/launcher.sh`.
+3. **Recompiler to Rust** (Linux, Windows, macOS in CI). `crates/recomp` takes over `recomp/` pass by pass; each pass's output matches the Python's byte for byte on hand-written AArch64 (never game code), and `tests/difftest.py` stays the oracle. 3.01 `Load` (`recomp/nso.py`); 3.02 `Analyse` (`analysis.py`, `ehframe.py`); 3.03 `Emit`, integer and branches (`emit.py`, `emit_int.py`, `regcache.py`); 3.04 `Emit`, floating point and NEON (`emit_fp.py`, `emit_neon*.py`, `emit_vldst.py`, `emit_ext.py`, `emit_sdk20.py`); 3.05 the driver (`__main__.py`, `stats.py`), the recompile stage switches to Rust, `recomp/` is deleted.
+4. **Runtime to Rust** (Linux first in CI; every OS by the end). 4.01 `crates/runtime` scaffold: a static library linked into the player, its header from `cbindgen`, the C++ (renderer, `games/acnh/`, `ui/`) built through CMake from the build script, and the boot smoke test (the player reaches its first frame on a fake game library) in CI. Then one group per piece, each exporting the C symbols of the files it replaces, in `acnh_runtime::SERVICES` order: 4.02 `Config`; 4.03 `Time`; 4.04 `Saves`; 4.05 `Files`; 4.06 `Input`; 4.07 `Audio`; 4.08 `Services`; 4.09 `Kernel`; 4.10 `Memory`; 4.11 `Platform`; 4.12 `Loader` (and `main.cpp`), last. A device check on the AMD handheld follows each of 4.02-4.12 (ADR 0002).
+5. **Build hubs** (Linux, Windows, macOS; Android as a client). 5.01 discovery (mDNS, private ranges only); 5.02 pairing (a six-digit code on both screens, SPAKE2); 5.03 serve and pull a bundle (sealed, resumable); 5.04 the game data a prepare made, to my own paired devices only; 5.05 fleet records over the hub and the `hub` and `fleet` commands. CI runs a fake hub on loopback.
+6. **SteamOS handhelds** (Linux). 6.01 the Strix Halo tablet as hub: build from my game folder, Add to Steam, an hour from Game Mode; 6.02 the AMD handheld: install pulled from the tablet, the artwork, an hour from Game Mode; 6.03 the week on the island (M12 parts a-d, `playlog.jsonl`).
+7. **Windows desktop.** 7.01 the C++ parts and the player build on the self-hosted Windows runner (the clang-cl and lld toolchain upstream uses; Rust target `x86_64-pc-windows-msvc`); 7.02 an hour with a controller.
+8. **Mac, iPhone and iPad.** 8.01 the iOS address-space check first: does the guest's fixed 39-bit reservation (`APPLE_GUEST_SHIFT`, heap up to 6 GiB) fit an iPhone with the extended virtual addressing entitlement, and what a free Apple ID allows (7-day re-signing, memory); a written finding, then my call on the developer account; 8.02 the Mac app built natively on Apple silicon from the launcher; 8.03 the iOS app built on the Mac and installed by cable; 8.04 iOS controller mapping, touch hidden with a controller; 8.05 save-relay in the iOS app (its C interface); 8.06 a session on the Mac; 8.07 a session on the iPhone or iPad with a controller.
+9. **Android** (Adreno). 9.01 the Slint launcher's Android build in the same APK as the player, replacing `Home.java`'s folder screen; 9.02 the game library and data pulled from the Strix Halo tablet instead of `adb push`; 9.03 save-relay in the Android launcher; 9.04 a session with a controller.
+10. **One island everywhere.** 10.01 the round trip across all six devices, with the fleet warning on a version mismatch: the 1.0 sentence.
+11. **Design pass** (R04), last before 1.0. 11.01 the built screens against the Continue screen brief and the shared design system, including the Steam artwork and Game Mode; findings become `design-pass` issues.
+
+## Open-source pieces and where they fit
+
+| Project | Licence | Where | How |
+|---|---|---|---|
+| Nycolazs/ACNHRecomp | MIT | the whole repo | upstream: synced daily (R21), credited in About |
+| iannitram/totk-universal | MIT | `platform`, `vdf`, `steam`, `artwork`, `backup`, `bundle`, `fleet`, `launch`, `update`, `hub`, `savecard`, `profile`, `recipe`, the Continue screen brief | copy with credit in each file header |
+| iannitram/save-relay | MIT | `relay` (1.26), the iOS app (8.05), Android (9.03) | link |
+| iannitram/Uncharted-Universal | GPL-2.0 | the strangler order and stage layout | learn only (this repo is MIT) |
+| peiikai/LASRecomp | MIT | `recomp`, `runtime` | learn: splitting per-game code from shared code |
+| BluetufieBugado/SuperMarioWonderRecomp | MIT | `runtime/src/nvn`, Android, Windows | learn: our framework's surviving upstream |
+| fedebuonco/nxrt, nxrt-frontend | Unlicense | `crates/runtime`, `app/` | learn: one shared runtime; launcher prior art |
+| cesar527/ACNHRecomp | MIT | `profile`, Android | adopt with credit: the thermal governor, power modes |
+| ZUlxian/ACNHRecomp | MIT | `gamefolder`, Windows | adopt with credit: plain game-folder import, Windows and 16:10 fixes |
+| bingnnvjn/nvn-native-android, Timqt/d2r-android | MIT | Android | learn: mobile GPU workarounds |
+| kwsch/NHSE | GPL-3.0 | `savecard` after 1.0 | ideas only: the save format |
+| citron-neo/emulator, pound-emu/pound | GPL-3.0 | `runtime` services | ideas only |
+| kaiyao7/SwitchRecomp, bgyss/SwitchRecomp | GPL-3.0, none | `recomp` | ideas only |
+| skyline-emu/skyline | none | Android | ideas only |
+| FluffyFishGames/ACNHDesignPatternEditor | GPL-3.0 | after 1.0 | ideas only |
+| Norviah/animal-crossing | MIT | Continue screen metadata after 1.0 | data, with credit |
+| K11MCH1/libadrenotools | BSD-2-Clause | Android (Turnip) | through upstream's `tools/build_turnip.sh` |
+| slint-ui/slint | royalty-free (attribution) | `app/` | dependency; About carries the notice |
+| gilrs, mdns-sd, spake2, chacha20poly1305, sha2, cbindgen, cmake | MIT or Apache-2.0 | `app/`, `hub`, `bundle`, `runtime` | dependencies |
+
+## After 1.0
+
+The Won'ts in `SPEC.md`: local wireless play over the LAN (`docs/LOCAL_PLAY.md`, kept as upstream has it), save editing and design-pattern sync, the island's name on the save card (needs a save reader of our own), online play, Android GPUs other than Adreno (Mali), versions other than the four, above 60 FPS, and rewriting the renderer, the game code or the overlay in Rust.

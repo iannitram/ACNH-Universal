@@ -1,0 +1,60 @@
+//! Play (SPEC.md M6): pull the island, start the game with the device profile, wait for it to
+//! quit, push the island. save-relay does the syncing (through `Relay`, implemented by
+//! `relay.rs` once save-relay's library is linked); the game is started through `Game`; both
+//! are traits so the flow is tested with fakes. Copied from iannitram/totk-universal's
+//! `launch` (MIT) by its issue.
+
+use crate::error::{not_built, Result};
+use std::path::Path;
+
+/// What one save-relay pull or push did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sync {
+    /// Done (pulled, pushed, or nothing to do); the message is save-relay's.
+    Done(String),
+    /// The server is unreachable: play on (pull) or push next time (push).
+    Offline,
+    /// Both sides changed since the last sync; nothing was touched.
+    Conflict { server: String, local: String },
+}
+
+/// The player's answer to a conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    Server,
+    Local,
+}
+
+/// save-relay, as the launcher uses it.
+pub trait Relay {
+    fn pull(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync>;
+    fn push(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync>;
+}
+
+/// The built game (the player, started with `NX_DATA_ROOT` set to the data root).
+pub trait Game {
+    /// Start the game with `env` added and wait until it quits; Ok with its exit code.
+    fn run(&self, env: &[(String, String)]) -> Result<i32>;
+}
+
+/// What a play session did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Played {
+    pub pulled: Sync,
+    pub exit_code: i32,
+    pub pushed: Sync,
+}
+
+/// The play flow: `relay.pull`; on `Conflict` ask `choose` and pull again with its answer;
+/// `Offline` plays on. Then `game.run(env)`, then `relay.push` (a conflict asks again). A
+/// relay error before the game starts stops the flow (the game does not start); a push error
+/// is returned after the game has quit.
+pub fn play(
+    relay: &dyn Relay,
+    game: &dyn Game,
+    save_dir: &Path,
+    env: &[(String, String)],
+    choose: &dyn Fn(&Sync) -> Keep,
+) -> Result<Played> {
+    not_built("launch::play")
+}

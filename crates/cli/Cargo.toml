@@ -1,0 +1,15 @@
+[package]
+name = "acnh-cli"
+description = "acnh-universal: the command-line face of the launcher; the Steam shortcut in Game Mode runs `acnh-universal play`"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "acnh-universal"
+path = "src/main.rs"
+
+[dependencies]
+acnh-core = { path = "../core" }

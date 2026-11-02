@@ -1,0 +1,11 @@
+# Our Rust workspace (SPEC.md M13, docs/adr/0001-rust-workspace.md). Upstream's C++ and
+# CMake build (CMakeLists.txt) stays beside it; `crates/runtime` drives it once it links.
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/recomp", "crates/runtime", "crates/cli"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/iannitram/ACNH-Universal"

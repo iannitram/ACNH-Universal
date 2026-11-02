@@ -1,0 +1,14 @@
+[package]
+name = "acnh-runtime"
+description = "The host runtime (Horizon kernel, IPC, HLE services, platform), moving from runtime/src C++ to Rust in strangler order"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "acnh_runtime"
+path = "src/lib.rs"
+
+[dependencies]

@@ -35,3 +35,6 @@ refs/
 
 # Rust workspace build output (our pipeline).
 /target/
+
+# Rust build output.
+/target/
