@@ -77,13 +77,14 @@ jobs:
           # vcpkg is not on the host: fetch it into the job's temp folder.
           VCPKG_INSTALLATION_ROOT=$(cygpath -m "$RUNNER_TEMP")/vcpkg
           echo "VCPKG_INSTALLATION_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+          export VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT  # Visual Studio's own vcpkg is the default otherwise
           git clone --depth 1 https://github.com/microsoft/vcpkg "$VCPKG_INSTALLATION_ROOT"
           "$VCPKG_INSTALLATION_ROOT/bootstrap-vcpkg.bat" -disableMetrics
           "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install libvpx:x64-windows-static-md-release \
-              libvorbis:x64-windows-static-md-release --disable-metrics
+              libvorbis:x64-windows-static-md-release --disable-metrics ||
+            { tail -n 40 "$VCPKG_INSTALLATION_ROOT"/buildtrees/*/*.log; exit 1; }
       - name: Package
         run: |
-          export PATH="/c/Program Files/LLVM/bin:$PATH"
           T=$(cygpath -m "$RUNNER_TEMP")
           tools/package_release_win.sh "$VERSION" "$T/SDL3-$SDL3" \
               "$(cygpath -m "$VCPKG_INSTALLATION_ROOT")/installed/x64-windows-static-md-release" \
