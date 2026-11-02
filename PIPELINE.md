@@ -1,4 +1,4 @@
-Stage: Roadmap
+Stage: Dev Loop
 Since: 2026-11-02
 Kind: fork, built our way (copy of Nycolazs/ACNHRecomp, not a GitHub fork; the `upstream` remote points there, fetch only)
 Spec: SPEC.md (ours, approved 2026-11-02)   Roadmap: ROADMAP.md (ours)   Code map: docs/code-map.md
