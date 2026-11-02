@@ -1,0 +1,39 @@
+# The packages of the Ubuntu 22.04 (jammy) build chroot of the Linux job in workflows/build.yml. The job caches the
+# chroot by a hash of this file: change a line here (or the CMAKE or LLVM line) and the cache is rebuilt.
+# CMAKE 3.31.6 (release tarball: jammy's 3.22 is older than CMakeLists.txt needs)
+# LLVM 18 (apt.llvm.org, jammy)
+git
+ca-certificates
+curl
+gnupg
+unzip
+xz-utils
+build-essential
+ninja-build
+patchelf
+pkg-config
+libvulkan-dev
+libvpx-dev
+libvorbis-dev
+libasound2-dev
+libpulse-dev
+libpipewire-0.3-dev
+libx11-dev
+libxext-dev
+libxrandr-dev
+libxcursor-dev
+libxfixes-dev
+libxi-dev
+libxss-dev
+libxtst-dev
+libxkbcommon-dev
+libdrm-dev
+libgbm-dev
+libgl1-mesa-dev
+libegl1-mesa-dev
+libdbus-1-dev
+libibus-1.0-dev
+libudev-dev
+libwayland-dev
+wayland-protocols
+libdecor-0-dev
