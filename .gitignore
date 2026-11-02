@@ -32,3 +32,6 @@ refs/
 /gen/
 /build/
 .DS_Store
+
+# Rust workspace build output (our pipeline).
+/target/
