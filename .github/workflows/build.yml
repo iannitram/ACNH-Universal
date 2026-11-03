@@ -2,7 +2,7 @@
 # ACNHRecomp-Importer prepared, with the libraries they need; nothing of the game. One per system, each built on the
 # oldest one it should run on. Run from the Actions tab (Build > Run workflow); each package is an artifact of the run.
 # Private-repo CI runs on our own runners (self-hosted Linux and Windows); only the macOS job is the exception, until
-# the Mac mini runner is online.
+# my Mac runner is online.
 name: Build
 
 on:
@@ -18,7 +18,7 @@ on:
         required: false
         default: true
       macos:
-        description: "Also build the macOS package (a GitHub-hosted runner, paid minutes, until the Mac mini runner is online)"
+        description: "Also build the macOS package (a GitHub-hosted runner, paid minutes, until my Mac runner is online)"
         type: boolean
         required: false
         default: false
@@ -105,7 +105,7 @@ jobs:
     name: macOS arm64
     needs: version
     if: inputs.macos
-    # Moves to [self-hosted, macos] when the Mac mini runner is online (R29); until then it is GitHub-hosted, so it runs
+    # Moves to [self-hosted, macos] when my Mac runner is online (R29); until then it is GitHub-hosted, so it runs
     # only when asked for (the "macos" input).
     runs-on: macos-14  # Homebrew's libraries there run on macOS 14 and newer
     env:

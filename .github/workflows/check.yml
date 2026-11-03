@@ -1,7 +1,7 @@
 # The Rust launcher (crates/): format, lint and test on every push to main and every pull request,
 # plus the game-data check over every tracked file (SPEC.md M14, M15). A private repo, so it runs on
 # our own runners (self-hosted Linux and Windows). macOS is a GitHub-hosted runner (paid minutes)
-# until the Mac mini runner is online, so it runs only when asked from the Actions tab.
+# until my Mac runner is online, so it runs only when asked from the Actions tab.
 name: check
 
 on:
