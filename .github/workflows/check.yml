@@ -1,7 +1,7 @@
 # The Rust launcher (crates/): format, lint and test on every push to main and every pull request,
 # plus the game-data check over every tracked file (SPEC.md M14, M15). A private repo, so it runs on
 # our own runners (self-hosted Linux and Windows). macOS is a GitHub-hosted runner (paid minutes)
-# until the Mac mini runner is online, so it runs only when asked from the Actions tab.
+# until my Mac runner is online, so it runs only when asked from the Actions tab.
 name: check
 
 on:
@@ -53,6 +53,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+      - name: C toolchain (Linux)
+        if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # The runner container has no linker; cargo's build scripts need cc.
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update -q
+          $SUDO apt-get install -yq --no-install-recommends build-essential pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

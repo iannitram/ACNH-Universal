@@ -1,6 +1,8 @@
 # The release packages (README "Downloads"): the launcher and the player, which plays the game folder
 # ACNHRecomp-Importer prepared, with the libraries they need; nothing of the game. One per system, each built on the
 # oldest one it should run on. Run from the Actions tab (Build > Run workflow); each package is an artifact of the run.
+# Private-repo CI runs on our own runners (self-hosted Linux and Windows); only the macOS job is the exception, until
+# my Mac runner is online.
 name: Build
 
 on:
@@ -10,6 +12,16 @@ on:
         description: "Version in the package names (empty: the commit's short hash)"
         required: false
         default: ""
+      windows:
+        description: "Build the Windows package (it runs one at a time on the Windows runner)"
+        type: boolean
+        required: false
+        default: true
+      macos:
+        description: "Also build the macOS package (a GitHub-hosted runner, paid minutes, until my Mac runner is online)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -17,11 +29,12 @@ permissions:
 env:
   SDL3: "3.4.16"          # as tools/setup_acnh.py
   VK_HEADERS: "1.4.357"   # as tools/setup_acnh.py
+  LLVM: "19.1.7"          # clang-cl on the Windows runner
 
 jobs:
   version:
     name: Version
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux]
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
@@ -36,7 +49,8 @@ jobs:
   windows:
     name: Windows x64
     needs: version
-    runs-on: windows-2022
+    if: inputs.windows
+    runs-on: [self-hosted, windows]  # the host's own Visual Studio Build Tools; the rest is fetched below
     env:
       VERSION: ${{ needs.version.outputs.version }}
     defaults:
@@ -46,6 +60,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # the launcher's version (git describe)
+      - name: LLVM (clang-cl), 7-Zip
+        run: |
+          # The host has no clang-cl: take LLVM's installer and unpack it (an NSIS archive) beside the job's files.
+          T=$(cygpath -u "$RUNNER_TEMP")
+          export PATH="/c/Program Files/7-Zip:$PATH"
+          curl -fsSL -o "$T/llvm.exe" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM/LLVM-$LLVM-win64.exe"
+          7z x -bso0 -o"$T/llvm" "$T/llvm.exe"
+          cygpath -w "$T/llvm/bin" >> "$GITHUB_PATH"
+          cygpath -w "/c/Program Files/7-Zip" >> "$GITHUB_PATH"
       - uses: ilammy/msvc-dev-cmd@v1  # vcvars64: clang-cl links against the Windows SDK and the C runtime
         with:
           arch: x64
@@ -57,11 +80,17 @@ jobs:
           curl -fsSL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$VK_HEADERS.tar.gz" | tar -xz -C "$T"
       - name: libvpx, libvorbis (vcpkg)
         run: |
-          "$(cygpath -u "$VCPKG_INSTALLATION_ROOT")/vcpkg.exe" install libvpx:x64-windows-static-md-release \
-              libvorbis:x64-windows-static-md-release --disable-metrics
+          # vcpkg is not on the host: fetch it into the job's temp folder.
+          VCPKG_INSTALLATION_ROOT=$(cygpath -m "$RUNNER_TEMP")/vcpkg
+          echo "VCPKG_INSTALLATION_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+          export VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT  # Visual Studio's own vcpkg is the default otherwise
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$VCPKG_INSTALLATION_ROOT"
+          "$VCPKG_INSTALLATION_ROOT/bootstrap-vcpkg.bat" -disableMetrics
+          "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install libvpx:x64-windows-static-md-release \
+              libvorbis:x64-windows-static-md-release --disable-metrics ||
+            { tail -n 40 "$VCPKG_INSTALLATION_ROOT"/buildtrees/*/*.log; exit 1; }
       - name: Package
         run: |
-          export PATH="/c/Program Files/LLVM/bin:$PATH"
           T=$(cygpath -m "$RUNNER_TEMP")
           tools/package_release_win.sh "$VERSION" "$T/SDL3-$SDL3" \
               "$(cygpath -m "$VCPKG_INSTALLATION_ROOT")/installed/x64-windows-static-md-release" \
@@ -75,6 +104,9 @@ jobs:
   macos:
     name: macOS arm64
     needs: version
+    if: inputs.macos
+    # Moves to [self-hosted, macos] when my Mac runner is online (R29); until then it is GitHub-hosted, so it runs
+    # only when asked for (the "macos" input).
     runs-on: macos-14  # Homebrew's libraries there run on macOS 14 and newer
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -96,41 +128,86 @@ jobs:
   linux:
     name: Linux x64
     needs: version
-    runs-on: ubuntu-22.04  # glibc 2.35: what the package runs on, and newer
+    runs-on: [self-hosted, linux]
+    # The package must run on glibc 2.35 and newer, so it is built in an Ubuntu 22.04 (jammy) chroot. The runner is an
+    # unprivileged Ubuntu 24.04 container (no Docker daemon, no mounts): the chroot is debootstrapped, cached as a
+    # tarball by a hash of its package list, the checkout is copied in, and the package copied out. Nothing is mounted.
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      CHROOT: /var/tmp/acnh-jammy
+      CMAKE: "3.31.6"
+      LLVM: "18"
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Tools
-        run: |
-          sudo apt-get update
-          # clang 18 (apt.llvm.org); SDL3's build dependencies (SDL's docs/README-linux.md): it loads these libraries
-          # at run time when present; the game's: Vulkan, libvpx, libvorbis.
-          curl -fsSL https://apt.llvm.org/llvm.sh | sudo bash -s 18
-          sudo apt-get install -y --no-install-recommends ninja-build patchelf pkg-config \
-               libvulkan-dev libvpx-dev libvorbis-dev \
-               libasound2-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
-               libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libdrm-dev libgbm-dev \
-               libgl1-mesa-dev libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev libwayland-dev \
-               wayland-protocols libdecor-0-dev
-      - name: SDL3, Vulkan headers
-        run: |
-          # Ubuntu 22.04's Vulkan headers (1.3.204) are older than the runtime's
-          curl -fsSL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$VK_HEADERS.tar.gz" |
-            tar -xz -C "$RUNNER_TEMP"
-          curl -fsSL "https://github.com/libsdl-org/SDL/releases/download/release-$SDL3/SDL3-$SDL3.tar.gz" |
-            tar -xz -C "$RUNNER_TEMP"
-          cmake -S "$RUNNER_TEMP/SDL3-$SDL3" -B "$RUNNER_TEMP/sdl3-build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdl3"
-          cmake --build "$RUNNER_TEMP/sdl3-build"
-          cmake --install "$RUNNER_TEMP/sdl3-build"
-      - name: Package
+      - uses: actions/cache@v4
+        id: chroot-cache
+        with:
+          path: ${{ runner.temp }}/jammy-chroot.tar.gz
+          key: jammy-chroot-${{ env.CMAKE }}-${{ env.LLVM }}-${{ hashFiles('.github/linux-chroot-packages.txt') }}
+      - name: Ubuntu 22.04 chroot
         env:
-          CC: clang-18
-          CXX: clang++-18
-        run: tools/package_release_linux.sh "$VERSION" "$RUNNER_TEMP/sdl3" "$RUNNER_TEMP/Vulkan-Headers-$VK_HEADERS/include"
+          DEBIAN_FRONTEND: noninteractive
+          HIT: ${{ steps.chroot-cache.outputs.cache-hit }}
+        run: |
+          SUDO=$(command -v sudo || true)
+          TAR="$RUNNER_TEMP/jammy-chroot.tar.gz"
+          $SUDO rm -rf "$CHROOT"
+          if [ "$HIT" = true ]; then
+            $SUDO mkdir -p "$CHROOT"
+            $SUDO tar -xzpf "$TAR" --numeric-owner -C "$CHROOT"
+          else
+            $SUDO apt-get update -q
+            $SUDO apt-get install -yq --no-install-recommends debootstrap ca-certificates
+            $SUDO debootstrap --variant=minbase --components=main,universe jammy "$CHROOT" http://archive.ubuntu.com/ubuntu
+            $SUDO cp /etc/resolv.conf "$CHROOT/etc/resolv.conf"
+            echo "deb http://archive.ubuntu.com/ubuntu jammy-updates main universe" | $SUDO tee -a "$CHROOT/etc/apt/sources.list" >/dev/null
+            grep -v '^#' .github/linux-chroot-packages.txt | $SUDO tee "$CHROOT/packages.txt" >/dev/null
+            $SUDO chroot "$CHROOT" env DEBIAN_FRONTEND=noninteractive CMAKE="$CMAKE" LLVM="$LLVM" bash -euc '
+              apt-get update -q
+              # shellcheck disable=SC2046
+              apt-get install -yq --no-install-recommends $(cat /packages.txt)
+              # clang (apt.llvm.org) and a CMake new enough for CMakeLists.txt
+              curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+              echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-$LLVM main" > /etc/apt/sources.list.d/llvm.list
+              apt-get update -q
+              apt-get install -yq --no-install-recommends clang-$LLVM
+              curl -fsSL "https://github.com/Kitware/CMake/releases/download/v$CMAKE/cmake-$CMAKE-linux-x86_64.tar.gz" |
+                tar -xz --strip-components=1 -C /usr/local
+              apt-get clean
+              rm -rf /var/lib/apt/lists/* /packages.txt
+            '
+            $SUDO tar -czpf "$TAR" --numeric-owner -C "$CHROOT" .
+            $SUDO chown "$(id -u):$(id -g)" "$TAR"
+          fi
+          # Network for the build, and the checkout copied in (no bind mounts: the runner cannot make them).
+          $SUDO cp /etc/resolv.conf "$CHROOT/etc/resolv.conf"
+          $SUDO mkdir -p "$CHROOT/work"
+          $SUDO cp -a "$GITHUB_WORKSPACE/." "$CHROOT/work/"
+      - name: SDL3, Vulkan headers, package
+        run: |
+          sudo chroot "$CHROOT" env VERSION="$VERSION" SDL3="$SDL3" VK_HEADERS="$VK_HEADERS" CC=clang-18 CXX=clang++-18 bash -euc '
+            git config --global --add safe.directory "*"
+            T=/tmp/sdk
+            mkdir -p "$T"
+            # Ubuntu 22.04'"'"'s Vulkan headers (1.3.204) are older than the runtime'"'"'s
+            curl -fsSL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$VK_HEADERS.tar.gz" | tar -xz -C "$T"
+            curl -fsSL "https://github.com/libsdl-org/SDL/releases/download/release-$SDL3/SDL3-$SDL3.tar.gz" | tar -xz -C "$T"
+            cmake -S "$T/SDL3-$SDL3" -B "$T/sdl3-build" -G Ninja -DCMAKE_BUILD_TYPE=Release                   -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX="$T/sdl3"
+            cmake --build "$T/sdl3-build"
+            cmake --install "$T/sdl3-build"
+            cd /work
+            tools/package_release_linux.sh "$VERSION" "$T/sdl3" "$T/Vulkan-Headers-$VK_HEADERS/include"
+          '
+      - name: Copy the package out
+        run: |
+          mkdir -p private/release
+          sudo cp "$CHROOT/work/private/release/ACNHRecomp-$VERSION-linux-x64.tar.gz" private/release/
+          sudo chown "$(id -u):$(id -g)" "private/release/ACNHRecomp-$VERSION-linux-x64.tar.gz"
+      - name: Remove the chroot copy
+        if: always()
+        run: sudo rm -rf "$CHROOT"
       - uses: actions/upload-artifact@v7
         with:
           path: private/release/ACNHRecomp-${{ env.VERSION }}-linux-x64.tar.gz
