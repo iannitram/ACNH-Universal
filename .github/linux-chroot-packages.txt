@@ -1,7 +1,5 @@
 # The packages of the Ubuntu 22.04 (jammy) build chroot of the Linux job in workflows/build.yml. The job caches the
-# chroot by a hash of this file: change a line here (or the CMAKE or LLVM line) and the cache is rebuilt.
-# CMAKE 3.31.6 (release tarball: jammy's 3.22 is older than CMakeLists.txt needs)
-# LLVM 18 (apt.llvm.org, jammy)
+# chroot by CMAKE, LLVM (from the job env) and a hash of this file: change a line here and the cache is rebuilt.
 git
 ca-certificates
 curl

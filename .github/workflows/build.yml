@@ -145,7 +145,7 @@ jobs:
         id: chroot-cache
         with:
           path: ${{ runner.temp }}/jammy-chroot.tar.gz
-          key: jammy-chroot-${{ hashFiles('.github/linux-chroot-packages.txt') }}
+          key: jammy-chroot-${{ env.CMAKE }}-${{ env.LLVM }}-${{ hashFiles('.github/linux-chroot-packages.txt') }}
       - name: Ubuntu 22.04 chroot
         env:
           DEBIAN_FRONTEND: noninteractive
