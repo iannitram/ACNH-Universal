@@ -55,6 +55,8 @@ jobs:
           submodules: false
       - name: C toolchain (Linux)
         if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           # The runner container has no linker; cargo's build scripts need cc.
           SUDO=$(command -v sudo || true)
