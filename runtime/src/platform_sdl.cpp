@@ -32,6 +32,8 @@
 #include "config.h"
 #include "platform.h"
 #include "platform_sdl.h"
+#include "nfp_host.h"
+#include "ui/amiibo_importer.h"
 #include "ui/ui.h"
 
 namespace nx::plat {
@@ -179,6 +181,7 @@ struct InputOptions {
     int deadzone = 7849;       // of 32767
     bool rumble = true;
     SDL_Scancode keys[22] = {};  // the order of kKeyNames
+    SDL_Scancode keys2[22] = {};  // the second key of each (input.key2.<name>; none by default)
 };
 const char* const kKeyNames[22][2] = {
     {"move_up", "W"},     {"move_down", "S"},  {"move_left", "A"},  {"move_right", "D"},  {"cam_up", "I"},
@@ -199,6 +202,7 @@ const InputOptions& input_options() {
             std::string name = nx::config_get(std::string("input.key.") + kKeyNames[k][0], kKeyNames[k][1]);
             SDL_Scancode sc = SDL_GetScancodeFromName(name.c_str());
             o.keys[k] = sc != SDL_SCANCODE_UNKNOWN ? sc : SDL_GetScancodeFromName(kKeyNames[k][1]);
+            o.keys2[k] = SDL_GetScancodeFromName(nx::config_get(std::string("input.key2.") + kKeyNames[k][0], "").c_str());
         }
     }
     return o;
@@ -265,6 +269,13 @@ static void sample_input() {
     uint64_t mods = 0;
     const bool focused = g_window && (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS);
     const bool typing = nx::plat::keyboard_typing();
+    // The settings screen's text fields: SDL only sends typed characters while text input is on.
+    static bool text_on = false;
+    if (g_window && nx::ui::ui_text_field() != text_on) {
+        text_on = !text_on;
+        if (text_on) SDL_StartTextInput(g_window);
+        else SDL_StopTextInput(g_window);
+    }
     if (focused && typing) {
         const bool* k = SDL_GetKeyboardState(nullptr);
         if (k[SDL_SCANCODE_UP]) p.buttons |= kUp;
@@ -273,14 +284,14 @@ static void sample_input() {
         if (k[SDL_SCANCODE_RIGHT]) p.buttons |= kRight;
         if (k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_KP_ENTER]) p.buttons |= kPlus;
         if (k[SDL_SCANCODE_BACKSPACE]) p.buttons |= kB;
-    } else if (focused) {
+    } else if (focused && !nx::ui::ui_text_field()) {
         const bool* k = SDL_GetKeyboardState(nullptr);
         const uint64_t now = SDL_GetTicks();
-        auto key = [&](int i) {
-            int sc = opt.keys[i];
-            return k[sc] && (!nx::plat::key_types(sc) || nx::plat::keyboard_state_known() ||
-                             now - down_since[sc] >= kTypeWaitMs);
+        auto held = [&](int sc) {
+            return sc > 0 && k[sc] && (!nx::plat::key_types(sc) || nx::plat::keyboard_state_known() ||
+                                       now - down_since[sc] >= kTypeWaitMs);
         };
+        auto key = [&](int i) { return held(opt.keys[i]) || held(opt.keys2[i]); };
         if (key(2)) p.lx = -kStickMax;
         if (key(3)) p.lx = kStickMax;
         if (key(0)) p.ly = kStickMax;
@@ -314,8 +325,11 @@ static void sample_input() {
                (m & SDL_KMOD_RALT ? 8u : 0u) | (m & SDL_KMOD_GUI ? 16u : 0u) | (m & SDL_KMOD_CAPS ? 256u : 0u) |
                (m & SDL_KMOD_SCROLL ? 512u : 0u) | (m & SDL_KMOD_NUM ? 1024u : 0u);
     }
+    if (focused && nx::ui::ui_visible()) nx::ui::amiibo_importer_poll();
+    nx::nfp_host::poll();
     // The settings screen takes the input while it is open (and watches for its Minus + Plus combo).
     bool ui = nx::ui::ui_pad(p.buttons, p.lx, p.ly);
+    p.buttons = nx::ui::ui_filter_game_buttons(p.buttons, ui);
     if (ui) p = PadState{}, std::memset(usb, 0, sizeof usb), mods = 0;
     nx::plat::set_keyboard(mods, usb);
     // The mouse: its left button touches the console's screen where the picture is (the game's own touch support).
@@ -420,6 +434,23 @@ void pick_path(bool zip, const std::string& title) {
             SDL_SetNumberProperty(props, SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER, 1);
         }
         SDL_ShowFileDialogWithProperties(zip ? SDL_FILEDIALOG_OPENFILE : SDL_FILEDIALOG_OPENFOLDER, picked, nullptr, props);
+        SDL_DestroyProperties(props);
+    });
+}
+
+void pick_file(const std::string& title, const char* extension) {
+    {
+        std::lock_guard lk(g_pick_lock);
+        g_pick_done = false;
+    }
+    run_on_main([title, extension] {
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, g_window);
+        SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, title.c_str());
+        SDL_DialogFileFilter filter = {extension, extension};
+        SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_FILTERS_POINTER, &filter);
+        SDL_SetNumberProperty(props, SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER, 1);
+        SDL_ShowFileDialogWithProperties(SDL_FILEDIALOG_OPENFILE, picked, nullptr, props);
         SDL_DestroyProperties(props);
     });
 }

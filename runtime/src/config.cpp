@@ -12,6 +12,7 @@
 
 #include <nx/runtime.h>
 
+#include "game_clock.h"
 #include "platform.h"
 
 namespace nx {
@@ -95,6 +96,7 @@ std::string interval(const std::string& v) { return (v == "60" && speedfix_insta
 std::string native60(const std::string& v) { return v == "60native" ? "1" : ""; }
 // lsfg-vk is a Vulkan layer of its own. "off" says so: frame generation is on by default on Android.
 std::string framegen(const std::string& v) { return v == "builtin" ? "1" : v.empty() ? "" : "0"; }
+std::string ffx_framegen(const std::string& v) { return v == "fsr" ? "1" : ""; }  // nvn_temporal.cpp
 // The screen's 0..100% sharpness -> FSR's RCAS attenuation in stops (0 sharpest, 2 softest).
 std::string fsr_sharpness(const std::string& v) {
     if (v.empty()) return "";
@@ -113,6 +115,7 @@ const Mapping kMappings[] = {
     {"video.upscaler", "NX_FSR", fsr, true},
     {"video.fsr_sharpness_pct", "NX_FSR_SHARP", fsr_sharpness, true},
     {"video.antialiasing", "NX_AA", off_empty, true},  // fxaa (nvn_present.cpp), ssaa15 / ssaa2 (nvn_ultrawide.cpp)
+    {"video.temporal", "NX_TEMPORAL", off_empty, false},  // fsr / dlaa (nvn_temporal.cpp): read live
     {"video.anisotropy", "NX_ANISOTROPY", game_empty, true},  // 2 .. 16 (nvn_sampler.cpp)
     {"video.gpu", "NX_GPU", auto_empty, true},
     {"video.frame_rate", "NX_PRESENT_INTERVAL", interval, true},
@@ -120,8 +123,10 @@ const Mapping kMappings[] = {
     {"video.frame_rate", "NX_SPEEDFIX", speedfix, true},
     {"video.frame_cap", "NX_FPS_CAP", fps_cap, true},
     {"video.frame_gen", "NX_FRAMEGEN", framegen, true},
+    {"video.frame_gen", "NX_FFX_FRAMEGEN", ffx_framegen, false},  // AMD's: read live (nvn_temporal.cpp)
     {"video.async_shaders", "NX_ASYNC_PIPELINES", on_or_zero, true},  // on by default on Android
     {"video.vsync", "NX_VSYNC", off_is_zero, true},
+    {"video.hdr", "NX_HDR", off_empty, true},  // scrgb / hdr10 (nvn_present.cpp); the brightness keys are read live
     {"video.shader_prepare", "NX_PIPE_PREWARM", off_is_zero, true},
     {"audio.reverb", "NX_AUDIO_REVERB", off_is_zero, false},  // also read live (hle_audio.cpp)
     {"video.root_clocks", "NX_ROOT_CLOCKS", on_off, true},  // Android, rooted phones (perf_hint.cpp)
@@ -242,12 +247,12 @@ void config_apply() {
             log("config: game language from the system: %s", game_lang.c_str());
         }
     }
-    std::lock_guard lk(g_lock);
+    std::unique_lock lk(g_lock);
     for (const Mapping& m : kMappings) {
         ConfigEntry* e = find(m.key);
         std::string value = std::string(m.key) == "game.language" ? game_lang : e ? e->value : std::string();
-        // No frame rate chosen: 60 when the SpeedFix is there (the loader keeps 30 if the game's code lacks it).
-        if (value.empty() && std::string(m.key) == "video.frame_rate" && speedfix_installed()) value = "60";
+        // No frame rate chosen: 30. 60 (the SpeedFix) is asked for in the settings: game folders get its code from
+        // ACNHRecomp-Importer 1.0.6 on, and the loader keeps 30 when a folder's code lacks it.
         if (value.empty()) continue;
         std::string v = m.map(value);
         if (std::string(m.env) == "NX_HANDHELD") {
@@ -268,7 +273,10 @@ void config_apply() {
     if (const char* sf = std::getenv("NX_SPEEDFIX"); sf && sf[0] == '1')  // its parameter files go with its code
         mods = mods.empty() ? "speedfix60" : mods + ",speedfix60";
     if (!mods.empty()) set_env_default("NX_MODS", mods);
-    log("config: %zu settings from %s", g_entries.size(), path().c_str());
+    const size_t count = g_entries.size();
+    lk.unlock();  // the clock reads the settings itself
+    game_clock_apply_config();
+    log("config: %zu settings from %s", count, path().c_str());
 }
 
 bool config_save() {
@@ -308,6 +316,11 @@ std::string config_get(const std::string& key, const std::string& fallback) {
 int config_get_int(const std::string& key, int fallback) {
     std::string v = config_get(key);
     return v.empty() ? fallback : std::atoi(v.c_str());
+}
+
+int64_t config_get_int64(const std::string& key, int64_t fallback) {
+    std::string v = config_get(key);
+    return v.empty() ? fallback : std::strtoll(v.c_str(), nullptr, 10);
 }
 
 float config_get_float(const std::string& key, float fallback) {

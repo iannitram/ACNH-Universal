@@ -34,6 +34,7 @@ const nx::ModuleInfo* game_module(const char* name);
 #ifndef __ANDROID__
 std::string load_game(const std::string& folder);  // "" when loaded, else why not
 bool load_game_or_explain();  // the data root's; false after showing why it is not playable
+void game_set_variant(bool on, uint64_t lo, uint64_t hi);  // Windows: the game DLL's 60 FPS switch (game_abi.cpp)
 #endif
 #endif
 
@@ -230,6 +231,7 @@ std::string controller_kind();                 // "switch", "xbox", "playstation
 void open_path(const std::string& path);       // shows a folder in the file manager
 // Asks the player for a folder (or a .zip when `zip`): the answer arrives later; poll with pick_result.
 void pick_path(bool zip, const std::string& title);
+void pick_file(const std::string& title, const char* extension);  // a single file (e.g. Amiibo .bin)
 bool pick_result(std::string& path);           // true once, when an answer came ("" = cancelled)
 
 // Audio: s16 stereo 48 kHz. `done` is called (on any thread) when a submitted buffer has been played.

@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include <vulkan/vulkan.h>
 
@@ -28,8 +29,16 @@ void ui_event(const SDL_Event& e);               // every SDL event (keys, mouse
 // The pad as the game would see it this tick (NpadButton bits, sticks): the menu's toggle combo and navigation.
 // Returns true when the menu has the input: the game must then see a neutral pad.
 bool ui_pad(uint64_t buttons, int32_t lx, int32_t ly);
+// Hold Plus/Minus briefly so the settings shortcut can consume them before the game sees them.
+uint64_t ui_filter_game_buttons(uint64_t buttons, bool captured);
 bool ui_visible();
+// A text field has the keyboard: its keys type there and must not drive the pad (Shift is B, which would close the menu).
+bool ui_text_field();
 void ui_toggle();
+void ui_open_online();  // the settings screen, on its Online page: from any thread
+// Any thread: a short message over the game for a few seconds (the screenshot key: "Screenshot saved: <file>").
+void ui_notice(const std::string& text);
+void ui_screenshot_saved(const std::string& file);
 // Touch screens (Android): one finger as the mouse, in pixels of the presented image. Returns true when the menu
 // took the touch (it is open): the game must not see it.
 bool ui_touch(float x, float y, bool down);

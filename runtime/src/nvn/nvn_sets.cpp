@@ -557,7 +557,7 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
         const DrawTextures& tex = (*g_textures);
         for (size_t k = 0; k < tex.bindings.size() && k < tex.resolved.size() && scales.n < 16; k++) {
             auto [s, b] = tex.bindings[k];
-            GpuImage* img = tex.resolved[k].texture ? image_of(tex.resolved[k].texture) : nullptr;
+            GpuImage* img = tex.resolved[k].texture ? temporal_sample_redirect(image_of(tex.resolved[k].texture)) : nullptr;
             if (!img || !img->uw) continue;
             float v = std::min(img->sx, img->sy);
             if (v == 1.0f) continue;
@@ -885,6 +885,14 @@ uint32_t gather_textures(const std::vector<const ShaderInfo*>& shaders) {
                 sampled->last_sampled = submit_ns;
             else
                 texture = 0;
+        }
+        // A compare sampler whose function is ALWAYS or NEVER on a color image (ACNH: R32F, func ALWAYS): the result is
+        // 1 or 0 whatever the texel, but Vulkan leaves comparisons on formats without depth-comparison support
+        // undefined (Arm Mali: striped shadows). The depth dummy with the same sampler gives the exact result.
+        if (texture && b->image.depth) {
+            const uint32_t f = r.sampler.compare_func;
+            const GpuImage* gi = (f == 0 || f == 1 || f >= 8) ? image_of(texture) : nullptr;
+            if (gi && !(gi->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) texture = 0;
         }
         r.texture = texture;
         if (texture ? !sampled_ready(texture) : !dummy_ready(b->image)) {

@@ -6,6 +6,15 @@
   <a href="https://discord.gg/VJW9Dtdu7a">
     <img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord Community">
   </a>
+  <a href="https://github.com/sponsors/Nycolazs">
+    <img src="https://img.shields.io/badge/GitHub%20Sponsors-Support-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="GitHub Sponsors">
+  </a>
+  <a href="https://ko-fi.com/nycolazs">
+    <img src="https://img.shields.io/badge/Ko--fi-Support-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white" alt="Ko-fi">
+  </a>
+  <a href="https://buymeacoffee.com/nycolazs">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee">
+  </a>
 </p>
 
 ACNHRecomp turns the Switch code of *Animal Crossing: New Horizons* (title ID `01006F8002326000`; version 3.0.2
@@ -39,9 +48,26 @@ Whether you're playing, helping test builds across different hardware, or follow
 - ⚙️ **Testing & Hardware**: Share logs, test results across different CPUs and GPUs, and report bugs.
 - 📢 **Development Updates**: Get real-time announcements, test builds, and sneak peeks at upcoming features.
 
+## Support the project
+
+ACNHRecomp and ACNHRecomp-Importer are free and open source, and they will stay that way. They are made in our free
+time, and every release, fix and answer on Discord takes many hours. If you enjoy the project and want to help it
+keep going, you can support it:
+
+- 💖 [GitHub Sponsors](https://github.com/sponsors/Nycolazs): monthly or one-time
+- ☕ [Ko-fi](https://ko-fi.com/nycolazs)
+- 🍵 [Buy Me a Coffee](https://buymeacoffee.com/nycolazs)
+
+Donations are completely optional and unlock nothing: every build, feature and fix stays free for everyone. They
+help pay for the time, the test devices and the hardware the project needs.
+
+Can't donate? Reporting bugs, sending pull requests, helping people on [Discord](https://discord.gg/VJW9Dtdu7a) and
+starring the repository help just as much. Thank you! 💚
+
 ## Contents
 
 - [Community](#community)
+- [Support the project](#support-the-project)
 - [Features](#features)
 - [Status](#status)
 - [Disclaimer](#disclaimer)
@@ -102,7 +128,8 @@ GPU; see [docs/STATUS.md](docs/STATUS.md) for the full, regularly updated log.
 | Free roaming on the island | Working, 30 fps on an Intel Iris Xe |
 | First save (written at the end of the first day) | Not yet verified in a full playthrough |
 | 60 fps | Not native yet (see below) |
-| Online features (visits, Nook Link, Dream Suite) | Unavailable |
+| Online features through Nintendo (Dodo codes, Nook Link, Dream Suite) | Unavailable |
+| Visits between PCs (airport, Local Play), over LAN or the internet, no server | Works on Windows; [docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md) |
 
 **Known issues**
 
@@ -113,7 +140,8 @@ GPU; see [docs/STATUS.md](docs/STATUS.md) for the full, regularly updated log.
   done yet. Play at 30 fps.
 - The first save only happens at the end of the first in-game day, and that path has not been verified end to end
   in a full playthrough. Back up and be prepared for surprises.
-- Online play is not available: the game sees a console with no internet connection.
+- Nintendo's online services are not available: the game sees a console with no internet connection. Visits between
+  PCs go through Local Play instead (page Online in the settings, [docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md)).
 
 **Platforms**
 
@@ -251,8 +279,9 @@ game, and none needs a compiler. You need two things:
 
 - **Brazilian Portuguese and 60 FPS** come with the package: the first start copies the pt-BR fan translation and
   the files of tmouh's 60 FPS SpeedFix into your game folder (no download). Português (Brasil) is then in the game's
-  languages (chosen by itself on a Portuguese system), and the game runs at 60 FPS at its normal speed unless you pick
-  30. A game folder whose code was prepared without the SpeedFix stays at 30. A new package with newer files copies
+  languages (chosen by itself on a Portuguese system). *Settings* > *Video* > *Frame rate* > *60* then plays at 60 FPS
+  at the game's normal speed (30 is the default); it needs a game folder prepared by ACNHRecomp-Importer 1.0.6 or
+  newer, which builds the SpeedFix into the game's code (an older folder stays at 30). A new package with newer files copies
   them again; `game.mod_fetch = off` in `config.ini` turns the copy off.
 - **New versions:** the launcher looks for a newer release on GitHub each time it opens and says so on its home page,
   with a button to its download page. *Settings* > *Look for new versions when the launcher opens* turns it off. To
@@ -419,6 +448,8 @@ restart are marked on the screen. Environment variables set on the command line 
 |---|---|---|
 | `game.language` | `auto`, `en-US`, `en-GB`, `es`, `es-419`, `fr`, `fr-CA`, `de`, `it`, `nl`, `ru`, `ja`, `ko`, `zh-CN`, `zh-TW`, `pt-BR` | `NX_LANGUAGE` |
 | `game.mods` | Comma-separated mod names | `NX_MODS` |
+| `game.time_travel_enabled` | `0`, `1` (real-time sync with the computer) | |
+| `game.time_travel_offset` | Seconds added to the host clock when sync is off | `NX_TIME_OFFSET` |
 | `ui.language` | `auto` or a menu language code | |
 | `video.preset` | `custom`, `quality`, `balanced`, `low` (see below) | |
 | `video.fullscreen` | `0`, `1` | `NX_FULLSCREEN` |
@@ -496,6 +527,11 @@ Default keyboard layout:
 
 As on the Switch, *New Horizons* keeps one island per console. The save lives in
 `private/acnh/user/device_save/`. The game writes its first save at the end of the first day.
+
+The **launcher** can keep several **save profiles** under `private/acnh/user/profiles/` (each holds a copy of
+`device_save`). The profile you select on the home screen is swapped into `user/device_save` before Play. That is
+separate from automatic **backups** in `user/backups/` (import, restore, and “Back up now” in the game settings).
+Quit the game before switching profiles.
 
 From the **Saves** page you can import a save from:
 
@@ -626,7 +662,9 @@ Some GNOME setups make libdecor/GTK abort the process; the runtime prefers X11/X
 `private/acnh/nx_play.log`.
 
 **Can I visit friends or use Nook Link?**
-No. Online services answer as a console without an internet connection.
+Visiting friends: yes, through Local Play at the airport, on a LAN or over the internet (page Online in the settings,
+[docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md)). Nook Link and the rest of Nintendo's online services: no, they answer as a
+console without an internet connection.
 
 **Does time pass on my island?**
 Yes. The island follows your computer's date, time and time zone.
@@ -706,6 +744,11 @@ More detail: [docs/ACNH.md](docs/ACNH.md) (the game's modules, RomFS and shader 
 - [Ryujinx / Ryubing](https://codeberg.org/Software_arch/Ryubing) (MIT): the Maxwell shader translator, used
   offline.
 - [Dear ImGui](https://github.com/ocornut/imgui) (MIT): the settings screen.
+- [MHGURecomp](https://github.com/morerokk/MHGURecomp) by morerokk (MIT): the design of local play between PCs
+  (`nn::ldn`, virtual sockets), [docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md).
+- [RenoDX](https://github.com/clshortfuse/renodx) by Carlos Lopez Jr. (MIT): the HDR output and tonemapping
+  (`SwapChainPass`, `ToneMapPass`, RenoDRT, user grading) compiled into the HDR shaders (`tools/shaders/hdr`; the
+  generated `.inc` files are in the repository, regenerating them needs a RenoDX checkout: `tools/gen_spirv_inc.py`).
 - [ACNH 60 FPS + SpeedFix](https://github.com/tmouh/acnh-60fps) by tmouh (CC BY-NC 4.0): the 60 FPS game-speed
   rescaling, downloaded by `tools/setup_60fps.sh` (or, with a release, at the first start) and applied on your
   machine (not part of this repository).

@@ -99,17 +99,137 @@ VkShaderStageFlags stage_bit(ShaderStage s) {
 // (the SPIR-V patches and vkCreateShaderModule were 1 ms a module on the replay thread: 5-10 ms when a scene showed
 // new shaders, every session, the disk cache keeping pipelines but not modules).
 std::recursive_mutex g_module_lock;
+// Devices without vertexPipelineStoresAndAtomics (Arm Mali) or fragmentShaderPixelInterlock: their drivers refuse the
+// pipeline (VK_ERROR_INITIALIZATION_FAILED) when a vertex-stage storage buffer lacks NonWritable or a fragment module
+// declares the interlock. Storage buffers the vertex stage never writes get NonWritable; the interlock (capability,
+// extension, execution modes, begin/end) is dropped, losing only its ordering of overlapping fragments.
+namespace {
+std::string spirv_string(const uint32_t* w, uint32_t n) {
+    std::string s;
+    for (uint32_t i = 0; i < n; i++)
+        for (int b = 0; b < 4; b++) {
+            const char c = char(w[i] >> 8 * b & 0xff);
+            if (!c) return s;
+            s += c;
+        }
+    return s;
+}
+
+void device_compat_module(const ShaderInfo* s, std::vector<uint32_t>& code) {
+    enum : uint32_t {
+        OpExtension = 10, OpCapability = 17, OpEntryPoint = 15, OpExecutionMode = 16, OpFunctionCall = 57, OpVariable = 59,
+        OpTypePointer = 32, OpStore = 62, OpCopyMemory = 63, OpCopyMemorySized = 64, OpAccessChain = 65,
+        OpInBoundsAccessChain = 66, OpPtrAccessChain = 67, OpInBoundsPtrAccessChain = 70, OpDecorate = 71,
+        OpMemberDecorate = 72, OpDecorationGroup = 73, OpCopyObject = 83, OpBitcast = 124, OpSelect = 169,
+        OpAtomicStore = 228, OpAtomicExchange = 229, OpAtomicXor = 242, OpPhi = 245, OpAtomicFlagTestAndSet = 318,
+        OpAtomicFlagClear = 319, OpBeginInterlock = 5364, OpEndInterlock = 5365, OpAtomicFMin = 5614, OpAtomicFMax = 5615,
+        OpAtomicFAdd = 6035, StorageUniform = 2, StorageBuffer = 12, DecorationBufferBlock = 3, DecorationNonWritable = 24,
+    };
+    static const bool vertex_stores = vk_features().vertexPipelineStoresAndAtomics == VK_TRUE;
+    static const bool interlock = vk_fragment_interlock();
+    if ((vertex_stores && interlock) || code.size() < 5 || code[0] != 0x07230203) return;
+    const size_t n = code.size();
+    auto each = [&](auto&& fn) {
+        for (size_t i = 5; i < n;) {
+            const uint32_t len = code[i] >> 16, op = code[i] & 0xffff;
+            if (!len || i + len > n) return false;
+            fn(i, op, len);
+            i += len;
+        }
+        return true;
+    };
+    bool vertex_like = false, has_interlock = false;
+    std::unordered_map<uint32_t, uint32_t> ptr_class, ptr_pointee;  // OpTypePointer id -> storage class, pointee
+    std::set<uint32_t> buffer_blocks, nonwritable;
+    std::vector<uint32_t> buffers;  // storage-buffer variables
+    if (!each([&](size_t i, uint32_t op, uint32_t len) {
+            if (op == OpEntryPoint && len > 1) vertex_like |= code[i + 1] <= 3;  // Vertex, TessControl, TessEval, Geometry
+            else if (op == OpCapability && len > 1) has_interlock |= code[i + 1] == 5363 || code[i + 1] == 5372 || code[i + 1] == 5378;
+            else if (op == OpTypePointer && len > 3) ptr_class[code[i + 1]] = code[i + 2], ptr_pointee[code[i + 1]] = code[i + 3];
+            else if (op == OpDecorate && len > 2 && code[i + 2] == DecorationBufferBlock) buffer_blocks.insert(code[i + 1]);
+            else if (op == OpDecorate && len > 2 && code[i + 2] == DecorationNonWritable) nonwritable.insert(code[i + 1]);
+            else if (op == OpVariable && len > 3) {
+                const uint32_t sc = code[i + 3];
+                if (sc == StorageBuffer || (sc == StorageUniform && buffer_blocks.count(ptr_pointee[code[i + 1]])))
+                    buffers.push_back(code[i + 2]);
+            }
+        }))
+        return;
+    const bool fix_vertex = !vertex_stores && vertex_like && !buffers.empty();
+    const bool fix_interlock = !interlock && has_interlock;
+    if (!fix_vertex && !fix_interlock) return;
+    std::vector<uint32_t> add;  // NonWritable for the vertex-stage buffers never written
+    if (fix_vertex) {
+        std::unordered_map<uint32_t, uint32_t> root;  // pointer id -> the buffer variable it points into
+        for (uint32_t v : buffers) root[v] = v;
+        std::set<uint32_t> written;
+        auto mark = [&](uint32_t id) {
+            if (auto it = root.find(id); it != root.end()) written.insert(it->second);
+        };
+        each([&](size_t i, uint32_t op, uint32_t len) {
+            switch (op) {
+            case OpAccessChain: case OpInBoundsAccessChain: case OpPtrAccessChain: case OpInBoundsPtrAccessChain:
+            case OpCopyObject: case OpBitcast:
+                if (len > 3) if (auto it = root.find(code[i + 3]); it != root.end()) root[code[i + 2]] = it->second;
+                break;
+            case OpSelect:
+            case OpPhi:
+                for (uint32_t k = 3; k < len; k++)
+                    if (auto it = root.find(code[i + k]); it != root.end()) root[code[i + 2]] = it->second;
+                break;
+            case OpStore: case OpCopyMemory: case OpCopyMemorySized: case OpAtomicStore: case OpAtomicFlagClear:
+                if (len > 1) mark(code[i + 1]);
+                break;
+            case OpFunctionCall:  // a pointer handed to a function: counted as written
+                for (uint32_t k = 4; k < len; k++) mark(code[i + k]);
+                break;
+            default:
+                if (((op >= OpAtomicExchange && op <= OpAtomicXor) || op == OpAtomicFlagTestAndSet || op == OpAtomicFMin ||
+                     op == OpAtomicFMax || op == OpAtomicFAdd) && len > 3)
+                    mark(code[i + 3]);
+            }
+        });
+        int kept = 0;
+        for (uint32_t v : buffers) {
+            if (written.count(v)) kept++;
+            else if (!nonwritable.count(v)) add.insert(add.end(), {3u << 16 | OpDecorate, v, DecorationNonWritable});
+        }
+        if (kept) log("nvn/vk: shader %s: %d vertex-stage storage buffers written, left as they are", s->hash.c_str(), kept);
+    }
+    std::vector<uint32_t> out(code.begin(), code.begin() + 5);
+    out.reserve(n + add.size());
+    bool added = add.empty();
+    each([&](size_t i, uint32_t op, uint32_t len) {
+        if (!added && (op == OpDecorate || op == OpMemberDecorate || op == OpDecorationGroup)) {
+            out.insert(out.end(), add.begin(), add.end());
+            added = true;
+        }
+        if (fix_interlock) {
+            if (op == OpCapability && len > 1 && (code[i + 1] == 5363 || code[i + 1] == 5372 || code[i + 1] == 5378)) return;
+            if (op == OpExtension && spirv_string(&code[i + 1], len - 1) == "SPV_EXT_fragment_shader_interlock") return;
+            if (op == OpExecutionMode && len > 2 && code[i + 2] >= 5366 && code[i + 2] <= 5371) return;
+            if (op == OpBeginInterlock || op == OpEndInterlock) return;
+        }
+        out.insert(out.end(), code.begin() + i, code.begin() + i + len);
+    });
+    if (!added) return;  // no annotation section to put the decorations in: left as it is
+    code.swap(out);
+}
+}  // namespace
+
 // `alpha_func`, `alpha_ref`: NVN's alpha test in the fragment module (nvn_spirv_alpha.cpp; func 0 none).
 VkShaderModule module_of(const ShaderInfo* s, const uint8_t* kinds = nullptr, uint32_t unwritten = 0, bool scaled = false,
-                         uint32_t alpha_func = 0, float alpha_ref = 0, uint32_t inst_binding = 0, uint32_t inst_step = 0) {
+                         uint32_t alpha_func = 0, float alpha_ref = 0, uint32_t inst_binding = 0, uint32_t inst_step = 0,
+                         bool clamp = false, bool motion = false) {
     std::lock_guard module_lock(g_module_lock);
-    static std::map<std::tuple<const ShaderInfo*, std::string, uint32_t, bool, uint32_t, float, uint64_t>, VkShaderModule> cache;
+    static std::map<std::tuple<const ShaderInfo*, std::string, uint32_t, bool, uint32_t, float, uint64_t, bool, bool>, VkShaderModule> cache;
     // The integer-vertex-input patch (skinned models' bone indices; without it Metal refuses every character's
     // pipeline, DEBUG.md #25/#26). NX_INT_ATTRIBS=0 turns it off.
     static const char* int_env = std::getenv("NX_INT_ATTRIBS");
     static const bool off = int_env && int_env[0] == '0';
     std::string k = kinds && !off ? std::string(reinterpret_cast<const char*>(kinds), 16) : std::string(16, '\0');
-    auto& m = cache[{s, k, unwritten, scaled, alpha_func, alpha_func ? alpha_ref : 0.0f, uint64_t(inst_binding) << 32 | inst_step}];
+    auto& m = cache[{s, k, unwritten, scaled, alpha_func, alpha_func ? alpha_ref : 0.0f, uint64_t(inst_binding) << 32 | inst_step,
+                     clamp, motion}];
     if (!m) {
         const uint64_t module_t0 = plat::monotonic_ns();
         bool is_patched = false;
@@ -128,6 +248,11 @@ VkShaderModule module_of(const ShaderInfo* s, const uint8_t* kinds = nullptr, ui
             if (patch_alpha_test(code, patched, alpha_func, alpha_ref)) code.swap(patched);
             else log("nvn/vk: shader %s: alpha test %u not patched", s->hash.c_str(), alpha_func);
         }
+        if (clamp && s->stage == ShaderStage::Fragment) {  // HDR: the colours an upgraded UNORM target clipped
+            std::vector<uint32_t> patched;
+            if (patch_clamp_outputs(code, patched)) code.swap(patched);
+            else log("nvn/vk: shader %s: colour clamp not patched", s->hash.c_str());
+        }
         if (inst_binding && s->stage == ShaderStage::Vertex) {  // draw merging: the block of instance k
             std::vector<uint32_t> patched;
             uint32_t bindings[2], steps[2], nb = 0;
@@ -137,7 +262,23 @@ VkShaderModule module_of(const ShaderInfo* s, const uint8_t* kinds = nullptr, ui
             else log("nvn/vk: shader %s: instance blocks %x not patched", s->hash.c_str(), inst_binding);
         }
         if (s->stage == ShaderStage::Vertex) clip_z_module(s, code);  // NX_CLIP_Z_PATCH (nvn_spirv_clip.cpp)
+        if (motion) {  // temporal AA's object motion vectors (nvn_spirv_motion.cpp)
+            std::vector<uint32_t> patched;
+            const bool vertex = s->stage == ShaderStage::Vertex;
+            if (vertex ? patch_motion_vertex(code, patched) : patch_motion_fragment(code, patched)) code.swap(patched);
+            else log("nvn/vk: shader %s: object motion not patched", s->hash.c_str());
+        }
+        // Temporal AA: textures finer (NX_TAA_MIP_BIAS, default -1; 0 off). With the motion patch, the bias each draw
+        // pushes (nvn_temporal.cpp: live, the 3D scene's only); else a constant in every fragment shader alike (the UI's
+        // are sampled at their own size, where a negative bias changes nothing), when temporal AA was on at boot.
+        static const float mip_bias = std::getenv("NX_TAA_MIP_BIAS") ? float(std::atof(std::getenv("NX_TAA_MIP_BIAS"))) : -1.0f;
+        if (mip_bias != 0.0f && s->stage == ShaderStage::Fragment) {
+            std::vector<uint32_t> patched;
+            if (motion && patch_mip_bias_push(code, patched)) code.swap(patched);
+            else if (temporal_mip_bias_on() && patch_mip_bias(code, patched, mip_bias)) code.swap(patched);
+        }
         nan_coords_module(code);  // nvn_spirv_nan.cpp
+        device_compat_module(s, code);  // Mali: NonWritable vertex buffers, no fragment interlock
         if (const char* opt = std::getenv("NX_SPIRV_OPT"); opt || std::getenv("NX_SPIRV_TOOL")) {  // diagnostic: each module through `spirv-opt <flags>` (NX_SPIRV_OPT) or `<tool> in out` (NX_SPIRV_TOOL) first
             static int n = 0;
             std::string in = "/tmp/nx_spv_" + std::to_string(process_id()) + "_" + std::to_string(n++) + ".spv", out = in + ".out";
@@ -356,6 +497,10 @@ const ProgramLayout& program_layout(const std::vector<const ShaderInfo*>& stages
     VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     ci.setLayoutCount = 4;
     ci.pSetLayouts = pl.sets;
+    // Temporal AA's object motion vectors: the skinned pipelines' push constants (MotionPush; nvn_spirv_motion.cpp).
+    // Skinning is a draw's attribute formats, so every layout has the range (unused by the other pipelines).
+    const VkPushConstantRange motion{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, kMotionPushSize};
+    if (temporal_object_motion_on()) ci.pushConstantRangeCount = 1, ci.pPushConstantRanges = &motion;
     p_vkCreatePipelineLayout(vk_device(), &ci, nullptr, &pl.layout);
     return cache[stages] = pl;
 }
@@ -412,6 +557,8 @@ struct PipeBuild {
         uint32_t alpha_func = 0;
         float alpha_ref = 0;
         uint32_t inst_binding = 0, inst_step = 0;
+        bool clamp = false;  // colour outputs clamped to 0..1 (an HDR-upgraded UNORM target, nvn_spirv_clamp.cpp)
+        bool motion = false;  // temporal AA's object motion vectors (nvn_spirv_motion.cpp)
     } modules[2];
 };
 
@@ -475,7 +622,7 @@ VkPipeline compile(PipeBuild& b) {
         if (!b.stages[k].module && b.modules[k].s) {
             const auto& mr = b.modules[k];
             b.stages[k].module = module_of(mr.s, mr.has_kinds ? mr.kinds : nullptr, mr.unwritten, mr.scaled, mr.alpha_func, mr.alpha_ref,
-                                         mr.inst_binding, mr.inst_step);
+                                         mr.inst_binding, mr.inst_step, mr.clamp, mr.motion);
         }
     const bool stats = pipe_stats_wanted(b.fs_hash);
     if (stats)
@@ -484,7 +631,7 @@ VkPipeline compile(PipeBuild& b) {
     VkResult made = p_vkCreateGraphicsPipelines(vk_device(), b.cache, 1, &b.ci, nullptr, &p);
     note_pipeline_created(plat::monotonic_ns() - t0, t_worker);
     if (made != VK_SUCCESS) {
-        log("nvn/vk: pipeline for %s + %s failed", b.vs_hash.c_str(), b.fs_hash.c_str());
+        log("nvn/vk: pipeline for %s + %s failed: VkResult %d", b.vs_hash.c_str(), b.fs_hash.c_str(), int(made));
         p = VK_NULL_HANDLE;
     } else if (g_trace) {
         log("nvn/vk: pipeline: %s + %s", b.vs_hash.c_str(), b.fs_hash.c_str());
@@ -923,6 +1070,7 @@ PipelineKey canonical_key(const PipelineKey& in) {
     k.fc_off = in.fc_off;
     if (in.fs && in.alpha_func >= 1 && in.alpha_func <= 7) k.alpha_func = in.alpha_func, k.alpha_ref = in.alpha_ref;
     k.inst_binding = in.inst_binding, k.inst_step = in.inst_binding ? in.inst_step : 0;
+    k.clamp_colors = in.fs ? in.clamp_colors & (n >= 32 ? ~0u : (1u << n) - 1) : 0;
     return k;
 }
 
@@ -953,6 +1101,9 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
         log("nvn/vk: vs %s inputs (location:format/stream+offset)%s", key.vs->hash.c_str(), line.c_str());
     }
     uint32_t unwritten = unwritten_inputs(key.vs, key.fs);
+    // Temporal AA's object motion: every pipeline (any draw that moves may use it; what a draw does not use is
+    // branched over in the shaders, nvn_spirv_motion.cpp).
+    const bool motion = key.vs && temporal_object_motion_on();
     for (const ShaderInfo* s : {key.vs, key.fs}) {
         if (!s) continue;
         auto& st = stages[nstages++];
@@ -961,9 +1112,10 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
         const bool scaled = (s == key.vs && key.uw_x != 0) || (s == key.fs && key.fc_x != 0);
         auto& mr = B.modules[nstages - 1];  // made in compile(), off the replay thread when that is asynchronous
         mr.s = s, mr.unwritten = s == key.fs ? unwritten : 0, mr.scaled = scaled;
-        if (s == key.fs) mr.alpha_func = key.alpha_func, mr.alpha_ref = key.alpha_ref;
+        if (s == key.fs) mr.alpha_func = key.alpha_func, mr.alpha_ref = key.alpha_ref, mr.clamp = key.clamp_colors != 0;
         if (s == key.vs) mr.inst_binding = key.inst_binding, mr.inst_step = key.inst_step;
         if (s == key.vs && int_kinds) std::memcpy(mr.kinds, int_kinds, sizeof mr.kinds), mr.has_kinds = true;
+        mr.motion = motion;  // both stages: the history goes from one to the other
         st.pName = "main";
         if (scaled) {  // screen scale: constants 0 and 1 of the patched vertex module (nvn_ultrawide.cpp)
             static const VkSpecializationMapEntry entries[2] = {{0, 0, sizeof(float)}, {1, sizeof(float), sizeof(float)}};
@@ -1288,7 +1440,7 @@ GpuImage* ensure_contents(VkCommandBuffer cb, uint64_t texture) {
 VkImageView sampled_view(VkCommandBuffer cb, uint64_t texture, const ImageShape& shape, const ViewInfo* view,
                          VkImageLayout* layout) {
     *layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    GpuImage* img = ensure_contents(cb, texture);
+    GpuImage* img = temporal_sample_redirect(ensure_contents(cb, texture));  // upscaling: the tonemap's input
     static uint64_t no_image = 0, incompatible = 0;
     if (!img) {
         if (++no_image % 100000 == 1) log("nvn/vk: dummy sampled: %llu with no image, %llu with an incompatible view",
@@ -1343,8 +1495,9 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgramLayout& layout) {
         sg.requiredSubgroupSize = 32;
         if (gpu_require_subgroup32()) ci.stage.pNext = &sg;
         ci.layout = layout.layout;
-        if (p_vkCreateComputePipelines(vk_device(), pipeline_cache(), 1, &ci, nullptr, &p) != VK_SUCCESS) {
-            log("nvn/vk: compute pipeline for %s failed", cs->hash.c_str());
+        const VkResult made = p_vkCreateComputePipelines(vk_device(), pipeline_cache(), 1, &ci, nullptr, &p);
+        if (made != VK_SUCCESS) {
+            log("nvn/vk: compute pipeline for %s failed: VkResult %d", cs->hash.c_str(), int(made));
             p = VK_NULL_HANDLE;
         }
     }
