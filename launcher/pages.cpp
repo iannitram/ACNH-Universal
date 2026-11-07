@@ -13,7 +13,10 @@
 // page under it and its buttons in a footer line. Sizes are design pixels times `scale` (main.cpp); below an aspect
 // of 1.2 the two-column parts stack.
 #include "launcher.h"
+#include "ldn_upnp.h"
 
+#include <thread>
+#include <atomic>
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -26,6 +29,10 @@
 #include <mutex>
 
 #include "imgui.h"
+#include "imgui_internal.h"
+
+#include "mod_manager.h"
+#include "save_profiles.h"
 
 #include "ui/i18n.h"
 #include "ui/theme.h"
@@ -49,9 +56,102 @@ const ImU32 kWhite = rgb(255, 255, 255);
 
 ImVec4 col4(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 
-enum class Page { Welcome, Files, Install, Build, Done, Home, Settings };
+enum class Page { Welcome, Files, Install, Build, Done, Home, Settings, Online, Credits };
 
 Page g_page = Page::Welcome;
+
+struct NavItem {
+    ImGuiID id;
+    ImGuiWindow* window;
+    ImGuiID focus_scope;
+    ImRect rect;
+    int section;  // 0: header, 1: page, 2: footer
+    bool primary;
+    bool home_action;
+};
+std::vector<NavItem> g_nav_items;
+int g_nav_section = -1;
+
+void nav_item(bool primary = false, bool home_action = false) {
+    if (g_nav_section < 0) return;
+    ImGuiContext& ctx = *ImGui::GetCurrentContext();
+    const ImGuiLastItemData& item = ctx.LastItemData;
+    if (ctx.CurrentWindow->SkipItems || !item.ID || (item.ItemFlags & ImGuiItemFlags_Disabled)) return;
+    g_nav_items.push_back({item.ID, ctx.CurrentWindow, ctx.CurrentFocusScopeId, item.NavRect, g_nav_section, primary, home_action});
+}
+
+void nav_focus(const NavItem& item) {
+    ImGui::ClearActiveID();
+    ImGui::FocusWindow(item.window);
+    // Discard ImGui's pending default focus, which otherwise selects the header on the next frame.
+    ImGuiContext& ctx = *ImGui::GetCurrentContext();
+    ctx.NavInitRequest = false;
+    ctx.NavInitRequestFromMove = false;
+    ctx.NavInitResult.Clear();
+    ImGui::NavMoveRequestCancel();
+    ImRect relative(ImVec2(item.rect.Min.x - item.window->Pos.x, item.rect.Min.y - item.window->Pos.y),
+                    ImVec2(item.rect.Max.x - item.window->Pos.x, item.rect.Max.y - item.window->Pos.y));
+    ImGui::SetNavID(item.id, ImGuiNavLayer_Main, item.focus_scope, relative);
+    ctx.NavIdIsAlive = true;
+    ImGui::SetNavCursorVisible(true);
+    ImGui::ScrollToRectEx(item.window, item.rect, ImGuiScrollFlags_KeepVisibleEdgeY);
+}
+
+void nav_move(int dx, int dy, int only_section = -1) {
+    ImGuiContext& ctx = *ImGui::GetCurrentContext();
+    auto current = std::find_if(g_nav_items.begin(), g_nav_items.end(), [&](const NavItem& item) {
+        return item.id == ctx.NavId && (only_section < 0 || item.section == only_section);
+    });
+    if (current == g_nav_items.end()) return;
+    // Settings form a vertical list even when some rows are outside the scrolling viewport.
+    if (only_section < 0 && (g_page == Page::Settings || g_page == Page::Online || g_page == Page::Credits) && dy) {
+        const int index = int(current - g_nav_items.begin());
+        const int target_section = current->section == 1 ? 1 : (dy > 0 ? 1 : (current->section == 2 ? 1 : -1));
+        for (int i = index + dy; i >= 0 && i < int(g_nav_items.size()); i += dy) {
+            if (g_nav_items[i].section == target_section) {
+                nav_focus(g_nav_items[i]);
+                return;
+            }
+        }
+        if (current->section == 1) {
+            const int edge_section = dy < 0 ? 0 : 2;
+            auto edge = std::find_if(g_nav_items.begin(), g_nav_items.end(),
+                                     [edge_section](const NavItem& item) { return item.section == edge_section; });
+            if (edge != g_nav_items.end()) nav_focus(*edge);
+        }
+        return;
+    }
+    // On the home screen Play leads to the first action; every action leads back to Play.
+    if (g_page == Page::Home && dy && (current->primary || current->home_action)) {
+        if (current->primary && dy > 0) {
+            auto first = std::find_if(g_nav_items.begin(), g_nav_items.end(), [](const NavItem& item) { return item.home_action; });
+            if (first != g_nav_items.end()) nav_focus(*first);
+            return;
+        }
+        if (current->home_action && dy < 0) {
+            auto play = std::find_if(g_nav_items.begin(), g_nav_items.end(), [](const NavItem& item) { return item.primary; });
+            if (play != g_nav_items.end()) nav_focus(*play);
+            return;
+        }
+    }
+    const ImVec2 from = current->rect.GetCenter();
+    const NavItem* best = nullptr;
+    float best_score = FLT_MAX;
+    for (const NavItem& item : g_nav_items) {
+        if (item.id == current->id || (only_section >= 0 && item.section != only_section)) continue;
+        const ImVec2 to = item.rect.GetCenter();
+        const float forward = dx ? (to.x - from.x) * dx : (to.y - from.y) * dy;
+        if (forward <= 1.0f) continue;
+        const float overlap = std::min(current->rect.Max.y, item.rect.Max.y) - std::max(current->rect.Min.y, item.rect.Min.y);
+        const bool same_row = overlap >= 0.5f * std::min(current->rect.GetHeight(), item.rect.GetHeight());
+        if ((dx && !same_row) || (dy && same_row)) continue;
+        const float side = dx ? std::max(0.0f, std::max(current->rect.Min.y - item.rect.Max.y, item.rect.Min.y - current->rect.Max.y))
+                              : std::max(0.0f, std::max(current->rect.Min.x - item.rect.Max.x, item.rect.Min.x - current->rect.Max.x));
+        const float score = forward + side * 2.0f;
+        if (score < best_score) best = &item, best_score = score;
+    }
+    if (best) nav_focus(*best);
+}
 SDL_Window* g_window = nullptr;
 float g_scale = 1;
 ImFont* g_title = nullptr;
@@ -68,6 +168,19 @@ std::string g_install;
 std::vector<Prereq> g_prereqs;
 Build g_build;
 const char* g_build_problem = "launcher.reason.none";  // "" when g_build is valid
+std::vector<nx::save_profiles::ProfileInfo> g_save_profiles;
+std::string g_save_profile_active;
+bool g_saves_open = false;
+double g_saves_since = 0;
+std::string g_saves_delete_id;
+void select_save_profile(const std::string& id);
+std::vector<nx::mod_manager::ModInfo> g_mods;
+bool g_mods_open = false;
+double g_mods_since = 0;
+std::string g_mods_delete_id;
+bool g_mods_refresh = false;           // reload list after the grid finishes drawing
+bool g_mods_refresh_wait_pad = false;  // gamepad: wait until FaceDown is released before reshuffling
+void refresh_mods();
 std::string g_banner;  // an error under the page title (a refused file or folder)
 std::string g_toast;
 double g_toast_until = 0;
@@ -85,7 +198,7 @@ ImVec2 g_drag_pos;
 ImVec2 g_page_min, g_page_max;  // the visible part of the page (it scrolls)
 
 // File dialogs answer on their own time (and maybe on another thread): queued here, applied in the frame.
-enum Target { kPickGame, kPickMod, kPickInstall, kPickBuild };
+enum Target { kPickGame, kPickMod, kPickInstall, kPickBuild, kPickSaveImport, kPickModImportFolder, kPickModImportZip };
 struct Picked {
     int target;
     std::vector<std::string> paths;
@@ -101,6 +214,10 @@ bool g_rebuild = false;  // started from home: no files page to go back to
 bool g_express = false;
 // Opened with a build: the game starts after a short countdown, which a click or a key stops (-2: from the first frame).
 double g_autostart_at = -1;
+// Snapshot for the frame: countdown was active before click-cancel, so the Play button does not also launch.
+bool g_autostart_ui = false;
+// After cancelling the countdown, keep Play green until the pointer leaves.
+bool g_play_calm = false;
 void start_setup(bool rebuild);
 bool prereqs_block();
 void play();
@@ -111,6 +228,15 @@ bool g_quit_after_stop = false;
 Ini g_game_ini;
 
 float S(float v) { return v * g_scale; }
+
+// These controls draw their own focus outline but still use ImGui's gamepad navigation.
+bool nav_card(const char* id, ImVec2 size, bool primary = false, bool home_action = false) {
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+    bool pressed = ImGui::InvisibleButton(id, size, ImGuiButtonFlags_EnableNav);
+    ImGui::PopStyleColor();
+    nav_item(primary, home_action);
+    return pressed;
+}
 
 void toast(const std::string& t) {
     g_toast = t;
@@ -140,11 +266,63 @@ void recheck_files() {
         for (Found& f : s.found) f.check = check_file(f.kind, f.path);
 }
 
+void refresh_save_profiles();
+
 void set_build(const std::string& folder, bool remember) {
     g_build = Build();
     g_build_problem = find_build(folder, g_build);
     if (*g_build_problem == 0 && remember) {
         settings().set("launcher.build", folder);
+        settings().save();
+    }
+    if (*g_build_problem == 0) {
+        refresh_save_profiles();
+        refresh_mods();
+    }
+}
+
+void refresh_mods() {
+    g_mods.clear();
+    if (*g_build_problem != 0) return;
+    g_mods = nx::mod_manager::list_mods(g_build.data);
+}
+
+void refresh_save_profiles() {
+    g_save_profiles.clear();
+    g_save_profile_active.clear();
+    if (*g_build_problem != 0) return;
+    std::string err;
+    if (!nx::save_profiles::ensure_migrated(g_build.data, &err)) {
+        g_banner = trf("launcher.profiles.switch_failed", err);
+        return;
+    }
+    std::string want = settings().get("launcher.save_profile");
+    if (want.empty()) want = nx::save_profiles::read_active_id(g_build.data);
+    if (want.empty()) want = "default";
+    g_save_profiles = nx::save_profiles::list_profiles(g_build.data);
+    bool want_ok = false;
+    for (const nx::save_profiles::ProfileInfo& p : g_save_profiles)
+        if (p.id == want) want_ok = true;
+    if (!want_ok) {
+        want = nx::save_profiles::read_active_id(g_build.data);
+        if (want.empty()) want = "default";
+        settings().set("launcher.save_profile", want);
+        settings().save();
+    }
+    std::string active = nx::save_profiles::read_active_id(g_build.data);
+    if (want != active) {
+        if (!nx::save_profiles::activate_profile(g_build.data, want, &err)) {
+            g_banner = trf("launcher.profiles.switch_failed", err);
+            return;
+        }
+        settings().set("launcher.save_profile", want);
+        settings().save();
+    }
+    g_save_profile_active = nx::save_profiles::read_active_id(g_build.data);
+    if (g_save_profile_active.empty()) g_save_profile_active = want;
+    if (g_save_profiles.empty()) g_save_profiles = nx::save_profiles::list_profiles(g_build.data);
+    if (settings().get("launcher.save_profile").empty()) {
+        settings().set("launcher.save_profile", g_save_profile_active);
         settings().save();
     }
 }
@@ -182,6 +360,9 @@ void pick(Target t) {
             SDL_ShowOpenFolderDialog(on_picked, user, g_window, is_dir(g_install) ? g_install.c_str() : nullptr, false);
             break;
         case kPickBuild: SDL_ShowOpenFolderDialog(on_picked, user, g_window, nullptr, false); break;
+        case kPickSaveImport: SDL_ShowOpenFolderDialog(on_picked, user, g_window, where, false); break;
+        case kPickModImportFolder: SDL_ShowOpenFolderDialog(on_picked, user, g_window, where, false); break;
+        case kPickModImportZip: SDL_ShowOpenFileDialog(on_picked, user, g_window, zip, 2, where, false); break;
     }
 }
 
@@ -264,6 +445,33 @@ void apply_picks() {
         switch (p.target) {
             case kPickInstall: g_install = first, g_prereqs = check_prerequisites(g_install); break;
             case kPickBuild: use_build_folder(first); break;
+            case kPickSaveImport: {
+                std::string err;
+                std::string id = nx::save_profiles::create_empty_profile(g_build.data, &err);
+                if (id.empty()) {
+                    g_banner = trf("launcher.saves.import_failed", err);
+                    break;
+                }
+                if (nx::save_profiles::import_into_profile(g_build.data, id, first, &err)) {
+                    toast(tr("launcher.saves.import_ok"));
+                    select_save_profile(id);
+                    refresh_save_profiles();
+                } else
+                    g_banner = trf("launcher.saves.import_failed", err);
+                break;
+            }
+            case kPickModImportFolder:
+            case kPickModImportZip: {
+                std::string err, id;
+                bool had_exefs = false;
+                if (nx::mod_manager::import_mod(g_build.data, first, &id, &had_exefs, &err)) {
+                    load_game_ini();
+                    refresh_mods();
+                    toast(had_exefs ? trf("launcher.mods.import_ok_exefs", id) : trf("launcher.mods.import_ok", id));
+                } else
+                    g_banner = trf("launcher.mods.import_failed", err);
+                break;
+            }
             default:  // a card
                 use_file(slot_kind(p.target, first), first);
                 if (g_express && p.target == kPickGame) express_continue();
@@ -278,6 +486,30 @@ float font_size(ImFont* f) { return f->FontSize * ImGui::GetIO().FontGlobalScale
 
 ImVec2 measure(ImFont* f, float size, const char* text, float wrap) {
     return f->CalcTextSizeA(size, FLT_MAX, wrap, text);
+}
+
+// Wrap to at most `max_lines` (ellipsis if longer). Used for mod tile titles.
+std::string fit_wrapped_lines(const char* text, float wrap_w, int max_lines) {
+    if (!text || !*text || max_lines < 1) return {};
+    ImFont* font = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    const float line_h = ImGui::GetTextLineHeight();
+    const float limit = line_h * float(max_lines) + 0.5f;
+    if (font->CalcTextSizeA(fs, FLT_MAX, wrap_w, text).y <= limit) return text;
+    const std::string src(text);
+    size_t lo = 0, hi = src.size();
+    while (lo < hi) {
+        const size_t mid = (lo + hi + 1) / 2;
+        const std::string cand = src.substr(0, mid) + "...";
+        if (font->CalcTextSizeA(fs, FLT_MAX, wrap_w, cand.c_str()).y <= limit) lo = mid;
+        else hi = mid - 1;
+    }
+    // Prefer cutting on a space when the ellipsis still fits.
+    size_t cut = lo;
+    while (cut > 0 && src[cut - 1] != ' ') --cut;
+    if (cut < lo / 2) cut = lo;
+    while (cut > 0 && src[cut - 1] == ' ') --cut;
+    return src.substr(0, cut) + "...";
 }
 
 // The background: mint to leaf green with a soft dot pattern, as the game's menus.
@@ -313,10 +545,20 @@ float button_width(const char* label) { return std::max(S(120), ImGui::CalcTextS
 
 bool button(const char* label, ImU32 color = kMint, bool enabled = true, float w = 0) {
     ImGui::BeginDisabled(!enabled);
+    const bool light = color == kMint || color == kWhite;
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    const ImGuiID id = window->GetID(label);
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    const bool hot = enabled && (g.HoveredIdPreviousFrame == id || g.ActiveId == id ||
+                                 (g.NavId == id && g.NavIdIsAlive && g.NavHighlightItemUnderNav));
     ImGui::PushStyleColor(ImGuiCol_Button, col4(color));
-    ImGui::PushStyleColor(ImGuiCol_Text, col4(color == kMint || color == kWhite ? kInk : kWhite));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col4(enabled ? kYellow : color));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, col4(enabled ? rgb(246, 196, 64) : color));
+    ImGui::PushStyleColor(ImGuiCol_Text, col4(hot || light ? kInk : kWhite));
     bool r = ImGui::Button(label, ImVec2(w > 0 ? w : button_width(label), 0));
-    ImGui::PopStyleColor(2);
+    if (enabled && ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    nav_item();
+    ImGui::PopStyleColor(4);
     ImGui::EndDisabled();
     return r;
 }
@@ -404,6 +646,7 @@ void language_combo(float width) {
         for (const nx::ui::UiLanguage& l : nx::ui::ui_languages()) choose(l.code, l.native_name);
         ImGui::EndCombo();
     }
+    nav_item();
     ImGui::PopStyleColor(4);
 }
 
@@ -492,9 +735,10 @@ float card_height(const Card& c, float w) {
 bool card(const char* id, const Card& c, ImVec2 size) {
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::BeginDisabled(!c.enabled);
-    bool clicked = ImGui::InvisibleButton(id, size);
+    bool clicked = nav_card(id, size);
     ImGui::EndDisabled();
     bool hov = c.enabled && (ImGui::IsItemHovered() || ImGui::IsItemFocused());
+    if (c.enabled && ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 q(p.x + size.x, p.y + size.y);
     dl->AddRectFilled(p, q, hov ? rgb(255, 240, 196) : kPaper, S(26));
@@ -602,6 +846,7 @@ bool row_button(const char* label, float size) {
     ImGui::PushStyleColor(ImGuiCol_Button, col4(rgb(240, 228, 196)));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
     bool r = ImGui::Button(label, ImVec2(size, size));
+    nav_item();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
     return r;
@@ -656,7 +901,7 @@ void found_list(int slot, float w) {
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, S(14));
     ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, S(290)));
     // A few results fit: no scrollbar (an auto-sized child can show one for its first frames).
-    ImGui::BeginChild("##found", ImVec2(w, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
+    ImGui::BeginChild("##found", ImVec2(w, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened,
                       s.found.size() > 3 ? 0 : ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar(2);
     const float iw = ImGui::GetContentRegionAvail().x, x0 = ImGui::GetCursorPosX();
@@ -718,7 +963,7 @@ struct FileCard {
 void file_card(const FileCard& c, Status st, const std::function<void(float)>& rows) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, col4(kPaper));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(g_portrait ? 14 : 20), S(16)));
-    ImGui::BeginChild(c.id, ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
+    ImGui::BeginChild(c.id, ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened,
                       ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(S(10), S(6)));
@@ -1096,14 +1341,18 @@ void page_build() {
         ImGui::SameLine(0, S(16));
         ImGui::BeginGroup();
         ImGui::SetNextItemOpen(true, ImGuiCond_Once);
-        if (ImGui::CollapsingHeader(tr("launcher.build.details")))
+        bool details_open = ImGui::CollapsingHeader(tr("launcher.build.details"));
+        nav_item();
+        if (details_open)
             log_view(std::max(S(160), ImGui::GetContentRegionAvail().y - S(4)));
         ImGui::EndGroup();
     } else {
         stage_list(s, failed);
         ImGui::Dummy(ImVec2(0, S(2)));
         if (failed) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
-        if (ImGui::CollapsingHeader(tr("launcher.build.details")))
+        bool details_open = ImGui::CollapsingHeader(tr("launcher.build.details"));
+        nav_item();
+        if (details_open)
             log_view(std::max(S(200), ImGui::GetContentRegionAvail().y - S(4)));
     }
 }
@@ -1138,7 +1387,18 @@ double g_opening_since = -1;
 
 void play() {
     if (g_opening_since >= 0) return;  // already starting
+    if (const char* missing = cpu_missing_feature()) {  // the game would stop at once (issue #46)
+        g_banner = trf("launcher.cpu_unsupported", missing);
+        g_autostart_at = -1;
+        return;
+    }
     std::string err;
+    std::string profile = settings().get("launcher.save_profile", g_save_profile_active);
+    if (profile.empty()) profile = "default";
+    if (!nx::save_profiles::activate_profile(g_build.data, profile, &err)) {
+        g_banner = trf("launcher.profiles.switch_failed", err);
+        return;
+    }
     if (launch_game(g_build, err, g_window))
         g_opening_since = ImGui::GetTime(), start_sound_play();
     else
@@ -1183,23 +1443,44 @@ void opening_overlay() {
     dl->AddText(g_body, fs, ImVec2(c.x - r - S(14) - ts.x, c.y - ts.y * 0.5f), IM_COL32(255, 249, 232, int(170 * a)), text);
 }
 
-bool big_button(const char* label, int icon, ImU32 color, float w, float h) {
+bool big_button(const char* label, int icon, ImU32 color, float w, float h, const char* sub = nullptr) {
     ImVec2 p = ImGui::GetCursorScreenPos();
-    bool clicked = ImGui::InvisibleButton(label, ImVec2(w, h));
-    bool hov = ImGui::IsItemHovered() || ImGui::IsItemFocused();
-    if (ImGui::IsItemActive()) {  // pressed: the button gives a little under the finger (3 %, from its centre)
+    bool clicked = nav_card("##play", ImVec2(w, h), true);
+    if (g_play_calm && !ImGui::IsItemHovered()) g_play_calm = false;
+    // Countdown: yellow. After cancel: green until the pointer leaves. Otherwise: normal hover/focus.
+    bool hov = sub ? true
+                   : (!g_autostart_ui && !g_play_calm && (ImGui::IsItemHovered() || ImGui::IsItemFocused()));
+    if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (!sub && !g_autostart_ui && !g_play_calm && ImGui::IsItemActive()) {  // pressed: the button gives a little under the finger (3 %, from its centre)
         float dx = w * 0.015f, dy = h * 0.015f;
         p = ImVec2(p.x + dx, p.y + dy * 2), w -= dx * 2, h -= dy * 2;
     }
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(ImVec2(p.x, p.y + S(4)), ImVec2(p.x + w, p.y + h + S(4)), rgb(80, 140, 60, 120), h * 0.5f);
-    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), hov ? kYellow : color, h * 0.5f);
+    const float round = std::min(S(22), h * 0.18f);
+    dl->AddRectFilled(ImVec2(p.x, p.y + S(4)), ImVec2(p.x + w, p.y + h + S(4)), rgb(80, 140, 60, 120), round);
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), hov ? kYellow : color, round);
+    float ir = h * 0.22f, pad = S(12), avail = w - ir * 2 - pad - S(24);
+    ImU32 ink = hov ? kInk : kWhite;
     float fs = font_size(g_title);
     ImVec2 ts = measure(g_title, fs, label, -1);
-    float ir = h * 0.22f, total = ts.x + ir * 2 + S(12);
+    if (ts.x > avail && avail > 0) fs *= avail / ts.x, ts = measure(g_title, fs, label, -1);
+    float sub_fs = 0, gap = 0;
+    ImVec2 ss(0, 0);
+    if (sub && *sub) {
+        sub_fs = fs * 0.62f;
+        ss = measure(g_body, sub_fs, sub, -1);
+        if (ss.x > avail && avail > 0) sub_fs *= avail / ss.x, ss = measure(g_body, sub_fs, sub, -1);
+        gap = S(2);
+    }
+    float text_h = ts.y + (sub ? gap + ss.y : 0);
+    float total = std::max(ts.x, ss.x) + ir * 2 + pad;
     float x = p.x + (w - total) * 0.5f;
-    theme_icon(dl, icon, ImVec2(x + ir, p.y + h * 0.5f), ir, hov ? kInk : kWhite);
-    dl->AddText(g_title, fs, ImVec2(x + ir * 2 + S(12), p.y + (h - ts.y) * 0.5f), hov ? kInk : kWhite, label);
+    float ty = p.y + (h - text_h) * 0.5f;
+    theme_icon(dl, icon, ImVec2(x + ir, p.y + h * 0.5f), ir, ink);
+    float tx = x + ir * 2 + pad;
+    dl->AddText(g_title, fs, ImVec2(tx + (std::max(ts.x, ss.x) - ts.x) * 0.5f, ty), ink, label);
+    if (sub && *sub)
+        dl->AddText(g_body, sub_fs, ImVec2(tx + (std::max(ts.x, ss.x) - ss.x) * 0.5f, ty + ts.y + gap), ink, sub);
     return clicked;
 }
 
@@ -1235,10 +1516,36 @@ void hero(int icon, ImU32 color, float r) {
     ImGui::Dummy(ImVec2(w, 2 * r + S(14)));
 }
 
+void select_save_profile(const std::string& id) {
+    if (id == g_save_profile_active) return;
+    std::string err;
+    if (!nx::save_profiles::activate_profile(g_build.data, id, &err)) {
+        g_banner = trf("launcher.profiles.switch_failed", err);
+        return;
+    }
+    settings().set("launcher.save_profile", id);
+    settings().save();
+    g_save_profile_active = id;
+    g_save_profiles = nx::save_profiles::list_profiles(g_build.data);
+    g_banner.clear();
+}
+
+// Same size for countdown and Play so cancel does not resize/recolor the control.
+void play_button(float w, float h = 0) {
+    if (h <= 0) h = S(80);
+    if (g_autostart_at >= 0) {
+        int left = std::max(1, int(std::ceil(g_autostart_at - ImGui::GetTime())));
+        std::string label = trf("launcher.autostart", std::to_string(left));
+        big_button(label.c_str(), nx::ui::kIconPlay, kGreen, w, h, tr("launcher.autostart.stay"));
+    } else if (big_button(tr("launcher.play"), nx::ui::kIconPlay, kGreen, w, h) && !g_autostart_ui) {
+        play();
+    }
+}
+
 void play_block() {
-    float w = std::min(ImGui::GetContentRegionAvail().x, S(360));
+    float w = std::min(ImGui::GetContentRegionAvail().x, S(420));
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - w) * 0.5f);
-    if (big_button(tr("launcher.play"), nx::ui::kIconPlay, kGreen, w, S(72))) play();
+    play_button(w);
     ImGui::Dummy(ImVec2(0, S(8)));
 }
 
@@ -1263,9 +1570,10 @@ void footer_done() {
 bool action_card(const char* id, int icon, ImU32 color, const char* title, const char* desc, ImVec2 size, bool enabled) {
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::BeginDisabled(!enabled);
-    bool clicked = ImGui::InvisibleButton(id, size);
+    bool clicked = nav_card(id, size, false, true);
     ImGui::EndDisabled();
     bool hov = enabled && (ImGui::IsItemHovered() || ImGui::IsItemFocused());
+    if (enabled && ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 q(p.x + size.x, p.y + size.y);
     dl->AddRectFilled(p, q, hov ? rgb(255, 240, 196) : kPaper, S(22));
@@ -1316,7 +1624,9 @@ bool pill(const char* id, int icon, ImU32 color, const char* text, bool clickabl
     float w = pad + 2 * r + S(10) + ts.x + S(16);
     ImGui::SetCursorScreenPos(ImVec2(x, ImGui::GetCursorScreenPos().y));
     ImVec2 p = ImGui::GetCursorScreenPos();
-    bool clicked = ImGui::InvisibleButton(id, ImVec2(w, h));
+    ImGui::BeginDisabled(!clickable);
+    bool clicked = nav_card(id, ImVec2(w, h));
+    ImGui::EndDisabled();
     bool hov = clickable && (ImGui::IsItemHovered() || ImGui::IsItemFocused());
     if (clickable && ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     if (clickable && ImGui::IsItemActive()) p = ImVec2(p.x + w * 0.015f, p.y + h * 0.03f), w *= 0.97f, h *= 0.94f;
@@ -1342,26 +1652,70 @@ float pill_width(const char* text) {
     return S(6) + 2 * r + S(10) + measure(g_body, fs, text, -1).x + S(16);
 }
 
-// Version and add-ons, side by side under the title (one under the other when they do not fit).
+std::string profile_save_folder(const std::string& id) {
+    std::string base = g_build.data + "/user/profiles/" + id;
+    std::string save = base + "/device_save";
+    return is_dir(save) ? save : base;
+}
+
+std::string active_island_pill_text() {
+    for (const nx::save_profiles::ProfileInfo& p : g_save_profiles) {
+        if (p.id != g_save_profile_active) continue;
+        if (p.has_save && !p.island_name.empty()) return trf("launcher.home.save_file", p.island_name);
+        return trf("launcher.home.save_file", tr("launcher.profiles.empty"));
+    }
+    return trf("launcher.home.save_file", tr("launcher.profiles.empty"));
+}
+
+// Version + add-ons on the left; save file + mods on the right — flush to the center line.
 void contents_row() {
     const BuildContents& c = contents();
     std::string ver = c.version.empty() ? tr("launcher.home.version_unknown") : trf("launcher.home.version", c.version);
+    std::string save = active_island_pill_text();
     std::string add = c.addons.empty() ? tr("launcher.addons.none")
                                        : trf("launcher.addons.count", std::to_string(c.addons.size()));
+    size_t mods_on = 0;
+    for (const nx::mod_manager::ModInfo& m : g_mods)
+        if (m.enabled) ++mods_on;
+    std::string mods_arg = std::to_string(mods_on) + "/" + std::to_string(g_mods.size());
+    std::string mods = g_mods.empty() ? tr("launcher.mods.none") : trf("launcher.mods.count", mods_arg);
     float avail = ImGui::GetContentRegionAvail().x, gap = S(10), x0 = ImGui::GetCursorScreenPos().x;
-    float w1 = pill_width(ver.c_str()), w2 = pill_width(add.c_str());
-    bool stack = w1 + gap + w2 > avail;
-    float y = ImGui::GetCursorScreenPos().y;
-    pill("##version", nx::ui::kIconLeaf, kMint, ver.c_str(), false, false,
-         x0 + std::floor((avail - (stack ? w1 : w1 + gap + w2)) * 0.5f));
+    float y0 = ImGui::GetCursorScreenPos().y;
+    float center = x0 + std::floor(avail * 0.5f);
+    float row_h = S(38) + gap;
+    // Left pills right-align to the center; right pills left-align from it.
+    float x_ver = center - gap * 0.5f - pill_width(ver.c_str());
+    float x_add = center - gap * 0.5f - pill_width(add.c_str());
+    float x_right = center + gap * 0.5f;
+
+    auto place = [&](const char* id, int icon, ImU32 color, const char* text, bool clickable, bool dot, float x,
+                     float y) {
+        ImGui::SetCursorScreenPos(ImVec2(x, y));
+        return pill(id, icon, color, text, clickable, dot, x);
+    };
+
+    place("##version", nx::ui::kIconLeaf, kMint, ver.c_str(), false, false, x_ver, y0);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", g_build.data.c_str());
-    if (!stack) ImGui::SetCursorScreenPos(ImVec2(x0, y));
-    float x2 = std::floor(stack ? x0 + (avail - w2) * 0.5f : x0 + (avail - w1 - gap - w2) * 0.5f + w1 + gap);
-    if (pill("##addons", nx::ui::kIconBox, c.addons.empty() ? kGrey : kPurple, add.c_str(), true, !c.addons.empty(), x2)) {
-        contents(true);  // read again: the setup may have added some since
+    if (place("##addons", nx::ui::kIconBox, c.addons.empty() ? kGrey : kPurple, add.c_str(), true, !c.addons.empty(),
+              x_add, y0 + row_h)) {
+        contents(true);
         g_addons_open = true, g_addons_since = ImGui::GetTime();
     }
-    ImGui::SetCursorScreenPos(ImVec2(x0, ImGui::GetCursorScreenPos().y));
+    bool has_save = false;
+    for (const nx::save_profiles::ProfileInfo& p : g_save_profiles)
+        if (p.id == g_save_profile_active && p.has_save) has_save = true;
+    if (place("##savefile", nx::ui::kIconHouse, has_save ? kRed : kGrey, save.c_str(), true, has_save, x_right, y0)) {
+        refresh_save_profiles();
+        g_saves_open = true;
+        g_saves_since = ImGui::GetTime();
+    }
+    if (place("##mods", nx::ui::kIconText, g_mods.empty() ? kGrey : kOrange, mods.c_str(), true, mods_on > 0, x_right,
+              y0 + row_h)) {
+        refresh_mods();
+        g_mods_open = true;
+        g_mods_since = ImGui::GetTime();
+    }
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 2 * row_h - gap + S(4)));
 }
 
 // The add-on content, one card each: its number, size and files, and that the game loads it.
@@ -1415,10 +1769,476 @@ void addons_popup() {
         }
         ImGui::Dummy(ImVec2(0, S(4)));
         align_right({tr("launcher.addons.close")});
-        if (button(tr("launcher.addons.close"), kWhite) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        if (button(tr("launcher.addons.close"), kWhite) || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
             g_addons_open = false, ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar();
+}
+
+void saves_popup() {
+    if (g_saves_open) ImGui::OpenPopup("saves");
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, out_cubic((ImGui::GetTime() - g_saves_since) / 0.18));
+    // Hide ImGui's square nav outline for the whole popup; tiles draw a rounded focus outline below.
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowSize(ImVec2(std::min(ds.x * 0.9f, S(720)), std::min(ds.y * 0.85f, S(520))));
+    if (ImGui::BeginPopupModal("saves", nullptr,
+                               ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float r = S(18);
+        dl->AddCircleFilled(ImVec2(p.x + r, p.y + r), r, kRed);
+        theme_icon(dl, nx::ui::kIconHouse, ImVec2(p.x + r, p.y + r), r * 0.6f, kWhite);
+        float fs = font_size(g_title) * 0.8f;
+        dl->AddText(g_title, fs, ImVec2(p.x + 2 * r + S(12), p.y + r - fs * 0.6f), kInk, tr("launcher.profiles.title"));
+        ImGui::Dummy(ImVec2(0, 2 * r + S(8)));
+        ImGui::PushStyleColor(ImGuiCol_Text, col4(kInkSoft));
+        ImGui::TextWrapped("%s", tr("launcher.profiles.hint"));
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, S(10)));
+
+        const char* new_l = tr("launcher.profiles.new");
+        const char* import_l = tr("launcher.saves.import_new");
+        const char* close_l = tr("launcher.addons.close");
+        float footer = S(56) + ImGui::GetFrameHeight();
+        if (!g_saves_delete_id.empty()) footer += S(72);
+        float grid_h = std::max(S(140), ImGui::GetContentRegionAvail().y - footer);
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(12), S(12)));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, S(16));
+        ImGui::BeginChild("##saves_grid", ImVec2(0, grid_h),
+                          ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PopStyleVar(2);
+
+        const bool only_one = g_save_profiles.size() <= 1;
+        if (g_save_profiles.empty()) {
+            ImGui::TextDisabled("%s", tr("launcher.profiles.empty"));
+        } else {
+            const char* open_l = tr("launcher.saves.open");
+            const char* del_l = tr("launcher.saves.delete");
+            float avail = ImGui::GetContentRegionAvail().x, gap = S(12);
+            const int cols = 2;
+            float tile_w = (avail - gap * float(cols - 1)) / float(cols);
+            // Size tiles so roughly two rows fit in the visible grid.
+            float tile_h = std::max(S(100), (grid_h - S(24) - gap) / 2.f);
+            float action_w = std::min(S(110), std::max(S(72), (tile_w - S(28)) / 2.f));
+
+            for (size_t i = 0; i < g_save_profiles.size(); ++i) {
+                const nx::save_profiles::ProfileInfo& prof = g_save_profiles[i];
+                if (i % size_t(cols) != 0) ImGui::SameLine(0, gap);
+                ImGui::PushID(prof.id.c_str());
+
+                const bool active = prof.id == g_save_profile_active;
+                ImVec2 tile_min = ImGui::GetCursorScreenPos();
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, col4(active ? rgb(255, 232, 160) : rgb(252, 246, 228)));
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, S(14));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(12), S(10)));
+                ImGui::BeginChild("##tile", ImVec2(tile_w, tile_h),
+                                  ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor();
+
+                std::string label =
+                    prof.has_save && !prof.island_name.empty() ? prof.island_name : tr("launcher.profiles.empty");
+                ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+                // Content area above the action row selects / activates the profile.
+                const float actions_h = ImGui::GetFrameHeight() + S(4);
+                const float select_h =
+                    std::max(ImGui::GetTextLineHeightWithSpacing() * 1.5f,
+                             tile_h - ImGui::GetStyle().WindowPadding.y * 2.f - actions_h - S(4));
+                bool selected = ImGui::Selectable("##pick", active, ImGuiSelectableFlags_None, ImVec2(0, select_h));
+                ImVec2 sel_min = ImGui::GetItemRectMin();
+                ImGui::PopStyleColor(4);
+                if (selected) select_save_profile(prof.id);
+                nav_item();
+
+                ImDrawList* tdl = ImGui::GetWindowDrawList();
+                float name_fs = font_size(g_body);
+                const float tile_pad = ImGui::GetStyle().WindowPadding.x;
+                ImVec2 name_pos(sel_min.x + S(4), sel_min.y + S(4));
+                ImVec2 name_sz = measure(g_body, name_fs, label.c_str(), -1);
+                float name_right = tile_min.x + tile_w - tile_pad;
+                if (active) {
+                    std::string active_mark = std::string("(") + tr("launcher.profiles.active") + ")";
+                    float active_fs = font_size(g_title) * 0.7f;
+                    ImVec2 as = measure(g_title, active_fs, active_mark.c_str(), -1);
+                    // Same row as the island name: right-aligned, vertically centered to the name.
+                    ImVec2 active_pos(tile_min.x + tile_w - tile_pad - as.x, name_pos.y + (name_sz.y - as.y) * 0.5f);
+                    tdl->AddText(g_title, active_fs, active_pos, kInk, active_mark.c_str());
+                    name_right = active_pos.x - S(8);
+                }
+                tdl->AddText(g_body, name_fs, name_pos, kInk, label.c_str(), nullptr, name_right - name_pos.x);
+                float y = name_pos.y + name_sz.y + S(4);
+                if (prof.has_save && !prof.last_modified.empty()) {
+                    std::string meta = trf("launcher.profiles.last_saved", prof.last_modified);
+                    tdl->AddText(g_body, font_size(g_body) * 0.8f, ImVec2(sel_min.x + S(4), y), kInkSoft, meta.c_str());
+                }
+
+                ImGui::SetCursorPosY(tile_h - ImGui::GetStyle().WindowPadding.y - ImGui::GetFrameHeight() - S(4));
+                if (button(open_l, kBlue, true, action_w)) open_folder(profile_save_folder(prof.id));
+                ImGui::SameLine();
+                ImGui::BeginDisabled(only_one);
+                if (button(del_l, kRed, true, action_w)) g_saves_delete_id = prof.id;
+                ImGui::EndDisabled();
+
+                ImGuiWindow* tile_win = ImGui::GetCurrentWindow();
+                ImGuiContext& gui = *ImGui::GetCurrentContext();
+                ImGui::EndChild();
+                ImVec2 a = tile_min, b(tile_min.x + tile_w, tile_min.y + tile_h);
+                // Unclipped hit test — IsMouseHoveringRect(..., clip=true) against the grid
+                // ClipRect was missing the tiles after the open animation settled.
+                const ImVec2 mp = ImGui::GetIO().MousePos;
+                const bool mouse_over = mp.x >= a.x && mp.x < b.x && mp.y >= a.y && mp.y < b.y;
+                const bool nav_here = gui.NavInputSource == ImGuiInputSource_Gamepad && gui.NavIdIsAlive &&
+                                     gui.NavWindow == tile_win;
+                float e = out_cubic((ImGui::GetTime() - g_saves_since - 0.03 * double(i)) / 0.2);
+                if (e < 1.f) {
+                    ImGui::GetWindowDrawList()->AddRectFilled(a, b, rgb(248, 239, 214, int(180 * (1 - e))), S(14));
+                }
+                if (mouse_over || nav_here) {
+                    const float thick = S(2);
+                    const float inset = ImGui::GetStyle().ChildBorderSize + thick * 0.5f;
+                    const float round = std::max(0.f, S(14) - inset);
+                    // Foreground so the stroke is not covered by later tiles / fade.
+                    ImGui::GetForegroundDrawList()->AddRect(ImVec2(a.x + inset, a.y + inset),
+                                                           ImVec2(b.x - inset, b.y - inset), rgb(246, 170, 40), round, 0,
+                                                           thick);
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+
+        if (!g_saves_delete_id.empty()) {
+            ImGui::Dummy(ImVec2(0, S(6)));
+            ImGui::PushStyleColor(ImGuiCol_Text, col4(kInkSoft));
+            ImGui::TextWrapped("%s", tr("launcher.saves.delete_confirm"));
+            ImGui::PopStyleColor();
+            if (button(tr("launcher.saves.delete"), kRed)) {
+                std::string err;
+                std::string id = g_saves_delete_id;
+                g_saves_delete_id.clear();
+                if (nx::save_profiles::delete_profile(g_build.data, id, &err)) {
+                    refresh_save_profiles();
+                    settings().set("launcher.save_profile", g_save_profile_active);
+                    settings().save();
+                    toast(tr("launcher.saves.deleted"));
+                } else
+                    g_banner = trf("launcher.saves.delete_failed", err);
+            }
+            ImGui::SameLine();
+            if (button(tr("common.no"), kWhite)) g_saves_delete_id.clear();
+        }
+
+        ImGui::Dummy(ImVec2(0, S(8)));
+        float pair_w = std::max(button_width(new_l), button_width(import_l));
+        if (button(new_l, kBlue, true, pair_w)) {
+            std::string err;
+            std::string id = nx::save_profiles::create_empty_profile(g_build.data, &err);
+            if (id.empty())
+                g_banner = trf("launcher.profiles.switch_failed", err);
+            else
+                select_save_profile(id);
+        }
+        ImGui::SameLine();
+        if (button(import_l, kBlue, true, pair_w)) pick(kPickSaveImport);
+        align_right({close_l});
+        if (button(close_l, kWhite) || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
+            g_saves_open = false, g_saves_delete_id.clear(), ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+}
+
+const char* managed_mod_text(const std::string& id) {
+    if (id == "ptbr") return tr("launcher.mods.managed.language");
+    if (id == "speedfix60") return tr("launcher.mods.managed.fps");
+    return tr("launcher.mods.managed");
+}
+
+void mods_popup() {
+    if (g_mods_open) ImGui::OpenPopup("mods");
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, out_cubic((ImGui::GetTime() - g_mods_since) / 0.18));
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
+    const ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowSize(ImVec2(std::min(ds.x * 0.94f, S(1180)), std::min(ds.y * 0.9f, S(700))));
+    // Keep the fixed modal centered when the display size changes (for example, entering fullscreen).
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("mods", nullptr,
+                               ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float r = S(18);
+        dl->AddCircleFilled(ImVec2(p.x + r, p.y + r), r, kOrange);
+        theme_icon(dl, nx::ui::kIconText, ImVec2(p.x + r, p.y + r), r * 0.6f, kWhite);
+        float fs = font_size(g_title) * 0.8f;
+        dl->AddText(g_title, fs, ImVec2(p.x + 2 * r + S(12), p.y + r - fs * 0.6f), kInk, tr("launcher.mods.title"));
+        ImGui::Dummy(ImVec2(0, 2 * r + S(8)));
+        ImGui::PushStyleColor(ImGuiCol_Text, col4(kInkSoft));
+        ImGui::TextWrapped("%s", tr("launcher.mods.hint"));
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, S(10)));
+
+        const char* folder_l = tr("launcher.mods.import_folder");
+        const char* zip_l = tr("launcher.mods.import_zip");
+        const char* open_l = tr("launcher.mods.open");
+        const char* close_l = tr("launcher.addons.close");
+        float footer = S(56) + ImGui::GetFrameHeight();
+        if (!g_mods_delete_id.empty()) footer += S(72);
+        float grid_h = std::max(S(140), ImGui::GetContentRegionAvail().y - footer);
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(12), S(12)));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, S(16));
+        ImGui::BeginChild("##mods_grid", ImVec2(0, grid_h),
+                          ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImGui::PopStyleVar(2);
+
+        if (g_mods.empty()) {
+            ImGui::TextDisabled("%s", tr("launcher.mods.empty"));
+        } else {
+            std::vector<int> order(g_mods.size(), 0);
+            int next = 1;
+            for (size_t i = 0; i < g_mods.size(); ++i)
+                if (g_mods[i].enabled) order[i] = next++;
+            const int enabled_count = next - 1;
+
+            float avail = ImGui::GetContentRegionAvail().x, gap = S(12);
+            int cols = avail >= S(900) ? 3 : (avail >= S(520) ? 2 : 1);
+            float tile_w = (avail - gap * float(cols - 1)) / float(cols);
+            const float tile_pad_x = S(12), tile_pad_y = S(10);
+            const float br = S(14);
+            const float fh = ImGui::GetFrameHeight();
+            const float line_h = ImGui::GetTextLineHeight();
+            const float item_sp = ImGui::GetStyle().ItemSpacing.y;
+            const float border = ImGui::GetStyle().ChildBorderSize;
+            const float inner_w = std::max(1.f, tile_w - 2.f * tile_pad_x - 2.f * border);
+            const float name_wrap =
+                std::max(1.f, inner_w - (2.f * br + S(10)) - fh - ImGui::GetStyle().ItemSpacing.x);
+            const float btn_gap = S(4);
+            const char* up_l = tr("launcher.mods.up");
+            const char* down_l = tr("launcher.mods.down");
+            const char* del_l = tr("launcher.mods.delete");
+            float action_w = std::min(S(96), std::max(S(64), (tile_w - S(36)) / 3.f));
+
+            // Snapshot ids so toggles cannot reshuffle g_mods while this frame still walks the grid.
+            const size_t mod_count = g_mods.size();
+            // Per-tile content height, then equalize within each grid row for a consistent band.
+            std::vector<float> tile_hs(mod_count, 0.f);
+            std::vector<std::string> name_labels(mod_count);
+            for (size_t i = 0; i < mod_count; ++i) {
+                const nx::mod_manager::ModInfo& m = g_mods[i];
+                name_labels[i] = fit_wrapped_lines(m.id.c_str(), name_wrap, 2);
+                float name_h = ImGui::CalcTextSize(name_labels[i].c_str(), nullptr, false, name_wrap).y;
+                name_h = std::min(name_h, line_h * 2.f);
+                float content = std::max(fh, name_h);
+                if (m.managed)
+                    content += item_sp + ImGui::CalcTextSize(managed_mod_text(m.id), nullptr, false, inner_w).y;
+                if (m.has_exefs)
+                    content += item_sp + ImGui::CalcTextSize(tr("launcher.mods.exefs_warn"), nullptr, false, inner_w).y;
+                // Button row + spacing; extra item_sp so actions stay inside bottom padding.
+                if (!m.managed) content += item_sp + btn_gap + fh + item_sp;
+                tile_hs[i] = 2.f * tile_pad_y + 2.f * border + content;
+            }
+            for (size_t row = 0; row < mod_count; row += size_t(cols)) {
+                const size_t row_end = std::min(row + size_t(cols), mod_count);
+                float row_max = 0.f;
+                for (size_t i = row; i < row_end; ++i) row_max = std::max(row_max, tile_hs[i]);
+                for (size_t i = row; i < row_end; ++i) tile_hs[i] = row_max;
+            }
+
+            for (size_t i = 0; i < mod_count; ++i) {
+                const nx::mod_manager::ModInfo mod = g_mods[i];
+                if (i % size_t(cols) != 0) ImGui::SameLine(0, gap);
+                ImGui::PushID(mod.id.c_str());
+
+                const std::string& name_label = name_labels[i];
+                float name_h = ImGui::CalcTextSize(name_label.c_str(), nullptr, false, name_wrap).y;
+                name_h = std::min(name_h, line_h * 2.f);
+                const float title_h = std::max(fh, name_h);
+                const float tile_h = tile_hs[i];
+
+                ImVec2 tile_min = ImGui::GetCursorScreenPos();
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, col4(rgb(255, 252, 242)));
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, S(14));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tile_pad_x, tile_pad_y));
+                ImGui::BeginChild("##tile", ImVec2(tile_w, tile_h),
+                                  ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+                                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor();
+
+                // Load-order badge (1-based among enabled mods), centred on the checkbox.
+                ImDrawList* tdl = ImGui::GetWindowDrawList();
+                ImVec2 row_min = ImGui::GetCursorScreenPos();
+                ImVec2 bc(row_min.x + br, row_min.y + fh * 0.5f);
+                tdl->AddCircleFilled(bc, br, mod.enabled ? kOrange : kRed);
+                char num[8];
+                if (mod.enabled)
+                    std::snprintf(num, sizeof num, "%d", order[i]);
+                else
+                    std::snprintf(num, sizeof num, "-");
+                ImVec2 ns = measure(g_body, font_size(g_body) * 0.85f, num, -1);
+                tdl->AddText(g_body, font_size(g_body) * 0.85f, ImVec2(bc.x - ns.x * 0.5f, bc.y - ns.y * 0.5f), kWhite,
+                             num);
+
+                // Checkbox + name share the top of the row; wrapped lines grow downward.
+                ImGui::SetCursorScreenPos(ImVec2(row_min.x + 2 * br + S(10), row_min.y));
+                const float row_top_y = ImGui::GetCursorPosY();
+                bool enabled = mod.enabled;
+                // Green fill when on, blue on hover; white check mark for contrast.
+                if (mod.enabled) ImGui::PushStyleColor(ImGuiCol_FrameBg, col4(kGreen));
+                ImGui::PushStyleColor(ImGuiCol_CheckMark, col4(kWhite));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, col4(kBlue));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive, col4(kBlue));
+                // Bundled mods (ptbr / speedfix60) are driven by language / 60 FPS settings — not toggled here.
+                ImGui::BeginDisabled(mod.managed);
+                if (ImGui::Checkbox("##on", &enabled) && !mod.managed) {
+                    std::string err;
+                    if (nx::mod_manager::set_enabled(g_build.data, mod.id, enabled, &err)) {
+                        load_game_ini();
+                        // Keep the tile put for this frame; reshuffle (disabled → bottom) after the grid,
+                        // and on gamepad only once FaceDown is released so activate cannot hit another tile.
+                        if (i < g_mods.size() && g_mods[i].id == mod.id) g_mods[i].enabled = enabled;
+                        g_mods_refresh = true;
+                        ImGuiContext& ctx = *ImGui::GetCurrentContext();
+                        if (ctx.NavInputSource == ImGuiInputSource_Gamepad) {
+                            g_mods_refresh_wait_pad = true;
+                            ctx.NavActivateId = 0;
+                            ctx.NavActivateDownId = 0;
+                            ctx.NavActivatePressedId = 0;
+                        } else {
+                            g_mods_refresh_wait_pad = false;
+                        }
+                    } else
+                        g_banner = trf("launcher.mods.toggle_failed", err);
+                }
+                ImGui::EndDisabled();
+                ImGui::PopStyleColor(3 + (mod.enabled ? 1 : 0));
+                nav_item();
+                // Max two lines; first line flush with the top of the checkbox (not its baseline).
+                // SameLine+Text would apply CurrLineTextBaseOffset and drop the name to the bottom of the box.
+                {
+                    const ImVec2 check_max = ImGui::GetItemRectMax();
+                    ImGuiWindow* tw = ImGui::GetCurrentWindow();
+                    tw->DC.CursorPos = ImVec2(check_max.x + ImGui::GetStyle().ItemInnerSpacing.x, row_min.y);
+                    tw->DC.CursorMaxPos = ImMax(tw->DC.CursorMaxPos, tw->DC.CursorPos);
+                    tw->DC.CurrLineSize = ImVec2(0, 0);
+                    tw->DC.CurrLineTextBaseOffset = 0.f;
+                    const float name_x = ImGui::GetCursorPosX();
+                    ImGui::PushTextWrapPos(name_x + name_wrap);
+                    ImGui::TextUnformatted(name_label.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), row_top_y + title_h));
+                }
+                if (mod.managed) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("%s", managed_mod_text(mod.id));
+                    ImGui::PopStyleColor();
+                }
+                if (mod.has_exefs) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("%s", tr("launcher.mods.exefs_warn"));
+                    ImGui::PopStyleColor();
+                }
+
+                // Bundled mods have no reorder / delete controls (settings-linked).
+                // Disabled mods keep Delete only — Up/Down apply to load order among enabled packs.
+                // Park actions at the bottom (SetCursorPos — Dummy would add ItemSpacing and clip past the tile).
+                if (!mod.managed) {
+                    const float y_gap = ImGui::GetCursorPosY() + btn_gap;
+                    const float y_bottom = ImGui::GetCursorPosY() + ImGui::GetContentRegionAvail().y - fh;
+                    ImGui::SetCursorPosY(std::max(y_gap, y_bottom));
+                    if (mod.enabled) {
+                        if (button(up_l, kBlue, order[i] > 1, action_w)) {
+                            std::string err;
+                            if (nx::mod_manager::move_enabled(g_build.data, mod.id, -1, &err)) {
+                                load_game_ini();
+                                g_mods_refresh = true;
+                                if (ImGui::GetCurrentContext()->NavInputSource == ImGuiInputSource_Gamepad)
+                                    g_mods_refresh_wait_pad = true;
+                            }
+                        }
+                        ImGui::SameLine();
+                        if (button(down_l, kBlue, order[i] < enabled_count, action_w)) {
+                            std::string err;
+                            if (nx::mod_manager::move_enabled(g_build.data, mod.id, 1, &err)) {
+                                load_game_ini();
+                                g_mods_refresh = true;
+                                if (ImGui::GetCurrentContext()->NavInputSource == ImGuiInputSource_Gamepad)
+                                    g_mods_refresh_wait_pad = true;
+                            }
+                        }
+                        ImGui::SameLine();
+                    }
+                    if (button(del_l, kRed, true, action_w)) g_mods_delete_id = mod.id;
+                }
+
+                ImGui::EndChild();
+                // Soft settle animation like the add-ons cards.
+                float e = out_cubic((ImGui::GetTime() - g_mods_since - 0.03 * double(i)) / 0.2);
+                if (e < 1.f) {
+                    ImVec2 a = tile_min, b(tile_min.x + tile_w, tile_min.y + tile_h);
+                    ImGui::GetWindowDrawList()->AddRectFilled(a, b, rgb(248, 239, 214, int(180 * (1 - e))), S(14));
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+        if (g_mods_refresh) {
+            const bool pad_held = g_mods_refresh_wait_pad && ImGui::IsKeyDown(ImGuiKey_GamepadFaceDown);
+            if (!pad_held) {
+                g_mods_refresh = false;
+                g_mods_refresh_wait_pad = false;
+                refresh_mods();  // enabled stay on top; disabled move to the bottom
+            }
+        }
+
+        if (!g_mods_delete_id.empty()) {
+            ImGui::Dummy(ImVec2(0, S(6)));
+            ImGui::PushStyleColor(ImGuiCol_Text, col4(kInkSoft));
+            const bool managed = [&] {
+                for (const nx::mod_manager::ModInfo& m : g_mods)
+                    if (m.id == g_mods_delete_id) return m.managed;
+                return false;
+            }();
+            ImGui::TextWrapped("%s", tr(managed ? "launcher.mods.delete_confirm_managed" : "launcher.mods.delete_confirm"));
+            ImGui::PopStyleColor();
+            if (button(tr("launcher.mods.delete"), kRed)) {
+                std::string err;
+                std::string id = g_mods_delete_id;
+                g_mods_delete_id.clear();
+                if (nx::mod_manager::delete_mod(g_build.data, id, &err)) {
+                    load_game_ini();
+                    refresh_mods();
+                    toast(tr("launcher.mods.deleted"));
+                } else
+                    g_banner = trf("launcher.mods.delete_failed", err);
+            }
+            ImGui::SameLine();
+            if (button(tr("common.no"), kWhite)) g_mods_delete_id.clear();
+        }
+
+        ImGui::Dummy(ImVec2(0, S(8)));
+        float pair_w = std::max({button_width(folder_l), button_width(zip_l), button_width(open_l)});
+        if (button(folder_l, kBlue, true, pair_w)) pick(kPickModImportFolder);
+        ImGui::SameLine();
+        if (button(zip_l, kBlue, true, pair_w)) pick(kPickModImportZip);
+        ImGui::SameLine();
+        if (button(open_l, kWhite, true, pair_w)) open_folder(g_build.data + "/mods");
+        align_right({close_l});
+        if (button(close_l, kWhite) || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
+            g_mods_open = false, g_mods_delete_id.clear(), ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 }
 
@@ -1447,21 +2267,15 @@ void page_home() {
     ImGui::Dummy(ImVec2(0, S(6)));
     update_notice();
     if (valid) {
-        hero(nx::ui::kIconHouse, kGreen, S(46));
-        centered(tr("launcher.home.title"), g_title, 1.1f, kInk);
-        ImGui::Dummy(ImVec2(0, S(6)));
-        if (g_autostart_at >= 0) {
-            int left = std::max(1, int(std::ceil(g_autostart_at - ImGui::GetTime())));
-            centered(trf("launcher.autostart", std::to_string(left)).c_str(), g_body, 0.9f, kInkSoft);
-            ImGui::Dummy(ImVec2(0, S(4)));
-        }
         contents_row();
-        ImGui::Dummy(ImVec2(0, S(16)));
-        play_block();
+        ImGui::Dummy(ImVec2(0, S(10)));
+        centered(tr("launcher.home.title"), g_title, 1.1f, kInk);
+        ImGui::Dummy(ImVec2(0, S(4)));
     }
-    // Settings, Rebuild, Change build folder.
+    // Left: Settings / Online. Center: Play. Right: Rebuild / Change folder.
     const bool can_rebuild = valid && setup_supported() &&
                              g_build.exe.rfind(g_build.data, 0) == 0 && g_build.exe.find("build") != std::string::npos;
+    const bool player = !player_beside().empty();  // a release: the folder is played as it is, nothing to rebuild
     struct A {
         const char* id;
         int icon;
@@ -1471,45 +2285,113 @@ void page_home() {
         bool enabled;
         int action;
     };
-    std::vector<A> acts;
-    if (valid) acts.push_back({"##settings", nx::ui::kIconGear, kPurple, tr("launcher.home.settings"),
-                               tr("launcher.home.settings.desc"), true, 0});
-    const bool player = !player_beside().empty();  // a release: the folder is played as it is, nothing to rebuild
+    std::vector<A> left, right;
+    if (valid) {
+        left.push_back({"##online", nx::ui::kIconBox, kBlue, tr("tab.online"), tr("online.home.desc"), true, 4});
+        left.push_back({"##settings", nx::ui::kIconGear, kPurple, tr("launcher.home.settings"),
+                        tr("launcher.home.settings.desc"), true, 0});
+    }
     if (setup_supported() && !player)
-        acts.push_back({"##rebuild", nx::ui::kIconLeaf, kOrange, tr("launcher.home.rebuild"),
-                        tr(can_rebuild ? "launcher.home.rebuild.desc" : "launcher.home.rebuild.unavailable"), can_rebuild, 1});
-#if defined(__APPLE__)
-    acts.push_back({"##desktop", nx::ui::kIconPlus, kMint, tr("launcher.home.install_app"),
-                    tr("launcher.home.install_app.desc"), true, 3});
-#else
-    acts.push_back({"##desktop", nx::ui::kIconPlus, kMint, tr("launcher.home.desktop"), tr("launcher.home.desktop.desc"),
-                    true, 3});
-#endif
-    acts.push_back({"##change", nx::ui::kIconFolder, kBlue, tr(player ? "launcher.home.change_game" : "launcher.home.change"),
-                    tr(player ? "launcher.home.change_game.desc" : "launcher.home.change.desc"), true, 2});
+        right.push_back({"##rebuild", nx::ui::kIconLeaf, kOrange, tr("launcher.home.rebuild"),
+                         tr(can_rebuild ? "launcher.home.rebuild.desc" : "launcher.home.rebuild.unavailable"),
+                         can_rebuild, 1});
+    right.push_back({"##change", nx::ui::kIconFolder, kBlue,
+                     tr(player ? "launcher.home.change_game" : "launcher.home.change"),
+                     tr(player ? "launcher.home.change_game.desc" : "launcher.home.change.desc"), true, 2});
+
+    auto run_action = [&](int action) {
+        if (action == 0) load_game_ini(), g_page = Page::Settings;
+        if (action == 4) load_game_ini(), g_page = Page::Online;
+        if (action == 1) start_setup(true);
+        if (action == 2) pick(kPickBuild);
+    };
+
     float avail = ImGui::GetContentRegionAvail().x, gap = S(14);
-    bool stack = g_portrait || avail < S(700);
-    float w = stack ? avail : (avail - gap * float(acts.size() - 1)) / float(acts.size());
-    float h = 0;
-    for (const A& a : acts) h = std::max(h, action_height(a.title, a.desc, w));
-    for (size_t k = 0; k < acts.size(); k++) {
-        if (k && !stack) ImGui::SameLine(0, gap);
-        const A& a = acts[k];
-        if (action_card(a.id, a.icon, a.color, a.title, a.desc, ImVec2(w, h), a.enabled)) {
-            if (a.action == 0) load_game_ini(), g_page = Page::Settings;
-            if (a.action == 1) start_setup(true);
-            if (a.action == 2) pick(kPickBuild);
-            if (a.action == 3) {
-                DesktopResult r = add_to_desktop();
-                toast(r.ok ? trf("launcher.desktop.done", r.where) : std::string(tr("launcher.desktop.failed")));
-            }
+    const bool stack = g_portrait || avail < S(700) || left.empty() || right.empty();
+    // Play keeps a fixed-ish middle width; side columns expand into the rest.
+    const float play_h = S(155);
+    const float play_w_cap = S(400);
+    float play_w_target = stack ? std::min(avail, play_w_cap) : std::min(play_w_cap, avail * 0.34f);
+    float col_w = stack ? avail : (avail - play_w_target - 2 * gap) * 0.5f;
+    float mid_w = stack ? avail : play_w_target;
+
+    auto draw_column = [&](const std::vector<A>& col) {
+        if (col.empty()) return 0.f;
+        float card_h = 0;
+        for (const A& a : col) card_h = std::max(card_h, action_height(a.title, a.desc, col_w));
+        for (size_t i = 0; i < col.size(); ++i) {
+            if (i) ImGui::Dummy(ImVec2(0, gap));
+            const A& a = col[i];
+            if (action_card(a.id, a.icon, a.color, a.title, a.desc, ImVec2(col_w, card_h), a.enabled))
+                run_action(a.action);
         }
+        return card_h * float(col.size()) + gap * float(col.size() - 1);
+    };
+
+    if (stack) {
+        if (valid) {
+            float play_w = std::min(mid_w, play_w_cap);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - play_w) * 0.5f);
+            play_button(play_w, play_h);
+            ImGui::Dummy(ImVec2(0, gap));
+        }
+        draw_column(left);
+        if (!left.empty() && !right.empty()) ImGui::Dummy(ImVec2(0, gap));
+        draw_column(right);
+    } else {
+        float side_h = 0;
+        for (const A& a : left) side_h = std::max(side_h, action_height(a.title, a.desc, col_w));
+        side_h = side_h * float(std::max(left.size(), right.size())) +
+                 gap * float(std::max(size_t(1), std::max(left.size(), right.size())) - 1);
+        float play_w = std::min(mid_w, play_w_cap);
+        float row_h = std::max(side_h, play_h);
+        float side_pad = std::max(0.f, (row_h - side_h) * 0.5f);
+        float play_pad = std::max(0.f, (row_h - play_h) * 0.5f);
+        float play_inset = std::max(0.f, (mid_w - play_w) * 0.5f);
+
+        ImGui::BeginGroup();
+        if (side_pad > 0) ImGui::Dummy(ImVec2(col_w, side_pad));
+        draw_column(left);
+        ImGui::EndGroup();
+        ImGui::SameLine(0, gap);
+        ImGui::BeginGroup();
+        if (valid) {
+            if (play_pad > 0) ImGui::Dummy(ImVec2(mid_w, play_pad));
+            if (play_inset > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + play_inset);
+            play_button(play_w, play_h);
+            ImGui::Dummy(ImVec2(mid_w, 0));
+        }
+        ImGui::EndGroup();
+        ImGui::SameLine(0, gap);
+        ImGui::BeginGroup();
+        if (side_pad > 0) ImGui::Dummy(ImVec2(col_w, side_pad));
+        draw_column(right);
+        ImGui::EndGroup();
     }
 }
 
 void footer_home() {
-    if (!player_beside().empty()) return;  // a release has no setup to start over
-    if (button(tr("launcher.home.start_over"), kWhite)) g_banner.clear(), g_page = Page::Welcome;
+#if defined(__APPLE__)
+    const char* shortcut_l = tr("launcher.home.install_app");
+#else
+    const char* shortcut_l = tr("launcher.home.desktop");
+#endif
+    if (button(tr("launcher.credits"), kWhite)) g_page = Page::Credits;
+
+    // Same style as the side footer buttons, centered between them.
+    float shortcut_bw = button_width(shortcut_l);
+    float mid = (ImGui::GetWindowContentRegionMin().x + ImGui::GetWindowContentRegionMax().x - shortcut_bw) * 0.5f;
+    ImGui::SameLine(0, 0);
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), mid));
+    if (button(shortcut_l, kBlue)) {
+        DesktopResult r = add_to_desktop();
+        toast(r.ok ? trf("launcher.desktop.done", r.where) : std::string(tr("launcher.desktop.failed")));
+    }
+
+    if (player_beside().empty()) {  // a release has no setup to start over
+        align_right({tr("launcher.home.start_over")});
+        if (button(tr("launcher.home.start_over"), kRed)) g_banner.clear(), g_page = Page::Welcome;
+    }
 }
 
 // ---- settings: a few of the game's config.ini keys ------------------------------------------------------------
@@ -1533,13 +2415,16 @@ void setting_row(const char* label, const char* desc, const char* key, const cha
         if (v == cur) shown = t;
     ImGui::SetNextItemWidth(ctrl_w);
     if (ImGui::BeginCombo("##c", shown.c_str())) {
-        for (auto& [v, t] : choices)
+        for (auto& [v, t] : choices) {
             if (ImGui::Selectable(t.c_str(), v == cur) && v != cur) {
                 g_game_ini.set(key, v);
                 if (!g_game_ini.save()) toast(tr("launcher.settings.save_failed"));
             }
+            if (v == cur) ImGui::SetItemDefaultFocus();
+        }
         ImGui::EndCombo();
     }
+    nav_item();
     ImGui::PopID();
     ImGui::Dummy(ImVec2(0, S(2)));
     ImGui::Separator();
@@ -1548,8 +2433,8 @@ void setting_row(const char* label, const char* desc, const char* key, const cha
 
 void page_settings() {
     heading(tr("app.title"), tr("launcher.settings.text"));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, col4(kPaper));
-    ImGui::BeginChild("##rows", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+    ImGui::BeginChild("##rows", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
     setting_row("game.language", "game.language.desc", "game.language", "auto",
                 {{"auto", tr("game.language.system")}, {"en-US", "English (US)"}, {"en-GB", "English (UK)"},
                  {"es", "Español (España)"}, {"es-419", "Español (Latinoamérica)"}, {"fr", "Français"},
@@ -1577,10 +2462,31 @@ void page_settings() {
     {
         Ini& li = settings();
         bool check = li.get("launcher.update_check", "1") != "0";
-        if (ImGui::Checkbox(tr("launcher.update.check"), &check)) {
+        bool changed = ImGui::Checkbox(tr("launcher.update.check"), &check);
+        nav_item();
+        if (changed) {
             li.set("launcher.update_check", check ? "1" : "0");
             li.save();
             if (check) update_check_start();
+        }
+        bool autostart = li.get("launcher.autostart", "1") != "0";
+        bool autostart_changed = ImGui::Checkbox(tr("launcher.autostart.setting"), &autostart);
+        nav_item();
+        if (autostart_changed) {
+            li.set("launcher.autostart", autostart ? "1" : "0");
+            if (!li.save()) toast(tr("launcher.settings.save_failed"));
+            if (!autostart) g_autostart_at = -1, g_autostart_ui = false;
+        }
+        bool fullscreen = li.get("launcher.fullscreen", "0") == "1";
+        bool fullscreen_changed = ImGui::Checkbox(tr("launcher.fullscreen"), &fullscreen);
+        nav_item();
+        if (fullscreen_changed) {
+            if (SDL_SetWindowFullscreen(g_window, fullscreen)) {
+                li.set("launcher.fullscreen", fullscreen ? "1" : "0");
+                if (!li.save()) toast(tr("launcher.settings.save_failed"));
+            } else {
+                toast(SDL_GetError());
+            }
         }
         const UpdateInfo u = update_info();
         std::string ver = trf("launcher.version", current_version());
@@ -1597,9 +2503,203 @@ void footer_settings() {
     if (button(tr("launcher.settings.open_data"), kWhite)) open_folder(g_build.data);
 }
 
+// ---- online: local play over the internet, the same settings as the game's Online page -------------------------
+
+struct OnlineCheck {
+    std::mutex lock;
+    nx::LinkCheck state = nx::LinkCheck::Idle;
+    std::string address;
+    std::atomic<bool> running{false};
+};
+OnlineCheck g_online;
+
+void online_check_start() {
+    if (g_online.running.exchange(true)) return;
+    {
+        std::lock_guard lk(g_online.lock);
+        g_online.state = nx::LinkCheck::Running;
+    }
+    std::thread([] {
+        std::string address;
+        const nx::LinkCheck r = nx::upnp_check(39500, address);
+        std::lock_guard lk(g_online.lock);
+        g_online.state = r;
+        g_online.address = address;
+        g_online.running = false;
+    }).detach();
+}
+
+void page_online() {
+    heading(tr("tab.online"), tr("online.enabled.desc"));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, col4(kPaper));
+    ImGui::BeginChild("##rows", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
+    bool on = g_game_ini.get("online.enabled", "0") == "1";
+    bool enabled_changed = ImGui::Checkbox(tr("online.enabled"), &on);
+    nav_item();
+    if (enabled_changed) {
+        g_game_ini.set("online.enabled", on ? "1" : "0");
+        if (!g_game_ini.save()) toast(tr("launcher.settings.save_failed"));
+        if (on) online_check_start();
+    }
+    if (on) {
+        static bool checked = false;
+        if (!checked) {
+            checked = true;
+            online_check_start();
+        }
+        nx::LinkCheck state;
+        std::string address;
+        {
+            std::lock_guard lk(g_online.lock);
+            state = g_online.state;
+            address = g_online.address;
+        }
+        const char* text = "online.status.idle";
+        switch (state) {
+        case nx::LinkCheck::Running: text = "online.status.running"; break;
+        case nx::LinkCheck::NoRouter: text = "online.status.no_router"; break;
+        case nx::LinkCheck::Refused: text = "online.status.refused"; break;
+        case nx::LinkCheck::NoPublicAddress: text = "online.status.no_public"; break;
+        case nx::LinkCheck::Open: text = "online.status.open"; break;
+        case nx::LinkCheck::OpenVerified: text = "online.status.verified"; break;
+        case nx::LinkCheck::Idle: break;
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted(tr("online.status"));
+        text_small(tr(text));
+        if (button(tr("online.test"), kWhite, !g_online.running)) online_check_start();
+        if (!address.empty()) {
+            static bool shown = false;
+            ImGui::Separator();
+            ImGui::TextUnformatted(tr("online.address"));
+            text_small(tr("online.address.desc"));
+            ImGui::TextUnformatted(shown ? address.c_str() : "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2");
+            if (button(tr(shown ? "online.hide" : "online.show"), kWhite)) shown = !shown;
+            ImGui::SameLine();
+            if (button(tr("online.copy"), kMint)) {
+                ImGui::SetClipboardText(address.c_str());
+                toast(tr("online.copied"));
+            }
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted(tr("online.join"));
+        const nx::AddressResult a = nx::address_check_result();
+        std::string join_text = tr("online.join.desc");
+        switch (a.check) {
+        case nx::AddressCheck::Running: join_text = tr("online.join.running"); break;
+        case nx::AddressCheck::Bad: join_text = tr("online.join.bad"); break;
+        case nx::AddressCheck::NoAnswer: join_text = tr("online.join.no_answer"); break;
+        case nx::AddressCheck::Found: join_text = trf("online.join.found", a.island); break;
+        case nx::AddressCheck::Idle: break;
+        }
+        text_small(join_text.c_str());
+        static char join[128] = {};
+        static bool loaded = false;
+        if (!loaded) {
+            loaded = true;
+            std::snprintf(join, sizeof join, "%s", g_game_ini.get("online.join").c_str());
+            nx::address_check_start(join);
+        }
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        ImGuiContext& ctx = *ImGui::GetCurrentContext();
+        if (ctx.NavActivateId == ImGui::GetID("##join") && ctx.NavInputSource == ImGuiInputSource_Gamepad)
+            ctx.NavActivateFlags |= ImGuiActivateFlags_PreferInput;
+        if (ImGui::InputText("##join", join, sizeof join)) {
+            g_game_ini.set("online.join", join);
+            if (!g_game_ini.save()) toast(tr("launcher.settings.save_failed"));
+        }
+        nav_item();
+        if (ImGui::IsItemDeactivatedAfterEdit()) nx::address_check_start(join);
+        if (join[0] && button(tr("online.join.test"), kWhite)) nx::address_check_start(join);
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
+void footer_online() {
+    if (button(tr("common.back"), kWhite)) g_page = Page::Home;
+}
+
+// ---- credits: contributors and the project's references -------------------------------------------------------
+
+void credit_entry(const char* name, const char* desc, const char* url = nullptr) {
+    ImGui::PushID(name);
+    ImGui::BeginGroup();
+    if (url && *url) {
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, col4(rgb(255, 240, 196)));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, col4(rgb(255, 240, 196)));
+        ImGui::PushStyleColor(ImGuiCol_Text, col4(kBlue));
+        if (ImGui::Selectable(name, false)) SDL_OpenURL(url);
+        ImGui::PopStyleColor(4);
+        if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        nav_item();
+    } else {
+        ImGui::TextUnformatted(name);
+    }
+    text_small(desc);
+    ImGui::EndGroup();
+    ImGui::PopID();
+    ImGui::Dummy(ImVec2(0, S(2)));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, S(2)));
+}
+
+void page_credits() {
+    heading(tr("launcher.credits"), tr("launcher.credits.text"));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+    ImGui::BeginChild("##rows", ImVec2(0, 0),
+                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened);
+
+    ImGui::PushFont(g_title);
+    ImGui::TextUnformatted(tr("launcher.credits.contributors"));
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, S(4)));
+    text_small(tr("launcher.credits.contributors.desc"));
+    ImGui::Dummy(ImVec2(0, S(6)));
+    credit_entry("Nycolazs", tr("launcher.credits.contrib.nycolazs"), "https://github.com/Nycolazs");
+    credit_entry("erickgodev", tr("launcher.credits.contrib.erickgodev"), "https://github.com/erickgodev");
+    credit_entry("SirOMGitsYOU", tr("launcher.credits.contrib.siromgitsyou"), "https://github.com/SirOMGitsYOU");
+    credit_entry("vzeol", tr("launcher.credits.contrib.vzeol"), "https://github.com/vzeol");
+    credit_entry("YaBoi69er", tr("launcher.credits.contrib.yaboi69er"), "https://github.com/YaBoi69er");
+    credit_entry("Rafacasari", tr("launcher.credits.contrib.rafacasari"), "https://github.com/Rafacasari");
+    credit_entry("RonyNjr", tr("launcher.credits.contrib.ronynjr"), "https://github.com/RonyNjr");
+    credit_entry("cashcon57", tr("launcher.credits.contrib.cashcon57"), "https://github.com/cashcon57");
+
+    ImGui::Dummy(ImVec2(0, S(10)));
+    ImGui::PushFont(g_title);
+    ImGui::TextUnformatted(tr("launcher.credits.references"));
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0, S(4)));
+    text_small(tr("launcher.credits.references.desc"));
+    ImGui::Dummy(ImVec2(0, S(6)));
+    credit_entry("SuperMarioWonderRecomp", tr("launcher.credits.ref.wonder"),
+                 "https://github.com/BelmanteGu/SuperMarioWonderRecomp");
+    credit_entry("Ryujinx / Ryubing", tr("launcher.credits.ref.ryujinx"),
+                 "https://codeberg.org/Software_arch/Ryubing");
+    credit_entry("Dear ImGui", tr("launcher.credits.ref.imgui"), "https://github.com/ocornut/imgui");
+    credit_entry("MHGURecomp", tr("launcher.credits.ref.mhgu"), "https://github.com/morerokk/MHGURecomp");
+    credit_entry("RenoDX", tr("launcher.credits.ref.renodx"), "https://github.com/clshortfuse/renodx");
+    credit_entry("ACNH 60 FPS + SpeedFix", tr("launcher.credits.ref.speedfix"),
+                 "https://github.com/tmouh/acnh-60fps");
+    credit_entry("SDL3, Capstone, Unicorn, libvpx, libvorbis, FSR 1", tr("launcher.credits.ref.libs"));
+    credit_entry("LASRecomp", tr("launcher.credits.ref.las"), "https://github.com/peiikai/LASRecomp");
+    credit_entry("SwitchRecomp", tr("launcher.credits.ref.switchrecomp"), "https://github.com/bgyss/SwitchRecomp");
+    credit_entry("uDPR", tr("launcher.credits.ref.udpr"), "https://github.com/shatter9652/uDPR");
+    credit_entry(tr("launcher.credits.ref.ptbr.name"), tr("launcher.credits.ref.ptbr"));
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
+void footer_credits() {
+    if (button(tr("common.back"), kWhite)) g_page = Page::Home;
+}
+
 // ---- popups ---------------------------------------------------------------------------------------------------
 
 void popups() {
+    g_nav_section = 3;
     if (g_confirm_stop) ImGui::OpenPopup("stop");
     if (g_confirm_quit) ImGui::OpenPopup("quit");
     ImGui::SetNextWindowSize(ImVec2(std::min(ImGui::GetIO().DisplaySize.x * 0.9f, S(560)), 0));
@@ -1608,7 +2708,9 @@ void popups() {
         ImGui::Dummy(ImVec2(0, S(6)));
         if (button(tr("launcher.stop"), kRed)) setup_cancel(), g_confirm_stop = false, ImGui::CloseCurrentPopup();
         ImGui::SameLine();
-        if (button(tr("common.no"), kWhite)) g_confirm_stop = false, ImGui::CloseCurrentPopup();
+        bool cancel = button(tr("common.no"), kWhite);
+        ImGui::SetItemDefaultFocus();
+        if (cancel || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) g_confirm_stop = false, ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
     ImGui::SetNextWindowSize(ImVec2(std::min(ImGui::GetIO().DisplaySize.x * 0.9f, S(560)), 0));
@@ -1622,11 +2724,16 @@ void popups() {
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (button(tr("common.no"), kWhite)) g_confirm_quit = false, ImGui::CloseCurrentPopup();
+        bool cancel = button(tr("common.no"), kWhite);
+        ImGui::SetItemDefaultFocus();
+        if (cancel || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) g_confirm_quit = false, ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
     if (g_quit_after_stop && !setup_state().running) g_exit = true;
     addons_popup();
+    saves_popup();
+    mods_popup();
+    g_nav_section = -1;
 }
 
 }  // namespace
@@ -1667,6 +2774,7 @@ void pages_init(SDL_Window* window) {
         if (n == "home") g_page = Page::Home;
         if (n == "addons") g_page = Page::Home, g_addons_open = true, g_addons_since = -1;  // the add-on panel open
         if (n == "settings") g_page = Page::Settings;
+        if (n == "credits") g_page = Page::Credits;
     }
 }
 
@@ -1705,6 +2813,31 @@ bool pages_busy() { return setup_state().running || ImGui::GetTime() < g_toast_u
 
 bool pages_draw(float scale, ImFont* title) {
     g_scale = scale, g_title = title, g_body = ImGui::GetFont();
+    ImGuiIO& io = ImGui::GetIO();
+    ImGuiContext& ctx = *ImGui::GetCurrentContext();
+    static bool controller_navigation = false, controller_connected = false, popup_last_frame = false;
+    static bool nav_page_valid = false;
+    static Page nav_page = Page::Welcome;
+    static ImGuiID saved_focus[int(Page::Credits) + 1] = {};
+    const bool connected = (io.BackendFlags & ImGuiBackendFlags_HasGamepad) != 0;
+    if (connected && !controller_connected) controller_navigation = true;
+    if (!connected) controller_navigation = false;
+    controller_connected = connected;
+    if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1)) controller_navigation = false;
+    for (int key = ImGuiKey_GamepadStart; key <= ImGuiKey_GamepadRStickDown; ++key)
+        if (ImGui::IsKeyPressed(ImGuiKey(key), false)) controller_navigation = true;
+    const bool popup_before = popup_last_frame || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) ||
+                              g_confirm_stop || g_confirm_quit || g_addons_open || g_saves_open || g_mods_open;
+    auto direction = [](ImGuiKey dpad, ImGuiKey stick) {
+        return ImGui::IsKeyPressed(dpad, true) || ImGui::IsKeyPressed(stick, true);
+    };
+    const int dx = int(direction(ImGuiKey_GamepadDpadRight, ImGuiKey_GamepadLStickRight)) -
+                   int(direction(ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadLStickLeft));
+    const int dy = int(direction(ImGuiKey_GamepadDpadDown, ImGuiKey_GamepadLStickDown)) -
+                   int(direction(ImGuiKey_GamepadDpadUp, ImGuiKey_GamepadLStickUp));
+    const bool popup_requested = g_confirm_stop || g_confirm_quit || g_addons_open || g_saves_open || g_mods_open;
+    const bool move = controller_navigation && (!popup_before || popup_requested) && ctx.ActiveId == 0 && (dx || dy);
+    if (move) ImGui::NavMoveRequestCancel();
     static bool first = true;
     if (first) {
         first = false;
@@ -1712,6 +2845,7 @@ bool pages_draw(float scale, ImFont* title) {
         if (g_autostart_at == -2) g_autostart_at = ImGui::GetTime() + 3;
         update_check_start();
     }
+    g_autostart_ui = g_autostart_at >= 0;
     if (g_autostart_at >= 0) {
         // A new release found stops it too: the notice stays on the home page to be read.
         bool stop = g_page != Page::Home || ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) ||
@@ -1721,13 +2855,31 @@ bool pages_draw(float scale, ImFont* title) {
                 stop = true;
         if (stop) {
             g_autostart_at = -1;
+            g_play_calm = true;
+            // Drop click/nav highlight so Play returns to green instead of staying yellow.
+            ImGui::ClearActiveID();
+            ctx.NavId = 0;
+            ctx.NavIdIsAlive = false;
+            ImGui::SetNavCursorVisible(false);
         } else if (ImGui::GetTime() >= g_autostart_at) {
             g_autostart_at = -1;
+            g_autostart_ui = false;
             play();
         }
     }
     apply_picks();
-    ImGuiIO& io = ImGui::GetIO();
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) && !popup_before && ctx.ActiveId == 0) {
+        switch (g_page) {
+            case Page::Settings: case Page::Online: case Page::Credits: case Page::Done: g_page = Page::Home; break;
+            case Page::Files: g_page = Page::Welcome; break;
+            case Page::Install: g_page = Page::Files; break;
+            case Page::Build:
+                if (setup_state().running) g_confirm_stop = true;
+                else g_page = g_rebuild ? Page::Home : Page::Install;
+                break;
+            default: break;
+        }
+    }
     ImVec2 ds = io.DisplaySize;
     g_portrait = ds.x < ds.y * 1.2f;
     draw_background(ds);
@@ -1744,15 +2896,23 @@ bool pages_draw(float scale, ImFont* title) {
                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
     ImGui::PopStyleVar();
+    const Page drawn_page = g_page;
+    g_nav_items.clear();
+    g_nav_section = 0;
     ribbon();
     float footer = ImGui::GetFrameHeight() + S(20);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-    ImGui::BeginChild("##page", ImVec2(0, -footer), ImGuiChildFlags_None);
+    const bool paper_page = g_page == Page::Settings || g_page == Page::Credits;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, paper_page ? col4(kPaper) : ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, S(22));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(14), S(12)));
+    ImGui::BeginChild("##page", ImVec2(0, -footer), ((paper_page ? ImGuiChildFlags_AlwaysUseWindowPadding : ImGuiChildFlags_None) | ImGuiChildFlags_NavFlattened));
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
+    g_nav_section = 1;
     // The short pages sit in the middle of the card: their height from the last frame. The offset is whole pixels:
     // ImGui rounds item positions down, so a fractional start changed the measured height and the page bobbed by a
     // pixel every frame.
-    static float content_h[8] = {};
+    static float content_h[int(Page::Credits) + 1] = {};
     const int pi = int(g_page);
     const bool center = g_page == Page::Welcome || g_page == Page::Done || g_page == Page::Home;
     const float avail_h = ImGui::GetContentRegionAvail().y, top = ImGui::GetCursorPosY();
@@ -1767,11 +2927,14 @@ bool pages_draw(float scale, ImFont* title) {
         case Page::Done: page_done(); break;
         case Page::Home: page_home(); break;
         case Page::Settings: page_settings(); break;
+        case Page::Online: page_online(); break;
+        case Page::Credits: page_credits(); break;
     }
     if (int(g_page) == pi) content_h[pi] = ImGui::GetCursorPosY() - start;
     static const char* scroll = std::getenv("NX_LAUNCHER_SCROLL");  // tests: 0..1 of the page's scroll range
     if (scroll) ImGui::SetScrollY(ImGui::GetScrollMaxY() * float(std::atof(scroll)));
     ImGui::EndChild();
+    g_nav_section = 2;
     ImGui::Dummy(ImVec2(0, S(2)));
     if (ImGui::GetTime() < g_toast_until) {  // a short confirmation, in place of the footer's own text
         ImGui::AlignTextToFramePadding();
@@ -1786,8 +2949,50 @@ bool pages_draw(float scale, ImFont* title) {
         case Page::Done: footer_done(); break;
         case Page::Home: footer_home(); break;
         case Page::Settings: footer_settings(); break;
+        case Page::Online: footer_online(); break;
+        case Page::Credits: footer_credits(); break;
     }
+    g_nav_section = -1;
     popups();
+    const bool popup_active = g_confirm_stop || g_confirm_quit || g_addons_open || g_saves_open || g_mods_open;
+    if (controller_navigation && popup_active && ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) &&
+        drawn_page == g_page && !g_nav_items.empty()) {
+        auto first_popup_item = std::find_if(g_nav_items.begin(), g_nav_items.end(), [](const NavItem& item) {
+            return item.section == 3;
+        });
+        auto focused_popup_item = std::find_if(g_nav_items.begin(), g_nav_items.end(), [&](const NavItem& item) {
+            return item.section == 3 && item.id == ctx.NavId;
+        });
+        if (first_popup_item != g_nav_items.end()) {
+            if (focused_popup_item == g_nav_items.end())
+                nav_focus(*first_popup_item);
+            else if (move)
+                nav_move(dx, dx ? 0 : dy, 3);
+        }
+    } else if (controller_navigation && !popup_before && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) &&
+        !g_confirm_stop && !g_confirm_quit && !g_addons_open && !g_saves_open && !g_mods_open &&
+        drawn_page == g_page && !g_nav_items.empty()) {
+        const bool page_changed = !nav_page_valid || nav_page != g_page;
+        auto focused = std::find_if(g_nav_items.begin(), g_nav_items.end(), [&](const NavItem& item) { return item.id == ctx.NavId; });
+        if (page_changed || focused == g_nav_items.end()) {
+            const ImGuiID saved = saved_focus[int(g_page)];
+            auto first = std::find_if(g_nav_items.begin(), g_nav_items.end(), [saved](const NavItem& item) { return saved && item.id == saved; });
+            if (first == g_nav_items.end())
+                first = std::find_if(g_nav_items.begin(), g_nav_items.end(), [](const NavItem& item) { return item.primary; });
+            if (first == g_nav_items.end())
+                first = std::find_if(g_nav_items.begin(), g_nav_items.end(), [](const NavItem& item) { return item.section == 1; });
+            if (first == g_nav_items.end()) first = g_nav_items.begin();
+            nav_focus(*first);
+        } else if (move) {
+            // Process one axis per press, in the direction the player chose.
+            nav_move(dx, dx ? 0 : dy);
+        }
+        nav_page = g_page;
+        nav_page_valid = true;
+        saved_focus[int(g_page)] = ctx.NavId;
+    }
+    popup_last_frame = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) || g_confirm_stop || g_confirm_quit ||
+                       g_addons_open || g_saves_open || g_mods_open;
     opening_overlay();
     ImGui::End();
     return !g_exit;

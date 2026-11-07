@@ -2,6 +2,29 @@ cmake_minimum_required(VERSION 3.25)
 project(SwitchGamesRecomp C CXX)
 if(WIN32)
     enable_language(RC)  # assets/acnhrecomp.rc: the executables' icon
+    # clang-cl + Ninja uses cmake_llvm_rc (preprocess via clang-cl, then rc.exe). That path breaks here
+    # ("Empty resource compilation command", literal -I SOURCE_DIR). Compile .rc with rc.exe instead.
+    function(nx_add_windows_rc target rc_relpath)
+        if(NOT WIN32)
+            return()
+        endif()
+        set(_rc "${CMAKE_SOURCE_DIR}/${rc_relpath}")
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            set(_rc_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${target}.dir/assets")
+            set(_rc_res "${_rc_dir}/acnhrecomp.rc.res")
+            file(MAKE_DIRECTORY "${_rc_dir}")
+            add_custom_command(
+                OUTPUT "${_rc_res}"
+                COMMAND "${CMAKE_RC_COMPILER}" /nologo /fo "${_rc_res}" "${_rc}"
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/assets"
+                DEPENDS "${_rc}" "${CMAKE_SOURCE_DIR}/assets/acnhrecomp.ico"
+                COMMENT "Building RC object acnhrecomp.rc.res"
+                VERBATIM)
+            target_sources(${target} PRIVATE "${_rc_res}")
+        else()
+            target_sources(${target} PRIVATE "${_rc}")
+        endif()
+    endfunction()
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -116,6 +139,21 @@ endif()
 # Dear ImGui: the settings screen and the launcher. tools/setup_acnh.py downloads it into private/third_party/imgui.
 set(NX_IMGUI_DIR "${CMAKE_SOURCE_DIR}/private/third_party/imgui" CACHE PATH "Dear ImGui sources")
 
+add_library(nx_save_storage STATIC runtime/src/save_storage.cpp runtime/src/save_profiles.cpp)
+target_include_directories(nx_save_storage PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
+
+add_library(nx_mod_manager STATIC runtime/src/mod_manager.cpp)
+target_include_directories(nx_mod_manager PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
+target_link_libraries(nx_mod_manager PUBLIC nx_save_storage)
+if(WIN32)
+    set(ZLIB_USE_STATIC_LIBS ON)  # vcpkg's static zlib: the launcher ships no zlib1.dll
+endif()
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+    target_link_libraries(nx_mod_manager PRIVATE ZLIB::ZLIB)
+    target_compile_definitions(nx_mod_manager PRIVATE NX_HAVE_ZLIB)
+endif()
+
 # The launcher (launcher/): the program a player opens first. It has no game code, so it builds from a plain
 # checkout (cmake --build <dir> --target acnhrecomp_launcher) and leaves the game's targets as they are.
 option(NX_LAUNCHER "Build the first-run launcher (acnhrecomp_launcher)" ON)
@@ -198,6 +236,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/kernel.cpp
     runtime/src/kernel_watch.cpp
     runtime/src/ipc.cpp
+    runtime/src/svc_hid.cpp
     runtime/src/svc_am.cpp
     runtime/src/svc_set.cpp
     runtime/src/svc_misc.cpp
@@ -205,21 +244,31 @@ set(NX_RUNTIME_SOURCES
     runtime/src/svc_process.cpp
     runtime/src/hle_fs.cpp
     runtime/src/svc_account.cpp
+    runtime/src/svc_nfp.cpp
     runtime/src/users.cpp
     runtime/src/hle_ro.cpp
     runtime/src/hle_vi.cpp
     runtime/src/hle_hid.cpp
+    runtime/src/hle_hid_system_nfc.cpp
     runtime/src/hle_net.cpp
     runtime/src/hle_ldn.cpp
+    runtime/src/hle_vsock.cpp
+    runtime/src/ldn_link.cpp
+    runtime/src/ldn_discovery.cpp
+    runtime/src/ldn_upnp.cpp
     runtime/src/hle_audio.cpp
     runtime/src/hle_pl.cpp
     runtime/src/hle_nfp.cpp
+    runtime/src/nfp_host.cpp
+    runtime/src/acnh_amiibo_hook.cpp
+    runtime/src/amiibo_decode.cpp
     runtime/src/hle_time.cpp
     runtime/src/hle_bcat.cpp
     runtime/src/hle_movie.cpp
     runtime/src/hle_friends.cpp
     runtime/src/hle_ngc.cpp
     runtime/src/config.cpp
+    runtime/src/game_clock.cpp
     runtime/src/mod_fetch.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
@@ -274,10 +323,15 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nvn/nvn_spirv_fragcoord.cpp
     runtime/src/nvn/nvn_spirv_instance.cpp
     runtime/src/nvn/nvn_spirv_alpha.cpp
+    runtime/src/nvn/nvn_spirv_clamp.cpp
+    runtime/src/nvn/nvn_spirv_motion.cpp
+    runtime/src/nvn/nvn_screenshot.cpp
     runtime/src/nvn/nvn_vk_defer.cpp
     runtime/src/nvn/nvn_ultrawide.cpp
     runtime/src/nvn/nvn_present.cpp
     runtime/src/nvn/nvn_framegen.cpp
+    runtime/src/nvn/nvn_temporal.cpp
+    runtime/src/nvn/nvn_temporal_dlss.cpp
     runtime/src/nvn/nvn_pipeline_cache.cpp
     runtime/src/nvn/nvn_bc.cpp
     runtime/src/nvn/nvn_draw.cpp
@@ -432,10 +486,10 @@ else()
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/Include")
     add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win.cpp runtime/src/platform_sdl.cpp
-                   runtime/src/app_icon.cpp assets/acnhrecomp.rc assets/acnhrecomp.manifest
-                   runtime/src/memguard_win.cpp)
+                   runtime/src/app_icon.cpp assets/acnhrecomp.manifest runtime/src/memguard_win.cpp)
+    nx_add_windows_rc(${NX_GAME} assets/acnhrecomp.rc)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
-    target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 ole32 psapi winmm dxgi)
+    target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 ole32 psapi winmm dxgi ws2_32 bcrypt)
     if(NX_GAME_FROM_FOLDER)
         # The game's code from game/windows-x64/<game>_game.dll, which the player hands its runtime calls to
         # (game_abi.cpp: nx_game_bind).
@@ -446,6 +500,30 @@ else()
     # SDL3.dll next to the game, so it starts from a double click.
     add_custom_command(TARGET ${NX_GAME} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
                        $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:${NX_GAME}>)
+    # Temporal AA (nvn_temporal.cpp): AMD's FidelityFX SDK 2.4 API headers and its signed Vulkan DLLs (loader,
+    # upscaler: FSR 3.1 / 4; frame generation), which tools/setup_acnh.py fetches into private/third_party/ffx. Loaded
+    # at run time from beside the exe; without them the setting does nothing.
+    set(NX_FFX_DIR "${CMAKE_SOURCE_DIR}/private/third_party/ffx")
+    if(EXISTS "${NX_FFX_DIR}/api/include/ffx_api.h")  # the SDK's own layout (its headers include ../../api/include)
+        target_include_directories(${NX_GAME} PRIVATE "${NX_FFX_DIR}/api/include" "${NX_FFX_DIR}/upscalers/include"
+                                   "${NX_FFX_DIR}/framegeneration/include")
+        target_compile_definitions(${NX_GAME} PRIVATE NX_FFX)
+        file(GLOB NX_FFX_DLLS "${NX_FFX_DIR}/bin/*.dll")
+        foreach(dll ${NX_FFX_DLLS})
+            add_custom_command(TARGET ${NX_GAME} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                               "${dll}" $<TARGET_FILE_DIR:${NX_GAME}>)
+        endforeach()
+    endif()
+    # Temporal AA's DLAA (nvn_temporal_dlss.cpp): NVIDIA's DLSS SDK (NGX headers, its static library for the /MD
+    # runtime, nvngx_dlss.dll beside the exe), which tools/setup_acnh.py fetches into private/third_party/dlss.
+    set(NX_DLSS_DIR "${CMAKE_SOURCE_DIR}/private/third_party/dlss")
+    if(EXISTS "${NX_DLSS_DIR}/include/nvsdk_ngx_vk.h" AND EXISTS "${NX_DLSS_DIR}/lib/nvsdk_ngx_d.lib")
+        target_include_directories(${NX_GAME} PRIVATE "${NX_DLSS_DIR}/include")
+        target_compile_definitions(${NX_GAME} PRIVATE NX_DLSS)
+        target_link_libraries(${NX_GAME} PRIVATE "${NX_DLSS_DIR}/lib/nvsdk_ngx_d.lib")
+        add_custom_command(TARGET ${NX_GAME} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                           "${NX_DLSS_DIR}/bin/nvngx_dlss.dll" $<TARGET_FILE_DIR:${NX_GAME}>)
+    endif()
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         # No fused multiply-add the guest code did not ask for (its float results must match).
         target_compile_options(${NX_GAME} PRIVATE /clang:-ffp-contract=off)
@@ -472,8 +550,8 @@ endif()
 # The settings screen (runtime/src/ui): Dear ImGui (NX_IMGUI_DIR, above). Without it the screen is a stub;
 # config.ini still works.
 if(EXISTS "${NX_IMGUI_DIR}/imgui.cpp")
-    target_sources(${NX_GAME} PRIVATE runtime/src/ui/ui.cpp runtime/src/ui/settings.cpp runtime/src/ui/i18n.cpp
-        runtime/src/ui/theme.cpp ${NX_IMGUI_DIR}/imgui.cpp ${NX_IMGUI_DIR}/imgui_draw.cpp ${NX_IMGUI_DIR}/imgui_tables.cpp
+    target_sources(${NX_GAME} PRIVATE runtime/src/ui/ui.cpp runtime/src/ui/settings.cpp runtime/src/ui/amiibo_importer.cpp
+        runtime/src/ui/i18n.cpp runtime/src/ui/theme.cpp runtime/src/ui/ui_cjk_font.cpp ${NX_IMGUI_DIR}/imgui.cpp ${NX_IMGUI_DIR}/imgui_draw.cpp ${NX_IMGUI_DIR}/imgui_tables.cpp
         ${NX_IMGUI_DIR}/imgui_widgets.cpp ${NX_IMGUI_DIR}/backends/imgui_impl_vulkan.cpp)
     target_include_directories(${NX_GAME} PRIVATE ${NX_IMGUI_DIR})
     target_compile_definitions(${NX_GAME} PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES $<$<NOT:$<BOOL:${ANDROID}>>:NX_HAVE_SDL3>)
@@ -482,6 +560,10 @@ else()
     target_sources(${NX_GAME} PRIVATE runtime/src/ui/ui_stub.cpp)
 endif()
 target_sources(${NX_GAME} PRIVATE runtime/src/saves.cpp)
+target_link_libraries(${NX_GAME} PRIVATE nx_save_storage)
+if(WIN32)
+    set(ZLIB_USE_STATIC_LIBS ON)  # vcpkg's static zlib (tools/setup_acnh.py): zs.lib
+endif()
 find_package(ZLIB QUIET)
 if(ZLIB_FOUND)
     target_link_libraries(${NX_GAME} PRIVATE ZLIB::ZLIB)
@@ -559,6 +641,18 @@ if(VORBIS_FOUND)
 else()
     message(STATUS "libvorbis not found: movies use the SDK's Vorbis decoder")
     target_compile_definitions(${NX_GAME} PRIVATE NX_NO_VORBIS)
+endif()
+# Android: a libvpx cross-built with the NDK (decoder only) in private/third_party/libvpx-android, when present.
+set(NX_VPX_ANDROID "${CMAKE_SOURCE_DIR}/private/third_party/libvpx-android" CACHE PATH "libvpx built for Android")
+if(ANDROID AND NOT VPX_FOUND AND EXISTS "${NX_VPX_ANDROID}/lib/libvpx.a")
+    if(NOT TARGET nx_vpx)
+        add_library(nx_vpx STATIC IMPORTED)
+        set_target_properties(nx_vpx PROPERTIES IMPORTED_LOCATION "${NX_VPX_ANDROID}/lib/libvpx.a"
+                              INTERFACE_INCLUDE_DIRECTORIES "${NX_VPX_ANDROID}/include")
+    endif()
+    set(VPX_FOUND TRUE)
+    set(NX_VPX_TARGET nx_vpx)
+    message(STATUS "libvpx: ${NX_VPX_ANDROID}/lib/libvpx.a (Android)")
 endif()
 if(VPX_FOUND)
     target_link_libraries(${NX_GAME} PRIVATE ${NX_VPX_TARGET})

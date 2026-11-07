@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -12,7 +13,12 @@
 
 #include <nx/runtime.h>
 
+#include "game_clock.h"
 #include "platform.h"
+
+#if !defined(_WIN32)
+extern char** environ;
+#endif
 
 namespace nx {
 
@@ -95,6 +101,7 @@ std::string interval(const std::string& v) { return (v == "60" && speedfix_insta
 std::string native60(const std::string& v) { return v == "60native" ? "1" : ""; }
 // lsfg-vk is a Vulkan layer of its own. "off" says so: frame generation is on by default on Android.
 std::string framegen(const std::string& v) { return v == "builtin" ? "1" : v.empty() ? "" : "0"; }
+std::string ffx_framegen(const std::string& v) { return v == "fsr" ? "1" : ""; }  // nvn_temporal.cpp
 // The screen's 0..100% sharpness -> FSR's RCAS attenuation in stops (0 sharpest, 2 softest).
 std::string fsr_sharpness(const std::string& v) {
     if (v.empty()) return "";
@@ -113,6 +120,7 @@ const Mapping kMappings[] = {
     {"video.upscaler", "NX_FSR", fsr, true},
     {"video.fsr_sharpness_pct", "NX_FSR_SHARP", fsr_sharpness, true},
     {"video.antialiasing", "NX_AA", off_empty, true},  // fxaa (nvn_present.cpp), ssaa15 / ssaa2 (nvn_ultrawide.cpp)
+    {"video.temporal", "NX_TEMPORAL", off_empty, false},  // fsr / dlaa (nvn_temporal.cpp): read live
     {"video.anisotropy", "NX_ANISOTROPY", game_empty, true},  // 2 .. 16 (nvn_sampler.cpp)
     {"video.gpu", "NX_GPU", auto_empty, true},
     {"video.frame_rate", "NX_PRESENT_INTERVAL", interval, true},
@@ -120,10 +128,13 @@ const Mapping kMappings[] = {
     {"video.frame_rate", "NX_SPEEDFIX", speedfix, true},
     {"video.frame_cap", "NX_FPS_CAP", fps_cap, true},
     {"video.frame_gen", "NX_FRAMEGEN", framegen, true},
+    {"video.frame_gen", "NX_FFX_FRAMEGEN", ffx_framegen, false},  // AMD's: read live (nvn_temporal.cpp)
     {"video.async_shaders", "NX_ASYNC_PIPELINES", on_or_zero, true},  // on by default on Android
     {"video.vsync", "NX_VSYNC", off_is_zero, true},
+    {"video.hdr", "NX_HDR", off_empty, true},  // scrgb / hdr10 (nvn_present.cpp); the brightness keys are read live
     {"video.shader_prepare", "NX_PIPE_PREWARM", off_is_zero, true},
     {"audio.reverb", "NX_AUDIO_REVERB", off_is_zero, false},  // also read live (hle_audio.cpp)
+    {"audio.surround", "NX_AUDIO_SURROUND", off_is_zero, true},  // next device open/restart; ignored on Android
     {"video.root_clocks", "NX_ROOT_CLOCKS", on_off, true},  // Android, rooted phones (perf_hint.cpp)
 };
 
@@ -158,29 +169,46 @@ const Preset* preset_named(const std::string& name) {
 // "auto" (or no setting): the system's locale picks among the game's languages; Portuguese gets the pt-BR fan
 // translation when it is installed (the game itself has no Portuguese), else English.
 std::string system_game_language() {
-    const char* vars[] = {"LC_ALL", "LC_MESSAGES", "LANG"};
-    std::string loc;
-    for (const char* v : vars)
-        if (const char* e = std::getenv(v); e && *e && std::string(e) != "C" && std::string(e) != "POSIX") {
-            loc = e;
-            break;
-        }
+    // Android keeps the phone's language in the Java locale, not in LANG. Desktop builds report "" here and use the
+    // variables below.
+    std::string loc = plat::device_locale();
+    if (loc.empty()) {
+        const char* vars[] = {"LC_ALL", "LC_MESSAGES", "LANG"};
+        for (const char* v : vars)
+            if (const char* e = std::getenv(v); e && *e && std::string(e) != "C" && std::string(e) != "POSIX") {
+                loc = e;
+                break;
+            }
+    }
 #if defined(__APPLE__)
     if (loc.empty()) loc = "en_US";
 #endif
-    std::string lang = loc.substr(0, loc.find_first_of("_-.@")), region;
-    size_t us = loc.find_first_of("_-");
-    if (us != std::string::npos) region = loc.substr(us + 1, 2);
-    for (char& c : lang) c = char(std::tolower(static_cast<unsigned char>(c)));
+    loc = loc.substr(0, loc.find_first_of(".@"));
+    std::string lang, script, region, rest = loc;
+    for (int part = 0; !rest.empty(); part++) {
+        size_t cut = rest.find_first_of("-_");
+        std::string sub = rest.substr(0, cut);
+        rest = cut == std::string::npos ? std::string() : rest.substr(cut + 1);
+        for (char& c : sub) c = char(std::tolower(static_cast<unsigned char>(c)));
+        if (part == 0)
+            lang = sub;
+        else if (sub.size() == 4 && script.empty() && region.empty())
+            script = sub;  // zh-Hans-CN
+        else if ((sub.size() == 2 || sub.size() == 3) && region.empty())
+            region = sub;
+    }
     if (lang == "pt") {
         std::error_code ec;
         bool ptbr = std::filesystem::is_directory(std::filesystem::u8path(plat::data_root() + "/mods/ptbr/romfs"), ec);
         return ptbr ? "pt-BR" : "en-US";
     }
-    if (lang == "en") return region == "US" || region.empty() ? "en-US" : "en-GB";
-    if (lang == "fr") return region == "CA" ? "fr-CA" : "fr";
-    if (lang == "es") return region == "ES" || region.empty() ? "es" : "es-419";
-    if (lang == "zh") return region == "TW" || region == "HK" || region == "MO" ? "zh-TW" : "zh-CN";
+    if (lang == "en") return region == "us" || region.empty() ? "en-US" : "en-GB";
+    if (lang == "fr") return region == "ca" ? "fr-CA" : "fr";
+    if (lang == "es") return region == "es" || region.empty() ? "es" : "es-419";
+    if (lang == "zh") {
+        bool traditional = script == "hant" || (script != "hans" && (region == "tw" || region == "hk" || region == "mo"));
+        return traditional ? "zh-TW" : "zh-CN";
+    }
     for (const char* l : {"de", "it", "nl", "ru", "ja", "ko"})
         if (lang == l) return l;
     return "en-US";
@@ -228,26 +256,64 @@ std::vector<std::pair<std::string, std::string>> config_preset(const std::string
     return out;
 }
 
+namespace {
+
+// The NX_* variables set before the game (a .bat's `set`, a script, the launcher, config.txt on Android), as the
+// player sees them: whether a switch reached it shows in the log (issue #49: one that did not looked tested).
+void log_environment() {
+#if defined(_WIN32)
+    (void)std::getenv("NX_LOG");  // the CRT makes its narrow table on demand (a wide entry point): now
+    char** env = _environ;
+#else
+    char** env = environ;
+#endif
+    std::string list;
+    for (char** e = env; e && *e; e++)
+        if (std::strncmp(*e, "NX_", 3) == 0) {
+            std::string v = *e;
+            if (v.size() > 120) v = v.substr(0, 117) + "...";
+            list += (list.empty() ? "" : " ") + v;
+        }
+    log("config: environment: %s", list.empty() ? "no NX_* variables" : list.c_str());
+}
+
+}  // namespace
+
 void config_apply() {
     if (!g_loaded) config_load();
+    log_environment();  // before set_env_default adds the settings' own
     mods_fetch();  // before the language and the frame rate look for them
     // Game language "auto": from the system, unless a language file or NX_LANGUAGE says otherwise. Only applied:
     // the entry keeps "auto", so the choice stays automatic.
     std::string game_lang = config_get("game.language", "auto");
+    // On Android the phone locale wins for "auto", and an explicit choice in the settings wins too. A language.txt
+    // or NX_LANGUAGE= left in the game folder by the computer that prepared it would otherwise keep the game in
+    // English on a Chinese phone. Elsewhere the environment and language.txt still win, as before.
+    bool language_from_phone = false;
     {
         std::error_code ec;
         bool file = std::filesystem::exists(std::filesystem::u8path(plat::data_root() + "/language.txt"), ec);
-        if ((game_lang.empty() || game_lang == "auto") && !file && !std::getenv("NX_LANGUAGE")) {
+        const bool automatic = game_lang.empty() || game_lang == "auto";
+#if defined(__ANDROID__)
+        if (automatic && !plat::device_locale().empty()) {
+            game_lang = system_game_language();
+            language_from_phone = true;
+            log("config: game language from the phone: %s", game_lang.c_str());
+        } else if (!automatic) {
+            language_from_phone = true;
+        } else
+#endif
+            if (automatic && !file && !std::getenv("NX_LANGUAGE")) {
             game_lang = system_game_language();
             log("config: game language from the system: %s", game_lang.c_str());
         }
     }
-    std::lock_guard lk(g_lock);
+    std::unique_lock lk(g_lock);
     for (const Mapping& m : kMappings) {
         ConfigEntry* e = find(m.key);
         std::string value = std::string(m.key) == "game.language" ? game_lang : e ? e->value : std::string();
-        // No frame rate chosen: 60 when the SpeedFix is there (the loader keeps 30 if the game's code lacks it).
-        if (value.empty() && std::string(m.key) == "video.frame_rate" && speedfix_installed()) value = "60";
+        // No frame rate chosen: 30. 60 (the SpeedFix) is asked for in the settings: game folders get its code from
+        // ACNHRecomp-Importer 1.0.6 on, and the loader keeps 30 when a folder's code lacks it.
         if (value.empty()) continue;
         std::string v = m.map(value);
         if (std::string(m.env) == "NX_HANDHELD") {
@@ -256,6 +322,11 @@ void config_apply() {
         } else if (std::string(m.env) == "NX_FSR") {
             if (v == "0") unset_env("NX_FSR");
             else if (v == "1") set_env_default("NX_FSR", "1");
+        } else if (!v.empty() && std::string(m.env) == "NX_LANGUAGE" && language_from_phone) {
+#if defined(__ANDROID__)
+            setenv("NX_LANGUAGE", v.c_str(), 1);  // replace the folder's NX_LANGUAGE=
+            g_env_from_config.insert("NX_LANGUAGE");
+#endif
         } else if (!v.empty()) {
             set_env_default(m.env, v);
         }
@@ -268,7 +339,10 @@ void config_apply() {
     if (const char* sf = std::getenv("NX_SPEEDFIX"); sf && sf[0] == '1')  // its parameter files go with its code
         mods = mods.empty() ? "speedfix60" : mods + ",speedfix60";
     if (!mods.empty()) set_env_default("NX_MODS", mods);
-    log("config: %zu settings from %s", g_entries.size(), path().c_str());
+    const size_t count = g_entries.size();
+    lk.unlock();  // the clock reads the settings itself
+    game_clock_apply_config();
+    log("config: %zu settings from %s", count, path().c_str());
 }
 
 bool config_save() {
@@ -308,6 +382,11 @@ std::string config_get(const std::string& key, const std::string& fallback) {
 int config_get_int(const std::string& key, int fallback) {
     std::string v = config_get(key);
     return v.empty() ? fallback : std::atoi(v.c_str());
+}
+
+int64_t config_get_int64(const std::string& key, int64_t fallback) {
+    std::string v = config_get(key);
+    return v.empty() ? fallback : std::strtoll(v.c_str(), nullptr, 10);
 }
 
 float config_get_float(const std::string& key, float fallback) {
@@ -377,7 +456,7 @@ std::vector<ConfigEntry> config_all() {
 bool config_needs_restart(const std::string& key) {
     for (const Mapping& m : kMappings)
         if (key == m.key) return m.restart;
-    return key == "game.mods" || key == "controls.glyphs" || key == "input.layout" || key == "video.preset";  // icons: read at boot
+    return key == "game.mods" || key == "video.gpu_driver" || key == "controls.glyphs" || key == "input.layout" || key == "video.preset";  // icons: read at boot
 }
 
 }  // namespace nx

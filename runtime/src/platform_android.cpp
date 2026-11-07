@@ -32,6 +32,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -429,6 +430,53 @@ bool read_asset(const std::string& path, std::string& out) {
     return true;
 }
 
+std::string device_locale() {
+    if (!g_app || !g_app->activity || !g_app->activity->vm) return "";
+    JNIEnv* env = nullptr;
+    if (g_app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return "";
+    jclass cls = env->FindClass("java/util/Locale");
+    if (!cls) {
+        env->ExceptionClear();
+        return "";
+    }
+    jmethodID get_default = env->GetStaticMethodID(cls, "getDefault", "()Ljava/util/Locale;");
+    jmethodID language = env->GetMethodID(cls, "getLanguage", "()Ljava/lang/String;");
+    jmethodID script = env->GetMethodID(cls, "getScript", "()Ljava/lang/String;");
+    jmethodID country = env->GetMethodID(cls, "getCountry", "()Ljava/lang/String;");
+    if (!get_default || !language || !script || !country) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        return "";
+    }
+    jobject loc = env->CallStaticObjectMethod(cls, get_default);
+    if (env->ExceptionCheck() || !loc) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        return "";
+    }
+    auto part = [&](jmethodID method) {
+        std::string out;
+        jstring s = static_cast<jstring>(env->CallObjectMethod(loc, method));
+        if (env->ExceptionCheck() || !s) {
+            env->ExceptionClear();
+            return out;
+        }
+        const char* chars = env->GetStringUTFChars(s, nullptr);
+        if (chars) out = chars;
+        env->ReleaseStringUTFChars(s, chars);
+        env->DeleteLocalRef(s);
+        return out;
+    };
+    std::string lang = part(language), scr = part(script), region = part(country);
+    env->DeleteLocalRef(loc);
+    env->DeleteLocalRef(cls);
+    if (lang.empty()) return "";
+    std::string tag = lang;
+    if (!scr.empty()) tag += "-" + scr;
+    if (!region.empty()) tag += "-" + region;
+    return tag;
+}
+
 std::string setting(const std::string& key) {
     // config.txt read once (again only if the data folder changes): window_size asks for two settings every frame,
     // and each read of the file (on shared storage, through FUSE) took milliseconds on the replay thread.
@@ -555,7 +603,7 @@ void* load_vulkan();
 // The GPU driver (video.gpu_driver, NX_GPU_DRIVER: auto, turnip or system). On a Snapdragon phone, "auto" loads
 // Turnip (Mesa's Vulkan driver for Adreno, in the APK: tools/build_turnip.sh) through libadrenotools instead of the
 // phone's own driver: the Adreno 6xx ones phones ship are Vulkan 1.1, without dynamic rendering, and drew nothing of
-// the game. "system" keeps the phone's driver.
+// the game. Adreno 8xx keep their own driver (load_vulkan). "system" keeps the phone's driver.
 void* vulkan_get_instance_proc_addr() {
     // Loaded once: a second libadrenotools load is a second copy of the driver, whose functions do not know the first
     // one's objects (the settings screen crashed binding its font texture's memory).
@@ -563,11 +611,109 @@ void* vulkan_get_instance_proc_addr() {
     return once;
 }
 
+// The Adreno model the phone's own driver reports (830 for "Adreno (TM) 830"), 0 when it is not an Adreno.
+int system_adreno_model(void* lib) {
+    auto gipa = lib ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr")) : nullptr;
+    if (!gipa) return 0;
+    auto create = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ci.pApplicationInfo = &app;
+    VkInstance inst = VK_NULL_HANDLE;
+    if (!create || create(&ci, nullptr, &inst) != VK_SUCCESS) return 0;
+    auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(inst, "vkEnumeratePhysicalDevices"));
+    auto props = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(gipa(inst, "vkGetPhysicalDeviceProperties"));
+    auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(gipa(inst, "vkDestroyInstance"));
+    int model = 0;
+    uint32_t n = 1;
+    VkPhysicalDevice pd = VK_NULL_HANDLE;
+    if (enumerate && props && enumerate(inst, &n, &pd) >= 0 && n && pd) {
+        VkPhysicalDeviceProperties p{};
+        props(pd, &p);
+        if (const char* a = std::strstr(p.deviceName, "Adreno")) std::sscanf(a, "Adreno (TM) %d", &model);
+    }
+    if (destroy) destroy(inst, nullptr);
+    return model;
+}
+
+// The first .so file in <game folder>/drivers/ (sorted by name), "" when there is none.
+std::string custom_driver_file() {
+    std::vector<std::string> found;
+    if (DIR* d = opendir((g_root + "/drivers").c_str())) {
+        while (dirent* e = readdir(d)) {
+            std::string n = e->d_name;
+            if (n.size() > 3 && n.compare(n.size() - 3, 3, ".so") == 0) found.push_back(n);
+        }
+        closedir(d);
+    }
+    std::sort(found.begin(), found.end());
+    return found.empty() ? std::string() : g_root + "/drivers/" + found[0];
+}
+
+void* load_custom_driver(const std::string& so) {
+    namespace fs = std::filesystem;
+    std::string name = fs::path(so).filename().string();
+    std::string dir = g_cache_dir + "/custom_driver/";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    // Copied again when the file in the game folder changed (another size or a newer time).
+    fs::path dst = fs::path(dir) / name;
+    bool fresh = fs::exists(dst, ec) && fs::file_size(dst, ec) == fs::file_size(so, ec) &&
+                 fs::last_write_time(dst, ec) >= fs::last_write_time(so, ec);
+    if (!fresh) {
+        for (const auto& e : fs::directory_iterator(dir, ec)) fs::remove(e.path(), ec);  // one driver at a time
+        fs::copy_file(so, dst, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            nx::log("vulkan: could not copy the custom driver %s (%s): the default driver", so.c_str(), ec.message().c_str());
+            return nullptr;
+        }
+        chmod(dst.c_str(), 0700);
+    }
+    std::string tmp = g_cache_dir + "/adrenotools/";
+    mkdir(tmp.c_str(), 0700);
+    std::string hooks = g_native_lib_dir + "/";
+    if (void* h = adrenotools_open_libvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, tmp.c_str(), hooks.c_str(), dir.c_str(),
+                                             name.c_str(), nullptr, nullptr)) {
+        if (void* gipa = dlsym(h, "vkGetInstanceProcAddr")) {
+            nx::log("vulkan: custom driver %s (from the game folder's drivers/) through libadrenotools", name.c_str());
+            return gipa;
+        }
+    }
+    nx::log("vulkan: the custom driver %s could not be loaded (%s): the default driver", name.c_str(), dlerror());
+    return nullptr;
+}
+
 void* load_vulkan() {
     std::string pick = std::getenv("NX_GPU_DRIVER") ? std::getenv("NX_GPU_DRIVER") : nx::config_get("video.gpu_driver", "auto");
     char vk[PROP_VALUE_MAX] = {};
     __system_property_get("ro.hardware.vulkan", vk);
     const std::string turnip = g_native_lib_dir + "/libvulkan_freedreno.so";
+    if (pick == "auto" && std::strcmp(vk, "adreno") == 0) {
+        // Adreno 8xx (Snapdragon 8 Elite and newer): the Turnip in the APK draws only coloured noise there (Adreno 830
+        // and 840 players), while the phone's own driver is Vulkan 1.4 and draws the game, with framebuffer
+        // compression and zero copy off (what those players found working; config.txt can still turn them on).
+        int model = system_adreno_model(dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL));
+        if (model >= 800) {
+            nx::log("vulkan: Adreno %d: the phone's driver (Turnip is for Adreno 6xx/7xx)", model);
+            pick = "system";
+            setenv("NX_UBWC_FLAGS", "0", 0);
+            setenv("NX_ZERO_COPY", "0", 0);
+        }
+    }
+    if (pick == "custom") {
+        // A driver the player chose (issue #47): the first .so in <game folder>/drivers/, e.g. a newer Turnip build's
+        // libvulkan_freedreno.so. Shared storage cannot hold code that runs, so it is copied into the app's own
+        // storage first and loaded from there through libadrenotools, the way the bundled Turnip is. Adreno only.
+        std::string so = custom_driver_file();
+        if (so.empty())
+            nx::log("vulkan: video.gpu_driver = custom, but %s/drivers/ has no .so: the default driver", g_root.c_str());
+        else if (std::strcmp(vk, "adreno") != 0)
+            nx::log("vulkan: a custom driver needs an Adreno GPU (this one is \"%s\"): the phone's driver", vk);
+        else if (void* gipa = load_custom_driver(so))
+            return gipa;
+        pick = "auto";
+    }
     if (pick != "system" && std::strcmp(vk, "adreno") == 0 && !g_native_lib_dir.empty() && access(turnip.c_str(), R_OK) == 0) {
         // Binning on (Turnip's default): the main pass and the whole frame took much less GPU time with it on the S20
         // FE's Adreno 650 (the intro 27 -> ~18 ms a frame) and it ran without a fault through every test on 2026-10-26.
@@ -610,11 +756,64 @@ void set_master_volume(float) {}
 std::string controller_name() { return ""; }
 std::string controller_kind() { return ""; }
 void rumble(float, float, uint32_t) {}
-void open_path(const std::string&) {}
-void pick_path(bool, const std::string&) {}
+// The folder picker and "open folder" (the settings screen's Saves page) are android/java Picker: NativeActivity gets
+// no activity results, so the picked path comes back through a file in the app's own folder.
+namespace {
+std::string pick_answer_file() { return std::string(g_app ? g_app->activity->internalDataPath : "") + "/pick_result.txt"; }
+std::atomic<bool> g_picking{false};
+
+bool start_picker(const char* key, const std::string& value) {
+    JNIEnv* env = nullptr;
+    if (!g_app || g_app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return false;
+    jobject act = g_app->activity->clazz;
+    jclass actc = env->GetObjectClass(act);
+    jclass ic = env->FindClass("android/content/Intent");
+    jobject intent = env->NewObject(ic, env->GetMethodID(ic, "<init>", "()V"));
+    jobject pkg = env->CallObjectMethod(act, env->GetMethodID(actc, "getPackageName", "()Ljava/lang/String;"));
+    env->CallObjectMethod(intent, env->GetMethodID(ic, "setClassName", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
+                          pkg, env->NewStringUTF("io.github.acnhrecomp.Picker"));
+    env->CallObjectMethod(intent, env->GetMethodID(ic, "putExtra", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
+                          env->NewStringUTF(key), env->NewStringUTF(value.c_str()));
+    env->CallVoidMethod(act, env->GetMethodID(actc, "startActivity", "(Landroid/content/Intent;)V"), intent);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        nx::log("app: the folder picker did not start");
+        return false;
+    }
+    return true;
+}
+
+void empty_answer() {
+    std::remove(pick_answer_file().c_str());
+    if (FILE* f = std::fopen(pick_answer_file().c_str(), "w")) std::fputs("\n", f), std::fclose(f);
+    g_picking = true;
+}
+}  // namespace
+
+void open_path(const std::string& path) { start_picker("open", path); }
+
+void pick_path(bool, const std::string&) {
+    std::remove(pick_answer_file().c_str());
+    g_picking = start_picker("out", pick_answer_file());
+    if (!g_picking) empty_answer();  // no picker: an empty answer, so the screen does not wait forever
+}
+
+// Android's picker activity chooses a folder. A file pick (Amiibo .bin) has no dialog here: answer empty.
+void pick_file(const std::string&, const char*) { empty_answer(); }
+
 bool pick_result(std::string& path) {
     path.clear();
-    return false;
+    if (!g_picking) return false;
+    FILE* f = std::fopen(pick_answer_file().c_str(), "r");
+    if (!f) return false;
+    char buf[4096];
+    size_t n = std::fread(buf, 1, sizeof buf - 1, f);
+    std::fclose(f);
+    std::remove(pick_answer_file().c_str());
+    g_picking = false;
+    path.assign(buf, n);
+    while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
+    return true;
 }
 
 }  // namespace nx::plat

@@ -87,7 +87,7 @@ jobs:
           git clone --depth 1 https://github.com/microsoft/vcpkg "$VCPKG_INSTALLATION_ROOT"
           "$VCPKG_INSTALLATION_ROOT/bootstrap-vcpkg.bat" -disableMetrics
           "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install libvpx:x64-windows-static-md-release \
-              libvorbis:x64-windows-static-md-release --disable-metrics ||
+              libvorbis:x64-windows-static-md-release zlib:x64-windows-static-md-release --disable-metrics ||
             { tail -n 40 "$VCPKG_INSTALLATION_ROOT"/buildtrees/*/*.log; exit 1; }
       - name: Package
         run: |

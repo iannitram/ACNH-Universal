@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -44,9 +45,13 @@
 
 #include "kernel.h"
 #include "config.h"
+#include "nfp_host.h"
+#include "ui/amiibo_importer.h"
 #include "ui/ui.h"
 #include "bug_report.h"
 #include "platform.h"
+#include "sdl_audio_frame.h"
+#include "sdl_audio_queue.h"
 
 namespace nx {
 void boot();
@@ -216,6 +221,8 @@ std::string data_root() {
 
 
 
+std::string device_locale() { return ""; }
+
 std::string setting(const std::string& key) {
     std::string env = "NX_";
     for (char ch : key) env += char(std::toupper(static_cast<unsigned char>(ch)));
@@ -279,6 +286,7 @@ struct InputOptions {
     int deadzone = 7849;       // of 32767
     bool rumble = true;
     SDL_Scancode keys[22] = {};  // the order of kKeyNames
+    SDL_Scancode keys2[22] = {};  // the second key of each (input.key2.<name>; none by default)
 };
 const char* const kKeyNames[22][2] = {
     {"move_up", "W"},     {"move_down", "S"},  {"move_left", "A"},  {"move_right", "D"},  {"cam_up", "I"},
@@ -299,6 +307,7 @@ const InputOptions& input_options() {
             std::string name = nx::config_get(std::string("input.key.") + kKeyNames[k][0], kKeyNames[k][1]);
             SDL_Scancode sc = SDL_GetScancodeFromName(name.c_str());
             o.keys[k] = sc != SDL_SCANCODE_UNKNOWN ? sc : SDL_GetScancodeFromName(kKeyNames[k][1]);
+            o.keys2[k] = SDL_GetScancodeFromName(nx::config_get(std::string("input.key2.") + kKeyNames[k][0], "").c_str());
         }
     }
     return o;
@@ -423,6 +432,13 @@ static void sample_input() {
     uint64_t mods = 0;
     const bool focused = g_window && (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS);
     const bool typing = nx::plat::keyboard_typing();
+    // The settings screen's text fields: SDL only sends typed characters while text input is on.
+    static bool text_on = false;
+    if (g_window && nx::ui::ui_text_field() != text_on) {
+        text_on = !text_on;
+        if (text_on) SDL_StartTextInput(g_window);
+        else SDL_StopTextInput(g_window);
+    }
     if (focused && typing) {
         const bool* k = SDL_GetKeyboardState(nullptr);
         if (k[SDL_SCANCODE_UP]) p.buttons |= kUp;
@@ -431,14 +447,14 @@ static void sample_input() {
         if (k[SDL_SCANCODE_RIGHT]) p.buttons |= kRight;
         if (k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_KP_ENTER]) p.buttons |= kPlus;
         if (k[SDL_SCANCODE_BACKSPACE]) p.buttons |= kB;
-    } else if (focused) {
+    } else if (focused && !nx::ui::ui_text_field()) {
         const bool* k = SDL_GetKeyboardState(nullptr);
         const uint64_t now = SDL_GetTicks();
-        auto key = [&](int i) {
-            int sc = opt.keys[i];
-            return k[sc] && (!nx::plat::key_types(sc) || nx::plat::keyboard_state_known() ||
-                             now - down_since[sc] >= kTypeWaitMs);
+        auto held = [&](int sc) {
+            return sc > 0 && k[sc] && (!nx::plat::key_types(sc) || nx::plat::keyboard_state_known() ||
+                                       now - down_since[sc] >= kTypeWaitMs);
         };
+        auto key = [&](int i) { return held(opt.keys[i]) || held(opt.keys2[i]); };
         if (key(2)) p.lx = -kStickMax;
         if (key(3)) p.lx = kStickMax;
         if (key(0)) p.ly = kStickMax;
@@ -472,8 +488,11 @@ static void sample_input() {
                (m & SDL_KMOD_RALT ? 8u : 0u) | (m & SDL_KMOD_GUI ? 16u : 0u) | (m & SDL_KMOD_CAPS ? 256u : 0u) |
                (m & SDL_KMOD_SCROLL ? 512u : 0u) | (m & SDL_KMOD_NUM ? 1024u : 0u);
     }
+    if (focused && nx::ui::ui_visible()) nx::ui::amiibo_importer_poll();
+    nx::nfp_host::poll();
     // The settings screen takes the input while it is open (and watches for its Minus + Plus combo).
     bool ui = nx::ui::ui_pad(p.buttons, p.lx, p.ly);
+    p.buttons = nx::ui::ui_filter_game_buttons(p.buttons, ui);
     if (ui) {
         for (PadState& q : players) q = PadState{};
         std::memset(usb, 0, sizeof usb);
@@ -588,6 +607,23 @@ void pick_path(bool zip, const std::string& title) {
     });
 }
 
+void pick_file(const std::string& title, const char* extension) {
+    {
+        std::lock_guard lk(g_pick_lock);
+        g_pick_done = false;
+    }
+    run_on_main([title, extension] {
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, g_window);
+        SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, title.c_str());
+        SDL_DialogFileFilter filter = {extension, extension};
+        SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_FILTERS_POINTER, &filter);
+        SDL_SetNumberProperty(props, SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER, 1);
+        SDL_ShowFileDialogWithProperties(SDL_FILEDIALOG_OPENFILE, picked, nullptr, props);
+        SDL_DestroyProperties(props);
+    });
+}
+
 bool pick_result(std::string& path) {
     std::lock_guard lk(g_pick_lock);
     if (!g_pick_done) return false;
@@ -619,15 +655,11 @@ bool read_player_pad(int index, PadState& p) {
 // ---- audio: SDL3 stream, s16 stereo 48 kHz, fed from the queue of submitted buffers ----------------------------
 
 namespace {
-struct Pending {
-    const uint8_t* data;
-    size_t size, pos;
-    void* ctx;
-};
 AudioDone g_done = nullptr;
 SDL_AudioStream* g_stream = nullptr;
 std::mutex g_audio;
-std::deque<Pending> g_pending;
+SdlAudioQueue g_pending;
+int g_audio_frame_bytes = 4;
 
 // Master volume (settings screen, live) and the mute while the window is in the background (audio.mute_background).
 void apply_gain(int16_t* pcm, int count) {
@@ -645,38 +677,42 @@ void apply_gain(int16_t* pcm, int count) {
 
 void SDLCALL audio_cb(void*, SDL_AudioStream* s, int additional, int) {
     uint8_t buf[4096];
+    // SDL rejects partial source frames; S16 5.1 frames are 12 bytes, not 4096-byte aligned.
+    const int max_chunk = int(sizeof buf) - int(sizeof buf) % g_audio_frame_bytes;
     while (additional > 0) {
-        int n = std::min<int>(additional, sizeof buf);
+        int n = sdl_audio_frame_chunk(additional, max_chunk, g_audio_frame_bytes);
         int filled = 0;
-        std::vector<void*> finished;
+        std::array<void*, SdlAudioQueue::kCapacity> finished;
+        size_t finished_count = 0;
         {
             std::lock_guard lk(g_audio);
             while (filled < n && !g_pending.empty()) {
-                Pending& p = g_pending.front();
+                AudioPending& p = g_pending.front();
                 size_t take = std::min(size_t(n - filled), p.size - p.pos);
                 std::memcpy(buf + filled, p.data + p.pos, take);
                 filled += int(take);
                 p.pos += take;
                 if (p.pos == p.size) {
-                    finished.push_back(p.ctx);
+                    finished[finished_count++] = p.ctx;
                     g_pending.pop_front();
                 }
             }
         }
         if (filled < n) std::memset(buf + filled, 0, size_t(n - filled));  // underrun: silence
         apply_gain(reinterpret_cast<int16_t*>(buf), n / 2);
-        SDL_PutAudioStreamData(s, buf, n);
-        for (void* ctx : finished) g_done(ctx);
+        if (!SDL_PutAudioStreamData(s, buf, n)) log("audio: SDL_PutAudioStreamData: %s", SDL_GetError());
+        for (size_t i = 0; i < finished_count; i++) g_done(finished[i]);
         additional -= n;
     }
 }
 }  // namespace
 
-bool audio_open(AudioDone done) {
+bool audio_open(AudioDone done, int channels) {
     g_done = done;
     // Headless test runs (and NX_MUTE=1) are silent: no device, the callers pace themselves with a timer.
     if (headless() || std::getenv("NX_MUTE")) return false;
-    SDL_AudioSpec spec{SDL_AUDIO_S16LE, 2, 48000};
+    g_audio_frame_bytes = channels * int(sizeof(int16_t));
+    SDL_AudioSpec spec{SDL_AUDIO_S16LE, Uint8(channels), 48000};
     g_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audio_cb, nullptr);
     if (!g_stream) {
         log("audio: %s", SDL_GetError());
@@ -689,7 +725,10 @@ bool audio_open(AudioDone done) {
 bool audio_submit(const void* data, size_t bytes, void* ctx) {
     if (!g_stream) return false;
     std::lock_guard lk(g_audio);
-    g_pending.push_back({static_cast<const uint8_t*>(data), bytes, 0, ctx});
+    if (!g_pending.push_back({static_cast<const uint8_t*>(data), bytes, 0, ctx})) {
+        log("audio: SDL pending queue full");
+        return false;
+    }
     return true;
 }
 
