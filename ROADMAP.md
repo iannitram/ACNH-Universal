@@ -71,3 +71,10 @@ I'm adopting [Save Relay](https://github.com/iannitram/save-relay) for this port
 ## After 1.0
 
 The Won'ts in `SPEC.md`: local wireless play over the LAN (`docs/LOCAL_PLAY.md`, kept as upstream has it), save editing and design-pattern sync, the island's name on the save card (needs a save reader of our own), online play, Android GPUs other than Adreno (Mali), versions other than the four, above 60 FPS, and rewriting the renderer, the game code or the overlay in Rust.
+
+## Game files (2026-11-12)
+
+Where the raw files and the prepared folders live on the RTX 3090 Ti desktop (Windows build hub). Only paths and names are recorded here; nothing from the files is in this repo. Raw files are read only (never installed or extracted inside Dropbox); work folders are on the same drive as the repos, outside every clone.
+
+- Raw (Switch, three files): `L:\Dropbox\Software\Emulation\roms\Switch\[NXArchive.com] Animal Crossing New Horizons [01006F8002326000][v0](eShop).nsp` (base), `L:\Dropbox\Software\Emulation\roms\Switch\[NXArchive.com] Animal Crossing New Horizons [01006F8002326800][v2228224][Up v3.0.3].nsp` (update 3.0.3), `L:\Dropbox\Software\Emulation\roms\Switch\[Tendoku.com] Animal Crossing New Horizons [Happy Home Paradise DLC][01006F80023273E8].nsp` (DLC).
+- Work folder: `B:\acnh-universal-work\` is where the game folder (`exefs/`, `romfs/` with the update applied, `aoc/`) goes. Not made yet: the machine has no NSP extractor, and the docs name ACNHRecomp-Importer for this step.
