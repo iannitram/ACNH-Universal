@@ -1,7 +1,8 @@
 # The Rust launcher (crates/): format, lint and test on every push to main and every pull request,
-# plus the game-data check over every tracked file (SPEC.md M14, M15). A private repo, so it runs on
-# our own runners (self-hosted Linux and Windows). macOS is a GitHub-hosted runner (paid minutes)
-# until my Mac runner is online, so it runs only when asked from the Actions tab.
+# plus the game-data check over every tracked file (SPEC.md M14, M15), and the Android cross-build
+# (M15). A private repo, so it runs on our own runners (self-hosted Linux and Windows). macOS is a
+# GitHub-hosted runner (paid minutes) until my Mac runner is online, so it runs only when asked from
+# the Actions tab; that run also checks the iOS target (`aarch64-apple-ios`, M15).
 name: check
 
 on:
@@ -74,6 +75,41 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test --workspace --all-features
 
+  android:
+    name: Cross-build (Android)
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: C toolchain
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # As the Linux job above: build scripts need cc.
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update -q
+          $SUDO apt-get install -yq --no-install-recommends build-essential pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - name: Android NDK (linker)
+        # NDK 28.2.13676358 (docs/ANDROID.md): the runner's ANDROID_NDK_HOME, else the SDK's ndk/ folder.
+        run: |
+          SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}
+          NDK=${ANDROID_NDK_HOME:-$SDK/ndk/28.2.13676358}
+          LINKER=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang
+          [ -x "$LINKER" ] || { echo "::error::Android NDK 28.2.13676358 not found at $NDK: set ANDROID_NDK_HOME on the runner"; exit 1; }
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$LINKER" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$LINKER" >> "$GITHUB_ENV"
+      - run: cargo build --workspace --target aarch64-linux-android
+
   rust-macos:
     name: Rust (macOS)
     if: github.event_name == 'workflow_dispatch' && inputs.macos
@@ -85,8 +121,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: aarch64-apple-ios
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+      - name: iOS cross-check
+        run: cargo check --workspace --target aarch64-apple-ios
