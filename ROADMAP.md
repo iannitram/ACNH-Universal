@@ -64,6 +64,10 @@ Each stage names its platforms (R04). Stages overlap: anything not blocked can b
 | slint-ui/slint | royalty-free (attribution) | `app/` | dependency; About carries the notice |
 | gilrs, mdns-sd, spake2, chacha20poly1305, sha2, cbindgen, cmake | MIT or Apache-2.0 | `app/`, `hub`, `bundle`, `runtime` | dependencies |
 
+## Save Relay integration
+
+I'm adopting [Save Relay](https://github.com/iannitram/save-relay) for this port's saves. It shares game saves between machines through my own Nextcloud, pulling at launch and pushing at exit, as one small Rust core reused by every game port. Save Relay reached 1.0 on 2026-11-11 (release tag to follow). This port will adopt it for saves, so a save made on one of my machines is there on the next.
+
 ## After 1.0
 
 The Won'ts in `SPEC.md`: local wireless play over the LAN (`docs/LOCAL_PLAY.md`, kept as upstream has it), save editing and design-pattern sync, the island's name on the save card (needs a save reader of our own), online play, Android GPUs other than Adreno (Mali), versions other than the four, above 60 FPS, and rewriting the renderer, the game code or the overlay in Rust.
