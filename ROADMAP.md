@@ -71,3 +71,15 @@ I'm adopting [Save Relay](https://github.com/iannitram/save-relay) for this port
 ## After 1.0
 
 The Won'ts in `SPEC.md`: local wireless play over the LAN (`docs/LOCAL_PLAY.md`, kept as upstream has it), save editing and design-pattern sync, the island's name on the save card (needs a save reader of our own), online play, Android GPUs other than Adreno (Mali), versions other than the four, above 60 FPS, and rewriting the renderer, the game code or the overlay in Rust.
+
+## Game files
+
+Checked 2026-11-12. No game file is in this repo; this section only says where my copy is.
+
+- **Raw sources (read-only, never extract here), all in `L:\Dropbox\Software\Emulation\roms\Switch\`:**
+  - `[NXArchive.com] Animal Crossing New Horizons [01006F8002326000][v0](eShop).nsp` (6.2 GB, base)
+  - `[NXArchive.com] Animal Crossing New Horizons [01006F8002326800][v2228224][Up v3.0.3].nsp` (4.3 GB, update 3.0.3, a version the port fully supports)
+  - `[Tendoku.com] Animal Crossing New Horizons [Happy Home Paradise DLC][01006F80023273E8].nsp` (0.6 GB, DLC)
+- **Working folder (planned, not made yet):** `B:\games-donotdelete\ACNH-Universal\01006F8002326000\`, in the `exefs/`, `romfs/`, `aoc/`, `game.ini`, `.import/` layout that ACNHRecomp-Importer writes (about 10.5 GB of romfs plus generated code).
+- **Tool and command:** none run. The launcher only takes a folder made by ACNHRecomp-Importer, which is a Discord-only download and needs the console's keys. The importer, `prod.keys` and any Switch tool (hactool, nstool) are not on this machine and are not downloaded.
+- **Missing:** ACNHRecomp-Importer, `prod.keys`.
