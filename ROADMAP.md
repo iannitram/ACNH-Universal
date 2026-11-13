@@ -22,6 +22,7 @@ From `SPEC.md` (approved 2026-11-02) to 1.0: *Animal Crossing: New Horizons* 3.0
 | M14 no game files | `tools/check_no_game_data.sh` in CI (present, `check.yml`), 1.16 (`redact`), 1.17 (`bundle::is_forbidden`), PR review |
 | M15 every build verified | 0.01, 0.02, 7.01 |
 | M16 fan mods off by default, a switch each | 1.32 (#85) |
+| M17 resolution independence: every aspect, wide or tall (6:5, 3:2, 16:9, 16:10) | feature #91 (the `nvn_ultrawide` work: HUD at the edges, tall screens, live resize) |
 
 ## Stages
 
