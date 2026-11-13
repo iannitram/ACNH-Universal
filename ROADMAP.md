@@ -77,9 +77,9 @@ The Won'ts in `SPEC.md`: local wireless play over the LAN (`docs/LOCAL_PLAY.md`,
 Checked 2026-11-12. No game file is in this repo; this section only says where my copy is.
 
 - **Raw sources (read-only, never extract here), all in `L:\Dropbox\Software\Emulation\roms\Switch\`:**
-  - `[NXArchive.com] Animal Crossing New Horizons [01006F8002326000][v0](eShop).nsp` (6.2 GB, base)
-  - `[NXArchive.com] Animal Crossing New Horizons [01006F8002326800][v2228224][Up v3.0.3].nsp` (4.3 GB, update 3.0.3, a version the port fully supports)
-  - `[Tendoku.com] Animal Crossing New Horizons [Happy Home Paradise DLC][01006F80023273E8].nsp` (0.6 GB, DLC)
+  - `Animal Crossing New Horizons [01006F8002326000][v0](eShop).nsp` (6.2 GB, base)
+  - `Animal Crossing New Horizons [01006F8002326800][v2228224][Up v3.0.3].nsp` (4.3 GB, update 3.0.3, a version the port fully supports)
+  - `Animal Crossing New Horizons [Happy Home Paradise DLC][01006F80023273E8].nsp` (0.6 GB, DLC)
 - **Working folder (planned, not made yet):** `B:\games-donotdelete\ACNH-Universal\01006F8002326000\`, in the `exefs/`, `romfs/`, `aoc/`, `game.ini`, `.import/` layout that ACNHRecomp-Importer writes (about 10.5 GB of romfs plus generated code).
-- **Tool and command:** none run. The launcher only takes a folder made by ACNHRecomp-Importer, which is a Discord-only download and needs the console's keys. The importer, `prod.keys` and any Switch tool (hactool, nstool) are not on this machine and are not downloaded.
-- **Missing:** ACNHRecomp-Importer, `prod.keys`.
+- **Tool and command:** none run. The launcher only takes a folder made by ACNHRecomp-Importer, which is a Discord-only download and needs the console's keys. Not on this machine, not downloaded: ACNHRecomp-Importer. On this machine, not used: `hactool.exe` at `B:\games-donotdelete\_tools\hactool-1.4.0-win\` and the console's keys at `B:\games-donotdelete\_keys\switch\prod.keys` (outside every repo; keys never go in a repo).
+- **Missing:** ACNHRecomp-Importer.
