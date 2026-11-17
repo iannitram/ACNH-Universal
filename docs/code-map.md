@@ -72,7 +72,7 @@ flowchart TD
 | `bundle` | stub | `Bundle` (target, version, commit, build id, files with size and SHA-256), `DEVICE_OWNED` (`root`, `logs`), `is_forbidden` (never game data, the game library, packs, `gen/`, saves), `to_text`/`from_text`, `manifest`, `verify`, `install` (keeps `DEVICE_OWNED`) | | M11, M14 |
 | `fleet` | stub | `DeviceRecord` (device, os, version, build id, last sync, free space), `Drift`, `drift`, `warning`, `to_line`/`from_line` | | M11 |
 | `hub` | present (feature `hub`) | `is_home_network` (loopback, private, unique-local, and link-local ranges); planned: `discover` (mDNS `_acnh-universal._tcp`), `pair` (six-digit code, SPAKE2), `serve`, `pull` (sealed, resumable), the game data transfer to my own paired devices, a `Transport` trait for loopback tests | | M11 |
-| `vdf` | stub | Steam binary KeyValues `Value`, `write` present, `read` stub (depth limit `MAX_DEPTH` = 64) | | M2 |
+| `vdf` | present | Steam binary KeyValues `Value`, `write`, `read` (depth limit `MAX_DEPTH` = 64) | | M2 |
 | `steam` | stub | `crc32`, `shortcut_app_id`, `rungameid`, `Shortcut::quoted_exe`, `Shortcut::app_id`, `userdata_roots` are present; `shortcut_entry`, `upsert`, `write_shortcut` remain stubs (Steam closed, `.bak` kept); the shortcut runs `acnh-universal play` | the desktop and Start-menu shortcuts of `launcher/desktop.cpp` and `tools/install_mac_shortcut.sh` (the Steam entry is new) | M2 |
 | `artwork` | present | `Art` (grid, wide grid, hero, logo, icon), `file_name`, `size`, `grid_dir`, `paths`; made from the game folder's icon, else `assets/acnhrecomp.png`; nothing downloaded | | M2 |
 | `relay` | planned (feature `relay`) | the save-relay adapter: links its library, maps outcomes to `launch::Sync`; waits on iannitram/save-relay#49 | | M6 |
