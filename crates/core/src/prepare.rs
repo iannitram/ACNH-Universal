@@ -54,13 +54,11 @@ pub fn prepare(req: &Request, progress: &mut dyn FnMut(Stage)) -> Result<PathBuf
 /// knows) becomes `<hex>`. Game file names stay; their contents never reach a log.
 pub fn redact(line: &str, home: &Path) -> String {
     let home = home.display().to_string();
-    let line = line.replace(&home, "~");
-    let known_build_ids = [
-        "FCD2BB238ABE99E925B4E452DF1F41F1",
-        "FF1D1C05670DB6021C85B624A710B963",
-        "0948E48778171EE6D5D7A65813ED5FCC",
-        "7FC1BAFF976AECA414520CB89F4616CB",
-    ];
+    let line = if home.is_empty() {
+        line.to_owned()
+    } else {
+        line.replace(&home, "~")
+    };
     let mut redacted = String::with_capacity(line.len());
     let mut run_start = None;
 
@@ -68,7 +66,7 @@ pub fn redact(line: &str, home: &Path) -> String {
         if character.is_ascii_hexdigit() {
             run_start.get_or_insert(index);
         } else if let Some(start) = run_start.take() {
-            redact_hex_run(&line[start..index], &mut redacted, &known_build_ids);
+            redact_hex_run(&line[start..index], &mut redacted);
             redacted.push(character);
         } else {
             redacted.push(character);
@@ -76,18 +74,14 @@ pub fn redact(line: &str, home: &Path) -> String {
     }
 
     if let Some(start) = run_start {
-        redact_hex_run(&line[start..], &mut redacted, &known_build_ids);
+        redact_hex_run(&line[start..], &mut redacted);
     }
 
     redacted
 }
 
-fn redact_hex_run(run: &str, redacted: &mut String, known_build_ids: &[&str]) {
-    if run.len() >= 32
-        && !known_build_ids
-            .iter()
-            .any(|id| run.eq_ignore_ascii_case(id))
-    {
+fn redact_hex_run(run: &str, redacted: &mut String) {
+    if run.len() >= 32 && crate::version::from_build_id(run).is_err() {
         redacted.push_str("<hex>");
     } else {
         redacted.push_str(run);
