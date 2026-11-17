@@ -2,6 +2,8 @@
 
 Newest first. One line per change of stage, release or decision that the next session needs. Upstream's history is its git log.
 
+- 2026-11-17 `SPEC.md` approved again with M5 widened, and the roadmap changes with it (PR #122), in the Mac satellite session: "Everything is approved".
+- 2026-11-17 My rulings on save-relay and controllers in the Apple apps (quoted in `ROADMAP.md`, Decisions; PR #122): 8.08 save-relay in the released Mac app (#121) and 8.09 the Mac controller through GameController (#124) added; 8.05 (#76), 8.04 (#75, now GameController and hot-plug on the iPhone and iPad) and 10.01 (#83, waits on #121, #76 and #124) changed; nothing moved, every Apple step was already 1.0. `SPEC.md` M5 widened to the Mac and hot-plug, which needed my approval again (given the same day, the line above).
 - 2026-11-02 My rulings: iOS signs with a free Apple ID, re-signed every 7 days (M4, approval line); the pt-BR and SpeedFix fan mods are off by default with a launcher switch each (new M16, roadmap 1.32, #85).
 - 2026-11-02 Roadmap -> Dev Loop: `ROADMAP.md` (stages 0-11), `docs/code-map.md`, `GLOSSARY.md` and the Rust skeleton (`crates/core`, `recomp`, `runtime`, `cli`; every stub returns `NotBuilt`) on `main`; issues #2-#84 cover the 1.0 code map, the 21 Easy `acnh_core` issues (#4-#24) with a Qwen brief and locked tests. The relay adapter (#29) waits on save-relay#49.
 - 2026-11-02 Spec -> Roadmap: `SPEC.md` approved (same plan as totk-universal and Uncharted-Universal: Musts M1-M15, the four-version gate, the M12 week-on-the-island bar, 24 peers).
