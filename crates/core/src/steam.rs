@@ -4,7 +4,7 @@
 //! closed (`write_shortcut`). Copied from iannitram/totk-universal's `steam` (MIT) by its
 //! issues.
 
-use crate::error::{not_built, Result};
+use crate::error::{not_built, Error, Result};
 use crate::platform::Vars;
 use crate::vdf::Value;
 use std::path::{Path, PathBuf};
@@ -67,7 +67,26 @@ impl Shortcut {
 /// "DevkitGameID" Str(""), "DevkitOverrideAppID" Int(0), "LastPlayTime" Int(0),
 /// "FlatpakAppID" Str(""), "tags" Map(empty).
 pub fn shortcut_entry(s: &Shortcut) -> Value {
-    not_built!("steam::shortcut_entry")
+    let string = |value: String| Value::Str(value);
+    Value::Map(vec![
+        ("appid".into(), Value::Int(s.app_id())),
+        ("AppName".into(), string(s.name.clone())),
+        ("Exe".into(), string(s.quoted_exe())),
+        ("StartDir".into(), string(format!("\"{}\"", s.start_dir))),
+        ("icon".into(), string(s.icon.clone())),
+        ("ShortcutPath".into(), string(String::new())),
+        ("LaunchOptions".into(), string(s.launch_options.clone())),
+        ("IsHidden".into(), Value::Int(0)),
+        ("AllowDesktopConfig".into(), Value::Int(1)),
+        ("AllowOverlay".into(), Value::Int(1)),
+        ("OpenVR".into(), Value::Int(0)),
+        ("Devkit".into(), Value::Int(0)),
+        ("DevkitGameID".into(), string(String::new())),
+        ("DevkitOverrideAppID".into(), Value::Int(0)),
+        ("LastPlayTime".into(), Value::Int(0)),
+        ("FlatpakAppID".into(), string(String::new())),
+        ("tags".into(), Value::Map(vec![])),
+    ])
 }
 
 /// Add `s` to a shortcuts.vdf document, or replace the entry with the same "appid", and return
@@ -78,7 +97,35 @@ pub fn shortcut_entry(s: &Shortcut) -> Value {
 // when the body is built (it pushes, so clippy is satisfied).
 #[allow(clippy::ptr_arg)]
 pub fn upsert(doc: &mut Vec<(String, Value)>, s: &Shortcut) -> Result<u32> {
-    not_built("steam::upsert")
+    if doc.is_empty() {
+        doc.push(("shortcuts".into(), Value::Map(vec![])));
+    }
+
+    let Some((key, Value::Map(entries))) = doc.first_mut() else {
+        return Err(Error::Steam("shortcuts.vdf has no shortcuts list".into()));
+    };
+    if key != "shortcuts" {
+        return Err(Error::Steam("shortcuts.vdf has no shortcuts list".into()));
+    }
+
+    let app_id = s.app_id();
+    let entry = shortcut_entry(s);
+    let mut shortcuts = std::mem::take(entries);
+    if let Some(index) = shortcuts.iter().position(|(_, value)| {
+        matches!(value, Value::Map(fields) if fields.iter().any(|(key, value)| {
+            key == "appid" && *value == Value::Int(app_id)
+        }))
+    }) {
+        shortcuts[index].1 = entry;
+    } else {
+        shortcuts.push((String::new(), entry));
+    }
+
+    for (index, (key, _)) in shortcuts.iter_mut().enumerate() {
+        *key = index.to_string();
+    }
+    *entries = shortcuts;
+    Ok(app_id)
 }
 
 /// Where Steam keeps its user folders on the OS this is built for, in the order to try: Linux
