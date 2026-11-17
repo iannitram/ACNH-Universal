@@ -3,7 +3,7 @@
 //! without touching the real environment (docs/code-map.md, `platform`). Copied from
 //! iannitram/totk-universal (MIT) by its issue; the folder names change to `acnh-universal`.
 
-use crate::error::{not_built, Result};
+use crate::error::{Error, Result};
 use std::path::PathBuf;
 
 /// A device family the launcher builds for (SPEC.md M1).
@@ -28,17 +28,40 @@ impl Os {
     /// The OS this binary was built for (`cfg!(target_os = ...)`: "windows" is Windows,
     /// "macos" Mac, "ios" Ios, "android" Android; anything else is Linux).
     pub fn current() -> Os {
-        not_built!("platform::Os::current")
+        if cfg!(target_os = "windows") {
+            Os::Windows
+        } else if cfg!(target_os = "macos") {
+            Os::Mac
+        } else if cfg!(target_os = "ios") {
+            Os::Ios
+        } else if cfg!(target_os = "android") {
+            Os::Android
+        } else {
+            Os::Linux
+        }
     }
 
     /// "linux", "windows", "mac", "ios", "android".
     pub fn key(self) -> &'static str {
-        not_built!("platform::Os::key")
+        match self {
+            Os::Linux => "linux",
+            Os::Windows => "windows",
+            Os::Mac => "mac",
+            Os::Ios => "ios",
+            Os::Android => "android",
+        }
     }
 
     /// The `Os` whose `key()` is `key` exactly, or `None`.
     pub fn from_key(key: &str) -> Option<Os> {
-        not_built!("platform::Os::from_key")
+        match key {
+            "linux" => Some(Os::Linux),
+            "windows" => Some(Os::Windows),
+            "mac" => Some(Os::Mac),
+            "ios" => Some(Os::Ios),
+            "android" => Some(Os::Android),
+            _ => None,
+        }
     }
 }
 
@@ -66,7 +89,45 @@ impl Vars {
     /// A missing required variable is `Error::Env("<NAME> is not set")`, first one missing
     /// in the order above.
     pub fn from_lookup(os: Os, var: impl Fn(&str) -> Option<String>) -> Result<Vars> {
-        not_built("platform::Vars::from_lookup")
+        let required = |name: &str| -> Result<PathBuf> {
+            var(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| Error::Env(format!("{name} is not set")))
+        };
+
+        match os {
+            Os::Linux => {
+                let home = required("HOME")?;
+                let data = var("XDG_DATA_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".local/share"));
+                let config = var("XDG_CONFIG_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".config"));
+                Ok(Vars { home, data, config })
+            }
+            Os::Windows => Ok(Vars {
+                home: required("USERPROFILE")?,
+                data: required("LOCALAPPDATA")?,
+                config: required("APPDATA")?,
+            }),
+            Os::Mac => {
+                let home = required("HOME")?;
+                let support = home.join("Library/Application Support");
+                Ok(Vars {
+                    home,
+                    data: support.clone(),
+                    config: support,
+                })
+            }
+            Os::Ios | Os::Android => Err(Error::Unsupported(format!(
+                "the app supplies its folders on {}",
+                os.key()
+            ))),
+        }
     }
 }
 
@@ -82,22 +143,25 @@ pub struct AppDirs {
 impl AppDirs {
     /// `config` is `<vars.config>/acnh-universal`, `data` is `<vars.data>/acnh-universal`.
     pub fn new(vars: &Vars) -> AppDirs {
-        not_built!("platform::AppDirs::new")
+        AppDirs {
+            config: vars.config.join("acnh-universal"),
+            data: vars.data.join("acnh-universal"),
+        }
     }
 
     /// `<data>/install`: the player and the game library, pulled from a hub or built here.
     pub fn install(&self) -> PathBuf {
-        not_built!("platform::AppDirs::install")
+        self.data.join("install")
     }
 
     /// `<data>/install/root`: the runtime's data root (`NX_DATA_ROOT`: `config.ini`, `mods/`,
     /// `user/`), inside the install, which `bundle::install` keeps (`DEVICE_OWNED`).
     pub fn data_root(&self) -> PathBuf {
-        not_built!("platform::AppDirs::data_root")
+        self.install().join("root")
     }
 
     /// `<data>/install/logs`, also kept by `bundle::install`.
     pub fn logs(&self) -> PathBuf {
-        not_built!("platform::AppDirs::logs")
+        self.install().join("logs")
     }
 }
