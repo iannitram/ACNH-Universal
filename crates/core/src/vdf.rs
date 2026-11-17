@@ -29,7 +29,31 @@ pub enum Value {
 
 /// Encode a document: each item as above, then 0x08.
 pub fn write(doc: &[(String, Value)]) -> Vec<u8> {
-    not_built!("vdf::write")
+    fn write_items(out: &mut Vec<u8>, items: &[(String, Value)]) {
+        for (key, value) in items {
+            let type_byte = match value {
+                Value::Map(_) => 0x00,
+                Value::Str(_) => 0x01,
+                Value::Int(_) => 0x02,
+            };
+            out.push(type_byte);
+            out.extend_from_slice(key.as_bytes());
+            out.push(0x00);
+            match value {
+                Value::Map(inner) => write_items(out, inner),
+                Value::Str(text) => {
+                    out.extend_from_slice(text.as_bytes());
+                    out.push(0x00);
+                }
+                Value::Int(n) => out.extend_from_slice(&n.to_le_bytes()),
+            }
+        }
+        out.push(0x08);
+    }
+
+    let mut out = Vec::new();
+    write_items(&mut out, doc);
+    out
 }
 
 /// Decode a document written as above. Errors, all `Error::Steam`:
