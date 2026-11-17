@@ -7,7 +7,7 @@
 //! file. The game data a prepare made goes to my own devices separately, over the paired home
 //! network connection only (`hub`, the game-data transfer), never in a bundle.
 
-use crate::error::{not_built, Result};
+use crate::error::{not_built, Error, Result};
 use crate::platform::Os;
 use std::path::Path;
 
@@ -45,14 +45,47 @@ pub const DEVICE_OWNED: &[&str] = &["root", "logs"];
 /// `exefs`, `romfs`, `aoc`, `gen`, `game`, `device_save` or `backups`; or anything whose first
 /// part is in `DEVICE_OWNED`.
 pub fn is_forbidden(rel_path: &str) -> bool {
-    not_built!("bundle::is_forbidden")
+    let lower = rel_path.to_ascii_lowercase();
+    let parts: Vec<_> = lower.split('/').collect();
+    let Some(name) = parts.last() else {
+        return false;
+    };
+
+    [
+        ".nsp", ".xci", ".nca", ".nsz", ".xcz", ".nso", ".pak", ".keys",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+        || (name.starts_with("lib") && name.contains("_game."))
+        || parts.iter().any(|part| {
+            matches!(
+                *part,
+                "exefs" | "romfs" | "aoc" | "gen" | "game" | "device_save" | "backups"
+            )
+        })
+        || DEVICE_OWNED
+            .iter()
+            .any(|owned| parts.first().is_some_and(|part| part == owned))
 }
 
 /// The bundle as text, one item per line, each line ending in `\n`: `acnh-bundle 1`,
 /// `target <os key>`, `version <version>`, `commit <commit>`, `build <build_id>`, then one
 /// `file <size> <sha256> <path>` line per file in order.
 pub fn to_text(b: &Bundle) -> String {
-    not_built!("bundle::to_text")
+    let mut text = format!(
+        "acnh-bundle 1\ntarget {}\nversion {}\ncommit {}\nbuild {}\n",
+        b.target.key(),
+        b.version,
+        b.commit,
+        b.build_id
+    );
+    for file in &b.files {
+        text.push_str(&format!(
+            "file {} {} {}\n",
+            file.size, file.sha256, file.path
+        ));
+    }
+    text
 }
 
 /// Reads `to_text`'s format back. Any other first line, a missing or out-of-order header
@@ -60,7 +93,81 @@ pub fn to_text(b: &Bundle) -> String {
 /// hex digits is `Error::Hub("bad bundle line <n>: <the line>")` (n from 1); a forbidden path
 /// is `Error::Hub("refusing to bundle <path>: game data and saves never go in a bundle")`.
 pub fn from_text(text: &str) -> Result<Bundle> {
-    not_built("bundle::from_text")
+    let lines: Vec<_> = text.lines().collect();
+    let bad_line = |index: usize| {
+        Error::Hub(format!(
+            "bad bundle line {}: {}",
+            index + 1,
+            lines.get(index).copied().unwrap_or("")
+        ))
+    };
+
+    if lines.first().copied().unwrap_or("") != "acnh-bundle 1" {
+        return Err(bad_line(0));
+    }
+
+    let target_line = lines.get(1).copied().unwrap_or("");
+    let target = target_line
+        .strip_prefix("target ")
+        .and_then(Os::from_key)
+        .ok_or_else(|| bad_line(1))?;
+
+    let version_line = lines.get(2).copied().unwrap_or("");
+    let version = version_line
+        .strip_prefix("version ")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| bad_line(2))?
+        .to_string();
+
+    let commit_line = lines.get(3).copied().unwrap_or("");
+    let commit = commit_line
+        .strip_prefix("commit ")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| bad_line(3))?
+        .to_string();
+
+    let build_line = lines.get(4).copied().unwrap_or("");
+    let build_id = build_line
+        .strip_prefix("build ")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| bad_line(4))?
+        .to_string();
+
+    let mut files = Vec::new();
+    for (index, line) in lines.iter().enumerate().skip(5) {
+        let fields: Vec<_> = line.splitn(4, ' ').collect();
+        let parsed = if fields.len() == 4 && fields[0] == "file" {
+            fields[1].parse::<u64>().ok().and_then(|size| {
+                let sha256 = fields[2];
+                let path = fields[3];
+                (sha256.len() == 64
+                    && sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    && !path.is_empty())
+                .then(|| (size, sha256.to_string(), path.to_string()))
+            })
+        } else {
+            None
+        };
+        let Some((size, sha256, path)) = parsed else {
+            return Err(bad_line(index));
+        };
+        if is_forbidden(&path) {
+            return Err(Error::Hub(format!(
+                "refusing to bundle {path}: game data and saves never go in a bundle"
+            )));
+        }
+        files.push(BundleFile { path, size, sha256 });
+    }
+
+    Ok(Bundle {
+        target,
+        version,
+        commit,
+        build_id,
+        files,
+    })
 }
 
 /// The bundle of a build folder: every file under `dir` (recursively; folders themselves are
