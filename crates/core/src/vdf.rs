@@ -13,7 +13,7 @@
 //! shortcuts.vdf is one map item "shortcuts" whose items are "0", "1", ... (one map per
 //! shortcut), so the file ends 0x08 0x08.
 
-use crate::error::{not_built, Result};
+use crate::error::{Error, Result};
 
 /// Deepest map nesting `read` accepts. Steam's files nest about three deep; the bound
 /// keeps untrusted input from overflowing the stack.
@@ -65,5 +65,69 @@ pub fn write(doc: &[(String, Value)]) -> Vec<u8> {
 /// - bytes after the closing 0x08: "shortcuts.vdf has bytes after its end";
 /// - maps nested more than 64 deep: "shortcuts.vdf is nested too deep".
 pub fn read(bytes: &[u8]) -> Result<Vec<(String, Value)>> {
-    not_built("vdf::read")
+    fn steam(message: &'static str) -> Error {
+        Error::Steam(message.to_string())
+    }
+
+    fn take_text(bytes: &[u8], cursor: &mut usize) -> Result<String> {
+        let remaining = bytes
+            .get(*cursor..)
+            .ok_or_else(|| steam("shortcuts.vdf is cut short"))?;
+        let end = remaining
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or_else(|| steam("shortcuts.vdf is cut short"))?;
+        let text = std::str::from_utf8(&remaining[..end])
+            .map_err(|_| steam("shortcuts.vdf has text that is not UTF-8"))?
+            .to_string();
+        *cursor += end + 1;
+        Ok(text)
+    }
+
+    fn items(bytes: &[u8], cursor: &mut usize, map_depth: usize) -> Result<Vec<(String, Value)>> {
+        let mut result = Vec::new();
+        loop {
+            let type_byte = *bytes
+                .get(*cursor)
+                .ok_or_else(|| steam("shortcuts.vdf is cut short"))?;
+            *cursor += 1;
+            if type_byte == 0x08 {
+                return Ok(result);
+            }
+            if !matches!(type_byte, 0x00..=0x02) {
+                return Err(Error::Steam(format!(
+                    "shortcuts.vdf has an unknown item type 0x{type_byte:02x}"
+                )));
+            }
+
+            let key = take_text(bytes, cursor)?;
+            let value = match type_byte {
+                0x00 => {
+                    let depth = map_depth + 1;
+                    if depth > MAX_DEPTH {
+                        return Err(steam("shortcuts.vdf is nested too deep"));
+                    }
+                    Value::Map(items(bytes, cursor, depth)?)
+                }
+                0x01 => Value::Str(take_text(bytes, cursor)?),
+                0x02 => {
+                    let number = bytes
+                        .get(*cursor..cursor.saturating_add(4))
+                        .ok_or_else(|| steam("shortcuts.vdf is cut short"))?;
+                    let value = u32::from_le_bytes([number[0], number[1], number[2], number[3]]);
+                    *cursor += 4;
+                    Value::Int(value)
+                }
+                _ => unreachable!("type byte was validated above"),
+            };
+            result.push((key, value));
+        }
+    }
+
+    let mut cursor = 0;
+    let doc = items(bytes, &mut cursor, 0)?;
+    if cursor != bytes.len() {
+        return Err(steam("shortcuts.vdf has bytes after its end"));
+    }
+    Ok(doc)
 }

@@ -53,5 +53,37 @@ pub fn prepare(req: &Request, progress: &mut dyn FnMut(Stage)) -> Result<PathBuf
 /// that looks like a key (a run of 32 or more hex digits that is not a build id the gate
 /// knows) becomes `<hex>`. Game file names stay; their contents never reach a log.
 pub fn redact(line: &str, home: &Path) -> String {
-    not_built!("prepare::redact")
+    let home = home.display().to_string();
+    let line = if home.is_empty() {
+        line.to_owned()
+    } else {
+        line.replace(&home, "~")
+    };
+    let mut redacted = String::with_capacity(line.len());
+    let mut run_start = None;
+
+    for (index, character) in line.char_indices() {
+        if character.is_ascii_hexdigit() {
+            run_start.get_or_insert(index);
+        } else if let Some(start) = run_start.take() {
+            redact_hex_run(&line[start..index], &mut redacted);
+            redacted.push(character);
+        } else {
+            redacted.push(character);
+        }
+    }
+
+    if let Some(start) = run_start {
+        redact_hex_run(&line[start..], &mut redacted);
+    }
+
+    redacted
+}
+
+fn redact_hex_run(run: &str, redacted: &mut String) {
+    if run.len() >= 32 && crate::version::from_build_id(run).is_err() {
+        redacted.push_str("<hex>");
+    } else {
+        redacted.push_str(run);
+    }
 }
