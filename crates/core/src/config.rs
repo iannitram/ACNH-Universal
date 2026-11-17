@@ -11,7 +11,7 @@
 //! their section). Unknown keys are kept. Writing keeps every line in place and changes only
 //! the value of a key that is set.
 
-use crate::error::{not_built, Result};
+use crate::error::{Error, Result};
 
 /// One line of the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,23 +35,96 @@ impl Config {
     /// `Error::Config("line <n> has no '=': <line>")` (n from 1); an empty key is
     /// `Error::Config("line <n> has no key")`.
     pub fn parse(text: &str) -> Result<Config> {
-        not_built("config::Config::parse")
+        if text.is_empty() {
+            return Ok(Config::default());
+        }
+
+        let mut lines = Vec::new();
+        let text = text.strip_suffix('\n').unwrap_or(text);
+
+        for (index, raw_line) in text.split('\n').enumerate() {
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            let trimmed = line.trim();
+
+            if trimmed.is_empty()
+                || trimmed.starts_with('#')
+                || trimmed.starts_with(';')
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            {
+                lines.push(Line::Other(line.to_owned()));
+                continue;
+            }
+
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(Error::Config(format!(
+                    "line {} has no '=': {line}",
+                    index + 1
+                )));
+            };
+            let key = key.trim();
+            if key.is_empty() {
+                return Err(Error::Config(format!("line {} has no key", index + 1)));
+            }
+            lines.push(Line::Entry {
+                key: key.to_owned(),
+                value: value.trim().to_owned(),
+            });
+        }
+
+        Ok(Config { lines })
     }
 
     /// The value of the last `key` entry, or `None`.
     pub fn get(&self, key: &str) -> Option<&str> {
-        not_built!("config::Config::get")
+        self.lines.iter().rev().find_map(|line| match line {
+            Line::Entry {
+                key: entry_key,
+                value,
+            } if entry_key == key => Some(value.as_str()),
+            _ => None,
+        })
     }
 
     /// Set `key` to `value`: every entry with that key gets the value; with none, one entry
     /// is added at the end.
     pub fn set(&mut self, key: &str, value: &str) {
-        not_built!("config::Config::set")
+        let mut found = false;
+        for line in &mut self.lines {
+            if let Line::Entry {
+                key: entry_key,
+                value: entry_value,
+            } = line
+            {
+                if entry_key == key {
+                    entry_value.clear();
+                    entry_value.push_str(value);
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            self.lines.push(Line::Entry {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            });
+        }
     }
 
     /// The file text: each `Entry` as `key = value`, each `Other` as it was, every line ending
     /// in `\n`. `parse(&c.to_text())` equals `c`.
     pub fn to_text(&self) -> String {
-        not_built!("config::Config::to_text")
+        let mut text = String::new();
+        for line in &self.lines {
+            match line {
+                Line::Entry { key, value } => {
+                    text.push_str(key);
+                    text.push_str(" = ");
+                    text.push_str(value);
+                }
+                Line::Other(line) => text.push_str(line),
+            }
+            text.push('\n');
+        }
+        text
     }
 }
