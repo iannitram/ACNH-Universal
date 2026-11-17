@@ -12,18 +12,29 @@ use std::path::{Path, PathBuf};
 /// CRC-32 (IEEE 802.3, reflected, polynomial 0xEDB88320, initial and final XOR 0xFFFFFFFF):
 /// `crc32(b"123456789") == 0xCBF43926`.
 pub fn crc32(bytes: &[u8]) -> u32 {
-    not_built!("steam::crc32")
+    let mut c: u32 = 0xFFFF_FFFF;
+    for &b in bytes {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
+        }
+    }
+    !c
 }
 
 /// The shortcut's app id: `crc32(exe + name) | 0x8000_0000`, with `exe` exactly as stored
 /// in the shortcut (quoted).
 pub fn shortcut_app_id(exe: &str, name: &str) -> u32 {
-    not_built!("steam::shortcut_app_id")
+    crc32(format!("{exe}{name}").as_bytes()) | 0x8000_0000
 }
 
 /// The 64-bit id `steam://rungameid/<id>` takes: `(app_id as u64) << 32 | 0x0200_0000`.
 pub fn rungameid(app_id: u32) -> u64 {
-    not_built!("steam::rungameid")
+    ((app_id as u64) << 32) | 0x0200_0000
 }
 
 /// A shortcut as the launcher writes it.
@@ -40,12 +51,12 @@ pub struct Shortcut {
 impl Shortcut {
     /// `exe` in double quotes, as Steam stores it.
     pub fn quoted_exe(&self) -> String {
-        not_built!("steam::Shortcut::quoted_exe")
+        format!("\"{}\"", self.exe)
     }
 
     /// `shortcut_app_id(&self.quoted_exe(), &self.name)`.
     pub fn app_id(&self) -> u32 {
-        not_built!("steam::Shortcut::app_id")
+        shortcut_app_id(&self.quoted_exe(), &self.name)
     }
 }
 
@@ -76,7 +87,18 @@ pub fn upsert(doc: &mut Vec<(String, Value)>, s: &Shortcut) -> Result<u32> {
 /// `C:\Program Files (x86)\Steam\userdata`; Mac
 /// `<home>/Library/Application Support/Steam/userdata`.
 pub fn userdata_roots(vars: &Vars) -> Vec<PathBuf> {
-    not_built!("steam::userdata_roots")
+    if cfg!(target_os = "windows") {
+        vec![PathBuf::from(r"C:\Program Files (x86)\Steam\userdata")]
+    } else if cfg!(target_os = "macos") {
+        vec![vars.home.join("Library/Application Support/Steam/userdata")]
+    } else {
+        vec![
+            vars.home.join(".local/share/Steam/userdata"),
+            vars.home.join(".steam/steam/userdata"),
+            vars.home
+                .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/userdata"),
+        ]
+    }
 }
 
 /// Write the shortcut into every Steam user's `config/shortcuts.vdf` under `userdata`
