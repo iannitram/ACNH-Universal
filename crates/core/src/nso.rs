@@ -5,7 +5,9 @@
 //! An NSO starts with the magic `NSO0` (bytes 0x4E 0x53 0x4F 0x30) at 0x00; its build id (the
 //! module id) is the 32 bytes at 0x40, of which the game's version table uses the first 16.
 
-use crate::error::{not_built, Result};
+use crate::error::{Error, Result};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 /// The header bytes `build_id` needs: 0x60.
@@ -16,11 +18,31 @@ pub const HEADER_LEN: usize = 0x60;
 /// executable")`; a first four bytes other than `NSO0` is `Error::NotAcnh("exefs/main is not
 /// a Switch executable (NSO)")`.
 pub fn build_id(header: &[u8]) -> Result<String> {
-    not_built("nso::build_id")
+    if header.len() < HEADER_LEN {
+        return Err(Error::NotAcnh(
+            "exefs/main is too short to be a Switch executable".into(),
+        ));
+    }
+    if &header[..4] != b"NSO0" {
+        return Err(Error::NotAcnh(
+            "exefs/main is not a Switch executable (NSO)".into(),
+        ));
+    }
+
+    let mut build_id = String::with_capacity(32);
+    for byte in &header[0x40..0x50] {
+        use std::fmt::Write;
+        write!(&mut build_id, "{byte:02X}").expect("writing to a String cannot fail");
+    }
+    Ok(build_id)
 }
 
 /// `build_id` of the file at `path`, reading at most `HEADER_LEN` bytes. A file that cannot be
 /// opened is `Error::Io`.
 pub fn read_build_id(path: &Path) -> Result<String> {
-    not_built("nso::read_build_id")
+    let mut header = Vec::with_capacity(HEADER_LEN);
+    File::open(path)?
+        .take(HEADER_LEN as u64)
+        .read_to_end(&mut header)?;
+    build_id(&header)
 }
