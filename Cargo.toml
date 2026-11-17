@@ -2,7 +2,7 @@
 # CMake build (CMakeLists.txt) stays beside it; `crates/runtime` drives it once it links.
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/recomp", "crates/runtime", "crates/cli"]
+members = ["crates/core", "crates/recomp", "crates/runtime", "crates/cli", "app"]
 
 [workspace.package]
 version = "0.0.0"
