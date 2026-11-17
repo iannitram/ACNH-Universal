@@ -3,7 +3,7 @@
 //! Shape from iannitram/totk-universal's `fleet` (MIT); ACNH has one engine, so the record
 //! names the game version and our build instead of a port and its pin.
 
-use crate::error::{not_built, Result};
+use crate::error::{Error, Result};
 use crate::platform::Os;
 
 /// What one launcher reports to its hubs after each sync.
@@ -35,7 +35,19 @@ pub enum Drift {
 /// Compares this device with the one that made the latest save. Different `version`:
 /// `Version`. Same version, different `build_id`: `Build`. Otherwise `None`.
 pub fn drift(here: &DeviceRecord, saved_by: &DeviceRecord) -> Drift {
-    not_built!("fleet::drift")
+    if here.version != saved_by.version {
+        Drift::Version {
+            theirs: saved_by.version.clone(),
+            ours: here.version.clone(),
+        }
+    } else if here.build_id != saved_by.build_id {
+        Drift::Build {
+            theirs: saved_by.build_id.clone(),
+            ours: here.build_id.clone(),
+        }
+    } else {
+        Drift::None
+    }
 }
 
 /// The warning the Continue screen shows, or `None` for `Drift::None`:
@@ -44,17 +56,61 @@ pub fn drift(here: &DeviceRecord, saved_by: &DeviceRecord) -> Drift {
 /// save with another build of ACNH Universal. Update this device first, or play on."
 /// `<device>` is `saved_by.device`.
 pub fn warning(drift: &Drift, saved_by: &DeviceRecord) -> Option<String> {
-    not_built!("fleet::warning")
+    match drift {
+        Drift::None => None,
+        Drift::Version { theirs, ours } => Some(format!(
+            "{} made this save with version {theirs}; this device has {ours}. Put the same version on both, or the game may refuse the island.",
+            saved_by.device
+        )),
+        Drift::Build { .. } => Some(format!(
+            "{} made this save with another build of ACNH Universal. Update this device first, or play on.",
+            saved_by.device
+        )),
+    }
 }
 
 /// A record as one tab-separated line, no trailing newline: device, os key, version, build
 /// id, last sync, free bytes. A tab or newline in `device` is
 /// `Error::Hub("a device name cannot hold a tab or a new line")`.
 pub fn to_line(r: &DeviceRecord) -> Result<String> {
-    not_built("fleet::to_line")
+    if r.device.contains(['\t', '\n', '\r']) {
+        return Err(Error::Hub(
+            "a device name cannot hold a tab or a new line".to_string(),
+        ));
+    }
+    Ok(format!(
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        r.device,
+        r.os.key(),
+        r.version,
+        r.build_id,
+        r.last_sync_unix,
+        r.free_bytes
+    ))
 }
 
 /// Reads `to_line`'s format back; anything else is `Error::Hub("bad device record: <line>")`.
 pub fn from_line(line: &str) -> Result<DeviceRecord> {
-    not_built("fleet::from_line")
+    let bad_line = || Error::Hub(format!("bad device record: {line}"));
+    let fields: Vec<_> = line.split('\t').collect();
+    if fields.len() != 6 {
+        return Err(bad_line());
+    }
+    if fields[0].contains(['\n', '\r']) {
+        return Err(bad_line());
+    }
+    let os = Os::from_key(fields[1]).ok_or_else(bad_line)?;
+    let last_sync_unix: u64 = fields[4].parse().map_err(|_| bad_line())?;
+    let free_bytes: u64 = fields[5].parse().map_err(|_| bad_line())?;
+    if last_sync_unix.to_string() != fields[4] || free_bytes.to_string() != fields[5] {
+        return Err(bad_line());
+    }
+    Ok(DeviceRecord {
+        device: fields[0].to_string(),
+        os,
+        version: fields[2].to_string(),
+        build_id: fields[3].to_string(),
+        last_sync_unix,
+        free_bytes,
+    })
 }
