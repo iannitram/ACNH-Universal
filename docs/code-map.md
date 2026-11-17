@@ -74,7 +74,7 @@ flowchart TD
 | `hub` | stub (feature `hub`) | `is_home_network` (private, loopback, link-local only); planned: `discover` (mDNS `_acnh-universal._tcp`), `pair` (six-digit code, SPAKE2), `serve`, `pull` (sealed, resumable), the game data transfer to my own paired devices, a `Transport` trait for loopback tests | | M11 |
 | `vdf` | stub | Steam binary KeyValues `Value`, `write`, `read` (depth limit `MAX_DEPTH` = 64) | | M2 |
 | `steam` | stub | `crc32`, `shortcut_app_id`, `rungameid`, `Shortcut`, `shortcut_entry`, `upsert`, `userdata_roots`, `write_shortcut` (Steam closed, `.bak` kept); the shortcut runs `acnh-universal play` | the desktop and Start-menu shortcuts of `launcher/desktop.cpp` and `tools/install_mac_shortcut.sh` (the Steam entry is new) | M2 |
-| `artwork` | stub | `Art` (grid, wide grid, hero, logo, icon), file names under `userdata/<user>/config/grid/`, sizes; made from the game folder's icon, else `assets/acnhrecomp.png`; nothing downloaded | | M2 |
+| `artwork` | present | `Art` (grid, wide grid, hero, logo, icon), `file_name`, `size`, `grid_dir`, `paths`; made from the game folder's icon, else `assets/acnhrecomp.png`; nothing downloaded | | M2 |
 | `relay` | planned (feature `relay`) | the save-relay adapter: links its library, maps outcomes to `launch::Sync`; waits on iannitram/save-relay#49 | | M6 |
 
 `platform`, `vdf`, `steam`, `artwork`, `backup`, `bundle`, `fleet`, `launch`, `update`, `hub` and the shapes of `savecard`, `profile` and `recipe` are copied from iannitram/totk-universal (MIT) with credit in the file header, by their issues.
