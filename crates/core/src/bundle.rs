@@ -8,7 +8,7 @@
 //! file. The game data a prepare made goes to my own devices separately, over the paired home
 //! network connection only (`hub`, the game-data transfer), never in a bundle.
 
-use crate::error::{not_built, Error, Result};
+use crate::error::{Error, Result};
 use crate::platform::Os;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -257,5 +257,48 @@ pub fn verify(b: &Bundle, dir: &Path) -> Result<()> {
 /// from an earlier run is removed first; a failure to delete the old install after the swap is
 /// not reported, and the next install removes it.
 pub fn install(b: &Bundle, staged: &Path, install_dir: &Path) -> Result<()> {
-    not_built("bundle::install")
+    verify(b, staged)?;
+
+    let mut old_name = install_dir.as_os_str().to_os_string();
+    old_name.push(".old");
+    let old_dir = PathBuf::from(old_name);
+    if old_dir.exists() {
+        fs::remove_dir_all(&old_dir)?;
+    }
+    if !install_dir.exists() {
+        fs::rename(staged, install_dir)?;
+        return Ok(());
+    }
+
+    let mut moved = Vec::new();
+    for &entry in DEVICE_OWNED {
+        let from = install_dir.join(entry);
+        if from.exists() {
+            if let Err(error) = fs::rename(&from, staged.join(entry)) {
+                put_back(&moved, staged, install_dir);
+                return Err(error.into());
+            }
+            moved.push(entry);
+        }
+    }
+
+    if let Err(error) = fs::rename(install_dir, &old_dir) {
+        put_back(&moved, staged, install_dir);
+        return Err(error.into());
+    }
+    if let Err(error) = fs::rename(staged, install_dir) {
+        put_back(&moved, staged, &old_dir);
+        let _ = fs::rename(&old_dir, install_dir);
+        return Err(error.into());
+    }
+
+    let _ = fs::remove_dir_all(&old_dir);
+    Ok(())
+}
+
+/// Moves entries back after a failed install step; the original error is reported.
+fn put_back(moved: &[&str], from: &Path, to: &Path) {
+    for entry in moved {
+        let _ = fs::rename(from.join(entry), to.join(entry));
+    }
 }
