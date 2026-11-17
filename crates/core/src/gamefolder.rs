@@ -10,7 +10,7 @@
 //! <game folder>/game.ini, .import/  (written by ACNHRecomp-Importer, optional)
 //! ```
 
-use crate::error::{not_built, Result};
+use crate::error::{Error, Result};
 use crate::version::Version;
 use std::path::{Path, PathBuf};
 
@@ -40,5 +40,66 @@ pub struct GameFolder {
 /// 5. `nso::read_build_id(exefs/main)`, then `version::from_build_id`; their errors pass
 ///    through unchanged.
 pub fn check(root: &Path) -> Result<GameFolder> {
-    not_built("gamefolder::check")
+    if !root.is_dir() {
+        return Err(Error::BadGameFolder(format!(
+            "{} is not a folder",
+            root.display()
+        )));
+    }
+
+    let exefs = root.join("exefs");
+    if !exefs.is_dir() {
+        return Err(Error::BadGameFolder("exefs/ is missing".into()));
+    }
+    for name in EXEFS_FILES {
+        if !exefs.join(name).is_file() {
+            return Err(Error::BadGameFolder(format!("exefs/{name} is missing")));
+        }
+    }
+
+    let romfs = root.join("romfs");
+    let romfs = if romfs.is_dir() {
+        romfs
+    } else {
+        let extracted = root.join("extract/romfs");
+        if extracted.is_dir() {
+            extracted
+        } else {
+            return Err(Error::BadGameFolder("romfs/ is missing".into()));
+        }
+    };
+
+    let main = exefs.join("main");
+    let version = crate::version::from_build_id(&crate::nso::read_build_id(&main)?)?;
+
+    let aoc_root = root.join("aoc");
+    let mut aoc = if aoc_root.is_dir() {
+        std::fs::read_dir(&aoc_root)?
+            .map(|entry| {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    Ok(Some(entry.path()))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    aoc.sort();
+
+    let from_importer = root.join(".import").is_dir() || root.join("game.ini").exists();
+
+    Ok(GameFolder {
+        root: root.to_path_buf(),
+        exefs,
+        romfs,
+        aoc,
+        from_importer,
+        version,
+    })
 }
