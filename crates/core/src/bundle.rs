@@ -1,6 +1,7 @@
 //! Build bundles (SPEC.md M11; docs/adr/0004-build-hubs.md): the player a hub built, as a
 //! list of files with their hashes, which a hub serves and a client checks before it installs.
 //! Shape from iannitram/totk-universal's `bundle` (MIT).
+//! Implementation copied from totk-universal's bundle module.
 //!
 //! A bundle never holds game data: not the game folder, not what is made from it (the game
 //! library, `romfs.pak`, `spirv.pak`, `gen/`), not a save. `is_forbidden` is checked for every
@@ -9,7 +10,9 @@
 
 use crate::error::{not_built, Error, Result};
 use crate::platform::Os;
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// One file of a build, its path relative to the build folder (with `/`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,14 +178,73 @@ pub fn from_text(text: &str) -> Result<Bundle> {
 /// refusal error. `build_id` is the first 16 hex digits of the SHA-256 of all the
 /// `file <size> <sha256> <path>\n` lines joined in order.
 pub fn manifest(dir: &Path, target: Os, version: &str, commit: &str) -> Result<Bundle> {
-    not_built("bundle::manifest")
+    fn walk(root: &Path, folder: &Path, files: &mut Vec<BundleFile>) -> Result<()> {
+        for entry in fs::read_dir(folder)? {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root).expect("walked path is under root");
+            let rel_path = relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if relative.components().count() == 1 && DEVICE_OWNED.contains(&rel_path.as_str()) {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                walk(root, &path, files)?;
+            } else {
+                if is_forbidden(&rel_path) {
+                    return Err(Error::Hub(format!(
+                        "refusing to bundle {rel_path}: game data and saves never go in a bundle"
+                    )));
+                }
+                let bytes = fs::read(&path)?;
+                files.push(BundleFile {
+                    path: rel_path,
+                    size: bytes.len() as u64,
+                    sha256: format!("{:x}", Sha256::digest(&bytes)),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files)?;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let lines = files
+        .iter()
+        .map(|file| format!("file {} {} {}\n", file.size, file.sha256, file.path))
+        .collect::<String>();
+    let build_id = format!("{:x}", Sha256::digest(lines.as_bytes()))[..16].to_string();
+    Ok(Bundle {
+        target,
+        version: version.to_string(),
+        commit: commit.to_string(),
+        build_id,
+        files,
+    })
 }
 
 /// Checks every file of `b` in `dir` for its size and hash, in order; the first that is
 /// missing or differs is `Error::Hub("<path> does not match the bundle")`. Files in `dir`
 /// that the bundle does not list are ignored.
 pub fn verify(b: &Bundle, dir: &Path) -> Result<()> {
-    not_built("bundle::verify")
+    for file in &b.files {
+        let path: PathBuf = dir.join(&file.path);
+        let matches = fs::read(path).ok().is_some_and(|bytes| {
+            bytes.len() as u64 == file.size
+                && format!("{:x}", Sha256::digest(&bytes)) == file.sha256
+        });
+        if !matches {
+            return Err(Error::Hub(format!(
+                "{} does not match the bundle",
+                file.path
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Installs a checked build: `verify(b, staged)` first (nothing changes if it fails); then
