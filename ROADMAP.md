@@ -6,7 +6,7 @@ From `SPEC.md` (approved 2026-11-02; M5 widened 2026-11-17, waiting for my appro
 
 - owner ruling 2026-11-17: "Fold the save relay into the Mac app via a step in the roadmap. Should be a 1.0 that exists in every universal app with and ios and Mac component. Revise all roadmaps if you need to." Here: 8.08, save-relay in the released Mac app, in stage 8 (1.0).
 - owner ruling 2026-11-17: "The save relay Mac and iOS functions need to be brought into 1.0" and "Revise the roadmap" (confirmed: "Yes, all into 1.0 (Recommended)"). This replaces the earlier "Ships with iOS app" placement. Here nothing moves: the Mac app (2.09, 8.02), the iPhone/iPad app (8.03), save-relay in the iOS app (8.05) and in the released Mac app (8.08), and the round trip (10.01) were already 1.0.
-- owner ruling 2026-11-17: "The ipad os and mac versions are obviously going to need to support an external controller. Make sure that's in the road map" (confirmed: "Yes, 1.0, Mac and iPad (Recommended)"). Here: 8.04 (iPhone and iPad) and 8.09 (the Mac), both 1.0; M5 in `SPEC.md` now covers the Mac and a controller connected or disconnected mid-game, so the spec waits for my approval again.
+- owner ruling 2026-11-17: "The ipad os and mac versions are obviously going to need to support an external controller. Make sure that's in the road map" (confirmed: "Yes, 1.0, Mac and iPad (Recommended)"). Here: 8.04 (iPhone and iPad) and 8.09 (the Mac), both 1.0, and the round trip (10.01) waits on both; M5 in `SPEC.md` now covers the Mac and a controller connected or disconnected mid-game, so the spec waits for my approval again.
 
 ## Features, by Must
 
