@@ -134,6 +134,25 @@ On iOS, the kernel task **Jetsam** monitors resident memory (`phys_footprint`). 
 
 ---
 
+## Sources and References
+
+1. **Apple Open Source XNU Kernel:**
+   * `xnu/osfmk/mach/arm/vm_param.h` (`MACH_VM_MAX_ADDRESS_RAW` = `0x0FC0000000ULL` on embedded/iOS vs `0x00007FFFFE000000ULL` on macOS).
+   * `xnu/osfmk/arm/pmap.c` (`pmap_max_64bit_offset`, `ARM_PMAP_MAX_OFFSET_DEVICE`, `ARM_PMAP_MAX_OFFSET_JUMBO`).
+   * `xnu/osfmk/arm64/proc_reg.h` (`TCR_EL1.T0SZ` address regimes).
+2. **LLVM Compiler-RT Sanitizer Platform Configurations:**
+   * `compiler-rt/lib/sanitizer_common/sanitizer_platform.h` ("Darwin iOS/ARM64 has a 36-bit VMA, 64GiB VM", `SANITIZER_MMAP_RANGE_SIZE = 1ULL << 36`).
+3. **Apple Developer Documentation:**
+   * [Extended Virtual Addressing Entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_kernel_extended-virtual-addressing)
+   * [Increased Memory Limit Entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_kernel_increased-memory-limit)
+4. **Repository Specifications:**
+   * `SPEC.md` (M4, M5).
+   * `ROADMAP.md` (Stage 8: Mac, iPhone and iPad; piece 8.01).
+   * `docs/adr/0006-apple.md` (Apple: the same recompiled code on Mac and iOS).
+   * `runtime/include/nx/runtime.h` and `runtime/include/nx/cpu.h` (`APPLE_GUEST_SHIFT`, `NX_BASE`, `kGuestShift`).
+
+---
+
 ## 3. The Decision on the Apple Account (M4, M5)
 
 In `SPEC.md` M4:
@@ -158,22 +177,3 @@ And `docs/adr/0006-apple.md`:
   2. **`increased-memory-limit`:** Raises process physical memory to 5–6 GB, completely preventing Jetsam OOM crashes across both 6 GB and 8 GB iPhones.
   3. **`extended-virtual-addressing`:** Unlocks the full 63 GiB jumbo virtual address space on iOS, providing generous room for the compact guest layout and Metal resource pools.
 * **Verdict:** Strongly recommended prior to 8.03 cable installation and 8.07 extended island sessions.
-
----
-
-## Sources and References
-
-1. **Apple Open Source XNU Kernel:**
-   * `xnu/osfmk/mach/arm/vm_param.h` (`MACH_VM_MAX_ADDRESS_RAW` = `0x0FC0000000ULL` on embedded/iOS vs `0x00007FFFFE000000ULL` on macOS).
-   * `xnu/osfmk/arm/pmap.c` (`pmap_max_64bit_offset`, `ARM_PMAP_MAX_OFFSET_DEVICE`, `ARM_PMAP_MAX_OFFSET_JUMBO`).
-   * `xnu/osfmk/arm64/proc_reg.h` (`TCR_EL1.T0SZ` address regimes).
-2. **LLVM Compiler-RT Sanitizer Platform Configurations:**
-   * `compiler-rt/lib/sanitizer_common/sanitizer_platform.h` ("Darwin iOS/ARM64 has a 36-bit VMA, 64GiB VM", `SANITIZER_MMAP_RANGE_SIZE = 1ULL << 36`).
-3. **Apple Developer Documentation:**
-   * [Extended Virtual Addressing Entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_kernel_extended-virtual-addressing)
-   * [Increased Memory Limit Entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_kernel_increased-memory-limit)
-4. **Repository Specifications:**
-   * `SPEC.md` (M4, M5).
-   * `ROADMAP.md` (Stage 8: Mac, iPhone and iPad; piece 8.01).
-   * `docs/adr/0006-apple.md` (Apple: the same recompiled code on Mac and iOS).
-   * `runtime/include/nx/runtime.h` and `runtime/include/nx/cpu.h` (`APPLE_GUEST_SHIFT`, `NX_BASE`, `kGuestShift`).
