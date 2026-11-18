@@ -209,6 +209,7 @@ fn build(options: &Options) -> Result<i32> {
         out,
         target,
         jobs: 0,
+        source: None,
     };
     let out = prepare::prepare(&request, &mut |stage| println!("== {}", stage.key()))?;
     println!("built {} for {}", out.display(), target.key());
