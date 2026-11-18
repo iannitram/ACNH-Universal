@@ -1,26 +1,52 @@
 #!/usr/bin/env bash
-# Boot smoke test (SPEC.md M13, M15): build the player through cargo (feature `player`, CMake from
-# crates/runtime/build.rs), point it at a fake game library, run it headless, and require that it
-# loads the library and starts booting. No game files. Linux; needs cmake, ninja, SDL3, Vulkan headers.
+# Linux boot/frame gate: Cargo -> CMake -> Rust-linked player -> synthetic game -> Vulkan readback.
+# Needs SDL3, Vulkan (Mesa lavapipe is sufficient), Python 3, Xvfb and xauth.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-ACNH_BUILD_PLAYER=1 cargo build -p acnh-runtime --features player
-player=$(find target -path '*build/script-output' -prune -o -type f -name acnh -perm -u+x -print | head -n1)
-[ -n "$player" ] || player=$(find target -type f -name acnh -perm -u+x | head -n1)
-[ -n "$player" ] || { echo "boot_smoke: player not found" >&2; exit 1; }
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/game/linux" "$tmp/analysis"
-abi=$("$player" --abi 2>/dev/null || true)
-c++ -std=c++20 -shared -fPIC -Iruntime/include ${abi:+-DNX_GAME_ABI="\"$abi\""} \
-    crates/runtime/tests/fake_game/fake_game.cpp -o "$tmp/game/linux/libacnh_game.so"
+export CARGO_BUILD_JOBS=2
+export CMAKE_BUILD_PARALLEL_LEVEL=2
+# All generated fixtures and logs stay in the worktree, including on failure.
+mkdir -p target/boot-smoke
+work=$(cd target/boot-smoke && pwd)
+if ! ACNH_GAME=acnh ACNH_BUILD_PLAYER=1 ACNH_BOOT_SMOKE=1 cargo build --locked -p acnh-runtime --features player \
+    --message-format=json >"$work/build.json"; then
+    cat "$work/build.json"
+    exit 1
+fi
+player=$(python3 - "$work/build.json" <<'PY'
+import json
+import pathlib
+import sys
+
+players = []
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    message = json.loads(line)
+    if message.get("reason") == "build-script-executed":
+        candidate = pathlib.Path(message["out_dir"]) / "player/build/acnh"
+        if candidate.is_file():
+            players.append(candidate.resolve())
+if len(players) != 1:
+    sys.exit(f"boot_smoke: expected one player from this Cargo build, found {len(players)}")
+print(players[0])
+PY
+)
+fixture="$(dirname "$player")/boot-smoke"
+python3 crates/runtime/tests/fake_game/images.py "$fixture/analysis"
+rm -rf "$fixture/frames"
 set +e
-NX_HEADLESS=1 NX_DATA_ROOT="$tmp" timeout 60 "$player" >"$tmp/log" 2>&1
+xvfb-run -a env SDL_VIDEO_DRIVER=x11 SDL_AUDIO_DRIVER=dummy \
+    NX_HEADLESS=1 NX_MUTE=1 NX_DUMP_FRAMES=1 NX_REPLAY_THREAD=0 \
+    NX_DATA_ROOT="$fixture" NX_LOG="$work/runtime.log" \
+    timeout 60 "$player" >"$work/player.log" 2>&1
 code=$?
 set -e
-cat "$tmp/log"
-# The fake library has no code, so a clean exit or a stop after loading is expected; a refusal of
-# the library is the failure.
-if grep -q "not a game library\|abi " "$tmp/log"; then echo "boot_smoke: library refused" >&2; exit 1; fi
-grep -q "entering nnMain\|first frame" "$tmp/log" || { echo "boot_smoke: no boot marker (exit $code)" >&2; exit 1; }
-echo "boot_smoke: ok"
+cat "$work/player.log"
+if [ "$code" -ne 0 ]; then
+    echo "boot_smoke: player failed (exit $code)" >&2
+    exit 1
+fi
+grep -q 'runtime: Rust ABI 1' "$work/player.log"
+grep -q 'nvn: present #1 ' "$work/player.log"
+# A marker alone cannot pass: require the first frame's GPU readback, with the synthetic clear.
+python3 crates/runtime/tests/fake_game/images.py --check-frame "$fixture/frames/00001.ppm"
+echo "boot_smoke: ok (first frame read back, player exited 0)"

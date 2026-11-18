@@ -11,6 +11,10 @@
 #include <nx/game.h>
 #include <nx/runtime.h>
 
+#ifdef NX_RUST_RUNTIME
+#include <acnh_runtime.h>
+#endif
+
 #include "kernel.h"
 #include "platform.h"
 
@@ -183,6 +187,9 @@ NX_HLE("__process_return", process_return);
 // ---- boot -----------------------------------------------------------------------------------------------------
 
 void boot() {
+#ifdef NX_RUST_RUNTIME
+    log("runtime: Rust ABI %u", acnh_runtime_abi_version());
+#endif
     if (const char* t = std::getenv("NX_TRACE")) g_trace = *t == '1';
     if (plat::setting("trace") == "1") g_trace = true;
     memory_init();
