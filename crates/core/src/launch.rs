@@ -4,7 +4,7 @@
 //! are traits so the flow is tested with fakes. Copied from iannitram/totk-universal's
 //! `launch` (MIT) by its issue.
 
-use crate::error::{not_built, Result};
+use crate::error::Result;
 use std::path::Path;
 
 /// What one save-relay pull or push did.
@@ -56,5 +56,25 @@ pub fn play(
     env: &[(String, String)],
     choose: &dyn Fn(&Sync) -> Keep,
 ) -> Result<Played> {
-    not_built("launch::play")
+    let pulled = sync_step(|resolve| relay.pull(save_dir, resolve), choose)?;
+    let exit_code = game.run(env)?;
+    let pushed = sync_step(|resolve| relay.push(save_dir, resolve), choose)?;
+    Ok(Played {
+        pulled,
+        exit_code,
+        pushed,
+    })
+}
+
+fn sync_step<F>(mut step: F, choose: &dyn Fn(&Sync) -> Keep) -> Result<Sync>
+where
+    F: FnMut(Option<Keep>) -> Result<Sync>,
+{
+    match step(None)? {
+        conflict @ Sync::Conflict { .. } => {
+            let choice = choose(&conflict);
+            step(Some(choice))
+        }
+        other => Ok(other),
+    }
 }

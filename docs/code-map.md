@@ -68,7 +68,7 @@ flowchart TD
 | `savecard` | present | `SaveCard` (save time from `main.dat`, device, play time, version, picture), `read_card` from `<save_dir>/../launcher-card.txt`, `latest`, `side_by_side` for a conflict | | M10 |
 | `backup` | stub | `stamp` (`YYYYmmdd-HHMMSS`, UTC), `backup_saves` (the synced files), `list`, `prune` (`KEEP` = 10) | the backups of `runtime/src/saves.cpp` (same place and shape) | M7 |
 | `update` | stub | back the island up, rebuild, check it is still there | | M7 |
-| `launch` | stub | `Relay` and `Game` traits, `Sync`, `Keep`, `play` (pull, conflict with both cards, run the player with the profile, push) | starting the player in `launcher/desktop.cpp` | M6, M10 |
+| `launch` | present | `Relay` and `Game` traits, `Sync`, `Keep`, `play` (pull, conflict with both cards, run the player with the profile, push) | starting the player in `launcher/desktop.cpp` | M6, M10 |
 | `bundle` | present | `Bundle` (target, version, commit, build id, files with size and SHA-256), `DEVICE_OWNED` (`root`, `logs`), `is_forbidden` (never game data, the game library, packs, `gen/`, saves), `to_text`/`from_text`, `manifest`/`verify`, `install` (keeps `DEVICE_OWNED`) | | M11, M14 |
 | `fleet` | present | `DeviceRecord` (device, os, version, build id, last sync, free space), `Drift`, `drift`, `warning`, `to_line`/`from_line` | | M11 |
 | `hub` | present (feature `hub`) | `is_home_network` (loopback, private, unique-local, and link-local ranges); planned: `discover` (mDNS `_acnh-universal._tcp`), `pair` (six-digit code, SPAKE2), `serve`, `pull` (sealed, resumable), the game data transfer to my own paired devices, a `Transport` trait for loopback tests | | M11 |
