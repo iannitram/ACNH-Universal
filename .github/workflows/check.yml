@@ -106,7 +106,9 @@ jobs:
           SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}
           SDKMANAGER=$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")
           SUDO=$(command -v sudo || true)
-          yes | $SUDO "$SDKMANAGER" --install "ndk;28.2.13676358"
+          $SUDO "$SDKMANAGER" --install "ndk;28.2.13676358" < <(yes 2>/dev/null)
+          CLANG="$SDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
+          [ -x "$CLANG" ] || { echo "::error::Android NDK 28.2.13676358 install failed: $CLANG not found"; exit 1; }
           echo "ANDROID_NDK_HOME=$SDK/ndk/28.2.13676358" >> "$GITHUB_ENV"
       - name: Android NDK (linker)
         # NDK 28.2.13676358 (docs/ANDROID.md): the runner's ANDROID_NDK_HOME, else the SDK's ndk/ folder.
