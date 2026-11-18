@@ -120,6 +120,13 @@ impl MdnsTransport {
     }
 }
 
+impl Drop for MdnsTransport {
+    fn drop(&mut self) {
+        // Dropping the daemon handle alone leaves its thread and services alive.
+        let _ = self.daemon.shutdown();
+    }
+}
+
 impl Transport for MdnsTransport {
     fn announce(&self, hub: &HubInfo) -> Result<(), Error> {
         refuse_public(hub)?;
@@ -191,5 +198,15 @@ mod tests {
         assert!(matches!(t.announce(&hub("8.8.8.8")), Err(Error::Hub(_))));
         t.inject(hub("8.8.8.8"));
         assert!(discover(&t, Duration::from_millis(10)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dropping_mdns_transport_stops_its_daemon() {
+        let t = MdnsTransport::new().unwrap();
+        let events = t.daemon.monitor().unwrap();
+        drop(t);
+        // Shutdown closes the monitor channel; a leaked daemon leaves it open.
+        while events.recv_timeout(Duration::from_secs(1)).is_ok() {}
+        assert!(events.is_disconnected());
     }
 }
