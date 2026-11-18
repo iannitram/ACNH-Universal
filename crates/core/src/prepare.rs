@@ -17,12 +17,16 @@
 
 use crate::error::{Error, Result};
 use crate::gamefolder::GameFolder;
-use crate::platform::Os;
+use crate::platform::{AppDirs, Os, Vars};
 use crate::recipe::{hub_for, output, serves, Hub, Stage, STAGES};
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::thread::JoinHandle;
+
+/// The file a packaged source holds at its root: the commit the tree was cut from.
+const SOURCE_FILE: &str = "SOURCE";
 
 /// How a stage runs today.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +47,29 @@ pub struct Request {
     pub target: Os,
     /// Compile jobs; 0 lets the stage choose (upstream: free RAM / 700 MB, at most the cores).
     pub jobs: u32,
+    /// The source tree to build from. `None` finds the packaged source beside the executable,
+    /// and keeps the checkout when there is none (a `cargo run`).
+    pub source: Option<PathBuf>,
+}
+
+/// A build tool a hub is missing, and how to install it. Required pieces stop a prepare
+/// before its first stage; a warning names what the build loses without them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Missing {
+    /// The tool or package, e.g. "clang" or "molten-vk".
+    pub what: String,
+    /// A plain message naming what is missing and the command that installs it.
+    pub message: String,
+    /// The command that installs it (also part of `message`).
+    pub install: String,
+    /// Only a warning: the build goes on, without what this piece gives it.
+    pub warning: bool,
+}
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 /// How `stage` runs for `req` right now. While no stage is ported, every stage is
@@ -86,6 +113,11 @@ pub trait ScriptRunner {
     fn finish(&mut self) -> std::result::Result<(), Vec<String>> {
         Ok(())
     }
+
+    /// The source folder the script runs in (`prepare` sets it before the first stage). A
+    /// runner that starts the script itself uses it; a test runner may record it. The
+    /// default does nothing.
+    fn set_root(&mut self, _root: &Path) {}
 }
 
 /// The real runner: upstream's command as a child process in the repo root, started once
@@ -156,6 +188,16 @@ impl ScriptRunner for ProcessRunner {
         let result = self.follow(None);
         self.script = None;
         result
+    }
+
+    fn set_root(&mut self, root: &Path) {
+        if self.root == root {
+            return;
+        }
+        if self.script.is_some() {
+            self.script = None; // dropping it ends the child
+        }
+        self.root = root.to_owned();
     }
 }
 
@@ -320,29 +362,143 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// The packaged source beside an executable: `source/` in the Windows zip, `../Resources/source`
+/// in the Mac app, and `../share/acnh-universal/source` in the AppImage.
+fn packaged_source(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    [
+        "source",
+        "../Resources/source",
+        "../share/acnh-universal/source",
+    ]
+    .into_iter()
+    .map(|relative| dir.join(relative))
+    .find(|source| source.join(SOURCE_FILE).is_file())
+}
+
+/// The commit a packaged source names, or `None` when the folder is a checkout.
+fn source_commit(source: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(source.join(SOURCE_FILE)).ok()?;
+    let commit = text.lines().next()?.trim();
+    (!commit.is_empty()).then(|| commit.to_owned())
+}
+
+/// Copy a source tree, replacing the last copy of its commit.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    if to.exists() {
+        std::fs::remove_dir_all(to)?;
+    }
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The folder the script runs in: the named source, else the packaged source beside `exe`,
+/// else the checkout. A packaged source is copied to `<data>/source/<commit>/` because the
+/// package may be read-only and the script writes into `private/`. A package from another
+/// commit is refused.
+fn source_root(req: &Request, exe: &Path, dirs: &AppDirs, commit: Option<&str>) -> Result<PathBuf> {
+    let source = req
+        .source
+        .clone()
+        .or_else(|| packaged_source(exe))
+        .unwrap_or_else(repo_root);
+    let Some(found) = source_commit(&source) else {
+        return Ok(source);
+    };
+    let expected = commit.unwrap_or(found.as_str());
+    if found.as_str() != expected {
+        return Err(Error::Io(format!(
+            "the source in this package is commit {found}, not {expected}: use the package \
+             built from the app's own source"
+        )));
+    }
+    let copy = dirs.data.join("source").join(&found);
+    copy_tree(&source, &copy)?;
+    Ok(copy)
+}
+
+/// The commit this binary was built from (the release sets `ACNH_SOURCE_COMMIT`).
+fn app_commit() -> Option<&'static str> {
+    option_env!("ACNH_SOURCE_COMMIT")
+        .map(str::trim)
+        .filter(|commit| !commit.is_empty())
+}
+
 /// Run every stage in order, calling `progress` as each one starts, and return `req.out`. A
 /// stage whose output was already in `req.out` is skipped, and when every stage's is, nothing
 /// runs. A failed stage is `Error::Build` naming it, with the last 20 lines of its log, run
-/// through `redact`. A target this hub does not serve (`recipe::serves`), or one upstream's
-/// script does not build (Android, iOS), is `Error::Unsupported`.
+/// through `redact`. Missing required tools are `Error::Build` before the first stage. A
+/// target this hub does not serve (`recipe::serves`), or one upstream's script does not build
+/// (Android, iOS), is `Error::Unsupported`.
 pub fn prepare(req: &Request, progress: &mut dyn FnMut(Stage)) -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_default();
-    prepare_with(
+    let exe = std::env::current_exe()
+        .map_err(|e| Error::Io(format!("cannot find this app's executable: {e}")))?;
+    let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
+    let dirs = AppDirs::new(&vars);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let missing = toolchain(Os::current(), &path);
+    prepare_installed(
         req,
         hub_for(Os::current()),
+        &exe,
+        &dirs,
+        app_commit(),
+        &missing,
         &mut ProcessRunner::new(repo_root(), req.jobs),
         &home,
         progress,
     )
 }
 
-/// `prepare` for a given hub, script runner and home folder (the seam the tests use).
+/// `prepare` for an executable at `exe`, the app folders `dirs`, the source's `commit` and the
+/// toolchain `missing` (the seam the tests use). A packaged source is copied into `dirs` and
+/// the runner runs there.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_installed(
+    req: &Request,
+    hub: Hub,
+    exe: &Path,
+    dirs: &AppDirs,
+    commit: Option<&str>,
+    missing: &[Missing],
+    runner: &mut dyn ScriptRunner,
+    home: &Path,
+    progress: &mut dyn FnMut(Stage),
+) -> Result<PathBuf> {
+    let source = source_root(req, exe, dirs, commit)?;
+    runner.set_root(&source);
+    run_stages(req, hub, missing, runner, home, progress)
+}
+
+/// `prepare` for a given hub, script runner and home folder, with no toolchain check (the
+/// seam the runner tests use).
 pub fn prepare_with(
     req: &Request,
     hub: Hub,
+    runner: &mut dyn ScriptRunner,
+    home: &Path,
+    progress: &mut dyn FnMut(Stage),
+) -> Result<PathBuf> {
+    run_stages(req, hub, &[], runner, home, progress)
+}
+
+fn run_stages(
+    req: &Request,
+    hub: Hub,
+    missing: &[Missing],
     runner: &mut dyn ScriptRunner,
     home: &Path,
     progress: &mut dyn FnMut(Stage),
@@ -362,6 +518,15 @@ pub fn prepare_with(
             "no stage builds for {} yet",
             req.target.key()
         )));
+    }
+    let required: Vec<&Missing> = missing.iter().filter(|piece| !piece.warning).collect();
+    if !required.is_empty() {
+        let mut message = String::from("missing build tools:");
+        for piece in required {
+            message.push_str("\n  ");
+            message.push_str(&piece.message);
+        }
+        return Err(Error::Build(message));
     }
     // What was there before anything ran. A script that runs on while we look may have
     // finished its next stage already: only an output from before skips a stage.
@@ -389,6 +554,316 @@ pub fn prepare_with(
             .map_err(|log| build_error(stage, &log, home))?;
     }
     Ok(req.out.clone())
+}
+
+/// The build tools `os` needs before its first stage, searched for in `path` (and, on the Mac,
+/// in `homebrew`). Required pieces stop a prepare; a warning names what the build loses
+/// without it. The script fetches CMake and Ninja, the Vulkan headers, .NET, and LLVM and
+/// SDL3 on Windows itself, so none of those is checked here.
+pub fn toolchain(os: Os, path: impl AsRef<OsStr>) -> Vec<Missing> {
+    let homebrew = [PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")];
+    toolchain_with(os, path, &homebrew)
+}
+
+/// `toolchain` with the Homebrew prefixes to try (the seam the tests use).
+pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> Vec<Missing> {
+    let dirs: Vec<PathBuf> = std::env::split_paths(path.as_ref())
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+    let mut missing = Vec::new();
+
+    if os == Os::Windows {
+        if !has_msvc_tools(&dirs) {
+            missing.push(missing_piece(
+                "the Visual Studio C++ build tools",
+                "the Windows SDK and C runtime come from them.",
+                "winget install Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --wait \
+                 --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"",
+                false,
+            ));
+        }
+        if find_tool(&dirs, os, "git").is_none() {
+            missing.push(missing_piece(
+                "git",
+                "without it the script builds no libvpx and the game's movies are black.",
+                "winget install Git.Git",
+                true,
+            ));
+        }
+        return missing;
+    }
+
+    for (tool, why) in [
+        ("clang", "the C compiler the build uses."),
+        ("clang++", "the C++ compiler the build uses."),
+        ("curl", "the downloader the script uses."),
+    ] {
+        if find_tool(&dirs, os, tool).is_none() {
+            missing.push(missing_piece(tool, why, install_command(os, tool), false));
+        }
+    }
+
+    match find_tool(&dirs, os, "python3") {
+        Some(python) => {
+            if has_venv(&python) == Some(false) {
+                missing.push(missing_piece(
+                    "python3's venv module",
+                    "the script makes its private venv with it.",
+                    install_command(os, "venv"),
+                    false,
+                ));
+            }
+        }
+        None => missing.push(missing_piece(
+            "python3",
+            "the build script is Python.",
+            install_command(os, "python3"),
+            false,
+        )),
+    }
+
+    if os == Os::Mac {
+        if !has_xcode(&dirs) {
+            missing.push(missing_piece(
+                "Xcode's command-line tools",
+                "they give clang and git for CMake's SPIRV-Cross fetch.",
+                "xcode-select --install",
+                false,
+            ));
+        }
+        match homebrew_prefix(&dirs, homebrew) {
+            Some(prefix) => {
+                for package in ["sdl3", "molten-vk", "vulkan-loader"] {
+                    if !formula_installed(&prefix, package) {
+                        missing.push(missing_piece(
+                            package,
+                            "the Mac build finds it through Homebrew.",
+                            &format!("brew install {package}"),
+                            false,
+                        ));
+                    }
+                }
+                for (package, why) in [
+                    ("libvpx", "without it the game's movies are black."),
+                    (
+                        "libvorbis",
+                        "without it the SDK's own Vorbis decoder is used.",
+                    ),
+                ] {
+                    if !formula_installed(&prefix, package) {
+                        missing.push(missing_piece(
+                            package,
+                            why,
+                            &format!("brew install {package}"),
+                            true,
+                        ));
+                    }
+                }
+            }
+            None => {
+                missing.push(missing_piece(
+                    "Homebrew",
+                    "the Mac build takes SDL3, MoltenVK and the Vulkan loader from it.",
+                    install_command(os, "brew"),
+                    false,
+                ));
+            }
+        }
+    } else {
+        if !has_sdl3(&dirs) {
+            missing.push(missing_piece(
+                "the SDL3 development files",
+                "CMake asks for SDL3.",
+                install_command(os, "sdl3"),
+                false,
+            ));
+        }
+        for (package, why) in [
+            ("libvpx", "without it the game's movies are black."),
+            (
+                "libvorbis",
+                "without it the SDK's own Vorbis decoder is used.",
+            ),
+        ] {
+            if !has_library(&dirs, package) {
+                missing.push(missing_piece(
+                    package,
+                    why,
+                    install_command(os, package),
+                    true,
+                ));
+            }
+        }
+    }
+
+    missing
+}
+
+fn missing_piece(what: &str, why: &str, install: &str, warning: bool) -> Missing {
+    Missing {
+        what: what.to_owned(),
+        message: format!("Missing {what}: {why} Install it with: {install}"),
+        install: install.to_owned(),
+        warning,
+    }
+}
+
+fn executable(os: Os, name: &str) -> String {
+    if os == Os::Windows {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    }
+}
+
+fn find_tool(dirs: &[PathBuf], os: Os, name: &str) -> Option<PathBuf> {
+    let file = executable(os, name);
+    dirs.iter()
+        .map(|dir| dir.join(&file))
+        .find(|path| path.is_file())
+}
+
+fn prefix_of(dir: &Path) -> &Path {
+    if dir.file_name() == Some(OsStr::new("bin")) {
+        dir.parent().unwrap_or(dir)
+    } else {
+        dir
+    }
+}
+
+fn homebrew_prefix(dirs: &[PathBuf], prefixes: &[PathBuf]) -> Option<PathBuf> {
+    for prefix in prefixes {
+        if prefix.join("bin").join("brew").is_file() {
+            return Some(prefix.clone());
+        }
+        if prefix.file_name() == Some(OsStr::new("bin")) && prefix.join("brew").is_file() {
+            return prefix.parent().map(Path::to_path_buf);
+        }
+    }
+    for dir in dirs {
+        if dir.join("brew").is_file() {
+            return Some(prefix_of(dir).to_path_buf());
+        }
+        if dir.join("bin").join("brew").is_file() {
+            return Some(dir.clone());
+        }
+    }
+    None
+}
+
+fn formula_installed(prefix: &Path, package: &str) -> bool {
+    prefix.join("opt").join(package).exists() || prefix.join("Cellar").join(package).is_dir()
+}
+
+/// `setup_acnh.py` finds the build tools through vswhere, at its Program Files place even
+/// when the Visual Studio prompt added nothing to PATH.
+fn has_msvc_tools(dirs: &[PathBuf]) -> bool {
+    find_tool(dirs, Os::Windows, "vswhere").is_some()
+        || std::env::var_os("ProgramFiles(x86)")
+            .map(PathBuf::from)
+            .is_some_and(|programs| {
+                programs
+                    .join("Microsoft Visual Studio/Installer/vswhere.exe")
+                    .is_file()
+            })
+}
+
+fn has_xcode(dirs: &[PathBuf]) -> bool {
+    find_tool(dirs, Os::Mac, "xcode-select").is_some()
+        || Path::new("/usr/bin/xcode-select").is_file()
+        || Path::new("/Library/Developer/CommandLineTools/usr/bin/clang").is_file()
+}
+
+/// `Some(false)` when the interpreter's standard library is found and has no `venv` module;
+/// `None` when it cannot be told from the folder (a fake in a test).
+fn has_venv(python: &Path) -> Option<bool> {
+    let prefix = prefix_of(python.parent()?);
+    let mut roots = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(prefix.join("lib")) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("python") {
+                roots.push(entry.path());
+            }
+        }
+    }
+    if roots.is_empty() {
+        return None;
+    }
+    Some(
+        roots
+            .iter()
+            .any(|root| root.join("venv").join("__init__.py").is_file()),
+    )
+}
+
+fn has_sdl3(dirs: &[PathBuf]) -> bool {
+    dirs.iter().any(|dir| {
+        let prefix = prefix_of(dir);
+        prefix.join("include/SDL3/SDL.h").is_file()
+            || prefix.join("lib/cmake/SDL3/SDL3Config.cmake").is_file()
+            || prefix
+                .join("lib")
+                .join("SDL3")
+                .join("SDL3Config.cmake")
+                .is_file()
+    })
+}
+
+fn has_library(dirs: &[PathBuf], package: &str) -> bool {
+    let module = package.trim_start_matches("lib");
+    dirs.iter().any(|dir| library_in(prefix_of(dir), module))
+}
+
+fn library_in(prefix: &Path, module: &str) -> bool {
+    let lib = prefix.join("lib");
+    let pkg_config = format!("{module}.pc");
+    let shared = [format!("lib{module}.so"), format!("lib{module}.dylib")];
+    if lib.join("pkgconfig").join(&pkg_config).is_file()
+        || shared.iter().any(|file| lib.join(file).is_file())
+    {
+        return true;
+    }
+    // Debian and Ubuntu put the development files under a multiarch folder.
+    let Ok(entries) = std::fs::read_dir(&lib) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let dir = entry.path();
+        dir.join("pkgconfig").join(&pkg_config).is_file()
+            || shared.iter().any(|file| dir.join(file).is_file())
+    })
+}
+
+fn install_command(os: Os, piece: &str) -> &'static str {
+    if os == Os::Mac {
+        match piece {
+            "clang" | "clang++" => "xcode-select --install",
+            "curl" => "brew install curl",
+            "python3" => "brew install python",
+            "venv" => "brew reinstall python",
+            "sdl3" => "brew install sdl3",
+            "molten-vk" => "brew install molten-vk",
+            "vulkan-loader" => "brew install vulkan-loader",
+            "libvpx" => "brew install libvpx",
+            "libvorbis" => "brew install libvorbis",
+            "brew" => {
+                "/bin/bash -c \"$(curl -fsSL \
+                 https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+            }
+            _ => "install it with Homebrew",
+        }
+    } else {
+        match piece {
+            "clang" | "clang++" => "sudo apt install clang",
+            "curl" => "sudo apt install curl",
+            "python3" => "sudo apt install python3 python3-venv",
+            "venv" => "sudo apt install python3-venv",
+            "sdl3" => "sudo apt install libsdl3-dev",
+            "libvpx" => "sudo apt install libvpx-dev",
+            "libvorbis" => "sudo apt install libvorbis-dev",
+            _ => "install it with your package manager",
+        }
+    }
 }
 
 /// `Error::Build` for the failed `log` of a script run for `stage`: the stage is the one the
