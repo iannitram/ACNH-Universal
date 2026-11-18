@@ -142,3 +142,154 @@ fn step_is_upstreams_script_for_every_stage() {
         Step::Rust => panic!("not ported"),
     }
 }
+
+#[test]
+fn completed_tools_version_and_build_do_not_run_again() {
+    let req = request("completed", Os::Linux);
+    std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
+    std::fs::write(req.out.join("version.ini"), "synthetic version").unwrap();
+    std::fs::create_dir_all(req.out.join("build")).unwrap();
+    std::fs::write(req.out.join("build/acnh"), "synthetic executable").unwrap();
+    let mut fake = Fake::default();
+    let mut seen = Vec::new();
+    prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap();
+    assert_eq!(
+        fake.ran,
+        vec![Stage::Game, Stage::Recompile, Stage::Shaders, Stage::Fonts]
+    );
+    assert_eq!(seen, fake.ran);
+}
+
+#[test]
+fn incomplete_module_outputs_are_not_skipped() {
+    let req = request("partial", Os::Linux);
+    std::fs::create_dir_all(req.out.join("analysis")).unwrap();
+    std::fs::write(req.out.join("analysis/main.bin"), "synthetic module").unwrap();
+    std::fs::create_dir_all(req.out.join("gen/main")).unwrap();
+    std::fs::write(req.out.join("gen/main/table.cpp"), "// synthetic table").unwrap();
+    let mut fake = Fake::default();
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(fake.ran.contains(&Stage::Game));
+    assert!(fake.ran.contains(&Stage::Recompile));
+    for module in ["sdk", "subsdk0"] {
+        std::fs::write(
+            req.out.join("analysis").join(format!("{module}.bin")),
+            "synthetic module",
+        )
+        .unwrap();
+        std::fs::create_dir_all(req.out.join("gen").join(module)).unwrap();
+        std::fs::write(
+            req.out.join("gen").join(module).join("table.cpp"),
+            "// synthetic table",
+        )
+        .unwrap();
+    }
+    let mut fake = Fake::default();
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(!fake.ran.contains(&Stage::Game));
+    assert!(!fake.ran.contains(&Stage::Recompile));
+}
+
+#[test]
+fn mobile_requests_never_fall_back_to_a_desktop_build() {
+    for (target, hub) in [(Os::Android, Hub::StrixHalo), (Os::Ios, Hub::Mac)] {
+        let req = request(target.key(), target);
+        let mut fake = Fake::default();
+        let mut seen = Vec::new();
+        let error =
+            prepare_with(&req, hub, &mut fake, Path::new("/h"), &mut |s| seen.push(s)).unwrap_err();
+        assert!(matches!(error, Error::Unsupported(message) if message.contains(target.key())));
+        assert!(fake.ran.is_empty());
+        assert!(seen.is_empty());
+    }
+}
+
+#[test]
+fn mac_skips_upstreams_native_executable() {
+    let req = request("native-mac", Os::Mac);
+    std::fs::create_dir_all(req.out.join("build")).unwrap();
+    std::fs::write(req.out.join("build/acnh"), "synthetic executable").unwrap();
+    let mut fake = Fake::default();
+    prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    assert!(!fake.ran.contains(&Stage::Build));
+}
+
+#[test]
+fn production_adapter_isolated_stages_match_upstreams_commands() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args([
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/tests",
+            "-p",
+            "test_prepare_stage.py",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn stage_commands_select_one_stage_and_forward_requested_jobs() {
+    let mut req = request("selected-stage", Os::Linux);
+    req.jobs = 2;
+    for stage in STAGES {
+        assert_eq!(
+            step(stage, &req),
+            Step::Script(vec![
+                "python3".to_owned(),
+                "tools/prepare_stage.py".to_owned(),
+                "--stage".to_owned(),
+                stage.key().to_owned(),
+                "--target".to_owned(),
+                "linux".to_owned(),
+                "--game".to_owned(),
+                req.game.root.display().to_string(),
+                "--out".to_owned(),
+                req.out.display().to_string(),
+                "--jobs".to_owned(),
+                "2".to_owned(),
+            ])
+        );
+    }
+}
+
+#[test]
+fn process_runner_keeps_stdout_and_stderr_lines_separate() {
+    use acnh_core::prepare::ProcessRunner;
+    let command = [
+        if cfg!(windows) { "python" } else { "python3" }.to_owned(),
+        "-c".to_owned(),
+        "import sys; sys.stdout.write('stdout'); sys.stderr.write('stderr'); sys.exit(1)"
+            .to_owned(),
+    ];
+    let log = ProcessRunner.run(Stage::Shaders, &command).unwrap_err();
+    assert_eq!(log, vec!["stdout", "stderr"]);
+}

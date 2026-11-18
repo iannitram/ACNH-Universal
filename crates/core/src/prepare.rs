@@ -35,11 +35,9 @@ pub struct Request {
     pub jobs: u32,
 }
 
-/// How `stage` runs for `req` right now. While no stage is ported, every stage is
-/// `Script(["python3", "tools/setup_acnh.py", "--game", <game root>, "--out", <out>])` with
-/// `FORCE=<stage key>` left to the caller (`python` instead of `python3` on Windows).
+/// Run only this stage through our adapter to upstream's unchanged stage bodies. The
+/// adapter keeps tool discovery between invocations; it never runs the aggregate pipeline.
 pub fn step(stage: Stage, req: &Request) -> Step {
-    let _ = stage; // upstream's script runs every stage in one go; none is ported yet
     let python = if req.target == Os::Windows {
         "python"
     } else {
@@ -47,11 +45,17 @@ pub fn step(stage: Stage, req: &Request) -> Step {
     };
     Step::Script(vec![
         python.to_owned(),
-        "tools/setup_acnh.py".to_owned(),
+        "tools/prepare_stage.py".to_owned(),
+        "--stage".to_owned(),
+        stage.key().to_owned(),
+        "--target".to_owned(),
+        req.target.key().to_owned(),
         "--game".to_owned(),
         req.game.root.display().to_string(),
         "--out".to_owned(),
         req.out.display().to_string(),
+        "--jobs".to_owned(),
+        req.jobs.to_string(),
     ])
 }
 
@@ -64,48 +68,69 @@ pub trait ScriptRunner {
 pub struct ProcessRunner;
 
 impl ScriptRunner for ProcessRunner {
-    fn run(&mut self, stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>> {
+    fn run(&mut self, _stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>> {
         let Some((program, rest)) = args.split_first() else {
             return Err(vec!["no command".to_owned()]);
         };
         let output = std::process::Command::new(program)
             .args(rest)
-            .env("FORCE", stage.key())
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .env_remove("FORCE")
             .output()
             .map_err(|e| vec![format!("cannot run {program}: {e}")])?;
         if output.status.success() {
             return Ok(());
         }
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        Err(text.lines().map(str::to_owned).collect())
+        Err(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .chain(String::from_utf8_lossy(&output.stderr).lines())
+            .map(str::to_owned)
+            .collect())
     }
 }
 
-/// What `stage` leaves under `req.out`, when it leaves one thing to look for. `None`: the
-/// stage has no output of its own there and always runs (upstream's script skips its own work).
-fn stage_output(stage: Stage, req: &Request) -> Option<PathBuf> {
+/// All required outputs must exist before skipping a stage. Tools writes its discovery
+/// manifest only after success; game and recompile each produce three modules.
+fn stage_complete(stage: Stage, req: &Request) -> bool {
     match stage {
-        Stage::Tools | Stage::Version => None,
-        Stage::Game => Some(req.out.join("analysis").join("main.bin")),
-        Stage::Recompile => Some(req.out.join("gen").join("main").join("table.cpp")),
-        Stage::Shaders => Some(req.out.join("spirv").join("summary.txt")),
-        Stage::Fonts => Some(
+        Stage::Tools => req.out.join(".prepare-tools.json").is_file(),
+        Stage::Version => req.out.join("version.ini").is_file(),
+        Stage::Game => ["main", "sdk", "subsdk0"].iter().all(|module| {
             req.out
-                .join("fonts")
-                .join("glyphs_xbox")
-                .join("console")
-                .join("romfs")
-                .join("Font")
-                .join("ScalableFont.sarc.zs"),
-        ),
-        Stage::Build => Some(req.out.join("build").join(output(req.target))),
+                .join("analysis")
+                .join(format!("{module}.bin"))
+                .is_file()
+        }),
+        Stage::Recompile => ["main", "sdk", "subsdk0"]
+            .iter()
+            .all(|module| req.out.join("gen").join(module).join("table.cpp").is_file()),
+        Stage::Shaders => req.out.join("spirv").join("summary.txt").is_file(),
+        Stage::Fonts => req
+            .out
+            .join("fonts")
+            .join("glyphs_xbox")
+            .join("console")
+            .join("romfs")
+            .join("Font")
+            .join("ScalableFont.sarc.zs")
+            .is_file(),
+        // Upstream builds a native Mac executable; app bundling belongs to stage 8.
+        Stage::Build => req
+            .out
+            .join("build")
+            .join(if req.target == Os::Mac {
+                "acnh"
+            } else {
+                output(req.target)
+            })
+            .is_file(),
     }
 }
 
 /// Run every stage in order, calling `progress` as each one starts, and return `req.out`. A
 /// failed stage is `Error::Build` with the last 20 lines of its log, run through `redact`.
-/// A target this hub does not serve (`recipe::serves`) is `Error::Unsupported`.
+/// A target this hub does not serve (`recipe::serves`), or whose upstream build route
+/// cannot honor this request yet (Android/iOS), is `Error::Unsupported`.
 pub fn prepare(req: &Request, progress: &mut dyn FnMut(Stage)) -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -135,8 +160,17 @@ pub fn prepare_with(
             req.target.key()
         )));
     }
+    // Upstream's setup builds only the host desktop. Android's separate script fixes its
+    // data path to private/acnh, and iOS has no upstream builder yet. Do not silently
+    // substitute the hub's desktop build for either requested mobile artifact.
+    if matches!(req.target, Os::Android | Os::Ios) {
+        return Err(Error::Unsupported(format!(
+            "prepare for {} is not implemented by the upstream stage adapter",
+            req.target.key()
+        )));
+    }
     for stage in STAGES {
-        if stage_output(stage, req).is_some_and(|path| path.exists()) {
+        if stage_complete(stage, req) {
             continue;
         }
         progress(stage);
