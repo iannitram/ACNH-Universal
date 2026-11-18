@@ -1,7 +1,7 @@
 //! The Saves page's view model (SPEC.md M6, M7): the island card, the backups list (newest
 //! first) and the backup folder. Plain Rust, so it is tested without a window.
 
-use acnh_core::{backup, saves, Result};
+use acnh_core::{Result, backup, saves};
 use std::path::PathBuf;
 
 /// What the island card says about the save folder.

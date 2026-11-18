@@ -2,7 +2,7 @@
 //! values it writes. Writing keeps every line of the player's file that is not changed,
 //! comments and unknown keys included; a profile only fills keys the player has not set.
 
-use acnh_core::{config::Config, profile::DeviceProfile, Error, Result};
+use acnh_core::{Error, Result, config::Config, profile::DeviceProfile};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -90,7 +90,7 @@ fn write_config(path: &Path, config: &Config) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsVm, CONFIG_FILE};
+    use super::{CONFIG_FILE, SettingsVm};
     use crate::vm::scratch;
     use acnh_core::profile;
     use std::fs;
