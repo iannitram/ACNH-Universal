@@ -142,6 +142,9 @@ jobs:
     needs: [linux, windows, mac]
     runs-on: [self-hosted, linux]
     steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
       - uses: actions/download-artifact@v4
         with:
           path: dist
