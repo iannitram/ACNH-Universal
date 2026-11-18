@@ -1,7 +1,7 @@
 # The Rust launcher (crates/): format, lint and test on every push to main and every pull request,
-# plus the game-data check over every tracked file (SPEC.md M14, M15), and the Android cross-build
-# (M15). A private repo, so it runs on our own runners (self-hosted Linux, Windows, macOS). The
-# macOS job also checks the iOS target (`aarch64-apple-ios`, M15).
+# plus the game-data check over every tracked file (SPEC.md M14, M15), the C++ unit tests on Linux
+# (0.01, M15), and the Android cross-build (M15). A private repo, so it runs on our own runners
+# (self-hosted Linux, Windows, macOS). The macOS job also checks the iOS target (`aarch64-apple-ios`, M15).
 name: check
 
 on:
@@ -68,6 +68,31 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - run: cargo test --workspace --all-features
+
+  cpp:
+    name: C++ unit tests (Linux)
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: C++ toolchain
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # The runner container has no linker or build tools by default.
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update -q
+          $SUDO apt-get install -yq --no-install-recommends build-essential cmake ninja-build
+      - name: Configure
+        run: cmake -B build -G Ninja -DNX_TESTS=ON -DNX_GAME=acnh -DNX_LAUNCHER=OFF -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --target gpu_pick_test tiling_test astc_test
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
 
   android:
     name: Cross-build (Android)

@@ -8,7 +8,7 @@ Status per module: **present** (built), **stub** (the final types and signatures
 
 | Device family | 1.0 device | Game code | Renderer | Built on (hub) | Launcher | Save sync in | CI |
 |---|---|---|---|---|---|---|---|
-| Linux / SteamOS | the AMD handheld, the Strix Halo tablet | recompiled, x86-64 | NVN on Vulkan (RADV) | the Strix Halo tablet; the AMD handheld pulls | Slint app (AppImage), opened by the Steam shortcut | the launcher | self-hosted Linux: workspace, game-data check and the Android cross-build (now); C++ tests (0.01); boot smoke (4.01) |
+| Linux / SteamOS | the AMD handheld, the Strix Halo tablet | recompiled, x86-64 | NVN on Vulkan (RADV) | the Strix Halo tablet; the AMD handheld pulls | Slint app (AppImage), opened by the Steam shortcut | the launcher | self-hosted Linux: workspace, game-data check and the Android cross-build, the C++ unit tests (now); boot smoke (4.01) |
 | Windows | the RTX 3090 Ti desktop | recompiled, x86-64 | NVN on Vulkan | the desktop | Slint app | the launcher | self-hosted Windows: workspace (now); the C++ build (7.01) |
 | macOS | a Mac with Apple silicon + controller | recompiled, ARM64 | MoltenVK, then upstream's Metal | the Mac | Slint app (also builds and installs the iOS app) | the launcher | `macos-latest` on request (paid minutes) until the Mac runner is online |
 | iOS / iPadOS | iPhone or iPad + controller | recompiled, ARM64 (no JIT) | Metal (or MoltenVK) | the Mac, installed by cable | none: the game app | the game app (save-relay C interface) | `cargo check` for `aarch64-apple-ios` in the macOS job, on request until the Mac runner is online (now) |
@@ -157,7 +157,7 @@ cargo test --workspace --all-features    # with the hub
 python3 tools/setup_acnh.py --help       # upstream's build, until 1.31
 ```
 
-CI (M15): `.github/workflows/check.yml` runs fmt, clippy and test, with and without `--all-features`, on the self-hosted Linux and Windows runners, the game-data check over every tracked file, the Android cross-build (`aarch64-linux-android`), and macOS on request (with the iOS check, `aarch64-apple-ios`); `build.yml` is upstream's release build. Not in CI yet: the C++ tests (0.01), the boot smoke test (4.01).
+CI (M15): `.github/workflows/check.yml` runs fmt, clippy and test, with and without `--all-features`, on the self-hosted Linux and Windows runners, the game-data check over every tracked file, the Android cross-build (`aarch64-linux-android`), and macOS on request (with the iOS check, `aarch64-apple-ios`); `build.yml` is upstream's release build. The C++ unit tests (`NX_TESTS=ON`: `gpu_pick`, `tiling`, `astc`) run on the self-hosted Linux runner in its `cpp` job (0.01); `shader_cache` needs the game folder and `memguard` is Windows-only, so neither runs there. Not in CI yet: the boot smoke test (4.01).
 
 ## Build hubs (ADR 0004)
 
