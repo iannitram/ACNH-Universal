@@ -1,265 +1,282 @@
-import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+// The Continue page (docs/design/continue-screen.md): the island card, the one Play button,
+// the conflict chooser with both cards, and the drift warning. It only draws: every text and
+// flag comes from `ContinuePageVm::view()` (app/src/vm/continue_page.rs) and every click goes
+// back as the button it hit.
 
-export component ContinuePage {
-    in-out property<string> island_name: "ACNH Universal";
-    in-out property<string> save_device: "AMD handheld";
-    in-out property<string> save_when: "Recently";
-    in-out property<string> play_time: "42 h 10 min played";
-    in-out property<string> save_version: "3.0.2";
-    in-out property<string> card_status: "Up to date";
+// A button on the page (`FocusTarget` in the view model).
+export enum PadTarget { play, keep-this, keep-relay, update, back, saves, settings, fleet, about }
 
-    in-out property<string> play_label: "Play";
-    in-out property<bool> play_enabled: true;
-    in-out property<string> play_step: "";
+// One save card, as lines of text.
+export struct CardView {
+    saved: string,
+    played: string,
+    version: string,
+    badges: string,
+}
 
-    // Conflict state
-    in-out property<bool> in_conflict: false;
-    in-out property<bool> choosing_conflict: false;
-    in-out property<string> this_card_line1: "";
-    in-out property<string> this_card_line2: "";
-    in-out property<string> this_badges: "";
-    in-out property<string> relay_card_line1: "";
-    in-out property<string> relay_card_line2: "";
-    in-out property<string> relay_badges: "";
-    in-out property<int> conflict_focus: 0; // 0: This, 1: Relay
+export struct ContinueView {
+    status: string,
+    has-card: bool,
+    card: CardView,
+    message: string,
+    // The one Play button's text; "" while the chooser or the warning holds the buttons.
+    button: string,
+    button-enabled: bool,
+    choosing: bool,
+    this-card: CardView,
+    relay-card: CardView,
+    keep-enabled: bool,
+    // The drift warning; "" for none.
+    warning: string,
+    play-anyway: bool,
+    back: bool,
+    pages-enabled: bool,
+    focus: PadTarget,
+}
 
-    // Drift / Warning state
-    in-out property<bool> has_warning: false;
-    in-out property<string> warning_text: "";
-    in-out property<bool> show_play_anyway: false;
+// A button that works by pad, key, mouse and touch. It never takes keyboard focus: the view
+// model owns focus and the ring is drawn from it.
+component PadButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> focused;
+    in property <bool> enabled: true;
+    in property <bool> primary;
+    callback clicked();
 
-    // Toast / status message
-    in-out property<string> status_message: "Ready to sync and play.";
+    min-height: root.primary ? 64px : 48px;
+    min-width: label.preferred-width + 40px;
+    border-radius: 10px;
+    border-width: 3px;
+    border-color: root.focused ? #ffffff : transparent;
+    background: !root.enabled ? #2f4a43 : root.primary ? #2f9e77 : #2b6b58;
 
-    callback play_clicked();
-    callback keep_this_clicked();
-    callback keep_relay_clicked();
-    callback update_clicked();
-    callback back_clicked();
-    callback page_clicked(string);
+    label := Text {
+        text: root.text;
+        color: root.enabled ? #ffffff : #9db5ad;
+        font-size: root.primary ? 24px : 17px;
+        font-weight: root.primary ? 700 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
 
-    VerticalBox {
-        padding: 24px;
-        spacing: 16px;
+    TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
 
-        // Header: Page navigation buttons
-        HorizontalBox {
-            spacing: 12px;
-            Text {
-                text: "ACNH Universal";
-                font-size: 24px;
-                font-weight: 700;
-                color: #f4f0e8;
-                vertical-alignment: center;
-            }
-            Rectangle { horizontal-stretch: 1; }
-            Button {
-                text: "Saves";
-                clicked => { root.page_clicked("Saves"); }
-            }
-            Button {
-                text: "Settings";
-                clicked => { root.page_clicked("Settings"); }
-            }
-            Button {
-                text: "Fleet";
-                clicked => { root.page_clicked("Fleet"); }
-            }
-            Button {
-                text: "About";
-                clicked => { root.page_clicked("About"); }
-            }
+component IslandCard inherits Rectangle {
+    in property <string> title;
+    in property <CardView> card;
+    in property <bool> focused;
+
+    background: #1d3d35;
+    border-radius: 14px;
+    border-width: 3px;
+    border-color: root.focused ? #ffffff : #36635a;
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 6px;
+        alignment: start;
+
+        Text {
+            text: root.title;
+            color: #a8d8c8;
+            font-size: 15px;
         }
 
-        // Center card area: Either Normal Island Card, Conflict Chooser, or Drift Warning
-        if root.in_conflict && root.choosing_conflict : Rectangle {
-            background: #20342c;
-            border-radius: 12px;
-            border-width: 2px;
-            border-color: #436353;
-            VerticalBox {
-                padding: 16px;
-                spacing: 12px;
-                Text {
-                    text: "Conflict: Choose which island to keep";
-                    font-size: 20px;
-                    font-weight: 700;
-                    color: #f4f0e8;
-                }
-                HorizontalBox {
-                    spacing: 16px;
-                    // Left: This device
-                    Rectangle {
-                        background: #283d35;
-                        border-radius: 8px;
-                        border-width: root.conflict_focus == 0 ? 3px : 1px;
-                        border-color: root.conflict_focus == 0 ? #80ed99 : #436353;
-                        VerticalBox {
-                            padding: 12px;
-                            spacing: 8px;
-                            HorizontalBox {
-                                Text {
-                                    text: "This device";
-                                    font-size: 16px;
-                                    font-weight: 700;
-                                    color: #f4f0e8;
-                                }
-                                if root.this_badges != "" : Text {
-                                    text: root.this_badges;
-                                    color: #80ed99;
-                                    font-weight: 700;
-                                }
-                            }
-                            Text { text: root.this_card_line1; color: #d2dfd5; }
-                            Text { text: root.this_card_line2; color: #b8c7bb; }
-                            Button {
-                                text: "Keep this one";
-                                clicked => { root.keep_this_clicked(); }
-                            }
-                        }
-                    }
-                    // Right: On the relay
-                    Rectangle {
-                        background: #283d35;
-                        border-radius: 8px;
-                        border-width: root.conflict_focus == 1 ? 3px : 1px;
-                        border-color: root.conflict_focus == 1 ? #80ed99 : #436353;
-                        VerticalBox {
-                            padding: 12px;
-                            spacing: 8px;
-                            HorizontalBox {
-                                Text {
-                                    text: "On the relay";
-                                    font-size: 16px;
-                                    font-weight: 700;
-                                    color: #f4f0e8;
-                                }
-                                if root.relay_badges != "" : Text {
-                                    text: root.relay_badges;
-                                    color: #80ed99;
-                                    font-weight: 700;
-                                }
-                            }
-                            Text { text: root.relay_card_line1; color: #d2dfd5; }
-                            Text { text: root.relay_card_line2; color: #b8c7bb; }
-                            Button {
-                                text: "Keep this one";
-                                clicked => { root.keep_relay_clicked(); }
-                            }
-                        }
-                    }
-                }
-                Text {
-                    text: "The other island is kept as a backup in Backups.";
-                    font-size: 13px;
-                    color: #b8c7bb;
-                    horizontal-alignment: center;
-                }
-            }
+        Text {
+            text: root.card.saved;
+            color: #ffffff;
+            font-size: 22px;
+            font-weight: 700;
+            wrap: word-wrap;
         }
 
-        if !root.choosing_conflict : Rectangle {
-            background: #283d35;
-            border-radius: 12px;
-            border-width: 1px;
-            border-color: #436353;
-            VerticalBox {
-                padding: 16px;
+        Text {
+            text: root.card.played;
+            color: #e4f2ed;
+            font-size: 17px;
+        }
+
+        Text {
+            text: root.card.version;
+            color: #e4f2ed;
+            font-size: 17px;
+        }
+
+        if root.card.badges != "": Text {
+            text: root.card.badges;
+            color: #ffd166;
+            font-size: 17px;
+            font-weight: 700;
+        }
+    }
+}
+
+export component ContinuePage inherits Rectangle {
+    in property <ContinueView> view;
+    callback clicked(PadTarget);
+
+    background: #10251f;
+
+    VerticalLayout {
+        padding: 28px;
+        spacing: 14px;
+
+        Text {
+            text: "Continue";
+            color: #ffffff;
+            font-size: 30px;
+            font-weight: 700;
+        }
+
+        if !root.view.choosing: IslandCard {
+            title: root.view.status;
+            card: root.view.card;
+        }
+
+        if root.view.choosing: HorizontalLayout {
+            spacing: 16px;
+
+            VerticalLayout {
                 spacing: 10px;
 
-                HorizontalBox {
-                    Text {
-                        text: root.island_name;
-                        font-size: 22px;
-                        font-weight: 700;
-                        color: #f4f0e8;
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    Text {
-                        text: root.card_status;
-                        color: #80ed99;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
+                IslandCard {
+                    title: "This device";
+                    card: root.view.this-card;
+                    focused: root.view.focus == PadTarget.keep-this;
                 }
 
-                HorizontalBox {
-                    spacing: 24px;
-                    VerticalBox {
-                        spacing: 4px;
-                        Text { text: "Device: " + root.save_device; color: #d2dfd5; }
-                        Text { text: "Saved: " + root.save_when; color: #b8c7bb; }
+                PadButton {
+                    text: "Keep this one";
+                    enabled: root.view.keep-enabled;
+                    focused: root.view.focus == PadTarget.keep-this;
+                    clicked => {
+                        root.clicked(PadTarget.keep-this);
                     }
-                    VerticalBox {
-                        spacing: 4px;
-                        Text { text: "Play time: " + root.play_time; color: #d2dfd5; }
-                        Text { text: "Version: " + root.save_version; color: #b8c7bb; }
-                    }
-                }
-
-                if root.status_message != "" : Text {
-                    text: root.status_message;
-                    color: #f4f0e8;
-                    font-size: 14px;
                 }
             }
-        }
 
-        // Drift warning banner
-        if root.has_warning : Rectangle {
-            background: #4a2820;
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: #e07a5f;
-            VerticalBox {
-                padding: 12px;
-                spacing: 8px;
-                Text {
-                    text: "Warning: Save drift detected";
-                    font-weight: 700;
-                    color: #f2cc8f;
+            VerticalLayout {
+                spacing: 10px;
+
+                IslandCard {
+                    title: "On the relay";
+                    card: root.view.relay-card;
+                    focused: root.view.focus == PadTarget.keep-relay;
                 }
-                Text {
-                    text: root.warning_text;
-                    color: #f4f0e8;
-                    wrap: word-wrap;
-                }
-                HorizontalBox {
-                    spacing: 12px;
-                    if root.show_play_anyway : Button {
-                        text: "Play anyway";
-                        clicked => { root.play_clicked(); }
-                    }
-                    Button {
-                        text: "Update";
-                        clicked => { root.update_clicked(); }
-                    }
-                    Button {
-                        text: "Back";
-                        clicked => { root.back_clicked(); }
+
+                PadButton {
+                    text: "Keep this one";
+                    enabled: root.view.keep-enabled;
+                    focused: root.view.focus == PadTarget.keep-relay;
+                    clicked => {
+                        root.clicked(PadTarget.keep-relay);
                     }
                 }
             }
         }
 
-        // The One Play Button (outside open chooser)
-        if !root.choosing_conflict && !root.has_warning : VerticalBox {
-            spacing: 6px;
-            Button {
-                text: root.play_step != "" ? root.play_step : ("▶  " + root.play_label);
-                enabled: root.play_enabled;
-                clicked => { root.play_clicked(); }
+        if root.view.warning != "": Text {
+            text: root.view.warning;
+            color: #ffd166;
+            font-size: 18px;
+            wrap: word-wrap;
+        }
+
+        if root.view.message != "": Text {
+            text: root.view.message;
+            color: #e4f2ed;
+            font-size: 17px;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+
+            if root.view.button != "": PadButton {
+                primary: true;
+                text: root.view.button;
+                enabled: root.view.button-enabled;
+                focused: root.view.focus == PadTarget.play;
+                clicked => {
+                    root.clicked(PadTarget.play);
+                }
+            }
+
+            if root.view.play-anyway: PadButton {
+                primary: true;
+                text: "Play anyway";
+                focused: root.view.focus == PadTarget.play;
+                clicked => {
+                    root.clicked(PadTarget.play);
+                }
+            }
+
+            if root.view.warning != "": PadButton {
+                primary: true;
+                text: "Update";
+                focused: root.view.focus == PadTarget.update;
+                clicked => {
+                    root.clicked(PadTarget.update);
+                }
+            }
+
+            if root.view.back: PadButton {
+                text: "Back";
+                focused: root.view.focus == PadTarget.back;
+                clicked => {
+                    root.clicked(PadTarget.back);
+                }
             }
         }
 
-        Rectangle { vertical-stretch: 1; }
+        HorizontalLayout {
+            spacing: 12px;
 
-        // Controller / Keyboard Hints Footer
-        Text {
-            text: "D-pad: Move focus     A / Enter: Accept     B / Esc: Back     Start / F1: Menu";
-            font-size: 13px;
-            color: #b8c7bb;
-            horizontal-alignment: center;
+            PadButton {
+                text: "Saves";
+                enabled: root.view.pages-enabled;
+                focused: root.view.focus == PadTarget.saves;
+                clicked => {
+                    root.clicked(PadTarget.saves);
+                }
+            }
+
+            PadButton {
+                text: "Settings";
+                enabled: root.view.pages-enabled;
+                focused: root.view.focus == PadTarget.settings;
+                clicked => {
+                    root.clicked(PadTarget.settings);
+                }
+            }
+
+            PadButton {
+                text: "Fleet";
+                enabled: root.view.pages-enabled;
+                focused: root.view.focus == PadTarget.fleet;
+                clicked => {
+                    root.clicked(PadTarget.fleet);
+                }
+            }
+
+            PadButton {
+                text: "About";
+                enabled: root.view.pages-enabled;
+                focused: root.view.focus == PadTarget.about;
+                clicked => {
+                    root.clicked(PadTarget.about);
+                }
+            }
         }
     }
 }

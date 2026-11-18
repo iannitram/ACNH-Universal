@@ -1,20 +1,32 @@
-import { ContinuePage } from "continue.slint";
+import { ContinuePage, ContinueView, CardView, PadTarget } from "continue.slint";
 
+export { ContinueView, CardView, PadTarget }
+
+// The launcher window. It shows the Continue page and hands every key and click to Rust:
+// `view` is `ContinuePageVm::view()`, `clicked` is a click or tap on a button, and `key` is
+// a key press (true when it was one of the launcher's keys).
 export component MainWindow inherits Window {
+    in property <ContinueView> view;
+    callback clicked(PadTarget);
+    callback key(string) -> bool;
+
     title: "ACNH Universal";
-    min-width: 560px;
-    min-height: 360px;
-    preferred-width: 720px;
-    preferred-height: 480px;
-    background: #172821;
+    preferred-width: 960px;
+    preferred-height: 600px;
+    min-width: 720px;
+    min-height: 480px;
+    forward-focus: keys;
 
-    in-out property<int> selected: 0;
-    in-out property<string> selection: "Continue";
-    in-out property<string> status: "Ready to sync and play.";
-    callback activate;
+    keys := FocusScope {
+        key-pressed(event) => {
+            return root.key(event.text) ? EventResult.accept : EventResult.reject;
+        }
 
-    ContinuePage {
-        status_message: root.status;
-        play_clicked => { root.activate(); }
+        ContinuePage {
+            view: root.view;
+            clicked(target) => {
+                root.clicked(target);
+            }
+        }
     }
 }
