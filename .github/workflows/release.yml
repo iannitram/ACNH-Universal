@@ -14,11 +14,13 @@ permissions:
 
 env:
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
+  # The source package's commit, and the commit the app checks it against.
+  ACNH_SOURCE_COMMIT: ${{ github.sha }}
 
 jobs:
   linux:
     name: AppImage
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -32,7 +34,7 @@ jobs:
         run: |
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update -q
-          $SUDO apt-get install -yq --no-install-recommends build-essential pkg-config libudev-dev libxkbcommon-dev libfontconfig1-dev file curl
+          $SUDO apt-get install -yq --no-install-recommends libudev-dev libxkbcommon-dev libfontconfig1-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -44,6 +46,14 @@ jobs:
           rm -rf "$D" && mkdir -p "$D/usr/bin"
           cp target/release/acnh-app target/release/acnh-universal "$D/usr/bin/"
           cp assets/acnhrecomp.png "$D/acnh-universal.png"
+          SRC="$D/usr/share/acnh-universal/source"
+          mkdir -p "$SRC"
+          git archive HEAD CMakeLists.txt runtime games recomp tools assets launcher Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
+          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
+          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
+          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
+            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
+          done
           cat > "$D/acnh-universal.desktop" <<DESK
           [Desktop Entry]
           Type=Application
@@ -53,6 +63,7 @@ jobs:
           Categories=Game;
           DESK
           sed -i 's/^ *//' "$D/acnh-universal.desktop"
+          # shellcheck disable=SC2016
           printf '#!/bin/sh\nH=$(dirname "$(readlink -f "$0")")\nexport PATH="$H/usr/bin:$PATH"\nexec "$H/usr/bin/acnh-app" "$@"\n' > "$D/AppRun"
           chmod +x "$D/AppRun"
           find "$D" -type f | tee files.txt
@@ -67,7 +78,7 @@ jobs:
 
   windows:
     name: Windows zip
-    runs-on: [self-hosted, windows]
+    runs-on: windows-2025
     defaults:
       run:
         shell: bash
@@ -86,6 +97,14 @@ jobs:
           rm -rf "$N" && mkdir "$N"
           cp target/release/acnh-app.exe target/release/acnh-universal.exe "$N/"
           cp assets/acnhrecomp.ico "$N/"
+          SRC="$N/source"
+          mkdir -p "$SRC"
+          git archive HEAD CMakeLists.txt runtime games recomp tools assets launcher Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
+          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
+          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
+          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
+            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
+          done
           find "$N" -type f | tee files.txt
           bash tools/check_release_files.sh < files.txt
           powershell -NoProfile -Command "Compress-Archive -Path '$N' -DestinationPath '$N.zip'"
@@ -96,7 +115,7 @@ jobs:
 
   mac:
     name: Mac app
-    runs-on: [self-hosted, macos]
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,6 +132,14 @@ jobs:
           cp target/release/acnh-app "$A/Contents/MacOS/acnh-app"
           cp target/release/acnh-universal "$A/Contents/MacOS/acnh-universal"
           cp assets/acnhrecomp.icns "$A/Contents/Resources/"
+          SRC="$A/Contents/Resources/source"
+          mkdir -p "$SRC"
+          git archive HEAD CMakeLists.txt runtime games recomp tools assets launcher Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
+          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
+          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
+          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
+            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
+          done
           cat > "$A/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -140,7 +167,7 @@ jobs:
     name: Draft release
     if: github.ref_type == 'tag'
     needs: [linux, windows, mac]
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -151,6 +178,7 @@ jobs:
           merge-multiple: true
       - name: File list has no game data
         run: |
+          # shellcheck disable=SC2012
           ls dist | tee files.txt
           bash tools/check_release_files.sh < files.txt
       - env:

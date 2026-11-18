@@ -11,6 +11,7 @@
 #include <thread>
 
 #if defined(__APPLE__)
+#include <TargetConditionals.h>
 #include <sys/sysctl.h>
 #endif
 #if !defined(_WIN32)
@@ -104,6 +105,10 @@ fs::path destination() {
 }
 
 bool zip_folder(const fs::path& dir, const fs::path& zip) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    (void)dir, (void)zip;
+    return false;  // no std::system on iOS: the report is left as the folder the caller made
+#else
     std::string d = utf8(dir), z = utf8(zip);
 #if defined(__APPLE__)
     std::string cmd = "ditto -c -k --norsrc --keepParent \"" + d + "\" \"" + z + "\"";
@@ -116,6 +121,7 @@ bool zip_folder(const fs::path& dir, const fs::path& zip) {
 #endif
     std::error_code ec;
     return !cmd.empty() && std::system(cmd.c_str()) == 0 && fs::exists(zip, ec);
+#endif
 }
 
 }  // namespace

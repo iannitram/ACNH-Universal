@@ -1,15 +1,35 @@
 //! View state kept separate from Slint so page behavior can be tested headlessly.
 
-/// Navigation actions shared by keyboard and gamepad input.
+pub mod continue_page;
+pub mod saves;
+pub mod settings;
+pub use continue_page::ContinuePageVm;
+
+/// Navigation actions shared by keyboard and gamepad input (docs/design/continue-screen.md,
+/// "Controller map").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nav {
-    Previous,
-    Next,
-    Activate,
+    Up,
+    Down,
+    Left,
+    Right,
+    Accept,
     Back,
+    Menu,
+    Prev,
+    Next,
+    Quit,
 }
 
-/// State for the initial Continue screen.
+#[allow(non_upper_case_globals)]
+impl Nav {
+    /// The first shell's name for `Prev`: the same value, not another action.
+    pub const Previous: Nav = Nav::Prev;
+    /// The first shell's name for `Accept`: the same value, not another action.
+    pub const Activate: Nav = Nav::Accept;
+}
+
+/// The first shell's page list. The Continue page itself is `ContinuePageVm`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ContinueVm {
     selected: usize,
@@ -43,10 +63,11 @@ impl ContinueVm {
     /// Apply a navigation action and return whether activation was requested.
     pub fn handle(&mut self, nav: Nav) -> bool {
         match nav {
-            Nav::Previous => self.selected = self.selected.saturating_sub(1),
+            Nav::Prev => self.selected = self.selected.saturating_sub(1),
             Nav::Next => self.selected = (self.selected + 1) % SECTIONS.len(),
-            Nav::Activate => return true,
+            Nav::Accept => return true,
             Nav::Back => self.status = "You are on the Continue screen.".to_owned(),
+            Nav::Up | Nav::Down | Nav::Left | Nav::Right | Nav::Menu | Nav::Quit => {}
         }
         false
     }
@@ -58,6 +79,14 @@ impl ContinueVm {
             format!("{} is coming soon.", self.selection())
         };
     }
+}
+
+/// A fresh folder under the system temp dir for one test; the test removes it when done.
+#[cfg(test)]
+pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("acnh-app-{name}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    dir
 }
 
 #[cfg(test)]
