@@ -1,6 +1,6 @@
 # The Continue screen: design brief
 
-Status: approved for 1.0 by the owner on 2026-11-18: "Let's build the whole launcher with the relay into it now. That is all 1.0" (SPEC.md M10). Shared with totk-universal: the layout, states and input rules are the same; only the game's icon, name and version list differ. Words follow `GLOSSARY.md`. The view models live in `app/src/vm/`, input in `app/src/input.rs`, pages in `app/ui/` (ADR 0003, `docs/code-map.md#faces`). `.slint` files only draw; every state below is a plain Rust value in a view model, so each is tested with fake saves and no window.
+Status: approved by the owner in PR #176 on 2026-11-18: "Let's build the whole launcher with the relay into it now. That is all 1.0", which the owner gave as approval of this brief as amended for the relay states and the owner's choices of 2026-11-18 (SPEC.md M6, M10). Shared with totk-universal: the layout, states and input rules are the same; only the game's icon, name and version list differ. Words follow `GLOSSARY.md`. The view models live in `app/src/vm/`, input in `app/src/input.rs`, pages in `app/ui/` (ADR 0003, `docs/code-map.md#faces`). `.slint` files only draw; every state below is a plain Rust value in a view model, so each is tested with fake saves and no window.
 
 ## Principles
 
@@ -34,7 +34,9 @@ Navigation uses physical position on every controller: south accepts and east go
 
 **Glyph sets.** The `Generic` glyph set is for a pad the launcher cannot name: its buttons are drawn by position (south, east, north, west, shoulders, sticks, Start) with no printed letter, so the prompt never claims a label the pad may not have. Touch draws the same targets for a finger. The set follows a pad connected or disconnected while the launcher is open, on every page; only the pictures change, never the actions. 2.04b builds the sets, and 9.01a builds them on Android.
 
-Text entry: the owner's choice is an on-screen keyboard with the address pad's focus rules (see *Controller map* and *Manual hub address*); Nextcloud Login Flow v2, which would type only the server address, is deferred to a save-relay change filed in that repo. The relay's server address, user name and app password are typed with the on-screen keyboard only. Every key and button has D-pad focus and Accept activation, Back leaves the editor, and keyboard and touch edit the same text. This is the one allowed exception to rule 2.
+Text entry: an on-screen keyboard in the launcher, driven by the controller, with the address pad's focus rules (see *Controller map* and *Manual hub address*); the owner chose it on 2026-11-18. Every key is reachable with the D-pad and Accept, Back leaves the editor, and keyboard and touch edit the same text. The relay's server address, user name and app password are typed with this keyboard only. save-relay stays as it is: Nextcloud Login Flow v2 is not used, and no save-relay change is filed for it. This is the one allowed exception to rule 2.
+
+Offline: while save sync is set up and save-relay cannot be reached, Play is refused, so a device never runs on an older save. `RelayUnavailable` says plainly that save-relay could not be reached and that the game starts once the island has synced; its button is Retry, and there is no Play anyway. Save sync that is off (Skip in the first run, or Turn off save sync) is not offline: `SyncOff` lets Play play without sync, and its card says that save sync is off and where to turn it on. A push still waiting from the last game is sent when the launcher opens, before anything else syncs, and Play stays refused until that push and the pull succeed (2.06a).
 
 ## The island card
 
@@ -86,7 +88,7 @@ A guided setup, one question per screen, driven by the controller; Back goes to 
 5. **Save relay** (`RelaySetup`): sign in so the island can sync, or skip. It offers:
    - *Nextcloud*: the server address, user name and app password, typed with the on-screen keyboard (see *Text entry*).
    - *Google Drive* or *Dropbox*: on a desktop the browser opens to sign in; in Game Mode a code and a URL are shown to open on a phone, then a wait that finishes on its own when the sign-in completes.
-   - *Skip*: play on the local island and sync later (offline play); the relay can be set up later from Settings.
+   - *Skip*: play without sync (`SyncOff`); save sync is off until it is turned on, and the relay can be set up later from Settings.
 
    Signing in shows progress; a failure shows a redacted reason with Retry, another service and Skip. Back goes to the previous step as everywhere else. The step is skipped when a relay account is already set up.
 6. **Device and Steam**: show the detected device profile and let it be changed; on Game Mode devices, "Add to Steam" writes the shortcut with artwork (Steam must be closed: if open, say so and offer "Try again" and "Skip"). Then **Done** goes to Continue with Play focused.
@@ -99,7 +101,7 @@ Connect enters `Validating`: parse the IP and port (1–65535), then check `hub:
 
 Each is one button from Continue, opens as a page with Back returning to Continue, Prev/Next moving between them.
 
-- **Saves:** the backups list (`backup::list`, newest first, with stamp, size), **Restore** (always backs the current island up first), the relay's service and account, the last sync, **Sync now**, and a push that is still waiting (shown with the last sync and retried on the next Sync now or Play). Empty list shows "No backups yet".
+- **Saves:** the backups list (`backup::list`, newest first, with stamp, size), **Restore** (always backs the current island up first), the relay's service and account, the last sync, **Sync now**, and a push that is still waiting (shown with the last sync and retried on the next Sync now or Play; a push still waiting is sent when the launcher opens, before anything else syncs, and Play is refused until that push and the pull succeed, 2.06a). Empty list shows "No backups yet".
 - **Settings:** device profile (resolution, frame cap, native 60 where the version has it), the save relay (service and account, on or off, the server address when there is one, **Sign in again**, **Turn off save sync**), "Add to Steam", data folder, hub choices. Changes are written to `config.ini` / `launcher.ini` on leaving a row, with the file's own comments kept (`config::Config`).
 - **Fleet:** one row per paired device (`fleet::DeviceRecord`: device, OS, version, build, last sync, free space), a warning mark on any device with drift, "Pair a device", and for a hub "Share this build". Empty shows "Only this device so far".
 - **About:** project and upstream credit, licence and Slint attribution (ADR 0003), the list of fixes offered upstream with links (M8), version and build id of the launcher, a link to the repository.
@@ -131,7 +133,8 @@ Each is a variant of a plain enum or field, constructible from fake saves, fake 
 | `Held { device, since }` | island card + hold summary | Wait (retry) / Play anyway / Back | save-relay says the game is open on another device; only Play anyway overrides the hold |
 | `Drift { newer_save_refused: bool }` | island card + warning | Play anyway / Update | see Pre-play warnings |
 | `BuildMissing` | island card | Prepare (hub) or Pull (other) | build not installed or bundle fails `verify` |
-| `RelayUnavailable` | last known card | Play (offline) | no network or relay off: plays on the local island, says it will sync later |
+| `RelayUnavailable` | last known card | Retry | save-relay could not be reached while save sync is set up; says the game starts once the island has synced, and there is no Play anyway |
+| `SyncOff` | island card, status "Save sync is off" | Play | save sync is off (Skip or Turn off save sync): plays without sync, and the card says so and where to turn it on |
 | `RelayError(reason)` | last known card | Retry | auth or server failure, with redacted reason |
 | `Syncing(step)` | island card | disabled, shows step | step: Pull, Backup, Push |
 | `Starting` | island card | disabled | player launching |
@@ -154,7 +157,7 @@ Also held: the `SaveCard` (local), the optional relay `SaveCard`, `Option<PlayAc
 
 ### `first_run`
 
-`FirstRunStep`: `Welcome`, `FindGame`, `PickFolder`, `FolderRejected(reason)` (missing file or `version` gate message), `FindHub`, `NoHubFound`, `EnterHubAddress(HubAddressEntry)`, `Pair { code, status: Waiting | Matched | Mismatch | Expired }`, `GetBuild { stages: [(Stage, Pending|Running|Done|Failed(reason)|Skipped)], progress }`, `RelaySetup { service: None | Nextcloud | GoogleDrive | Dropbox, phase: Choose | EditingField(Field) | SigningIn | WaitingForBrowser { code, url } | Failed(reason) | Skipped }`, `DeviceAndSteam { profile, steam: NotApplicable | Ready | SteamRunning | Added | Failed(reason) }`, `Done`. `RelaySetup` is skipped when an account is already set up; `None` and `Skipped` both mean offline play and can be revisited from Settings. Also: the step number and total (six), whether Back is allowed, and whether the flow was resumed from a partial state (each prepare stage is skipped when its output exists, so a restart resumes).
+`FirstRunStep`: `Welcome`, `FindGame`, `PickFolder`, `FolderRejected(reason)` (missing file or `version` gate message), `FindHub`, `NoHubFound`, `EnterHubAddress(HubAddressEntry)`, `Pair { code, status: Waiting | Matched | Mismatch | Expired }`, `GetBuild { stages: [(Stage, Pending|Running|Done|Failed(reason)|Skipped)], progress }`, `RelaySetup { service: None | Nextcloud | GoogleDrive | Dropbox, phase: Choose | EditingField(Field) | SigningIn | WaitingForBrowser { code, url } | Failed(reason) | Skipped }`, `DeviceAndSteam { profile, steam: NotApplicable | Ready | SteamRunning | Added | Failed(reason) }`, `Done`. `RelaySetup` is skipped when an account is already set up; `None` and `Skipped` both mean save sync is off (`SyncOff`) and can be revisited from Settings. Also: the step number and total (six), whether Back is allowed, and whether the flow was resumed from a partial state (each prepare stage is skipped when its output exists, so a restart resumes).
 
 `HubAddressEntry { host_text, port_text, active_field: Host | Port, caret, focus: Field(Host | Port) | PadKey(AddressKey) | Connect | Retry | Edit | Cancel, return_to: FindHub | NoHubFound, status: Editing | Validating | Invalid { field, reason } | Connecting { endpoint } | Unreachable { endpoint, reason } }`. `AddressKey` identifies a digit, hexadecimal letter, dot, colon, cursor-left, cursor-right, delete or field-selection key. Empty input is `Editing` with empty text; errors retain the text and focus so it can be corrected with the controller. `endpoint` is a parsed IP and port that passed the home-network check. The first-run model also retains the editor while on Pair, the selected hub, and an attempt id so cancelled or superseded validation/connection results cannot advance setup. No persistent hub setting changes until pairing succeeds.
 
@@ -181,13 +184,13 @@ Also held: the `SaveCard` (local), the optional relay `SaveCard`, `Option<PlayAc
 ## Not in this brief
 
 - The in-game overlay (`runtime/src/ui/`), which stays C++.
-- iOS: the iPad's `.ipa` is the one contained app (the launcher's 1.0 pieces, the player and the prepared game), and the same 1.0 pieces run on every platform. The iPad's app shows the same relay states (`RelaySetup`, `Conflict` with both cards, `Held`, offline), driven by the controller with prompts for the pad in hand. 8.05a builds them there as prompts in the game app; Google Drive and Dropbox sign-in there stay #76's, and #75 and #76 are the device runs (ADR 0003).
+- iOS: the iPad's `.ipa` is the one contained app (the launcher's 1.0 pieces, the player and the prepared game), and the same 1.0 pieces run on every platform. The iPad's app shows the same relay states (`RelaySetup`, `Conflict` with both cards, `Held`, and offline refused with Retry: the player does not boot the game until its pull has succeeded), driven by the controller with prompts for the pad in hand. 8.05a builds them there as prompts in the game app; Google Drive and Dropbox sign-in there stay #76's, and #75 and #76 are the device runs (ADR 0003).
 - The island's name: after 1.0.
 
 ## Unknowns to settle before the app pages (2.03 onward)
 
 1. **Relay conflict detection:** how `launch` learns that both sides changed (relay manifest times against the last-synced stamp). The `Conflict` and `RelayNewer`/`LocalNewer` states hold either way; the source of truth is save-relay's `sync::status` before Play. Settled: save-relay#49 is closed, and `RelayNewer`/`LocalNewer` come from `sync::status` (1.26b).
-2. **Offline play policy:** `RelayUnavailable` plays on the local island and syncs later; Saves shows the last sync, **Sync now** and a push that is still waiting, and if both devices play offline the next sync is a conflict the conflict view handles. Settled: play on the island here and sync later rather than refusing to play offline.
+2. **Offline play policy:** while save sync is set up and save-relay cannot be reached, Play is refused so a device never runs on an older save. `RelayUnavailable` says that save-relay could not be reached and that the game starts once the island has synced, with Retry and no Play anyway; save sync that is off is `SyncOff` and plays without sync. Settled: refuse until synced (the owner's choice on 2026-11-18); never play an older local save.
 3. **Slint on-screen address pad:** whether Slint's focus handling is enough or `app/` needs its own pad. The controller-reachable keys, editing/validation states and transitions above are required either way.
 4. **Gamepad access in Game Mode:** Steam's own input layer may hide the pad from gilrs. The shortcut may need a controller template that sends plain pad events; the AMD handheld run checks it. Settled: checked by 2.04b, then the device run #68.
 5. **Android:** key events for the D-pad and south/east face buttons on common controllers; the touch layout of the Narrow form. The physical Accept/Back convention above is fixed.
@@ -196,4 +199,4 @@ Also held: the `SaveCard` (local), the optional relay `SaveCard`, `Option<PlayAc
 
 ## Done when
 
-For #36 (2.02), this brief names every state the view models must hold and the owner approved it on 2026-11-18: "Let's build the whole launcher with the relay into it now. That is all 1.0". The later app pieces implement those values and test their transitions with fake saves, relay, hub and game (M10), including manual address correction/retry/cancel, pending conflict → chooser → Back without writes, the held island's Wait/Play anyway/Back, and south/east navigation with matching glyphs on each controller layout and the `Generic` set.
+For #36 (2.02), this brief names every state the view models must hold and the owner approved it in PR #176 on 2026-11-18: "Let's build the whole launcher with the relay into it now. That is all 1.0". The later app pieces implement those values and test their transitions with fake saves, relay, hub and game (M10), including manual address correction/retry/cancel, pending conflict → chooser → Back without writes, the held island's Wait/Play anyway/Back, offline refused with Retry and `SyncOff` playing without sync, the on-screen keyboard for the relay fields, and south/east navigation with matching glyphs on each controller layout and the `Generic` set.
