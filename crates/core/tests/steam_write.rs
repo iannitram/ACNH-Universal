@@ -74,3 +74,14 @@ fn steam_running_writes_nothing() {
     assert!(!user.join("config/shortcuts.vdf").exists());
     assert!(!user.join("config/grid").exists());
 }
+
+#[test]
+fn nul_in_shortcut_field_returns_vdf_error_and_writes_nothing() {
+    let (root, user) = setup();
+    let err = write_shortcut(&root, &shortcut("AC\0NH"), &[], &|| false).unwrap_err();
+    assert_eq!(
+        err,
+        Error::Steam("shortcuts.vdf text can't hold a NUL".into())
+    );
+    assert!(!user.join("config/shortcuts.vdf").exists());
+}

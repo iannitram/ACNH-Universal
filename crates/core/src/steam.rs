@@ -180,7 +180,7 @@ pub fn write_shortcut(
             std::fs::copy(&file, file.with_extension("vdf.bak"))?;
         }
         std::fs::create_dir_all(artwork::grid_dir(&user_dir))?;
-        std::fs::write(&file, vdf::write(&doc))?;
+        std::fs::write(&file, vdf::write(&doc)?)?;
         for (art, path) in artwork::paths(&user_dir, app_id) {
             if let Some((_, bytes)) = images.iter().find(|(a, _)| *a == art) {
                 std::fs::write(path, bytes)?;
