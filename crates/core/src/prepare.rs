@@ -86,6 +86,14 @@ pub trait ScriptRunner {
     /// Run `args` (a `Step::Script`) for `stage`, and come back when that stage of it is over.
     fn run(&mut self, stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>>;
 
+    /// Whether a script `run` started is still working. A `Step::Rust` stage must not write
+    /// the same folders while one is: upstream's script runs on to its own version of the
+    /// stage, and two writers would race. A runner whose `run` leaves nothing running is
+    /// never active.
+    fn active(&self) -> bool {
+        false
+    }
+
     /// No stage is left to ask for: wait for what `run` left running. A runner whose `run`
     /// leaves nothing running has nothing to do.
     fn finish(&mut self) -> std::result::Result<(), Vec<String>> {
@@ -147,6 +155,10 @@ impl ProcessRunner {
 }
 
 impl ScriptRunner for ProcessRunner {
+    fn active(&self) -> bool {
+        self.script.as_ref().is_some_and(|script| !script.ended)
+    }
+
     fn run(&mut self, stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>> {
         if self.script.as_ref().is_some_and(|s| s.args != args) {
             self.finish()?; // another command: the one before it ends first
@@ -382,27 +394,40 @@ pub fn prepare_with(
                 .run(stage, &args)
                 .map_err(|log| build_error(stage, &log, home))?,
             Step::Rust if stage == Stage::Shaders => {
-                // Extract the shaders ourselves; the SPIR-V harness is still the tools'
-                // .NET program. When it is not installed here, upstream's script runs the
-                // stage as before, so a build works either way.
-                let mut translated = false;
-                if req.game.romfs.is_dir() {
-                    let extracted = req.out.join("shaders_extracted");
-                    crate::shaders::extract(
-                        &req.game.romfs,
-                        &req.out.join("analysis").join("main.bin"),
-                        &extracted,
-                        req.jobs,
-                        false,
-                    )
-                    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-                    translated = crate::shaders::translate(&req.out, req.jobs)
-                        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-                }
-                if !translated {
+                if runner.active() {
+                    // Upstream's script, started for an earlier stage, has already reached
+                    // this stage and is writing `shaders_extracted/` and `spirv/` itself.
+                    // Follow it instead of extracting a second copy beside it: one writer,
+                    // and the stage is skipped next time from the output it leaves.
                     runner
                         .run(stage, &stage_script(req))
                         .map_err(|log| build_error(stage, &log, home))?;
+                } else {
+                    // No script is running: extract the shaders ourselves. The SPIR-V
+                    // harness is still the tools' .NET program. When it is not installed
+                    // here, upstream's script runs the stage as before, so a build works
+                    // either way.
+                    let mut translated = false;
+                    if req.game.romfs.is_dir() {
+                        let extracted = req.out.join("shaders_extracted");
+                        crate::shaders::extract(
+                            &req.game.romfs,
+                            &req.out.join("analysis").join("main.bin"),
+                            &extracted,
+                            req.jobs,
+                            false,
+                        )
+                        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+                        translated =
+                            crate::shaders::translate(&req.out, req.jobs).map_err(|error| {
+                                Error::Build(format!("stage {}: {error}", stage.key()))
+                            })?;
+                    }
+                    if !translated {
+                        runner
+                            .run(stage, &stage_script(req))
+                            .map_err(|log| build_error(stage, &log, home))?;
+                    }
                 }
             }
             Step::Rust => {}

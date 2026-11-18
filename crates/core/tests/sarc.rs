@@ -1,7 +1,7 @@
 // Tests for SARC archives and the shaders stage (issue 1.29): made-up archives, the same
 // bytes upstream's `sarc_endian.py` writes, and the grouping/cleanup of `extract_shaders.py`.
 use acnh_core::sarc::{big_endian, check, parse, read, rewrite, Endian};
-use acnh_core::shaders::{cleanup, plan};
+use acnh_core::shaders::{cleanup, extract_with, plan, Tools};
 use std::path::{Path, PathBuf};
 
 fn temp(name: &str) -> PathBuf {
@@ -209,6 +209,29 @@ fn plan_names_the_groups_like_extract_shaders() {
 
     let full = plan(&romfs, true).unwrap();
     assert_eq!(full.last().unwrap().name, "model_m");
+}
+
+#[test]
+fn a_missing_container_tool_is_refused_not_counted() {
+    // A binary installed away from its checkout has no `tools/maxwell/`: the stage must say
+    // so, not report every group as failed and carry on with an empty tree.
+    let root = temp("no-tools");
+    let romfs = root.join("romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    let tools = Tools::new(root.join("checkout"), "python3".to_owned());
+
+    let error = extract_with(
+        &tools,
+        &romfs,
+        &root.join("main.bin"),
+        &root.join("out"),
+        1,
+        false,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("checkout"), "{error}");
+    assert!(!root.join("out").exists());
 }
 
 #[test]

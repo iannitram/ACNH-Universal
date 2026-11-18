@@ -253,6 +253,63 @@ fn process_runner_keeps_stdout_and_stderr_lines_separate() {
     assert_eq!(log, vec!["stdout", "stderr"]);
 }
 
+/// A runner whose script, started for an earlier stage, is already in the shaders stage
+/// when our own code reaches it.
+struct BusyShaders {
+    out: PathBuf,
+    ran: Vec<Stage>,
+    active: bool,
+}
+
+impl ScriptRunner for BusyShaders {
+    fn run(&mut self, stage: Stage, _args: &[String]) -> Result<(), Vec<String>> {
+        self.ran.push(stage);
+        if stage == Stage::Shaders {
+            // The script owns the stage and leaves the output our stage would have written.
+            self.active = false;
+            let spirv = self.out.join("spirv");
+            std::fs::create_dir_all(&spirv).unwrap();
+            std::fs::write(spirv.join("summary.txt"), "blocks 3 files 9\n").unwrap();
+        } else {
+            self.active = true;
+        }
+        Ok(())
+    }
+
+    fn active(&self) -> bool {
+        self.active
+    }
+}
+
+#[test]
+fn rust_shaders_follows_a_script_that_is_already_in_the_stage() {
+    // An earlier stage leaves upstream's script running through the shaders stage. Our own
+    // stage must follow it, not extract a second copy into the same folders.
+    let mut req = request("busy-shaders", Os::Linux);
+    let romfs = req.out.join("romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    req.game.romfs = romfs;
+
+    let mut runner = BusyShaders {
+        out: req.out.clone(),
+        ran: vec![],
+        active: false,
+    };
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut runner,
+        Path::new("/home/me"),
+        &mut |_| {},
+    )
+    .unwrap();
+
+    assert!(runner.ran.contains(&Stage::Shaders));
+    assert!(req.out.join("spirv/summary.txt").is_file());
+    // The Rust stage's own extraction never ran beside the script.
+    assert!(!req.out.join("shaders_extracted").exists());
+}
+
 // ---- The real runner (`ProcessRunner`) on a stand-in for upstream's script ----
 
 /// What upstream's script prints after `== ` as each stage begins (`tools/setup_acnh.py`).

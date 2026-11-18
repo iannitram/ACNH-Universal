@@ -139,6 +139,22 @@ pub fn extract_with(
             romfs.display()
         )));
     }
+    // The container formats are still read by the tools under `tools/maxwell/`. Without
+    // them (a binary installed away from its checkout) every group would fail and the stage
+    // would carry on with an empty tree: refuse with a plain message instead.
+    for script in [
+        "tools/maxwell/containers.py",
+        "tools/maxwell/exefs_shaders.py",
+        "tools/maxwell/model_shaders.py",
+    ] {
+        let path = tools.root.join(script);
+        if !path.is_file() {
+            return Err(Error::Io(format!(
+                "missing {}: the shaders stage needs a checkout of the repository",
+                path.display()
+            )));
+        }
+    }
     fs::create_dir_all(out)?;
 
     let groups = plan(romfs, full)?;
@@ -315,14 +331,33 @@ pub fn translate(out: &Path, jobs: u32) -> Result<bool> {
     let status = command
         .status()
         .map_err(|error| Error::Io(format!("cannot run the shader translator: {error}")))?;
-    if status.success() {
-        Ok(true)
-    } else {
-        Err(Error::Build(format!(
+    if !status.success() {
+        return Err(Error::Build(format!(
             "the shader translator failed (log: {})",
             log_path.display()
-        )))
+        )));
     }
+    // Upstream's setup fails when the harness extracted nothing: the player would draw
+    // nothing. Remove the summary so the next run tries again, as it does.
+    let summary = out.join("spirv").join("summary.txt");
+    let first = match fs::read_to_string(&summary) {
+        Ok(text) => text.lines().next().unwrap_or_default().trim().to_owned(),
+        Err(_) => {
+            return Err(Error::Build(format!(
+                "the shader translator wrote no summary (log: {})",
+                log_path.display()
+            )));
+        }
+    };
+    if first.starts_with("blocks 0 ") {
+        let _ = fs::remove_file(&summary);
+        return Err(Error::Build(
+            "no shader was extracted: the build would draw nothing (see the FAIL lines and \
+             the logs in shaders_extracted)"
+                .to_owned(),
+        ));
+    }
+    Ok(true)
 }
 
 fn run_container(tools: &Tools, group: &Group, out: &Path) -> Result<bool> {
