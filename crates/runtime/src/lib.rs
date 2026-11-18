@@ -59,3 +59,9 @@ pub fn ported(service: Service) -> bool {
     let _ = service;
     false
 }
+
+/// Version of the scaffold's C interface, checked by the player at boot.
+#[no_mangle]
+pub extern "C" fn acnh_runtime_abi_version() -> u32 {
+    1
+}

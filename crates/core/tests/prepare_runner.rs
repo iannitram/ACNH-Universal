@@ -1,8 +1,11 @@
 // Tests for the prepare stage runner (issue 1.22), with a fake script runner.
 use acnh_core::error::Error;
 use acnh_core::gamefolder::GameFolder;
-use acnh_core::platform::Os;
-use acnh_core::prepare::{prepare_with, step, ProcessRunner, Request, ScriptRunner, Step};
+use acnh_core::platform::{AppDirs, Os, Vars};
+use acnh_core::prepare::{
+    prepare_installed, prepare_with, step, toolchain_with, Missing, ProcessRunner, Request,
+    ScriptRunner, Step,
+};
 use acnh_core::recipe::{Hub, Stage, STAGES};
 use acnh_core::version::Version;
 use std::io::Write;
@@ -25,6 +28,7 @@ fn request(name: &str, target: Os) -> Request {
         out: d,
         target,
         jobs: 0,
+        source: None,
     }
 }
 
@@ -33,6 +37,7 @@ struct Fake {
     ran: Vec<Stage>,
     args: Vec<Vec<String>>,
     fail_at: Option<Stage>,
+    root: Option<PathBuf>,
 }
 
 impl ScriptRunner for Fake {
@@ -43,6 +48,10 @@ impl ScriptRunner for Fake {
             return Err(vec!["boom at /home/me/x".to_owned()]);
         }
         Ok(())
+    }
+
+    fn set_root(&mut self, root: &Path) {
+        self.root = Some(root.to_owned());
     }
 }
 
@@ -609,4 +618,153 @@ fn a_failure_in_a_stage_we_did_not_wait_on_is_named_by_the_scripts_line() {
         );
         assert_eq!(seen, vec![missing]);
     }
+}
+
+// ---- The toolchain check and a packaged source (issue 1.22a) ----
+
+fn toolchain_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("acnh-tool-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn file(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, "synthetic").unwrap();
+}
+
+fn find<'a>(missing: &'a [Missing], what: &str) -> Option<&'a Missing> {
+    missing.iter().find(|piece| piece.what == what)
+}
+
+#[test]
+fn mac_finds_homebrew_off_path_and_names_a_missing_molten_vk() {
+    let base = toolchain_dir("mac-brew");
+    let bin = base.join("app/usr/bin");
+    for tool in ["clang", "clang++", "curl", "python3", "xcode-select"] {
+        file(&bin.join(tool));
+    }
+    // No brew on PATH: the fake prefix is found through toolchain_with, as the Finder's
+    // missing PATH is handled by the real /opt/homebrew.
+    let prefix = base.join("homebrew");
+    file(&prefix.join("bin/brew"));
+    std::fs::create_dir_all(prefix.join("opt/sdl3")).unwrap();
+    std::fs::create_dir_all(prefix.join("opt/vulkan-loader")).unwrap();
+    std::fs::create_dir_all(prefix.join("opt/libvpx")).unwrap();
+    std::fs::create_dir_all(prefix.join("opt/libvorbis")).unwrap();
+
+    let missing = toolchain_with(Os::Mac, &bin, std::slice::from_ref(&prefix));
+    let molten = find(&missing, "molten-vk").expect("molten-vk is named");
+    assert!(
+        molten.message.contains("brew install molten-vk"),
+        "{molten:?}"
+    );
+    assert!(!molten.warning);
+    assert!(find(&missing, "Homebrew").is_none(), "{missing:?}");
+}
+
+#[test]
+fn linux_names_a_missing_clang_and_warns_about_missing_libvpx() {
+    let base = toolchain_dir("linux-clang");
+    let bin = base.join("usr/bin");
+    for tool in ["clang++", "curl", "python3"] {
+        file(&bin.join(tool));
+    }
+    let prefix = base.join("usr");
+    file(&prefix.join("include/SDL3/SDL.h"));
+
+    let missing = toolchain_with(Os::Linux, &bin, &[]);
+    let clang = find(&missing, "clang").expect("clang is named");
+    assert!(!clang.warning);
+    assert!(
+        clang.install.contains("sudo apt install clang"),
+        "{clang:?}"
+    );
+    let vpx = find(&missing, "libvpx").expect("libvpx is named");
+    assert!(vpx.warning, "{vpx:?}");
+}
+
+#[test]
+fn a_complete_toolchain_has_nothing_missing() {
+    let base = toolchain_dir("linux-complete");
+    let bin = base.join("usr/bin");
+    for tool in ["clang", "clang++", "curl", "python3"] {
+        file(&bin.join(tool));
+    }
+    let prefix = base.join("usr");
+    file(&prefix.join("include/SDL3/SDL.h"));
+    file(&prefix.join("lib/pkgconfig/vpx.pc"));
+    file(&prefix.join("lib/pkgconfig/vorbis.pc"));
+
+    assert_eq!(toolchain_with(Os::Linux, &bin, &[]), Vec::new());
+}
+
+/// A fake installed layout: `<base>/app/usr/bin/acnh-app` and the source under
+/// `<base>/app/usr/share/acnh-universal/source`.
+fn installed(name: &str, commit: &str) -> (PathBuf, PathBuf, AppDirs) {
+    let base = toolchain_dir(name);
+    let exe = base.join("app/usr/bin/acnh-app");
+    file(&exe);
+    let source = base.join("app/usr/share/acnh-universal/source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("SOURCE"), format!("{commit}\n")).unwrap();
+    std::fs::write(source.join("CMakeLists.txt"), "synthetic source").unwrap();
+    let dirs = AppDirs::new(&Vars {
+        home: base.join("home"),
+        data: base.join("data"),
+        config: base.join("config"),
+    });
+    (base, exe, dirs)
+}
+
+#[test]
+fn a_packaged_source_is_copied_to_the_data_folder_and_the_runner_runs_there() {
+    let req = request("installed-copy", Os::Linux);
+    let (_base, exe, dirs) = installed("installed-copy", "abc123");
+    let mut fake = Fake::default();
+    let mut seen = Vec::new();
+    let out = prepare_installed(
+        &req,
+        Hub::StrixHalo,
+        &exe,
+        &dirs,
+        Some("abc123"),
+        &[],
+        &mut fake,
+        Path::new("/home/me"),
+        &mut |stage| seen.push(stage),
+    )
+    .unwrap();
+    assert_eq!(out, req.out);
+    let copy = dirs.data.join("source/abc123");
+    assert!(copy.join("CMakeLists.txt").is_file());
+    assert_eq!(fake.root.as_deref(), Some(copy.as_path()));
+    assert_eq!(fake.ran, STAGES.to_vec());
+    assert_eq!(seen, STAGES.to_vec());
+}
+
+#[test]
+fn a_packaged_source_from_another_commit_is_refused() {
+    let req = request("installed-other", Os::Linux);
+    let (_base, exe, dirs) = installed("installed-other", "abc123");
+    let mut fake = Fake::default();
+    let error = prepare_installed(
+        &req,
+        Hub::StrixHalo,
+        &exe,
+        &dirs,
+        Some("different"),
+        &[],
+        &mut fake,
+        Path::new("/home/me"),
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Io(message) if message.contains("abc123") && message.contains("different")),
+        "{error:?}"
+    );
+    assert!(!dirs.data.join("source/abc123").exists());
+    assert!(fake.ran.is_empty());
 }
