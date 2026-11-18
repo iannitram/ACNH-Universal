@@ -12,9 +12,9 @@ name = "acnh_core"
 path = "src/lib.rs"
 
 [features]
-# `relay` links iannitram/save-relay's library (src/relay.rs, planned); its issue adds the
+# `relay` links iannitram/save-relay's library (src/relay.rs); its issue adds the
 # dependency. The core builds without it, so every module is testable with no network.
-relay = []
+relay = ["dep:save-relay"]
 # `hub` is the build hub on the home network (src/hub.rs, ADR 0004); its issues add the
 # pure-Rust crates it needs (mdns-sd, RustCrypto spake2 and chacha20poly1305), as in
 # totk-universal.
@@ -25,3 +25,4 @@ hub = []
 [dependencies]
 # SHA-256 for bundles (`bundle::manifest`, `verify`).
 sha2 = "0.10"
+save-relay = { git = "https://github.com/iannitram/save-relay", optional = true }
