@@ -156,3 +156,17 @@ fn spirv_pack_without_results_tsv_has_only_the_shaders() {
     assert_eq!(std::fs::read(&out).unwrap(), expected);
     assert!(!root.join("spirv.pak.tmp").exists());
 }
+
+#[test]
+fn spirv_pack_sorts_by_file_name_with_its_suffix() {
+    let root = temp("spirv-order");
+    write(&root, "a.spv", b"1");
+    write(&root, "a-b.spv", b"2");
+    let out = root.join("spirv.pak");
+
+    spirv(&root, &out).unwrap();
+
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(&bytes[8..12], b"a-b\0");
+    assert_eq!(&bytes[bytes.len() - 2..], b"21");
+}

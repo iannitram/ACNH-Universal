@@ -276,7 +276,7 @@ fn spirv_entries(src: &Path) -> Result<Vec<(String, PathBuf, u64)>> {
             }
         }
     }
-    names.sort();
+    names.sort_by(|a, b| a.1.cmp(&b.1)); // by file name with ".spv", as upstream does
 
     let mut entries = Vec::with_capacity(names.len() + 1);
     for (key, name) in names {
