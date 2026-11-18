@@ -3,7 +3,7 @@
 //! old CMake path keeps working on its own).
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=src");
@@ -17,7 +17,7 @@ fn main() {
 
 /// `$OUT_DIR/include/acnh_runtime.h`. A failure is a warning: the header is only needed by the
 /// C++ side, and only once the runtime exports C symbols.
-fn header(manifest: &PathBuf, out: &PathBuf) {
+fn header(manifest: &Path, out: &Path) {
     let dir = out.join("include");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -40,7 +40,7 @@ fn header(manifest: &PathBuf, out: &PathBuf) {
 /// The folder-loaded library mode (`NX_GAME_FROM_FOLDER`, always on) loads its code from the game folder, so no generated
 /// code is needed to build.
 #[cfg(feature = "player")]
-fn player(manifest: &PathBuf, out: &PathBuf) {
+fn player(manifest: &Path, out: &Path) {
     // `--all-features` (clippy, tests) must not need SDL3 and Vulkan headers: build only on request.
     println!("cargo:rerun-if-env-changed=ACNH_BUILD_PLAYER");
     if env::var_os("ACNH_BUILD_PLAYER").is_none() {
