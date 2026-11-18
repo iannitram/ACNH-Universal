@@ -45,7 +45,8 @@ pub struct Request {
     pub jobs: u32,
 }
 
-/// How `stage` runs for `req` right now. While no stage is ported, every stage is
+/// How `stage` runs for `req` right now. The shaders stage's packs are ours now
+/// (`pack::romfs`, `pack::spirv`), so it is `Rust`; the rest is
 /// `Script(["python3", "tools/setup_acnh.py", "--game", <game root>, "--out", <out>])`
 /// (`python` instead of `python3` on Windows). Upstream's script has no argument that picks a
 /// stage (its `FORCE` only redoes one), so the unported stages share this one command: a
@@ -53,26 +54,31 @@ pub struct Request {
 /// arm becomes `Step::Rust`.
 pub fn step(stage: Stage, req: &Request) -> Step {
     match stage {
+        Stage::Shaders => Step::Rust,
         Stage::Tools
         | Stage::Game
         | Stage::Version
         | Stage::Recompile
-        | Stage::Shaders
         | Stage::Fonts
-        | Stage::Build => Step::Script(vec![
-            if req.target == Os::Windows {
-                "python"
-            } else {
-                "python3"
-            }
-            .to_owned(),
-            "tools/setup_acnh.py".to_owned(),
-            "--game".to_owned(),
-            req.game.root.display().to_string(),
-            "--out".to_owned(),
-            req.out.display().to_string(),
-        ]),
+        | Stage::Build => Step::Script(stage_script(req)),
     }
+}
+
+/// Upstream's one command for a stage that is still its script.
+fn stage_script(req: &Request) -> Vec<String> {
+    vec![
+        if req.target == Os::Windows {
+            "python"
+        } else {
+            "python3"
+        }
+        .to_owned(),
+        "tools/setup_acnh.py".to_owned(),
+        "--game".to_owned(),
+        req.game.root.display().to_string(),
+        "--out".to_owned(),
+        req.out.display().to_string(),
+    ]
 }
 
 /// Runs the script of a stage. `Err` holds the log lines of a failed run; a line
@@ -275,6 +281,21 @@ fn tools_record(req: &Request) -> PathBuf {
     req.out.join(".prepare-tools.json")
 }
 
+/// The Rust part of the shaders stage: pack the RomFS and the stage's `.spv` files for the
+/// runtime (`pack::romfs`, `pack::spirv`). A source that is not there yet leaves its pack
+/// alone, as upstream keeps the loose folder until something packs it.
+fn pack_stage(req: &Request) -> Result<()> {
+    std::fs::create_dir_all(&req.out)?;
+    if req.game.romfs.is_dir() {
+        crate::pack::romfs(&req.game.romfs, &req.out.join("romfs.pak"))?;
+    }
+    let spirv = req.out.join("spirv");
+    if spirv.is_dir() {
+        crate::pack::spirv(&spirv, &req.out.join("spirv.pak"))?;
+    }
+    Ok(())
+}
+
 /// Whether everything `stage` leaves in `req.out` is there. Game and recompile leave one
 /// file per module; upstream's build leaves the player itself in `build/` (on the Mac the
 /// plain executable: the app bundle is stage 8's).
@@ -372,10 +393,20 @@ pub fn prepare_with(
             continue;
         }
         progress(stage);
-        if let Step::Script(args) = step(stage, req) {
-            runner
+        match step(stage, req) {
+            Step::Script(args) => runner
                 .run(stage, &args)
-                .map_err(|log| build_error(stage, &log, home))?;
+                .map_err(|log| build_error(stage, &log, home))?,
+            Step::Rust if stage == Stage::Shaders => {
+                // The stage's packs are ours; extracting the shaders themselves is still
+                // upstream's script until its issue ports it (1.29), so it runs first.
+                runner
+                    .run(stage, &stage_script(req))
+                    .map_err(|log| build_error(stage, &log, home))?;
+                pack_stage(req)
+                    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+            }
+            Step::Rust => {}
         }
         if stage == Stage::Tools {
             std::fs::create_dir_all(&req.out)?;

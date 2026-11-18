@@ -123,9 +123,13 @@ fn a_target_the_hub_does_not_serve_is_unsupported() {
 }
 
 #[test]
-fn step_is_upstreams_script_for_every_stage() {
+fn step_is_rust_for_shaders_and_upstreams_script_for_the_rest() {
     let req = request("step", Os::Linux);
     for stage in STAGES {
+        if stage == Stage::Shaders {
+            assert_eq!(step(stage, &req), Step::Rust);
+            continue;
+        }
         assert_eq!(
             step(stage, &req),
             Step::Script(vec![
@@ -139,6 +143,7 @@ fn step_is_upstreams_script_for_every_stage() {
         );
     }
     let win = request("step-win", Os::Windows);
+    assert_eq!(step(Stage::Shaders, &win), Step::Rust);
     match step(Stage::Tools, &win) {
         Step::Script(a) => assert_eq!(a[0], "python"),
         Step::Rust => panic!("not ported"),
