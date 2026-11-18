@@ -1,6 +1,8 @@
 //! View state kept separate from Slint so page behavior can be tested headlessly.
 
 pub mod continue_page;
+pub mod saves;
+pub mod settings;
 pub use continue_page::ContinuePageVm;
 
 /// Navigation actions shared by keyboard and gamepad input (docs/design/continue-screen.md,
@@ -77,6 +79,14 @@ impl ContinueVm {
             format!("{} is coming soon.", self.selection())
         };
     }
+}
+
+/// A fresh folder under the system temp dir for one test; the test removes it when done.
+#[cfg(test)]
+pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("acnh-app-{name}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    dir
 }
 
 #[cfg(test)]
