@@ -1,5 +1,8 @@
 //! View state kept separate from Slint so page behavior can be tested headlessly.
 
+pub mod saves;
+pub mod settings;
+
 /// Navigation actions shared by keyboard and gamepad input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nav {
@@ -58,6 +61,14 @@ impl ContinueVm {
             format!("{} is coming soon.", self.selection())
         };
     }
+}
+
+/// A fresh folder under the system temp dir for one test; the test removes it when done.
+#[cfg(test)]
+pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("acnh-app-{name}-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    dir
 }
 
 #[cfg(test)]
