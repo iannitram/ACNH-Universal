@@ -85,3 +85,16 @@ fn nul_in_shortcut_field_returns_vdf_error_and_writes_nothing() {
     );
     assert!(!user.join("config/shortcuts.vdf").exists());
 }
+
+#[test]
+fn nul_refusal_leaves_existing_file_and_backup_alone() {
+    let (root, user) = setup();
+    let file = user.join("config/shortcuts.vdf");
+    let bak = user.join("config/shortcuts.vdf.bak");
+    write_shortcut(&root, &shortcut("First"), &[], &|| false).unwrap();
+    write_shortcut(&root, &shortcut("Second"), &[], &|| false).unwrap();
+    let (file_before, bak_before) = (std::fs::read(&file).unwrap(), std::fs::read(&bak).unwrap());
+    assert!(write_shortcut(&root, &shortcut("Th\0ird"), &[], &|| false).is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), file_before);
+    assert_eq!(std::fs::read(&bak).unwrap(), bak_before);
+}
