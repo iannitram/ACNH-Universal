@@ -1,7 +1,7 @@
 # The Rust launcher (crates/): format, lint and test on every push to main and every pull request,
 # plus the game-data check over every tracked file (SPEC.md M14, M15), the C++ unit tests on Linux
-# (0.01, M15), and the Android cross-build (M15). Use GitHub-hosted runners (#155).
-# The macOS job also checks the iOS target (`aarch64-apple-ios`, M15).
+# (0.01, M15), and the Android cross-build (M15). Runs on GitHub-hosted runners (#155)
+# (Linux, Windows, macOS). The macOS job also checks the iOS target (`aarch64-apple-ios`, M15).
 name: check
 
 on:
@@ -59,7 +59,7 @@ jobs:
           # Slint (app/) links fontconfig through yeslogic-fontconfig-sys, which needs its dev headers.
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update -q
-          $SUDO apt-get install -yq --no-install-recommends build-essential pkg-config libudev-dev libxkbcommon-dev libfontconfig1-dev
+          $SUDO apt-get install -yq --no-install-recommends libudev-dev libxkbcommon-dev libfontconfig1-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -92,9 +92,11 @@ jobs:
       - name: Configure
         run: cmake -B build -G Ninja -DNX_TESTS=ON -DNX_GAME=acnh -DNX_LAUNCHER=OFF -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        run: cmake --build build --target gpu_pick_test tiling_test astc_test
+        run: cmake --build build --target gpu_pick_test tiling_test astc_test game_root_test
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Game reads stay on the game root
+        run: bash tests/game_root_check.sh
 
   boot-smoke:
     name: Boot smoke (Linux)
@@ -158,6 +160,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+      - name: Install Android NDK
+        run: |
+          SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}
+          SDKMANAGER=$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")
+          SUDO=$(command -v sudo || true)
+          $SUDO "$SDKMANAGER" --install "ndk;28.2.13676358" < <(yes 2>/dev/null)
+          CLANG="$SDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
+          [ -x "$CLANG" ] || { echo "::error::Android NDK 28.2.13676358 install failed: $CLANG not found"; exit 1; }
+          echo "ANDROID_NDK_HOME=$SDK/ndk/28.2.13676358" >> "$GITHUB_ENV"
       - name: Android NDK (linker)
         # NDK 28.2.13676358 (docs/ANDROID.md), installed in the hosted runner's SDK.
         run: |
@@ -190,3 +201,7 @@ jobs:
       - run: cargo test --workspace --all-features
       - name: iOS cross-check
         run: cargo check --workspace --target aarch64-apple-ios
+      - name: Homebrew headers (SDL3, Vulkan)
+        run: brew install sdl3 vulkan-headers
+      - name: C++ compiles for iOS
+        run: bash tools/check_ios_compile.sh

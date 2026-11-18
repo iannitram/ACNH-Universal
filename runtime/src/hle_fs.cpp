@@ -1,8 +1,8 @@
 // nn::fs at the API level, on host files. The game imports these by name (main), so no fsp-srv IPC is involved:
-//   rom:   -> private/extract/romfs (the RomFS with the update applied)
-//   save:  -> private/user/save/<mount>
-//   cache: -> private/user/cache<index>
-//   add-on content (MountAddOnContent) -> private/aoc/<index>
+//   rom:   -> <game root>/extract/romfs (the RomFS with the update applied)
+//   save:  -> <data root>/user/save/<mount>
+//   cache: -> <data root>/user/cache<index>
+//   add-on content (MountAddOnContent) -> <game root>/aoc/<index>
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -117,7 +117,7 @@ struct Dir {
     size_t pos = 0;
 };
 
-// The packed RomFS (tools/pack_romfs.py): <data root>/romfs.pak, when there, serves every RomFS file from one file
+// The packed RomFS (tools/pack_romfs.py): <game root>/romfs.pak, when there, serves every RomFS file from one file
 // instead of the ~100,000 under extract/romfs. On a phone's memory card (exFAT, 128 KiB clusters) the loose files
 // took twice their size and each open was a slow lookup. Format: "NXRP", u32 version 1, u32 count, then per file
 // u16 path length, the path ('/' separated, relative to the RomFS), u64 offset, u64 size; the data after.
@@ -128,7 +128,7 @@ struct Pak {
 };
 const Pak* pak() {
     static const Pak* p = []() -> const Pak* {
-        FILE* f = plat::fopen_utf8(plat::data_root() + "/romfs.pak", "rb");
+        FILE* f = plat::fopen_utf8(plat::game_root() + "/romfs.pak", "rb");
         if (!f) return nullptr;
         auto* k = new Pak;
         k->f = f;
@@ -171,6 +171,7 @@ std::map<uint64_t, Dir> g_dirs;
 uint64_t g_next = 1;
 
 fs::path data_root() { return fs::u8path(plat::data_root()); }
+fs::path game_root() { return fs::u8path(plat::game_root()); }
 
 std::string utf8(const fs::path& p) {
     auto s = p.u8string();
@@ -213,13 +214,13 @@ const std::vector<fs::path>& mod_roots() {
     return roots;
 }
 
-// The RomFS with the update applied, loose: <data root>/romfs (the game folder ACNHRecomp-Importer prepares) or
-// <data root>/extract/romfs (a setup's data folder).
+// The RomFS with the update applied, loose: <game root>/romfs (the game folder ACNHRecomp-Importer prepares) or
+// <game root>/extract/romfs (a setup's read-only game folder).
 fs::path romfs_root() {
     static const fs::path p = [] {
         std::error_code ec;
-        fs::path r = data_root() / "romfs";
-        return fs::is_directory(r, ec) ? r : data_root() / "extract" / "romfs";
+        fs::path r = game_root() / "romfs";
+        return fs::is_directory(r, ec) ? r : game_root() / "extract" / "romfs";
     }();
     return p;
 }
@@ -714,7 +715,7 @@ void MountCacheStorage(CPU& c) {  // (name, int index)
 std::vector<int> aoc_indexes() {
     std::vector<int> out;
     std::error_code ec;
-    for (auto& e : fs::directory_iterator(data_root() / "aoc", ec)) {
+    for (auto& e : fs::directory_iterator(game_root() / "aoc", ec)) {
         if (!e.is_directory()) continue;
         std::string n = utf8(e.path().filename());
         if (!n.empty() && n.find_first_not_of("0123456789") == std::string::npos) out.push_back(std::stoi(n));
@@ -749,7 +750,7 @@ void QueryMountAddOnContentCacheSize(CPU& c) {  // Result (size_t*, int index)
 
 void MountAddOnContent(CPU& c) {  // Result (const char* name, int index, void* cache, size_t)
     std::lock_guard lk(g_fs);
-    fs::path p = data_root() / "aoc" / std::to_string(int(c.x[1]));
+    fs::path p = game_root() / "aoc" / std::to_string(int(c.x[1]));
     std::error_code ec;
     if (!fs::is_directory(p, ec)) {
         log("aoc: MountAddOnContent(%d): not imported", int(c.x[1]));

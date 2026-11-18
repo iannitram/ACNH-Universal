@@ -223,7 +223,7 @@ bool read_whole(const std::string& path, std::string& out) {
     return ok;
 }
 
-// spirv.pak (tools/pack_spirv.py): the spirv folder's .spv files in one file, opened once. On Android the data folder
+// spirv.pak (tools/pack_spirv.py): the spirv folder's .spv files in one file, opened once. On Android the game folder
 // is on shared storage (FUSE), where opening each of ~9,000 small files took milliseconds: shaders met for the first
 // time while playing stalled the replay. Header "SPK1", the count, then per file 16 bytes of hash, its offset and
 // size (u64 each), then the data. A .spv missing from it is read from the folder. The folder's results.tsv is in it
@@ -235,7 +235,7 @@ struct SpirvPak {
 SpirvPak& spirv_pak() {
     static SpirvPak p = [] {
         SpirvPak x;
-        const std::string path = plat::data_root() + "/spirv.pak";
+        const std::string path = plat::game_root() + "/spirv.pak";
         FILE* f = plat::fopen_utf8(path, "rb");
         if (!f) return x;
         uint32_t head[2] = {};
@@ -291,7 +291,8 @@ bool builtin_hdr_spirv(const std::string& hash, std::string& out) {
 
 bool read_spirv(const std::string& hash, std::string& out) {
     if (hdr_requested() != HdrOutput::Off) {
-        const bool file = read_whole(plat::data_root() + "/spirv_hdr/" + hash + ".spv", out);  // a newer one, while working on it
+        // The data root: the player writes these while working on a shader.
+        const bool file = read_whole(plat::data_root() + "/spirv_hdr/" + hash + ".spv", out);
         if (file || builtin_hdr_spirv(hash, out)) {
             if (std::lock_guard lk(g_hdr_lock); g_hdr_replaced.insert(hash).second)
                 log("nvn: shader %s: HDR replacement%s", hash.c_str(), file ? " (spirv_hdr)" : "");
@@ -305,7 +306,7 @@ bool read_spirv(const std::string& hash, std::string& out) {
             if (plat::read_at(p.f, it->second.first, out.data(), out.size()) == out.size()) return true;
         }
     }
-    return read_whole(plat::data_root() + "/spirv/" + hash + ".spv", out);
+    return read_whole(plat::game_root() + "/spirv/" + hash + ".spv", out);
 }
 
 struct Cache {
@@ -344,7 +345,7 @@ const ShaderInfo* shader_for(uint64_t code_host, uint64_t control) {
     Cache& k = cache();
     std::lock_guard lk(k.lock);
     if (auto it = k.by_hash.find(hash); it != k.by_hash.end()) return it->second.get();
-    std::string dir = plat::data_root() + "/spirv/";
+    std::string dir = plat::game_root() + "/spirv/";
     if (!k.resources_loaded) {
         k.resources_loaded = true;
         std::string text;

@@ -198,14 +198,14 @@ void boot() {
     std::vector<const ModuleInfo*> mods = {&nx_module_main};
     if (const ModuleInfo* sub = plat::game_module("subsdk0")) mods.push_back(sub);
     mods.push_back(&nx_module_sdk);
-    load_modules(mods.data(), mods.size(), plat::data_root() + "/analysis");
+    load_modules(mods.data(), mods.size(), plat::game_root() + "/analysis");
 #else
 #ifdef NX_HAS_SUBSDK0
     const ModuleInfo* mods[] = {&nx_module_main, &nx_module_subsdk0, &nx_module_sdk};
 #else
     const ModuleInfo* mods[] = {&nx_module_main, &nx_module_sdk};
 #endif
-    load_modules(mods, sizeof(mods) / sizeof(mods[0]), plat::data_root() + "/analysis");
+    load_modules(mods, sizeof(mods) / sizeof(mods[0]), plat::game_root() + "/analysis");
 #endif
 
     uint64_t tdata = 0, tdata_end = 0;

@@ -21,6 +21,9 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include "nvn_pipeline.h"
 #include "nvn_ultrawide.h"
@@ -279,6 +282,7 @@ VkShaderModule module_of(const ShaderInfo* s, const uint8_t* kinds = nullptr, ui
         }
         nan_coords_module(code);  // nvn_spirv_nan.cpp
         device_compat_module(s, code);  // Mali: NonWritable vertex buffers, no fragment interlock
+#if !defined(__APPLE__) || !TARGET_OS_IPHONE  // no std::system on iOS
         if (const char* opt = std::getenv("NX_SPIRV_OPT"); opt || std::getenv("NX_SPIRV_TOOL")) {  // diagnostic: each module through `spirv-opt <flags>` (NX_SPIRV_OPT) or `<tool> in out` (NX_SPIRV_TOOL) first
             static int n = 0;
             std::string in = "/tmp/nx_spv_" + std::to_string(process_id()) + "_" + std::to_string(n++) + ".spv", out = in + ".out";
@@ -297,6 +301,7 @@ VkShaderModule module_of(const ShaderInfo* s, const uint8_t* kinds = nullptr, ui
                 std::remove(in.c_str()), std::remove(out.c_str());
             }
         }
+#endif
         VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         ci.codeSize = code.size() * 4;
         ci.pCode = code.data();

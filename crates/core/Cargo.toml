@@ -12,9 +12,9 @@ name = "acnh_core"
 path = "src/lib.rs"
 
 [features]
-# `relay` links iannitram/save-relay's library (src/relay.rs, planned); its issue adds the
+# `relay` links iannitram/save-relay's library (src/relay.rs); its issue adds the
 # dependency. The core builds without it, so every module is testable with no network.
-relay = []
+relay = ["dep:save-relay"]
 # Hub discovery, pairing, and sealed build transfers (src/hub.rs, ADR 0004),
 # adapted from totk-universal with optional dependencies so the base core stays small.
 hub = ["dep:mdns-sd", "dep:spake2", "dep:hmac", "dep:serde", "dep:serde_json", "dep:chacha20poly1305"]
@@ -24,6 +24,7 @@ hub = ["dep:mdns-sd", "dep:spake2", "dep:hmac", "dep:serde", "dep:serde_json", "
 [dependencies]
 # SHA-256 for bundles (`bundle::manifest`, `verify`).
 sha2 = "0.10"
+save-relay = { git = "https://github.com/iannitram/save-relay", optional = true }
 # Pure-Rust discovery, PAKE, peer records, and authenticated bounded-memory transfers.
 # Versions follow the credited sibling hub implementation (see NOTICE).
 mdns-sd = { version = "0.21.7", optional = true, default-features = false }

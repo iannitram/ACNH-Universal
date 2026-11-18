@@ -34,10 +34,13 @@ pub mod gamefolder;
 pub mod hub;
 pub mod launch;
 pub mod nso;
+pub mod pack;
 pub mod platform;
 pub mod prepare;
 pub mod profile;
 pub mod recipe;
+#[cfg(feature = "relay")]
+pub mod relay;
 pub mod savecard;
 pub mod saves;
 pub mod steam;
