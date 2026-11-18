@@ -94,6 +94,30 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  boot-smoke:
+    name: Boot smoke (Linux)
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Toolchain
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update -q
+          $SUDO apt-get install -yq --no-install-recommends build-essential cmake ninja-build pkg-config libsdl3-dev libvulkan-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - name: Player through cargo, then boot on a fake game library
+        run: bash tools/boot_smoke.sh
+
   android:
     name: Cross-build (Android)
     runs-on: [self-hosted, linux]
