@@ -247,6 +247,17 @@ std::string data_root() {
     return r ? r : nx::game::kInfo.pc_data_root;
 }
 
+// The game inside the app (Contents/Resources/game on the Mac, ACNH.app/game on the iPad), or NX_GAME_ROOT from the
+// launcher; the data root otherwise (a development build).
+std::string game_root() {
+    const char* base = SDL_GetBasePath();
+    const auto is_file = [](const std::string& path) {
+        std::error_code ec;
+        return std::filesystem::is_regular_file(std::filesystem::u8path(path), ec);
+    };
+    return choose_game_root(std::getenv("NX_GAME_ROOT"), true, base ? base : "", is_file, data_root());
+}
+
 std::string device_locale() { return ""; }
 
 std::string setting(const std::string& key) {
