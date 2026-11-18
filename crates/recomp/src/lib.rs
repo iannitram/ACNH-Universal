@@ -9,6 +9,9 @@
 //! It reads my game folder on a hub and writes generated code beside the build; neither ever
 //! enters this repo or a bundle (M14).
 
+pub mod analyse;
+pub mod decode;
+pub mod ehframe;
 pub mod load;
 
 pub use load::{
