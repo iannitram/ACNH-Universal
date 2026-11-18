@@ -1,0 +1,155 @@
+# Release builds of the launcher (SPEC.md M13, M14): on a version tag (v*), build the Rust app and the
+# command line for Linux (AppImage), Windows (zip) and the Mac (app, zipped), check each file list for game
+# data (tools/check_release_files.sh), and attach the three files to a draft release. The release holds
+# no game data. Replaces tools/package_release_*.sh for our launcher. Runs on a tag pushed to a test branch too.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
+
+jobs:
+  linux:
+    name: AppImage
+    runs-on: [self-hosted, linux]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: C toolchain
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update -q
+          $SUDO apt-get install -yq --no-install-recommends build-essential pkg-config libudev-dev libxkbcommon-dev libfontconfig1-dev file curl
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - run: cargo build --release -p acnh-app -p acnh-cli
+      - name: AppImage
+        run: |
+          D=AppDir
+          rm -rf "$D" && mkdir -p "$D/usr/bin"
+          cp target/release/acnh-app target/release/acnh-universal "$D/usr/bin/"
+          cp assets/acnhrecomp.png "$D/acnh-universal.png"
+          cat > "$D/acnh-universal.desktop" <<DESK
+          [Desktop Entry]
+          Type=Application
+          Name=ACNH Universal
+          Exec=acnh-app
+          Icon=acnh-universal
+          Categories=Game;
+          DESK
+          sed -i 's/^ *//' "$D/acnh-universal.desktop"
+          printf '#!/bin/sh\nH=$(dirname "$(readlink -f "$0")")\nexport PATH="$H/usr/bin:$PATH"\nexec "$H/usr/bin/acnh-app" "$@"\n' > "$D/AppRun"
+          chmod +x "$D/AppRun"
+          find "$D" -type f | tee files.txt
+          bash tools/check_release_files.sh < files.txt
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool "$D" "ACNH-Universal-$VERSION-linux-x86_64.AppImage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: ACNH-Universal-*.AppImage
+
+  windows:
+    name: Windows zip
+    runs-on: [self-hosted, windows]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - run: cargo build --release -p acnh-app -p acnh-cli
+      - name: Zip
+        run: |
+          N="ACNH-Universal-$VERSION-windows-x64"
+          rm -rf "$N" && mkdir "$N"
+          cp target/release/acnh-app.exe target/release/acnh-universal.exe "$N/"
+          cp assets/acnhrecomp.ico "$N/"
+          find "$N" -type f | tee files.txt
+          bash tools/check_release_files.sh < files.txt
+          powershell -NoProfile -Command "Compress-Archive -Path '$N' -DestinationPath '$N.zip'"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: ACNH-Universal-*.zip
+
+  mac:
+    name: Mac app
+    runs-on: [self-hosted, macos]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - run: cargo build --release -p acnh-app -p acnh-cli
+      - name: App bundle
+        run: |
+          A="ACNH Universal.app"
+          rm -rf "$A" && mkdir -p "$A/Contents/MacOS" "$A/Contents/Resources"
+          cp target/release/acnh-app "$A/Contents/MacOS/acnh-app"
+          cp target/release/acnh-universal "$A/Contents/MacOS/acnh-universal"
+          cp assets/acnhrecomp.icns "$A/Contents/Resources/"
+          cat > "$A/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleName</key><string>ACNH Universal</string>
+          <key>CFBundleIdentifier</key><string>io.github.iannitram.acnh-universal</string>
+          <key>CFBundleExecutable</key><string>acnh-app</string>
+          <key>CFBundleIconFile</key><string>acnhrecomp</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleShortVersionString</key><string>${VERSION#v}</string>
+          <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          sed -i '' 's/^ *//' "$A/Contents/Info.plist"
+          codesign --force --deep --sign - "$A"
+          find "$A" -type f | tee files.txt
+          bash tools/check_release_files.sh < files.txt
+          ditto -c -k --keepParent "$A" "ACNH-Universal-$VERSION-mac.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: ACNH-Universal-*.zip
+
+  publish:
+    name: Draft release
+    if: github.ref_type == 'tag'
+    needs: [linux, windows, mac]
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: File list has no game data
+        run: |
+          ls dist | tee files.txt
+          bash tools/check_release_files.sh < files.txt
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --draft --title "$VERSION" --notes "Launcher builds. No game data; bring your own game folder."
