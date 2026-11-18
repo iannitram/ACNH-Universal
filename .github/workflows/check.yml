@@ -81,9 +81,11 @@ jobs:
       - name: Configure
         run: cmake -B build -G Ninja -DNX_TESTS=ON -DNX_GAME=acnh -DNX_LAUNCHER=OFF -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        run: cmake --build build --target gpu_pick_test tiling_test astc_test
+        run: cmake --build build --target gpu_pick_test tiling_test astc_test game_root_test
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Game reads stay on the game root
+        run: bash tests/game_root_check.sh
 
   android:
     name: Cross-build (Android)

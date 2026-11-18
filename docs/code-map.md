@@ -14,6 +14,8 @@ Status per module: **present** (built), **stub** (the final types and signatures
 | iOS / iPadOS | iPhone or iPad + controller | recompiled, ARM64 (no JIT) | Metal (or MoltenVK) | the Mac, installed by cable | none: the game app | the game app (save-relay C interface) | `cargo check` for `aarch64-apple-ios` in the macOS job (now) |
 | Android | Adreno device + controller | recompiled, ARM64 | NVN on Vulkan (Turnip) | the Strix Halo tablet | Slint app, same APK as the player | the launcher | GitHub-hosted Linux (ubuntu-24.04): `aarch64-linux-android` cross-build, NDK 28.2.13676358 (now) |
 
+Where the game root is: `plat::game_root()` (`runtime/src/game_root.h`) is `NX_GAME_ROOT` when set; else, on macOS and iOS, `game/` beside SDL's base (`ACNH-Universal.app/Contents/Resources/game/` on the Mac, `ACNH.app/game/` on the iPad) when it holds `analysis/main.bin`; else the data root (Linux, Windows, Android and a development build read as before). The player reads the game from the game root and writes saves, settings and logs to `plat::data_root()` (`~/Library/Application Support/ACNH-Universal` on the Mac, the app's Documents folder on the iPad).
+
 Rules that keep it portable: `crates/core` is pure Rust (no C library, no OpenSSL; the hub's crates are `mdns-sd`, RustCrypto `spake2`, `chacha20poly1305`, `sha2`, behind feature `hub`); no `std::os::*` outside `platform` and `steam`; every OS rule takes its folders from `platform::Vars`, so Linux, Windows and Mac rules are tested on every runner; tests build temporary folders under `std::env::temp_dir()` and never read a real game file. `crates/core` has `#![forbid(unsafe_code)]`; the runtime is the only crate with `unsafe` and FFI, and each `unsafe` block carries a `// SAFETY:` line.
 
 ## How it fits together
@@ -101,7 +103,7 @@ Built as a static library linked into the player while C++ remains; each Rust gr
 | `Config` | stub (listed) | `config.cpp`: `config.ini` to the `NX_*` settings | 4.02 | M2, M13 |
 | `Time` | stub (listed) | `hle_time.cpp`, `svc_time.cpp`: the island clock (`NX_TIME_OFFSET`) | 4.03 | M12, M13 |
 | `Saves` | stub (listed) | `saves.cpp`, `users.cpp`, `svc_account.cpp` | 4.04 | M6, M13 |
-| `Files` | stub (listed) | `hle_fs.cpp`, `game_folder.cpp`, `mod_fetch.cpp`: the romfs, its packs, mods | 4.05 | M13 |
+| `Files` | stub (listed) | `hle_fs.cpp`, `game_folder.cpp`, `mod_fetch.cpp`, `game_root.h`: the romfs, its packs, fonts, glyphs, shaders and add-on content from the game root; mods and the player's own files from the data root | 4.05 | M13 |
 | `Input` | stub (listed) | `hle_hid.cpp`, `input_script.cpp`, `touch_layout.cpp` | 4.06 | M3, M5, M9, M13 |
 | `Audio` | stub (listed) | `hle_audio.cpp` | 4.07 | M13 |
 | `Services` | stub (listed) | `svc_am.cpp`, `svc_set.cpp`, `svc_misc.cpp`, `svc_process.cpp`, the other `hle_*.cpp` (bcat, friends, ldn, movie, net, nfp, ngc, pl, ro, vi) | 4.08 | M13 |
