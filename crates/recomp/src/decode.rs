@@ -303,7 +303,8 @@ fn decode_dp_imm(w: u32, pc: u64) -> Option<Insn> {
                 return None;
             }
             let (immr, imms) = ((w >> 16) & 0x3F, (w >> 10) & 0x3F);
-            if opc == 0 && sf && immr == 0 && imms == 31 && rn != 31 && rd != 31 {
+            let copy = immr == 0 && imms == 31 && rn != 31 && rd != 31;
+            if (opc == 0 && sf || opc == 2) && copy {
                 Some(Insn::Copy { rd, rn })
             } else {
                 other(rd)
@@ -425,5 +426,11 @@ mod tests {
     fn logical_immediates() {
         assert_eq!(bitmask(true, 1, 0x1F, 0), Some(0xFFFF_FFFF));
         assert_eq!(bitmask(true, 1, 0x3F, 0), None);
+    }
+
+    #[test]
+    fn zero_and_sign_extend_copies() {
+        assert_eq!(decode(0xD340_7C00, 0), Some(Insn::Copy { rd: 0, rn: 0 }));
+        assert_eq!(decode(0x9340_7C00, 0), Some(Insn::Copy { rd: 0, rn: 0 }));
     }
 }
