@@ -34,6 +34,7 @@ pub mod gamefolder;
 pub mod hub;
 pub mod launch;
 pub mod nso;
+pub mod nso2bin;
 pub mod pack;
 pub mod platform;
 pub mod prepare;
