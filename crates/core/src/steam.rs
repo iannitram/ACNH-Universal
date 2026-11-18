@@ -4,8 +4,10 @@
 //! closed (`write_shortcut`). Copied from iannitram/totk-universal's `steam` (MIT) by its
 //! issues.
 
-use crate::error::{not_built, Error, Result};
+use crate::artwork::{self, Art};
+use crate::error::{Error, Result};
 use crate::platform::Vars;
+use crate::vdf;
 use crate::vdf::Value;
 use std::path::{Path, PathBuf};
 
@@ -149,12 +151,42 @@ pub fn userdata_roots(vars: &Vars) -> Vec<PathBuf> {
 }
 
 /// Write the shortcut into every Steam user's `config/shortcuts.vdf` under `userdata`
-/// (keeping a `.bak` of the old file), only when Steam is not running (`steam_running`);
-/// else `Error::Steam("close Steam first")`. Returns the files written.
+/// (keeping a `.bak` of the old file) and each of `images` at `artwork::paths`, only when
+/// Steam is not running (`steam_running`); else `Error::Steam("close Steam first")` and
+/// nothing is written. Returns the shortcuts files written.
 pub fn write_shortcut(
     userdata: &Path,
     s: &Shortcut,
+    images: &[(Art, Vec<u8>)],
     steam_running: &dyn Fn() -> bool,
 ) -> Result<Vec<PathBuf>> {
-    not_built("steam::write_shortcut")
+    if steam_running() {
+        return Err(Error::Steam("close Steam first".into()));
+    }
+    let mut written = Vec::new();
+    for entry in std::fs::read_dir(userdata)? {
+        let user_dir = entry?.path();
+        if !user_dir.is_dir() {
+            continue;
+        }
+        let file = user_dir.join("config").join("shortcuts.vdf");
+        let mut doc = if file.exists() {
+            vdf::read(&std::fs::read(&file)?)?
+        } else {
+            Vec::new()
+        };
+        let app_id = upsert(&mut doc, s)?;
+        if file.exists() {
+            std::fs::copy(&file, file.with_extension("vdf.bak"))?;
+        }
+        std::fs::create_dir_all(artwork::grid_dir(&user_dir))?;
+        std::fs::write(&file, vdf::write(&doc))?;
+        for (art, path) in artwork::paths(&user_dir, app_id) {
+            if let Some((_, bytes)) = images.iter().find(|(a, _)| *a == art) {
+                std::fs::write(path, bytes)?;
+            }
+        }
+        written.push(file);
+    }
+    Ok(written)
 }
