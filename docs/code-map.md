@@ -116,7 +116,7 @@ Built as a static library linked into the player while C++ remains; each Rust gr
 
 | Path | Status | Owns | Replaces | Musts |
 |---|---|---|---|---|
-| `crates/cli` (`acnh-universal`) | stub | `check`, `build`, `play`, `steam-add`, `hub serve/pair/pull`, `fleet`; the Steam shortcut runs `play` | `tools/setup_acnh.py`'s command line, `tools/launcher.sh` | M1, M2, M6, M11 |
+| `crates/cli` (`acnh-universal`) | present (`hub` at #66) | `check`, `build`, `play`, `steam-add`, `fleet`; plain messages, `--json` prints the error `code()`, unknown commands exit 2 with usage; the Steam shortcut runs `play`; `hub` joins at #66 | `tools/setup_acnh.py`'s command line, `tools/launcher.sh` | M1, M2, M6, M11 |
 | `app/` (`acnh-app`) | planned | the launcher, Rust + Slint, Linux, Windows, macOS, Android; links `acnh_core` | `launcher/` (SDL3 + ImGui: `main.cpp`, `desktop.cpp`, `pages.cpp`, `pipeline.cpp`, `files.cpp`) | M2, M4, M9-M11, M13 |
 | `app/src/vm/` | planned | view models: `continue_page`, `first_run`, `saves`, `settings`, `fleet`, `about` | | M8, M10, M11 |
 | `app/src/input.rs` | planned | `Nav` from gilrs (desktop) and Android key events | | M9, M10 |
