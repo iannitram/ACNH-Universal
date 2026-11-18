@@ -167,7 +167,7 @@ CI (M15): `.github/workflows/check.yml` runs fmt, clippy and test, with and with
 | the RTX 3090 Ti desktop | windows | itself |
 | the Mac | mac, ios | itself; the iPhone or iPad as an `.ipa` in Dropbox (SideStore) |
 
-A bundle holds the player a hub built (its files, sizes and hashes), never game data: not the game folder, not the game library, `romfs.pak`, `spirv.pak` or `gen/`, not a save. The game data a prepare made goes to my own paired devices separately, over the home network only (5.04), and lands in the data root, which `bundle::install` keeps. Nothing leaves the home network.
+A bundle holds the player a hub built (its files, sizes and hashes), never game data: not the game folder, not the game library, `romfs.pak`, `spirv.pak` or `gen/`, not a save. The game data a prepare made goes to my own paired devices separately, over the home network only (5.04), and lands in the data root, which `bundle::install` keeps. Nothing leaves the home network, except the final Apple builds in my own Dropbox (`SPEC.md`, Won'ts).
 
 ## Not verified yet
 
