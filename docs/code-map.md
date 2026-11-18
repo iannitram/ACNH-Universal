@@ -8,11 +8,11 @@ Status per module: **present** (built), **stub** (the final types and signatures
 
 | Device family | 1.0 device | Game code | Renderer | Built on (hub) | Launcher | Save sync in | CI |
 |---|---|---|---|---|---|---|---|
-| Linux / SteamOS | the AMD handheld, the Strix Halo tablet | recompiled, x86-64 | NVN on Vulkan (RADV) | the Strix Halo tablet; the AMD handheld pulls | Slint app (AppImage), opened by the Steam shortcut | the launcher | self-hosted Linux: workspace, game-data check and the Android cross-build, the C++ unit tests (now); boot smoke (4.01) |
-| Windows | the RTX 3090 Ti desktop | recompiled, x86-64 | NVN on Vulkan | the desktop | Slint app | the launcher | self-hosted Windows: workspace (now); the C++ build (7.01) |
-| macOS | a Mac with Apple silicon + controller | recompiled, ARM64 | MoltenVK, then upstream's Metal | the Mac | Slint app (also builds and installs the iOS app) | the launcher | `macos-latest` on request (paid minutes) until the Mac runner is online |
-| iOS / iPadOS | iPhone or iPad + controller | recompiled, ARM64 (no JIT) | Metal (or MoltenVK) | the Mac, installed by cable | none: the game app | the game app (save-relay C interface) | `cargo check` for `aarch64-apple-ios` in the macOS job, on request until the Mac runner is online (now) |
-| Android | Adreno device + controller | recompiled, ARM64 | NVN on Vulkan (Turnip) | the Strix Halo tablet | Slint app, same APK as the player | the launcher | self-hosted Linux: `aarch64-linux-android` cross-build, NDK 28.2.13676358 on the runner (now) |
+| Linux / SteamOS | the AMD handheld, the Strix Halo tablet | recompiled, x86-64 | NVN on Vulkan (RADV) | the Strix Halo tablet; the AMD handheld pulls | Slint app (AppImage), opened by the Steam shortcut | the launcher | GitHub-hosted Linux (ubuntu-24.04): workspace, game-data check and the Android cross-build, the C++ unit tests (now); boot smoke (4.01) |
+| Windows | the RTX 3090 Ti desktop | recompiled, x86-64 | NVN on Vulkan | the desktop | Slint app | the launcher | GitHub-hosted Windows (windows-2025): workspace (now); the C++ build (7.01) |
+| macOS | a Mac with Apple silicon + controller | recompiled, ARM64 | MoltenVK, then upstream's Metal | the Mac | Slint app (also builds and installs the iOS app) | the launcher | GitHub-hosted macOS (macos-15): workspace (now) |
+| iOS / iPadOS | iPhone or iPad + controller | recompiled, ARM64 (no JIT) | Metal (or MoltenVK) | the Mac, installed by cable | none: the game app | the game app (save-relay C interface) | `cargo check` for `aarch64-apple-ios` in the macOS job (now) |
+| Android | Adreno device + controller | recompiled, ARM64 | NVN on Vulkan (Turnip) | the Strix Halo tablet | Slint app, same APK as the player | the launcher | GitHub-hosted Linux (ubuntu-24.04): `aarch64-linux-android` cross-build, NDK 28.2.13676358 (now) |
 
 Rules that keep it portable: `crates/core` is pure Rust (no C library, no OpenSSL; the hub's crates are `mdns-sd`, RustCrypto `spake2`, `chacha20poly1305`, `sha2`, behind feature `hub`); no `std::os::*` outside `platform` and `steam`; every OS rule takes its folders from `platform::Vars`, so Linux, Windows and Mac rules are tested on every runner; tests build temporary folders under `std::env::temp_dir()` and never read a real game file. `crates/core` has `#![forbid(unsafe_code)]`; the runtime is the only crate with `unsafe` and FFI, and each `unsafe` block carries a `// SAFETY:` line.
 
@@ -157,7 +157,7 @@ cargo test --workspace --all-features    # with the hub
 python3 tools/setup_acnh.py --help       # upstream's build, until 1.31
 ```
 
-CI (M15): `.github/workflows/check.yml` runs fmt, clippy and test, with and without `--all-features`, on the self-hosted Linux and Windows runners, the game-data check over every tracked file, the Android cross-build (`aarch64-linux-android`), and macOS on request (with the iOS check, `aarch64-apple-ios`); `build.yml` is upstream's release build. The C++ unit tests (`NX_TESTS=ON`: `gpu_pick`, `tiling`, `astc`) run on the self-hosted Linux runner in its `cpp` job (0.01); `shader_cache` needs the game folder and `memguard` is Windows-only, so neither runs there. Not in CI yet: the boot smoke test (4.01).
+CI (M15): `.github/workflows/check.yml` runs fmt, clippy and test, with and without `--all-features`, on GitHub-hosted Linux and Windows runners, the game-data check over every tracked file, the Android cross-build (`aarch64-linux-android`), and macOS (with the iOS check, `aarch64-apple-ios`); `build.yml` is upstream's release build. The C++ unit tests (`NX_TESTS=ON`: `gpu_pick`, `tiling`, `astc`) run on GitHub-hosted Linux (ubuntu-24.04) in its `cpp` job (0.01); `shader_cache` needs the game folder and `memguard` is Windows-only, so neither runs there. Not in CI yet: the boot smoke test (4.01).
 
 ## Build hubs (ADR 0004)
 
