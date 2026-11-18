@@ -45,34 +45,39 @@ pub struct Request {
     pub jobs: u32,
 }
 
-/// How `stage` runs for `req` right now. While no stage is ported, every stage is
-/// `Script(["python3", "tools/setup_acnh.py", "--game", <game root>, "--out", <out>])`
-/// (`python` instead of `python3` on Windows). Upstream's script has no argument that picks a
-/// stage (its `FORCE` only redoes one), so the unported stages share this one command: a
-/// runner starts it once and follows it stage by stage (`ProcessRunner`). A ported stage's
-/// arm becomes `Step::Rust`.
+/// How `stage` runs for `req` right now. The shaders stage is Rust (`sarc`, `shaders`); the
+/// rest is `Script(["python3", "tools/setup_acnh.py", "--game", <game root>, "--out",
+/// <out>])` (`python` instead of `python3` on Windows). Upstream's script has no argument
+/// that picks a stage (its `FORCE` only redoes one), so the unported stages share this one
+/// command: a runner starts it once and follows it stage by stage (`ProcessRunner`). A ported
+/// stage's arm becomes `Step::Rust`.
 pub fn step(stage: Stage, req: &Request) -> Step {
     match stage {
+        Stage::Shaders => Step::Rust,
         Stage::Tools
         | Stage::Game
         | Stage::Version
         | Stage::Recompile
-        | Stage::Shaders
         | Stage::Fonts
-        | Stage::Build => Step::Script(vec![
-            if req.target == Os::Windows {
-                "python"
-            } else {
-                "python3"
-            }
-            .to_owned(),
-            "tools/setup_acnh.py".to_owned(),
-            "--game".to_owned(),
-            req.game.root.display().to_string(),
-            "--out".to_owned(),
-            req.out.display().to_string(),
-        ]),
+        | Stage::Build => Step::Script(stage_script(req)),
     }
+}
+
+/// Upstream's one command for a stage that is still its script.
+fn stage_script(req: &Request) -> Vec<String> {
+    vec![
+        if req.target == Os::Windows {
+            "python"
+        } else {
+            "python3"
+        }
+        .to_owned(),
+        "tools/setup_acnh.py".to_owned(),
+        "--game".to_owned(),
+        req.game.root.display().to_string(),
+        "--out".to_owned(),
+        req.out.display().to_string(),
+    ]
 }
 
 /// Runs the script of a stage. `Err` holds the log lines of a failed run; a line
@@ -372,10 +377,35 @@ pub fn prepare_with(
             continue;
         }
         progress(stage);
-        if let Step::Script(args) = step(stage, req) {
-            runner
+        match step(stage, req) {
+            Step::Script(args) => runner
                 .run(stage, &args)
-                .map_err(|log| build_error(stage, &log, home))?;
+                .map_err(|log| build_error(stage, &log, home))?,
+            Step::Rust if stage == Stage::Shaders => {
+                // Extract the shaders ourselves; the SPIR-V harness is still the tools'
+                // .NET program. When it is not installed here, upstream's script runs the
+                // stage as before, so a build works either way.
+                let mut translated = false;
+                if req.game.romfs.is_dir() {
+                    let extracted = req.out.join("shaders_extracted");
+                    crate::shaders::extract(
+                        &req.game.romfs,
+                        &req.out.join("analysis").join("main.bin"),
+                        &extracted,
+                        req.jobs,
+                        false,
+                    )
+                    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+                    translated = crate::shaders::translate(&req.out, req.jobs)
+                        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+                }
+                if !translated {
+                    runner
+                        .run(stage, &stage_script(req))
+                        .map_err(|log| build_error(stage, &log, home))?;
+                }
+            }
+            Step::Rust => {}
         }
         if stage == Stage::Tools {
             std::fs::create_dir_all(&req.out)?;
