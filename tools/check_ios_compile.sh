@@ -10,6 +10,14 @@ game=${NX_GAME:-acnh}
 sdl3=$(brew --prefix sdl3)
 vulkan=$(brew --prefix vulkan-headers)
 
+# brew --prefix prints a path even when the formula is not installed: check the headers themselves.
+for header in "$vulkan/include/vulkan/vulkan.h" "$sdl3/include/SDL3/SDL.h"; do
+    if [ ! -f "$header" ]; then
+        echo "error: $header not found: install the headers with: brew install sdl3 vulkan-headers" >&2
+        exit 1
+    fi
+done
+
 sources=()
 while IFS= read -r f; do sources+=("$f"); done < <(
     sed -n '/^set(NX_RUNTIME_SOURCES/,/^)/p' CMakeLists.txt | grep -o 'runtime/src/[^ )]*\.cpp' | sort -u
