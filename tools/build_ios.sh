@@ -73,29 +73,33 @@ if [ ! -f "$sdl_prefix/lib/cmake/SDL3/SDL3Config.cmake" ]; then
     cmake --install "$sdl_build"
 fi
 
-# ---- MoltenVK (static libMoltenVK.a from KhronosGroup's iOS release) --------------------------------------------
+# ---- MoltenVK (static libMoltenVK.a from KhronosGroup's all-platform release) -----------------------------------
+# MoltenVK-ios.tar has only the device slice (ios-arm64); the simulator slice is in MoltenVK-all.tar, so take both
+# from that one. The xcframework's static/ directory holds ios-arm64/libMoltenVK.a (device) and
+# ios-arm64_x86_64-simulator/libMoltenVK.a (simulator).
 mv_prefix=$third/$sdk/moltenvk
-if [ ! -f "$mv_prefix/lib/libMoltenVK.a" ]; then
-    mv_archive=$third/downloads/MoltenVK-ios-$MOLTENVK_TAG.tar
-    mv_src=$third/build/moltenvk-$MOLTENVK_TAG
-    fetch "https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_TAG/MoltenVK-ios.tar" "$mv_archive"
-    [ -d "$mv_src" ] || { mkdir -p "$mv_src"; tar -xf "$mv_archive" -C "$mv_src"; }
-    if [ "$sdk" = iphonesimulator ]; then
-        mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*simulator*' -path '*arm64*' -print -quit)
-        if [ -z "$mv_lib" ]; then
-            mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*simulator*' -print -quit)
-        fi
-    else
-        mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*ios-arm64*' ! -path '*simulator*' -print -quit)
-    fi
+mv_archive=$third/downloads/MoltenVK-all-$MOLTENVK_TAG.tar
+mv_src=$third/build/moltenvk-all-$MOLTENVK_TAG
+fetch "https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_TAG/MoltenVK-all.tar" "$mv_archive"
+[ -d "$mv_src" ] || { mkdir -p "$mv_src"; tar -xf "$mv_archive" -C "$mv_src"; }
+mv_static=$mv_src/MoltenVK/MoltenVK/static/MoltenVK.xcframework
+if [ "$sdk" = iphonesimulator ]; then
+    mv_lib=$mv_static/ios-arm64_x86_64-simulator/libMoltenVK.a
+    [ -f "$mv_lib" ] || mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*simulator*' -path '*arm64*' -print -quit)
     if [ -z "$mv_lib" ]; then
-        mv_lib=$(find "$mv_src" -name libMoltenVK.a -print -quit)
-        echo "warning: no $sdk slice named in the MoltenVK release; using ${mv_lib:-none}" >&2
+        mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*simulator*' -print -quit)
     fi
-    [ -n "$mv_lib" ] || { echo "error: libMoltenVK.a not found in $mv_archive" >&2; exit 1; }
-    mkdir -p "$mv_prefix/lib"
-    cp "$mv_lib" "$mv_prefix/lib/libMoltenVK.a"
+else
+    mv_lib=$mv_static/ios-arm64/libMoltenVK.a
+    [ -f "$mv_lib" ] || mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*/ios-arm64/libMoltenVK.a' -print -quit)
 fi
+if [ ! -f "$mv_lib" ]; then
+    mv_lib=$(find "$mv_src" -name libMoltenVK.a -print -quit)
+    echo "warning: no $sdk slice named in the MoltenVK release; using ${mv_lib:-none}" >&2
+fi
+[ -n "$mv_lib" ] && [ -f "$mv_lib" ] || { echo "error: libMoltenVK.a not found in $mv_archive" >&2; exit 1; }
+mkdir -p "$mv_prefix/lib"
+cp "$mv_lib" "$mv_prefix/lib/libMoltenVK.a"
 
 # ---- the app ----------------------------------------------------------------------------------------------------
 cmake -S "$root" -B "$build" -G Ninja \
