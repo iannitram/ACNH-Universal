@@ -138,7 +138,12 @@ jobs:
         with:
           cache-bin: false
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Homebrew MoltenVK and Vulkan loader (the contained app's, crates/core/tests/assemble.rs)
+        run: brew install molten-vk vulkan-loader
       - run: cargo test --workspace --all-features
+        env:
+          # The Mac assemble tests must use Homebrew's real libraries here, not stand-ins.
+          ACNH_TEST_HOMEBREW_VULKAN: "1"
       - name: iOS cross-check
         run: cargo check --workspace --target aarch64-apple-ios
       - name: Homebrew headers (SDL3, Vulkan)
