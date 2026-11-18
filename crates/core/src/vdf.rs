@@ -27,10 +27,17 @@ pub enum Value {
     Int(u32),
 }
 
-/// Encode a document: each item as above, then 0x08.
-pub fn write(doc: &[(String, Value)]) -> Vec<u8> {
-    fn write_items(out: &mut Vec<u8>, items: &[(String, Value)]) {
+/// Encode a document: each item as above, then 0x08. Returns
+/// `Error::Steam("shortcuts.vdf text can't hold a NUL")` if a key or string
+/// contains a NUL.
+pub fn write(doc: &[(String, Value)]) -> Result<Vec<u8>> {
+    fn write_items(out: &mut Vec<u8>, items: &[(String, Value)]) -> Result<()> {
         for (key, value) in items {
+            if key.contains('\0') {
+                return Err(Error::Steam(
+                    "shortcuts.vdf text can't hold a NUL".to_string(),
+                ));
+            }
             let type_byte = match value {
                 Value::Map(_) => 0x00,
                 Value::Str(_) => 0x01,
@@ -40,8 +47,13 @@ pub fn write(doc: &[(String, Value)]) -> Vec<u8> {
             out.extend_from_slice(key.as_bytes());
             out.push(0x00);
             match value {
-                Value::Map(inner) => write_items(out, inner),
+                Value::Map(inner) => write_items(out, inner)?,
                 Value::Str(text) => {
+                    if text.contains('\0') {
+                        return Err(Error::Steam(
+                            "shortcuts.vdf text can't hold a NUL".to_string(),
+                        ));
+                    }
                     out.extend_from_slice(text.as_bytes());
                     out.push(0x00);
                 }
@@ -49,11 +61,12 @@ pub fn write(doc: &[(String, Value)]) -> Vec<u8> {
             }
         }
         out.push(0x08);
+        Ok(())
     }
 
     let mut out = Vec::new();
-    write_items(&mut out, doc);
-    out
+    write_items(&mut out, doc)?;
+    Ok(out)
 }
 
 /// Decode a document written as above. Errors, all `Error::Steam`:
