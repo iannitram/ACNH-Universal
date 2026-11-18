@@ -1,4 +1,5 @@
 import { Button, VerticalBox } from "std-widgets.slint";
+import { AboutPage } from "about.slint";
 
 export component MainWindow inherits Window {
     title: "ACNH Universal";
@@ -16,30 +17,37 @@ export component MainWindow inherits Window {
         padding: 32px;
         spacing: 16px;
 
-        Text {
-            text: "Continue";
-            font-size: 30px;
-            color: #f4f0e8;
-        }
-        Text {
-            text: "ACNH Universal  ·  " + root.selection;
-            font-size: 18px;
-            color: #b8c7bb;
-        }
-        Rectangle {
-            background: #283d35;
-            border-radius: 12px;
-            VerticalBox {
-                spacing: 8px;
-                Text { text: "Your island"; font-size: 22px; color: #f4f0e8; }
-                Text { text: "Select Continue to sync and play"; color: #d2dfd5; }
-                Text { text: root.status; color: #b8c7bb; }
+        if root.selection != "About": VerticalBox {
+            spacing: 16px;
+
+            Text {
+                text: "Continue";
+                font-size: 30px;
+                color: #f4f0e8;
+            }
+            Text {
+                text: "ACNH Universal  ·  " + root.selection;
+                font-size: 18px;
+                color: #b8c7bb;
+            }
+            Rectangle {
+                background: #283d35;
+                border-radius: 12px;
+                VerticalBox {
+                    spacing: 8px;
+                    Text { text: "Your island"; font-size: 22px; color: #f4f0e8; }
+                    Text { text: "Select Continue to sync and play"; color: #d2dfd5; }
+                    Text { text: root.status; color: #b8c7bb; }
+                }
+            }
+            Button {
+                text: root.selected == 0 ? "▶  Continue" : "Continue";
+                clicked => { root.activate(); }
             }
         }
-        Button {
-            text: root.selected == 0 ? "▶  Continue" : "Continue";
-            clicked => { root.activate(); }
-        }
+
+        if root.selection == "About": AboutPage {}
+
         Text {
             text: "D-pad / stick to browse     A to activate     B to go back";
             color: #b8c7bb;

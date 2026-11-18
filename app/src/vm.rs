@@ -1,5 +1,8 @@
 //! View state kept separate from Slint so page behavior can be tested headlessly.
 
+pub mod about;
+pub use about::AboutVm;
+
 /// Navigation actions shared by keyboard and gamepad input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nav {

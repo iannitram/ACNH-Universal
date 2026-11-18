@@ -1,0 +1,106 @@
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export struct CreditEntry {
+    name: string,
+    licence: string,
+    role: string,
+}
+
+export struct FixEntry {
+    title: string,
+    link: string,
+}
+
+export component AboutPage inherits Rectangle {
+    in property<string> upstream-credit: "Nycolazs/ACNHRecomp (MIT)";
+    in property<string> slint-notice: "GUI powered by Slint (https://slint.dev). Copyright © SixtyFPS GmbH.";
+    in property<[CreditEntry]> credits: [
+        { name: "Nycolazs/ACNHRecomp", licence: "MIT", role: "Upstream project" },
+        { name: "iannitram/totk-universal", licence: "MIT", role: "Launcher architecture & modules" },
+        { name: "iannitram/save-relay", licence: "MIT", role: "Cross-device save sync" },
+        { name: "cesar527/ACNHRecomp", licence: "MIT", role: "Thermal governor & power modes" },
+        { name: "ZUlxian/ACNHRecomp", licence: "MIT", role: "Game folder import & fixes" },
+        { name: "Norviah/animal-crossing", licence: "MIT", role: "Item & villager metadata" },
+        { name: "fedebuonco/nxrt", licence: "Unlicense", role: "Runtime & launcher prior art" },
+    ];
+    in property<[FixEntry]> offered-fixes: [
+        { title: "VSync timer pacing on 75/144/165 Hz displays", link: "https://github.com/Nycolazs/ACNHRecomp/pull/55" },
+        { title: "Thermal governor and handheld power profiles", link: "https://github.com/Nycolazs/ACNHRecomp/pull/56" },
+    ];
+
+    background: #172821;
+
+    VerticalBox {
+        padding: 24px;
+        spacing: 12px;
+
+        Text {
+            text: "About";
+            font-size: 28px;
+            color: #f4f0e8;
+            font-weight: 700;
+        }
+
+        Text {
+            text: "Upstream: " + root.upstream-credit;
+            font-size: 16px;
+            color: #d2dfd5;
+        }
+
+        Rectangle {
+            background: #283d35;
+            height: 1px;
+        }
+
+        Text {
+            text: "Fixes Offered Upstream (M8)";
+            font-size: 18px;
+            color: #f4f0e8;
+        }
+
+        for fix in root.offered-fixes: HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "• " + fix.title;
+                color: #d2dfd5;
+                font-size: 14px;
+            }
+            Text {
+                text: "(" + fix.link + ")";
+                color: #8da394;
+                font-size: 12px;
+            }
+        }
+
+        Rectangle {
+            background: #283d35;
+            height: 1px;
+        }
+
+        Text {
+            text: "Credits & Licences";
+            font-size: 18px;
+            color: #f4f0e8;
+        }
+
+        for c in root.credits: HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: c.name + " (" + c.licence + ") - " + c.role;
+                color: #b8c7bb;
+                font-size: 13px;
+            }
+        }
+
+        Rectangle {
+            background: #283d35;
+            height: 1px;
+        }
+
+        Text {
+            text: root.slint-notice;
+            font-size: 13px;
+            color: #8da394;
+        }
+    }
+}

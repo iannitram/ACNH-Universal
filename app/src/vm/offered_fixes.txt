@@ -1,0 +1,7 @@
+# Fixes of ours offered upstream (SPEC.md M8)
+# Format: title | link | status
+# Status: "offered" (shown until upstream has it) or "upstream" (already landed upstream)
+
+VSync timer pacing on 75/144/165 Hz displays | https://github.com/Nycolazs/ACNHRecomp/pull/55 | offered
+Thermal governor and handheld power profiles | https://github.com/Nycolazs/ACNHRecomp/pull/56 | offered
+SteamOS shared font discovery fallback | https://github.com/Nycolazs/ACNHRecomp/pull/40 | upstream
