@@ -81,7 +81,10 @@ if [ ! -f "$mv_prefix/lib/libMoltenVK.a" ]; then
     fetch "https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_TAG/MoltenVK-ios.tar" "$mv_archive"
     [ -d "$mv_src" ] || { mkdir -p "$mv_src"; tar -xf "$mv_archive" -C "$mv_src"; }
     if [ "$sdk" = iphonesimulator ]; then
-        mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*simulator*' -print -quit)
+        mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*simulator*' -path '*arm64*' -print -quit)
+        if [ -z "$mv_lib" ]; then
+            mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*simulator*' -print -quit)
+        fi
     else
         mv_lib=$(find "$mv_src" -name libMoltenVK.a -path '*ios-arm64*' ! -path '*simulator*' -print -quit)
     fi
