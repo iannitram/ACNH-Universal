@@ -2,10 +2,12 @@
 use acnh_core::error::Error;
 use acnh_core::gamefolder::GameFolder;
 use acnh_core::platform::Os;
-use acnh_core::prepare::{prepare_with, step, Request, ScriptRunner, Step};
+use acnh_core::prepare::{prepare_with, step, ProcessRunner, Request, ScriptRunner, Step};
 use acnh_core::recipe::{Hub, Stage, STAGES};
 use acnh_core::version::Version;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 fn request(name: &str, target: Os) -> Request {
     let d = std::env::temp_dir().join(format!("acnh-prep-{name}-{}", std::process::id()));
@@ -232,64 +234,317 @@ fn mac_skips_upstreams_native_executable() {
 }
 
 #[test]
-fn production_adapter_isolated_stages_match_upstreams_commands() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
-        .args([
-            "-B",
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
-            "tools/tests",
-            "-p",
-            "test_prepare_stage.py",
-        ])
-        .current_dir(root)
-        .output()
+fn process_runner_keeps_stdout_and_stderr_lines_separate() {
+    // The system's shell, so the test needs nothing a build machine may lack.
+    let command = if cfg!(windows) {
+        ["cmd", "/C", "echo stdout& echo stderr>&2& exit /b 1"]
+    } else {
+        ["sh", "-c", "printf stdout; printf stderr >&2; exit 1"]
+    }
+    .map(str::to_owned);
+    let log = ProcessRunner::new(std::env::temp_dir(), 0)
+        .run(Stage::Shaders, &command)
+        .unwrap_err();
+    assert_eq!(log, vec!["stdout", "stderr"]);
+}
+
+// ---- The real runner (`ProcessRunner`) on a stand-in for upstream's script ----
+
+/// What upstream's script prints after `== ` as each stage begins (`tools/setup_acnh.py`).
+const SAYS: [&str; 7] = [
+    "tools",
+    "game (the game folder: ExeFS + RomFS, add-on content)",
+    "version",
+    "recompile (main, sdk, subsdk0)",
+    "shaders (Maxwell -> SPIR-V)",
+    "fonts (button icons)",
+    "build (-j2; the first build compiles ~5 CPU-hours of code)",
+];
+
+/// The files a stage leaves in the build folder (tools: none there).
+fn outputs(out: &Path, stage: Stage) -> Vec<PathBuf> {
+    let modules = ["main", "sdk", "subsdk0"];
+    match stage {
+        Stage::Tools => vec![],
+        Stage::Game => modules
+            .iter()
+            .map(|m| out.join("analysis").join(format!("{m}.bin")))
+            .collect(),
+        Stage::Version => vec![out.join("version.ini")],
+        Stage::Recompile => modules
+            .iter()
+            .map(|m| out.join("gen").join(m).join("table.cpp"))
+            .collect(),
+        Stage::Shaders => vec![out.join("spirv").join("summary.txt")],
+        Stage::Fonts => {
+            vec![out.join("fonts/glyphs_xbox/console/romfs/Font/ScalableFont.sarc.zs")]
+        }
+        Stage::Build => vec![out.join("build").join("acnh")],
+    }
+}
+
+fn make(paths: &[PathBuf]) {
+    for path in paths {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "synthetic").unwrap();
+    }
+}
+
+/// Wait (at most 20 s) for `path` to be there.
+fn wait_for(path: &Path) -> bool {
+    let start = Instant::now();
+    while !path.is_file() {
+        if start.elapsed() > Duration::from_secs(20) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+/// Not a test of its own: the stand-in for upstream's script. The tests below start this
+/// test binary again with `setup:<out>` among its arguments, and then it does what
+/// `tools/setup_acnh.py` does, with made-up files: one pass over every stage, `== <stage>`
+/// as each begins, a stage's work skipped when its output is there, exit 1 where
+/// `fail:<stage>` says. Before it works on a stage it waits for `<out>/go-<stage>`, which a
+/// test's progress callback makes: work nobody reported never gets done (`eager`: no wait).
+/// It counts its starts in `starts.txt` of the folder it runs in.
+#[test]
+fn stand_in_setup() {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(out) = args.iter().find_map(|a| a.strip_prefix("setup:")) else {
+        return;
+    };
+    let out = Path::new(out);
+    let fail = args.iter().find_map(|a| a.strip_prefix("fail:"));
+    let eager = args.iter().any(|a| a == "eager");
+    let say = |line: &str| writeln!(std::io::stdout(), "{line}").unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("starts.txt")
+        .and_then(|mut f| f.write_all(b"start\n"))
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    std::fs::write(
+        out.join("jobs.txt"),
+        std::env::var("JOBS").unwrap_or_default(),
+    )
+    .unwrap();
+    for (stage, name) in STAGES.into_iter().zip(SAYS) {
+        say(&format!("\n== {name}"));
+        if fail == Some(stage.key()) {
+            say("boom at /home/me/x");
+            writeln!(std::io::stderr(), "trace of {}", stage.key()).unwrap();
+            std::process::exit(1);
+        }
+        let missing: Vec<PathBuf> = outputs(out, stage)
+            .into_iter()
+            .filter(|path| !path.is_file())
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        if !eager && !wait_for(&out.join(format!("go-{}", stage.key()))) {
+            say(&format!("nobody reported {}", stage.key()));
+            std::process::exit(3);
+        }
+        make(&missing);
+    }
+    say("\n== done: synthetic");
+    std::fs::write(out.join("ended.txt"), "ended").unwrap();
+    std::process::exit(0);
+}
+
+/// The real `ProcessRunner`, in the build folder, started on the stand-in instead of
+/// upstream's command.
+struct StandIn {
+    runner: ProcessRunner,
+    command: Vec<String>,
+}
+
+fn stand_in(req: &Request, jobs: u32, more: &[&str]) -> StandIn {
+    let mut command = vec![
+        std::env::current_exe().unwrap().display().to_string(),
+        "--exact".to_owned(),
+        "stand_in_setup".to_owned(),
+        "--nocapture".to_owned(),
+        format!("setup:{}", req.out.display()),
+    ];
+    command.extend(more.iter().map(|a| (*a).to_owned()));
+    StandIn {
+        runner: ProcessRunner::new(req.out.clone(), jobs),
+        command,
+    }
+}
+
+impl ScriptRunner for StandIn {
+    fn run(&mut self, stage: Stage, _args: &[String]) -> Result<(), Vec<String>> {
+        self.runner.run(stage, &self.command)
+    }
+
+    fn finish(&mut self) -> Result<(), Vec<String>> {
+        self.runner.finish()
+    }
+}
+
+/// A progress callback that records the stage and lets the stand-in work on it.
+fn report<'a>(req: &'a Request, seen: &'a mut Vec<Stage>) -> impl FnMut(Stage) + 'a {
+    move |stage| {
+        seen.push(stage);
+        std::fs::write(req.out.join(format!("go-{}", stage.key())), "").unwrap();
+    }
+}
+
+fn starts(req: &Request) -> usize {
+    std::fs::read_to_string(req.out.join("starts.txt"))
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn one_run_of_the_script_is_followed_stage_by_stage() {
+    let req = request("followed", Os::Linux);
+    let mut seen = vec![];
+    let out = prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut stand_in(&req, 2, &[]),
+        Path::new("/home/me"),
+        &mut report(&req, &mut seen),
+    )
+    .unwrap();
+    assert_eq!(out, req.out);
+    // The script works on a stage only once it was reported, so each was, in order, while
+    // the one run went on; and the run was over when prepare came back.
+    assert_eq!(seen, STAGES.to_vec());
+    assert_eq!(starts(&req), 1);
+    assert!(req.out.join("ended.txt").is_file());
+    assert_eq!(
+        std::fs::read_to_string(req.out.join("jobs.txt")).unwrap(),
+        "2"
     );
 }
 
 #[test]
-fn stage_commands_select_one_stage_and_forward_requested_jobs() {
-    let mut req = request("selected-stage", Os::Linux);
-    req.jobs = 2;
-    for stage in STAGES {
-        assert_eq!(
-            step(stage, &req),
-            Step::Script(vec![
-                "python3".to_owned(),
-                "tools/prepare_stage.py".to_owned(),
-                "--stage".to_owned(),
-                stage.key().to_owned(),
-                "--target".to_owned(),
-                "linux".to_owned(),
-                "--game".to_owned(),
-                req.game.root.display().to_string(),
-                "--out".to_owned(),
-                req.out.display().to_string(),
-                "--jobs".to_owned(),
-                "2".to_owned(),
-            ])
-        );
-    }
+fn stages_the_script_is_already_past_are_still_reported_once() {
+    let req = request("eager", Os::Linux);
+    let mut seen = vec![];
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut stand_in(&req, 0, &["eager"]),
+        Path::new("/h"),
+        &mut |stage| {
+            // The whole script has run through before game is reported as started: every
+            // later output is there before its stage is looked at.
+            if stage == Stage::Game {
+                assert!(wait_for(&req.out.join("ended.txt")));
+            }
+            seen.push(stage);
+        },
+    )
+    .unwrap();
+    assert_eq!(seen, STAGES.to_vec());
+    assert_eq!(starts(&req), 1);
 }
 
 #[test]
-fn process_runner_keeps_stdout_and_stderr_lines_separate() {
-    use acnh_core::prepare::ProcessRunner;
-    let command = [
-        if cfg!(windows) { "python" } else { "python3" }.to_owned(),
-        "-c".to_owned(),
-        "import sys; sys.stdout.write('stdout'); sys.stderr.write('stderr'); sys.exit(1)"
-            .to_owned(),
-    ];
-    let log = ProcessRunner.run(Stage::Shaders, &command).unwrap_err();
-    assert_eq!(log, vec!["stdout", "stderr"]);
+fn a_failing_script_run_names_the_stage_it_failed_in() {
+    let req = request("fail-shaders", Os::Linux);
+    let mut seen = vec![];
+    let err = prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut stand_in(&req, 0, &["fail:shaders"]),
+        Path::new("/home/me"),
+        &mut report(&req, &mut seen),
+    )
+    .unwrap_err();
+    match err {
+        Error::Build(m) => {
+            assert!(m.starts_with("stage shaders: == shaders"), "{m}");
+            assert!(m.contains("boom at ~/x"), "{m}");
+            assert!(m.contains("trace of shaders"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(seen, STAGES[..5].to_vec());
+    assert_eq!(starts(&req), 1);
+    assert!(!req.out.join("build").exists());
+}
+
+#[test]
+fn a_complete_build_folder_starts_no_script() {
+    let req = request("complete", Os::Linux);
+    std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
+    for stage in STAGES {
+        make(&outputs(&req.out, stage));
+    }
+    let mut seen = vec![];
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut stand_in(&req, 0, &[]),
+        Path::new("/h"),
+        &mut report(&req, &mut seen),
+    )
+    .unwrap();
+    assert!(seen.is_empty());
+    assert_eq!(starts(&req), 0);
+}
+
+#[test]
+fn one_missing_output_is_one_reported_stage_and_the_run_ends_first() {
+    let req = request("fonts-only", Os::Linux);
+    std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
+    for stage in STAGES {
+        if stage != Stage::Fonts {
+            make(&outputs(&req.out, stage));
+        }
+    }
+    let mut seen = vec![];
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut stand_in(&req, 0, &[]),
+        Path::new("/h"),
+        &mut report(&req, &mut seen),
+    )
+    .unwrap();
+    assert_eq!(seen, vec![Stage::Fonts]);
+    assert_eq!(starts(&req), 1);
+    assert!(outputs(&req.out, Stage::Fonts)[0].is_file());
+    assert!(req.out.join("ended.txt").is_file());
+}
+
+#[test]
+fn a_failure_in_a_stage_we_did_not_wait_on_is_named_by_the_scripts_line() {
+    // Only the build is missing, and the script fails before it (its own tools check), then
+    // after the last stage we waited on (the build that follows the fonts).
+    for (missing, fail, named) in [
+        (Stage::Build, "fail:tools", "stage tools: == tools"),
+        (Stage::Fonts, "fail:build", "stage build: == build"),
+    ] {
+        let req = request(fail.trim_start_matches("fail:"), Os::Linux);
+        std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
+        for stage in STAGES {
+            if stage != missing {
+                make(&outputs(&req.out, stage));
+            }
+        }
+        let mut seen = vec![];
+        let err = prepare_with(
+            &req,
+            Hub::StrixHalo,
+            &mut stand_in(&req, 0, &[fail]),
+            Path::new("/h"),
+            &mut report(&req, &mut seen),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::Build(m) if m.starts_with(named)),
+            "{err:?}"
+        );
+        assert_eq!(seen, vec![missing]);
+    }
 }
