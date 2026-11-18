@@ -11,7 +11,7 @@ use std::path::Path;
 fn passes_and_ported_flag() {
     assert_eq!(PASSES, [Pass::Load, Pass::Analyse, Pass::Emit]);
     assert!(ported(Pass::Load));
-    assert!(!ported(Pass::Analyse));
+    assert!(ported(Pass::Analyse));
     assert!(!ported(Pass::Emit));
 }
 

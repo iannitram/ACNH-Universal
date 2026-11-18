@@ -88,7 +88,7 @@ Ported pass by pass (ADR 0002). Each pass's output must match `python3 -m recomp
 | Pass | Status | Replaces (lines) | Order | Musts |
 |---|---|---|---|---|
 | `Load` | present | `recomp/nso.py` (200): segments, symbols, relocations | 3.01 | M13 |
-| `Analyse` | planned | `recomp/analysis.py` (439), `recomp/ehframe.py` (142): functions and their bounds | 3.02 | M13 |
+| `Analyse` | present | `recomp/analysis.py` (439), `recomp/ehframe.py` (142): functions and their bounds | 3.02 | M13 |
 | `Emit` (integer, branches) | planned | `recomp/emit.py` (659), `emit_int.py` (421), `regcache.py` (218) | 3.03 | M13 |
 | `Emit` (FP, NEON) | planned | `emit_fp.py` (255), `emit_neon.py` (312), `emit_neon_wide.py` (369), `emit_vldst.py` (92), `emit_ext.py` (249), `emit_sdk20.py` (129) | 3.04 | M13 |
 | driver | planned | `recomp/__main__.py` (303), `stats.py` (48) | 3.05 | M13 |

@@ -9,6 +9,9 @@
 //! It reads my game folder on a hub and writes generated code beside the build; neither ever
 //! enters this repo or a bundle (M14).
 
+pub mod analyse;
+pub mod decode;
+pub mod ehframe;
 pub mod load;
 
 pub use load::{
@@ -36,5 +39,5 @@ pub const PASSES: [Pass; 3] = [Pass::Load, Pass::Analyse, Pass::Emit];
 
 /// True once a pass is ported to Rust; false sends it to upstream's tool.
 pub fn ported(pass: Pass) -> bool {
-    matches!(pass, Pass::Load)
+    matches!(pass, Pass::Load | Pass::Analyse)
 }
