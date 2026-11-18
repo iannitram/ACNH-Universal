@@ -180,7 +180,7 @@ jobs:
             $SUDO tar -czpf "$TAR" --numeric-owner -C "$CHROOT" .
             $SUDO chown "$(id -u):$(id -g)" "$TAR"
           fi
-          # Network for the build, and the checkout copied in (no bind mounts: the runner cannot make them).
+          # Network for the build, and the checkout copied in (no bind mounts: nothing is mounted into the chroot).
           $SUDO cp /etc/resolv.conf "$CHROOT/etc/resolv.conf"
           $SUDO mkdir -p "$CHROOT/work"
           $SUDO cp -a "$GITHUB_WORKSPACE/." "$CHROOT/work/"
