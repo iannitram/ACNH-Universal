@@ -17,6 +17,10 @@
 #include <string>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include <nx/runtime.h>
 
 #include "platform.h"
@@ -101,7 +105,7 @@ const Font& font(uint32_t type) {
     std::string root = plat::data_root() + "/fonts/";
     std::vector<std::string> candidates = {root + "shared_" + std::to_string(type) + ".ttf", root + "shared.ttf"};
     if (const char* e = std::getenv("NX_SHARED_FONT")) candidates.push_back(e);
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !TARGET_OS_IPHONE  // iOS has no host fonts: the prepared game carries one
     candidates.push_back("/System/Library/Fonts/Supplemental/Arial Unicode.ttf");
     candidates.push_back("/System/Library/Fonts/Supplemental/Arial.ttf");
 #elif defined(__ANDROID__)

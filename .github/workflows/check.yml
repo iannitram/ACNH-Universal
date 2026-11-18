@@ -147,3 +147,5 @@ jobs:
       - run: cargo test --workspace --all-features
       - name: iOS cross-check
         run: cargo check --workspace --target aarch64-apple-ios
+      - name: C++ compiles for iOS
+        run: bash tools/check_ios_compile.sh

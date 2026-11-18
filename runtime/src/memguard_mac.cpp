@@ -2,7 +2,11 @@
 // silicon) is checked every 250 ms; past the limit the process ends at once, so a leak can never push the machine
 // into swap until it freezes (it did: 85 GB, texture images never freed). The limit is NX_MEM_LIMIT_GB (default 8, half of a 16 GB Mac);
 // the footprint is logged every 30 s so growth shows before it matters.
+#include <TargetConditionals.h>
 #include <mach/mach.h>
+#if TARGET_OS_IPHONE
+#include <os/proc.h>
+#endif
 #include <unistd.h>
 
 #include <cstdio>
@@ -28,9 +32,23 @@ uint64_t footprint() {
 
 void start_memory_guard() {
     const char* e = std::getenv("NX_MEM_LIMIT_GB");
+#if TARGET_OS_IPHONE
+    // iOS and iPadOS kill an app (jetsam) past the footprint it may still grow: the one it has at start plus what
+    // os_proc_available_memory() reports, less a margin, so a run that nears the limit ends with a log line.
+    const uint64_t start = footprint();
+    const uint64_t available = os_proc_available_memory();
+    const uint64_t margin = 256ull << 20;
+    uint64_t limit = start + (available > margin ? available - margin : 0);
+    double gb = e ? std::atof(e) : 0.0;
+    if (gb > 0) limit = uint64_t(gb * double(1ull << 30));
+    else gb = double(limit) / double(1ull << 30);
+    log("memory: %.2f GB at start, iOS limit %.1f GB (%llu MB available, %llu MB margin)", double(start) / double(1ull << 30),
+        gb, (unsigned long long)(available >> 20), (unsigned long long)(margin >> 20));
+#else
     double gb = e ? std::atof(e) : 8.0;
     if (gb <= 0) gb = 8.0;
     const uint64_t limit = uint64_t(gb * double(1ull << 30));
+#endif
     std::thread([limit, gb] {
         uint64_t ticks = 0, peak = 0;
         for (;;) {

@@ -610,11 +610,18 @@ def main():
     fonts = os.path.join(G, "fonts")
     os.makedirs(fonts, exist_ok=True)
     # Stand-in for the Switch's button-icon font (type 5), drawn over a host font. The other shared fonts fall back
-    # to host fonts (runtime/src/hle_pl.cpp); ACNH ships its own fonts in its RomFS for almost all text.
-    if not os.path.exists(os.path.join(fonts, "shared_5.ttf")):
-        for f in (r"C:\Windows\Fonts\arial.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    # to a host font (runtime/src/hle_pl.cpp), so the general fallback (shared.ttf) is a copy of it: iOS and iPadOS
+    # have none to fall back to and the game comes with the font inside the app. A TrueType .ttf, never a collection.
+    host_fonts = (r"C:\Windows\Fonts\arial.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
                   "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
-                  "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"):
+                  "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf")
+    if not os.path.exists(os.path.join(fonts, "shared.ttf")):
+        for f in host_fonts:
+            if os.path.exists(f):
+                shutil.copyfile(f, os.path.join(fonts, "shared.ttf"))
+                break
+    if not os.path.exists(os.path.join(fonts, "shared_5.ttf")):
+        for f in host_fonts:
             if os.path.exists(f):
                 run([py, "tools/fonts/make_button_font.py", "--base", f, "--out", os.path.join(fonts, "shared_5.ttf")],
                     log=os.path.join(logs, "button_font.log"))
