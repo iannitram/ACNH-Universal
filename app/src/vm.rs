@@ -1,12 +1,23 @@
 //! View state kept separate from Slint so page behavior can be tested headlessly.
 
+pub mod continue_page;
+pub use continue_page::ContinuePageVm;
+
 /// Navigation actions shared by keyboard and gamepad input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nav {
-    Previous,
-    Next,
-    Activate,
+    Up,
+    Down,
+    Left,
+    Right,
+    Accept,
     Back,
+    Menu,
+    Prev,
+    Next,
+    Quit,
+    Previous,
+    Activate,
 }
 
 /// State for the initial Continue screen.
@@ -47,6 +58,7 @@ impl ContinueVm {
             Nav::Next => self.selected = (self.selected + 1) % SECTIONS.len(),
             Nav::Activate => return true,
             Nav::Back => self.status = "You are on the Continue screen.".to_owned(),
+            _ => {}
         }
         false
     }

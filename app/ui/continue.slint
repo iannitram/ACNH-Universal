@@ -1,0 +1,265 @@
+import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+
+export component ContinuePage {
+    in-out property<string> island_name: "ACNH Universal";
+    in-out property<string> save_device: "AMD handheld";
+    in-out property<string> save_when: "Recently";
+    in-out property<string> play_time: "42 h 10 min played";
+    in-out property<string> save_version: "3.0.2";
+    in-out property<string> card_status: "Up to date";
+
+    in-out property<string> play_label: "Play";
+    in-out property<bool> play_enabled: true;
+    in-out property<string> play_step: "";
+
+    // Conflict state
+    in-out property<bool> in_conflict: false;
+    in-out property<bool> choosing_conflict: false;
+    in-out property<string> this_card_line1: "";
+    in-out property<string> this_card_line2: "";
+    in-out property<string> this_badges: "";
+    in-out property<string> relay_card_line1: "";
+    in-out property<string> relay_card_line2: "";
+    in-out property<string> relay_badges: "";
+    in-out property<int> conflict_focus: 0; // 0: This, 1: Relay
+
+    // Drift / Warning state
+    in-out property<bool> has_warning: false;
+    in-out property<string> warning_text: "";
+    in-out property<bool> show_play_anyway: false;
+
+    // Toast / status message
+    in-out property<string> status_message: "Ready to sync and play.";
+
+    callback play_clicked();
+    callback keep_this_clicked();
+    callback keep_relay_clicked();
+    callback update_clicked();
+    callback back_clicked();
+    callback page_clicked(string);
+
+    VerticalBox {
+        padding: 24px;
+        spacing: 16px;
+
+        // Header: Page navigation buttons
+        HorizontalBox {
+            spacing: 12px;
+            Text {
+                text: "ACNH Universal";
+                font-size: 24px;
+                font-weight: 700;
+                color: #f4f0e8;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "Saves";
+                clicked => { root.page_clicked("Saves"); }
+            }
+            Button {
+                text: "Settings";
+                clicked => { root.page_clicked("Settings"); }
+            }
+            Button {
+                text: "Fleet";
+                clicked => { root.page_clicked("Fleet"); }
+            }
+            Button {
+                text: "About";
+                clicked => { root.page_clicked("About"); }
+            }
+        }
+
+        // Center card area: Either Normal Island Card, Conflict Chooser, or Drift Warning
+        if root.in_conflict && root.choosing_conflict : Rectangle {
+            background: #20342c;
+            border-radius: 12px;
+            border-width: 2px;
+            border-color: #436353;
+            VerticalBox {
+                padding: 16px;
+                spacing: 12px;
+                Text {
+                    text: "Conflict: Choose which island to keep";
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: #f4f0e8;
+                }
+                HorizontalBox {
+                    spacing: 16px;
+                    // Left: This device
+                    Rectangle {
+                        background: #283d35;
+                        border-radius: 8px;
+                        border-width: root.conflict_focus == 0 ? 3px : 1px;
+                        border-color: root.conflict_focus == 0 ? #80ed99 : #436353;
+                        VerticalBox {
+                            padding: 12px;
+                            spacing: 8px;
+                            HorizontalBox {
+                                Text {
+                                    text: "This device";
+                                    font-size: 16px;
+                                    font-weight: 700;
+                                    color: #f4f0e8;
+                                }
+                                if root.this_badges != "" : Text {
+                                    text: root.this_badges;
+                                    color: #80ed99;
+                                    font-weight: 700;
+                                }
+                            }
+                            Text { text: root.this_card_line1; color: #d2dfd5; }
+                            Text { text: root.this_card_line2; color: #b8c7bb; }
+                            Button {
+                                text: "Keep this one";
+                                clicked => { root.keep_this_clicked(); }
+                            }
+                        }
+                    }
+                    // Right: On the relay
+                    Rectangle {
+                        background: #283d35;
+                        border-radius: 8px;
+                        border-width: root.conflict_focus == 1 ? 3px : 1px;
+                        border-color: root.conflict_focus == 1 ? #80ed99 : #436353;
+                        VerticalBox {
+                            padding: 12px;
+                            spacing: 8px;
+                            HorizontalBox {
+                                Text {
+                                    text: "On the relay";
+                                    font-size: 16px;
+                                    font-weight: 700;
+                                    color: #f4f0e8;
+                                }
+                                if root.relay_badges != "" : Text {
+                                    text: root.relay_badges;
+                                    color: #80ed99;
+                                    font-weight: 700;
+                                }
+                            }
+                            Text { text: root.relay_card_line1; color: #d2dfd5; }
+                            Text { text: root.relay_card_line2; color: #b8c7bb; }
+                            Button {
+                                text: "Keep this one";
+                                clicked => { root.keep_relay_clicked(); }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: "The other island is kept as a backup in Backups.";
+                    font-size: 13px;
+                    color: #b8c7bb;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        if !root.choosing_conflict : Rectangle {
+            background: #283d35;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #436353;
+            VerticalBox {
+                padding: 16px;
+                spacing: 10px;
+
+                HorizontalBox {
+                    Text {
+                        text: root.island_name;
+                        font-size: 22px;
+                        font-weight: 700;
+                        color: #f4f0e8;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: root.card_status;
+                        color: #80ed99;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalBox {
+                    spacing: 24px;
+                    VerticalBox {
+                        spacing: 4px;
+                        Text { text: "Device: " + root.save_device; color: #d2dfd5; }
+                        Text { text: "Saved: " + root.save_when; color: #b8c7bb; }
+                    }
+                    VerticalBox {
+                        spacing: 4px;
+                        Text { text: "Play time: " + root.play_time; color: #d2dfd5; }
+                        Text { text: "Version: " + root.save_version; color: #b8c7bb; }
+                    }
+                }
+
+                if root.status_message != "" : Text {
+                    text: root.status_message;
+                    color: #f4f0e8;
+                    font-size: 14px;
+                }
+            }
+        }
+
+        // Drift warning banner
+        if root.has_warning : Rectangle {
+            background: #4a2820;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #e07a5f;
+            VerticalBox {
+                padding: 12px;
+                spacing: 8px;
+                Text {
+                    text: "Warning: Save drift detected";
+                    font-weight: 700;
+                    color: #f2cc8f;
+                }
+                Text {
+                    text: root.warning_text;
+                    color: #f4f0e8;
+                    wrap: word-wrap;
+                }
+                HorizontalBox {
+                    spacing: 12px;
+                    if root.show_play_anyway : Button {
+                        text: "Play anyway";
+                        clicked => { root.play_clicked(); }
+                    }
+                    Button {
+                        text: "Update";
+                        clicked => { root.update_clicked(); }
+                    }
+                    Button {
+                        text: "Back";
+                        clicked => { root.back_clicked(); }
+                    }
+                }
+            }
+        }
+
+        // The One Play Button (outside open chooser)
+        if !root.choosing_conflict && !root.has_warning : VerticalBox {
+            spacing: 6px;
+            Button {
+                text: root.play_step != "" ? root.play_step : ("▶  " + root.play_label);
+                enabled: root.play_enabled;
+                clicked => { root.play_clicked(); }
+            }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        // Controller / Keyboard Hints Footer
+        Text {
+            text: "D-pad: Move focus     A / Enter: Accept     B / Esc: Back     Start / F1: Menu";
+            font-size: 13px;
+            color: #b8c7bb;
+            horizontal-alignment: center;
+        }
+    }
+}

@@ -1,4 +1,4 @@
-import { Button, VerticalBox } from "std-widgets.slint";
+import { ContinuePage } from "continue.slint";
 
 export component MainWindow inherits Window {
     title: "ACNH Universal";
@@ -6,44 +6,15 @@ export component MainWindow inherits Window {
     min-height: 360px;
     preferred-width: 720px;
     preferred-height: 480px;
+    background: #172821;
 
     in-out property<int> selected: 0;
     in-out property<string> selection: "Continue";
     in-out property<string> status: "Ready to sync and play.";
     callback activate;
 
-    VerticalBox {
-        padding: 32px;
-        spacing: 16px;
-
-        Text {
-            text: "Continue";
-            font-size: 30px;
-            color: #f4f0e8;
-        }
-        Text {
-            text: "ACNH Universal  ·  " + root.selection;
-            font-size: 18px;
-            color: #b8c7bb;
-        }
-        Rectangle {
-            background: #283d35;
-            border-radius: 12px;
-            VerticalBox {
-                spacing: 8px;
-                Text { text: "Your island"; font-size: 22px; color: #f4f0e8; }
-                Text { text: "Select Continue to sync and play"; color: #d2dfd5; }
-                Text { text: root.status; color: #b8c7bb; }
-            }
-        }
-        Button {
-            text: root.selected == 0 ? "▶  Continue" : "Continue";
-            clicked => { root.activate(); }
-        }
-        Text {
-            text: "D-pad / stick to browse     A to activate     B to go back";
-            color: #b8c7bb;
-        }
+    ContinuePage {
+        status_message: root.status;
+        play_clicked => { root.activate(); }
     }
-    background: #172821;
 }
