@@ -1,8 +1,7 @@
 # The release packages (README "Downloads"): the launcher and the player, which plays the game folder
 # ACNHRecomp-Importer prepared, with the libraries they need; nothing of the game. One per system, each built on the
 # oldest one it should run on. Run from the Actions tab (Build > Run workflow); each package is an artifact of the run.
-# Private-repo CI runs on our own runners (self-hosted Linux and Windows); only the macOS job is the exception, until
-# my Mac runner is online.
+# Runs on GitHub-hosted runners (Linux, Windows, macOS).
 name: Build
 
 on:
@@ -13,12 +12,12 @@ on:
         required: false
         default: ""
       windows:
-        description: "Build the Windows package (it runs one at a time on the Windows runner)"
+        description: "Build the Windows package"
         type: boolean
         required: false
         default: true
       macos:
-        description: "Also build the macOS package (a GitHub-hosted runner, paid minutes, until my Mac runner is online)"
+        description: "Also build the macOS package"
         type: boolean
         required: false
         default: false
@@ -29,12 +28,12 @@ permissions:
 env:
   SDL3: "3.4.16"          # as tools/setup_acnh.py
   VK_HEADERS: "1.4.357"   # as tools/setup_acnh.py
-  LLVM: "19.1.7"          # clang-cl on the Windows runner
+  LLVM: "19.1.7"          # clang-cl on Windows
 
 jobs:
   version:
     name: Version
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
@@ -50,7 +49,7 @@ jobs:
     name: Windows x64
     needs: version
     if: inputs.windows
-    runs-on: [self-hosted, windows]  # the host's own Visual Studio Build Tools; the rest is fetched below
+    runs-on: windows-2025  # the runner's Visual Studio Build Tools; the rest is fetched below
     env:
       VERSION: ${{ needs.version.outputs.version }}
     defaults:
@@ -105,8 +104,7 @@ jobs:
     name: macOS arm64
     needs: version
     if: inputs.macos
-    # Moves to [self-hosted, macos] when my Mac runner is online (R29); until then it is GitHub-hosted, so it runs
-    # only when asked for (the "macos" input).
+    # Runs only when asked for (the "macos" input).
     runs-on: macos-14  # Homebrew's libraries there run on macOS 14 and newer
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -128,10 +126,10 @@ jobs:
   linux:
     name: Linux x64
     needs: version
-    runs-on: [self-hosted, linux]
-    # The package must run on glibc 2.35 and newer, so it is built in an Ubuntu 22.04 (jammy) chroot. The runner is an
-    # unprivileged Ubuntu 24.04 container (no Docker daemon, no mounts): the chroot is debootstrapped, cached as a
-    # tarball by a hash of its package list, the checkout is copied in, and the package copied out. Nothing is mounted.
+    runs-on: ubuntu-24.04
+    # The package must run on glibc 2.35 and newer, so it is built in an Ubuntu 22.04 (jammy) chroot. On the
+    # Ubuntu 24.04 runner: the chroot is debootstrapped, cached as a tarball by a hash of its package list,
+    # the checkout is copied in, and the package copied out. Nothing is mounted.
     env:
       VERSION: ${{ needs.version.outputs.version }}
       CHROOT: /var/tmp/acnh-jammy
@@ -164,6 +162,7 @@ jobs:
             $SUDO cp /etc/resolv.conf "$CHROOT/etc/resolv.conf"
             echo "deb http://archive.ubuntu.com/ubuntu jammy-updates main universe" | $SUDO tee -a "$CHROOT/etc/apt/sources.list" >/dev/null
             grep -v '^#' .github/linux-chroot-packages.txt | $SUDO tee "$CHROOT/packages.txt" >/dev/null
+            # shellcheck disable=SC2016
             $SUDO chroot "$CHROOT" env DEBIAN_FRONTEND=noninteractive CMAKE="$CMAKE" LLVM="$LLVM" bash -euc '
               apt-get update -q
               # shellcheck disable=SC2046
