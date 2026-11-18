@@ -136,6 +136,7 @@ fn request(name: &str) -> Request {
         out: d,
         target: Os::Mac,
         jobs: 0,
+        source: None,
     }
 }
 
