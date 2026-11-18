@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <string>
 
+#include "game_root.h"
+
 // The runtime's functions and variables the recompiled code calls (cpu.h, runtime.h, the generated funcs.h). On
 // Android the game's code is its own library (lib<game>_game.so) and these are exported to it from the app's.
 #if defined(__GNUC__) || defined(__clang__)
@@ -73,6 +75,16 @@ bool read_asset(const std::string& path, std::string& out);  // a file of the AP
 // ---- output ----
 void log_line(const char* line);  // stderr / logcat
 std::string data_root();
+#if defined(__APPLE__)
+// Where the game's files are read from: NX_GAME_ROOT, else the app's game/ folder, else the data root (platform_mac.cpp).
+std::string game_root();
+#else
+// NX_GAME_ROOT when set, else the data root: the other hosts read the game as they always have (game_root.h).
+inline std::string game_root() {
+    return choose_game_root(std::getenv("NX_GAME_ROOT"), false, "", [](const std::string&) { return false; },
+                            data_root());
+}
+#endif
 std::string setting(const std::string& key);  // a player setting: config.txt (Android), NX_<KEY> (PC); "" if unset          // where private/ lives ("private" on PC, the app's external files dir on Android)
 // The OS locale as a BCP 47 tag ("zh-Hans-CN", "pt-BR"). "" where the process has no device locale of its own
 // (desktop builds read LANG instead). Android does not put the phone's language in LANG.

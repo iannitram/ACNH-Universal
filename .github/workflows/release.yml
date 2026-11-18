@@ -18,7 +18,7 @@ env:
 jobs:
   linux:
     name: AppImage
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -32,7 +32,7 @@ jobs:
         run: |
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update -q
-          $SUDO apt-get install -yq --no-install-recommends build-essential pkg-config libudev-dev libxkbcommon-dev libfontconfig1-dev file curl
+          $SUDO apt-get install -yq --no-install-recommends libudev-dev libxkbcommon-dev libfontconfig1-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -53,6 +53,7 @@ jobs:
           Categories=Game;
           DESK
           sed -i 's/^ *//' "$D/acnh-universal.desktop"
+          # shellcheck disable=SC2016
           printf '#!/bin/sh\nH=$(dirname "$(readlink -f "$0")")\nexport PATH="$H/usr/bin:$PATH"\nexec "$H/usr/bin/acnh-app" "$@"\n' > "$D/AppRun"
           chmod +x "$D/AppRun"
           find "$D" -type f | tee files.txt
@@ -67,7 +68,7 @@ jobs:
 
   windows:
     name: Windows zip
-    runs-on: [self-hosted, windows]
+    runs-on: windows-2025
     defaults:
       run:
         shell: bash
@@ -96,7 +97,7 @@ jobs:
 
   mac:
     name: Mac app
-    runs-on: [self-hosted, macos]
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -140,7 +141,7 @@ jobs:
     name: Draft release
     if: github.ref_type == 'tag'
     needs: [linux, windows, mac]
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -151,6 +152,7 @@ jobs:
           merge-multiple: true
       - name: File list has no game data
         run: |
+          # shellcheck disable=SC2012
           ls dist | tee files.txt
           bash tools/check_release_files.sh < files.txt
       - env:

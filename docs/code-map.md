@@ -8,11 +8,13 @@ Status per module: **present** (built), **stub** (the final types and signatures
 
 | Device family | 1.0 device | Game code | Renderer | Built on (hub) | Launcher | Save sync in | CI |
 |---|---|---|---|---|---|---|---|
-| Linux / SteamOS | the AMD handheld, the Strix Halo tablet | recompiled, x86-64 | NVN on Vulkan (RADV) | the Strix Halo tablet; the AMD handheld pulls | Slint app (AppImage), opened by the Steam shortcut | the launcher | self-hosted Linux: workspace, game-data check and the Android cross-build, the C++ unit tests (now); boot smoke (4.01) |
-| Windows | the RTX 3090 Ti desktop | recompiled, x86-64 | NVN on Vulkan | the desktop | Slint app | the launcher | self-hosted Windows: workspace (now); the C++ build (7.01) |
-| macOS | a Mac with Apple silicon + controller | recompiled, ARM64 | MoltenVK, then upstream's Metal | the Mac | Slint app (also builds and installs the iOS app) | the launcher | `macos-latest` on request (paid minutes) until the Mac runner is online |
-| iOS / iPadOS | iPhone or iPad + controller | recompiled, ARM64 (no JIT) | Metal (or MoltenVK) | the Mac, as an unsigned `.ipa` in Dropbox, installed with SideStore | none: the game app | the game app (save-relay C interface) | `cargo check` for `aarch64-apple-ios` in the macOS job, on request until the Mac runner is online (now) |
-| Android | Adreno device + controller | recompiled, ARM64 | NVN on Vulkan (Turnip) | the Strix Halo tablet | Slint app, same APK as the player | the launcher | self-hosted Linux: `aarch64-linux-android` cross-build, NDK 28.2.13676358 on the runner (now) |
+| Linux / SteamOS | the AMD handheld, the Strix Halo tablet | recompiled, x86-64 | NVN on Vulkan (RADV) | the Strix Halo tablet; the AMD handheld pulls | Slint app (AppImage), opened by the Steam shortcut | the launcher | GitHub-hosted Linux (ubuntu-24.04): workspace, game-data check and the Android cross-build, the C++ unit tests (now); boot smoke (4.01) |
+| Windows | the RTX 3090 Ti desktop | recompiled, x86-64 | NVN on Vulkan | the desktop | Slint app | the launcher | GitHub-hosted Windows (windows-2025): workspace (now); the C++ build (7.01) |
+| macOS | a Mac with Apple silicon + controller | recompiled, ARM64 | MoltenVK, then upstream's Metal | the Mac | Slint app (also builds and installs the iOS app) | the launcher | GitHub-hosted macOS (macos-15): workspace (now) |
+| iOS / iPadOS | iPhone or iPad + controller | recompiled, ARM64 (no JIT) | Metal (or MoltenVK) | the Mac, as an unsigned `.ipa` in Dropbox, installed with SideStore | none: the game app | the game app (save-relay C interface) | `cargo check` for `aarch64-apple-ios` in the macOS job (now) |
+| Android | Adreno device + controller | recompiled, ARM64 | NVN on Vulkan (Turnip) | the Strix Halo tablet | Slint app, same APK as the player | the launcher | GitHub-hosted Linux (ubuntu-24.04): `aarch64-linux-android` cross-build, NDK 28.2.13676358 (now) |
+
+Where the game root is: `plat::game_root()` (`runtime/src/game_root.h`) is `NX_GAME_ROOT` when set; else, on macOS and iOS, `game/` beside SDL's base (`ACNH-Universal.app/Contents/Resources/game/` on the Mac, `ACNH.app/game/` on the iPad) when it holds `analysis/main.bin`; else the data root (Linux, Windows, Android and a development build read as before). The player reads the game from the game root and writes saves, settings and logs to `plat::data_root()` (`~/Library/Application Support/ACNH-Universal` on the Mac, the app's Documents folder on the iPad).
 
 Rules that keep it portable: `crates/core` is pure Rust (no C library, no OpenSSL; the hub's crates are `mdns-sd`, RustCrypto `spake2`, `chacha20poly1305`, `sha2`, behind feature `hub`); no `std::os::*` outside `platform` and `steam`; every OS rule takes its folders from `platform::Vars`, so Linux, Windows and Mac rules are tested on every runner; tests build temporary folders under `std::env::temp_dir()` and never read a real game file. `crates/core` has `#![forbid(unsafe_code)]`; the runtime is the only crate with `unsafe` and FFI, and each `unsafe` block carries a `// SAFETY:` line.
 
@@ -63,7 +65,7 @@ flowchart TD
 | `config` | present | `Config` of `Line`s: `parse`, `get` (last wins), `set` (in place, else appended), `to_text`; `config.ini` in the data root and `launcher.ini` in the settings folder | `runtime/src/config.cpp` (format), the ini code of `launcher/files.cpp` | M2 |
 | `profile` | present | `DeviceProfile` (amd-handheld 30 fps, strix-halo-tablet 60 fps, desktop), `builtin`, `by_id`, `detect` from the CPU model; settings as `config.ini` entries, power as advice only | | M2 |
 | `recipe` | present | `Hub` (strix-halo, desktop, mac), `hub_for`, `serves`, `hub_by_key`; `Stage` (tools, game, version, recompile, shaders, fonts, build) with `from_line` for `== <stage>` progress lines; `output` per target (`acnh`, `acnh.exe`, `ACNH.app`, `ACNH.ipa`, `acnh.apk`) | the stage list of `tools/setup_acnh.py`, the progress parsing of `launcher/pipeline.cpp` | M1, M11 |
-| `prepare` | partial | `Request`, `Step` (`Rust`, or upstream's `Script` until a stage is ported), `step` (stub), `prepare` (stub; stages in order, each skipped when its output is there), `redact` (present: no home folder or stray hex ids in a log line) | `tools/setup_acnh.py` and the scripts it runs: `nso2bin.py`, `pack_romfs.py`, `pack_spirv.py`, `extract_shaders.py`, `sarc_endian.py`, `msg_rewrap.py` (1.27-1.31); `launcher/pipeline.cpp` | M1, M13, M14 |
+| `prepare` | partial | `Request`, `Step` (`Rust`, or upstream's `Script` until a stage is ported), `step` (present: upstream's one `setup_acnh.py` command for every unported stage), `prepare` and `prepare_with` (present: stages in order, a stage reported and waited on unless its outputs were already there, nothing run when every stage's are; a `ScriptRunner` seam; `ProcessRunner` starts upstream's command once and follows its `== <stage>` lines, so inside a run upstream's own checks decide what is redone; redacted `Error::Build` naming the stage the script failed in; Android and iOS are `Unsupported` until their build routes exist; on the Mac the build is upstream's plain executable until stage 8 bundles it), `redact` (present: no home folder or stray hex ids in a log line) | `tools/setup_acnh.py` and the scripts it runs: `nso2bin.py`, `pack_romfs.py`, `pack_spirv.py`, `extract_shaders.py`, `sarc_endian.py`, `msg_rewrap.py` (1.27-1.31); `launcher/pipeline.cpp` | M1, M13, M14 |
 | `saves` | present | `save_dir` (`<data root>/user/device_save`), `backups_dir` (`user/backups`), `REQUIRED`, `is_synced` (what travels), `check_island`, `relay_manifest` (save-relay's manifest for ACNH) | the save folder of `runtime/src/saves.cpp` (read, not moved; the runtime's own `Saves` group is 4.04) | M6 |
 | `savecard` | present | `SaveCard` (save time from `main.dat`, device, play time, version, picture), `read_card` from `<save_dir>/../launcher-card.txt`, `latest`, `side_by_side` for a conflict | | M10 |
 | `backup` | present | `stamp` (`YYYYmmdd-HHMMSS`, UTC), `backup_saves` (the synced files), `list`, `prune` (`KEEP` = 10) | the backups of `runtime/src/saves.cpp` (same place and shape) | M7 |
@@ -75,7 +77,7 @@ flowchart TD
 | `vdf` | present | Steam binary KeyValues `Value`, `write`, `read` (depth limit `MAX_DEPTH` = 64) | | M2 |
 | `steam` | stub | `crc32`, `shortcut_app_id`, `rungameid`, `Shortcut::quoted_exe`, `Shortcut::app_id`, `userdata_roots`, `shortcut_entry`, `upsert` are present; `write_shortcut` remains a stub (Steam closed, `.bak` kept); the shortcut runs `acnh-universal play` | the desktop and Start-menu shortcuts of `launcher/desktop.cpp` and `tools/install_mac_shortcut.sh` (the Steam entry is new) | M2 |
 | `artwork` | present | `Art` (grid, wide grid, hero, logo, icon), `file_name`, `size`, `grid_dir`, `paths`; made from the game folder's icon, else `assets/acnhrecomp.png`; nothing downloaded | | M2 |
-| `relay` | present (feature `relay`) | the save-relay adapter: links its library, maps outcomes to `launch::Sync` | | M6 |
+| `relay` | present (feature `relay`) | the save-relay adapter: links its library, maps outcomes to `launch::Sync`; `open` reads save-relay's own setup and opens its remote, `setup_nextcloud`/`start_sign_in`/`finish_sign_in` set it up (browser or Game Mode code flow), `forget` removes the config and secret | | M6 |
 
 `platform`, `vdf`, `steam`, `artwork`, `backup`, `bundle`, `fleet`, `launch`, `update`, `hub` and the shapes of `savecard`, `profile` and `recipe` are copied from iannitram/totk-universal (MIT) with credit in the file header, by their issues.
 
@@ -86,7 +88,7 @@ Ported pass by pass (ADR 0002). Each pass's output must match `python3 -m recomp
 | Pass | Status | Replaces (lines) | Order | Musts |
 |---|---|---|---|---|
 | `Load` | present | `recomp/nso.py` (200): segments, symbols, relocations | 3.01 | M13 |
-| `Analyse` | planned | `recomp/analysis.py` (439), `recomp/ehframe.py` (142): functions and their bounds | 3.02 | M13 |
+| `Analyse` | present | `recomp/analysis.py` (439), `recomp/ehframe.py` (142): functions and their bounds | 3.02 | M13 |
 | `Emit` (integer, branches) | planned | `recomp/emit.py` (659), `emit_int.py` (421), `regcache.py` (218) | 3.03 | M13 |
 | `Emit` (FP, NEON) | planned | `emit_fp.py` (255), `emit_neon.py` (312), `emit_neon_wide.py` (369), `emit_vldst.py` (92), `emit_ext.py` (249), `emit_sdk20.py` (129) | 3.04 | M13 |
 | driver | planned | `recomp/__main__.py` (303), `stats.py` (48) | 3.05 | M13 |
@@ -101,7 +103,7 @@ Built as a static library linked into the player while C++ remains; each Rust gr
 | `Config` | stub (listed) | `config.cpp`: `config.ini` to the `NX_*` settings | 4.02 | M2, M13 |
 | `Time` | stub (listed) | `hle_time.cpp`, `svc_time.cpp`: the island clock (`NX_TIME_OFFSET`) | 4.03 | M12, M13 |
 | `Saves` | stub (listed) | `saves.cpp`, `users.cpp`, `svc_account.cpp` | 4.04 | M6, M13 |
-| `Files` | stub (listed) | `hle_fs.cpp`, `game_folder.cpp`, `mod_fetch.cpp`: the romfs, its packs, mods | 4.05 | M13 |
+| `Files` | stub (listed) | `hle_fs.cpp`, `game_folder.cpp`, `mod_fetch.cpp`, `game_root.h`: the romfs, its packs, fonts, glyphs, shaders and add-on content from the game root; mods and the player's own files from the data root | 4.05 | M13 |
 | `Input` | stub (listed) | `hle_hid.cpp`, `input_script.cpp`, `touch_layout.cpp` | 4.06 | M3, M5, M9, M13 |
 | `Audio` | stub (listed) | `hle_audio.cpp` | 4.07 | M13 |
 | `Services` | stub (listed) | `svc_am.cpp`, `svc_set.cpp`, `svc_misc.cpp`, `svc_process.cpp`, the other `hle_*.cpp` (bcat, friends, ldn, movie, net, nfp, ngc, pl, ro, vi) | 4.08 | M13 |
@@ -116,7 +118,7 @@ Built as a static library linked into the player while C++ remains; each Rust gr
 
 | Path | Status | Owns | Replaces | Musts |
 |---|---|---|---|---|
-| `crates/cli` (`acnh-universal`) | stub | `check`, `build`, `play`, `steam-add`, `hub serve/pair/pull`, `fleet`; the Steam shortcut runs `play` | `tools/setup_acnh.py`'s command line, `tools/launcher.sh` | M1, M2, M6, M11 |
+| `crates/cli` (`acnh-universal`) | present (`hub` at #66) | `check`, `build`, `play`, `steam-add`, `fleet`; plain messages, `--json` prints the error `code()`, unknown commands exit 2 with usage; the Steam shortcut runs `play`; `hub` joins at #66 | `tools/setup_acnh.py`'s command line, `tools/launcher.sh` | M1, M2, M6, M11 |
 | `app/` (`acnh-app`) | planned | the launcher, Rust + Slint, Linux, Windows, macOS, Android; links `acnh_core` | `launcher/` (SDL3 + ImGui: `main.cpp`, `desktop.cpp`, `pages.cpp`, `pipeline.cpp`, `files.cpp`) | M2, M4, M9-M11, M13 |
 | `app/src/vm/` | planned | view models: `continue_page`, `first_run`, `saves`, `settings`, `fleet`, `about` | | M8, M10, M11 |
 | `app/src/input.rs` | planned | `Nav` from gilrs (desktop) and Android key events | | M9, M10 |
@@ -157,7 +159,7 @@ cargo test --workspace --all-features    # with the hub
 python3 tools/setup_acnh.py --help       # upstream's build, until 1.31
 ```
 
-CI (M15): `.github/workflows/check.yml` runs fmt, clippy and test, with and without `--all-features`, on the self-hosted Linux and Windows runners, the game-data check over every tracked file, the Android cross-build (`aarch64-linux-android`), and macOS on request (with the iOS check, `aarch64-apple-ios`); `build.yml` is upstream's release build. The C++ unit tests (`NX_TESTS=ON`: `gpu_pick`, `tiling`, `astc`) run on the self-hosted Linux runner in its `cpp` job (0.01); `shader_cache` needs the game folder and `memguard` is Windows-only, so neither runs there. Not in CI yet: the boot smoke test (4.01).
+CI (M15): `.github/workflows/check.yml` runs fmt, clippy and test, with and without `--all-features`, on GitHub-hosted Linux and Windows runners, the game-data check over every tracked file, the Android cross-build (`aarch64-linux-android`), and macOS (with the iOS check, `aarch64-apple-ios`); `build.yml` is upstream's release build. The C++ unit tests (`NX_TESTS=ON`: `gpu_pick`, `tiling`, `astc`) run on GitHub-hosted Linux (ubuntu-24.04) in its `cpp` job (0.01); `shader_cache` needs the game folder and `memguard` is Windows-only, so neither runs there. Not in CI yet: the boot smoke test (4.01).
 
 ## Build hubs (ADR 0004)
 
