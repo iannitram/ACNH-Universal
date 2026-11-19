@@ -14,6 +14,8 @@ permissions:
 
 env:
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
+  # The source package's commit, and the commit the app checks it against.
+  ACNH_SOURCE_COMMIT: ${{ github.sha }}
 
 jobs:
   linux:
@@ -44,6 +46,14 @@ jobs:
           rm -rf "$D" && mkdir -p "$D/usr/bin"
           cp target/release/acnh-app target/release/acnh-universal "$D/usr/bin/"
           cp assets/acnhrecomp.png "$D/acnh-universal.png"
+          SRC="$D/usr/share/acnh-universal/source"
+          mkdir -p "$SRC"
+          git archive HEAD CMakeLists.txt runtime games recomp tools assets launcher Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
+          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
+          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
+          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
+            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
+          done
           cat > "$D/acnh-universal.desktop" <<DESK
           [Desktop Entry]
           Type=Application
@@ -87,6 +97,14 @@ jobs:
           rm -rf "$N" && mkdir "$N"
           cp target/release/acnh-app.exe target/release/acnh-universal.exe "$N/"
           cp assets/acnhrecomp.ico "$N/"
+          SRC="$N/source"
+          mkdir -p "$SRC"
+          git archive HEAD CMakeLists.txt runtime games recomp tools assets launcher Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
+          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
+          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
+          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
+            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
+          done
           find "$N" -type f | tee files.txt
           bash tools/check_release_files.sh < files.txt
           powershell -NoProfile -Command "Compress-Archive -Path '$N' -DestinationPath '$N.zip'"
@@ -114,6 +132,14 @@ jobs:
           cp target/release/acnh-app "$A/Contents/MacOS/acnh-app"
           cp target/release/acnh-universal "$A/Contents/MacOS/acnh-universal"
           cp assets/acnhrecomp.icns "$A/Contents/Resources/"
+          SRC="$A/Contents/Resources/source"
+          mkdir -p "$SRC"
+          git archive HEAD CMakeLists.txt runtime games recomp tools assets launcher Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
+          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
+          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
+          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
+            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
+          done
           # The same Info.plist the launcher writes when it makes the bundle from a checkout
           # (crates/core/src/assemble.rs), so the two cannot drift.
           sed "s/@VERSION@/${VERSION#v}/" assets/mac/Info.plist.in > "$A/Contents/Info.plist"
