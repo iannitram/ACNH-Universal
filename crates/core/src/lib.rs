@@ -24,6 +24,7 @@ macro_rules! not_built {
 }
 
 pub mod artwork;
+pub mod assemble;
 pub mod backup;
 pub mod bundle;
 pub mod config;
@@ -34,10 +35,14 @@ pub mod gamefolder;
 pub mod hub;
 pub mod launch;
 pub mod nso;
+pub mod nso2bin;
+pub mod pack;
 pub mod platform;
 pub mod prepare;
 pub mod profile;
 pub mod recipe;
+#[cfg(feature = "relay")]
+pub mod relay;
 pub mod savecard;
 pub mod saves;
 pub mod steam;

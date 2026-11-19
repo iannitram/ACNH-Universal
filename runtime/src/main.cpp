@@ -11,6 +11,10 @@
 #include <nx/game.h>
 #include <nx/runtime.h>
 
+#ifdef NX_RUST_RUNTIME
+#include <acnh_runtime.h>
+#endif
+
 #include "kernel.h"
 #include "platform.h"
 
@@ -183,6 +187,9 @@ NX_HLE("__process_return", process_return);
 // ---- boot -----------------------------------------------------------------------------------------------------
 
 void boot() {
+#ifdef NX_RUST_RUNTIME
+    log("runtime: Rust ABI %u", acnh_runtime_abi_version());
+#endif
     if (const char* t = std::getenv("NX_TRACE")) g_trace = *t == '1';
     if (plat::setting("trace") == "1") g_trace = true;
     memory_init();
@@ -191,14 +198,14 @@ void boot() {
     std::vector<const ModuleInfo*> mods = {&nx_module_main};
     if (const ModuleInfo* sub = plat::game_module("subsdk0")) mods.push_back(sub);
     mods.push_back(&nx_module_sdk);
-    load_modules(mods.data(), mods.size(), plat::data_root() + "/analysis");
+    load_modules(mods.data(), mods.size(), plat::game_root() + "/analysis");
 #else
 #ifdef NX_HAS_SUBSDK0
     const ModuleInfo* mods[] = {&nx_module_main, &nx_module_subsdk0, &nx_module_sdk};
 #else
     const ModuleInfo* mods[] = {&nx_module_main, &nx_module_sdk};
 #endif
-    load_modules(mods, sizeof(mods) / sizeof(mods[0]), plat::data_root() + "/analysis");
+    load_modules(mods, sizeof(mods) / sizeof(mods[0]), plat::game_root() + "/analysis");
 #endif
 
     uint64_t tdata = 0, tdata_end = 0;

@@ -7,11 +7,16 @@
 //
 // Data: NX_DATA_ROOT or games/<game>'s pc_data_root ("private/<game>"): analysis/{main,sdk}.bin, extract/romfs, user/.
 // Settings: NX_<KEY> environment variables, as on Windows.
+#include <TargetConditionals.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <cstdlib>
 #include <mach/mach.h>
+#if TARGET_OS_IPHONE
+#include <mach/vm_map.h>
+#else
 #include <mach/mach_vm.h>
+#endif
 #include <mach/thread_switch.h>
 #include <pthread/qos.h>
 #include <sched.h>
@@ -39,6 +44,9 @@
 #include <vector>
 
 #include <SDL3/SDL.h>
+#if TARGET_OS_IPHONE
+#include <SDL3/SDL_main.h>  // the UIKit main, which runs ours as SDL_main
+#endif
 #include <SDL3/SDL_metal.h>
 #include <SDL3/SDL_vulkan.h>
 
@@ -109,9 +117,29 @@ void update_refresh_hz();  // below, with display_refresh_hz
 
 // No MAP_FIXED_NOREPLACE on Darwin: ask for the address as a hint and give it back if the kernel chose another.
 // macOS 27 ignores mmap's address hint below 0x70_0000_0000 (the mapping lands up there), and MAP_FIXED would
-// silently replace whatever is already mapped. mach_vm_allocate with VM_FLAGS_FIXED takes the exact range or fails
-// when any of it is in use.
+// silently replace whatever is already mapped. mach_vm_allocate (vm_allocate on iOS, where mach_vm.h is refused)
+// with VM_FLAGS_FIXED takes the exact range or fails when any of it is in use.
 bool reserve(uint64_t addr, uint64_t size) {
+#if TARGET_OS_IPHONE
+    vm_address_t a = addr;
+    if (vm_allocate(mach_task_self(), &a, size, VM_FLAGS_FIXED) != KERN_SUCCESS) {
+        vm_address_t r = addr;  // name what is in the way (svcs and the guest layout are in runtime.h)
+        vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj;
+        if (vm_region_64(mach_task_self(), &r, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) ==
+            KERN_SUCCESS)
+            nx::log("memory: %llx (+%llx) overlaps a mapping at %llx (+%llx)", (unsigned long long)addr,
+                    (unsigned long long)size, (unsigned long long)r, (unsigned long long)rs);
+        return false;
+    }
+    if (mprotect(reinterpret_cast<void*>(addr), size, PROT_NONE) != 0) {
+        vm_deallocate(mach_task_self(), addr, size);
+        return false;
+    }
+    return true;
+#else
     mach_vm_address_t a = addr;
     if (mach_vm_allocate(mach_task_self(), &a, size, VM_FLAGS_FIXED) != KERN_SUCCESS) {
         mach_vm_address_t r = addr;  // name what is in the way (svcs and the guest layout are in runtime.h)
@@ -130,6 +158,7 @@ bool reserve(uint64_t addr, uint64_t size) {
         return false;
     }
     return true;
+#endif
 }
 
 bool commit(uint64_t addr, uint64_t size) {
@@ -245,6 +274,17 @@ void log_line(const char* line) { std::fprintf(stderr, "%s\n", line); }
 std::string data_root() {
     const char* r = std::getenv("NX_DATA_ROOT");
     return r ? r : nx::game::kInfo.pc_data_root;
+}
+
+// The game inside the app (Contents/Resources/game on the Mac, ACNH.app/game on the iPad), or NX_GAME_ROOT from the
+// launcher; the data root otherwise (a development build).
+std::string game_root() {
+    const char* base = SDL_GetBasePath();
+    const auto is_file = [](const std::string& path) {
+        std::error_code ec;
+        return std::filesystem::is_regular_file(std::filesystem::u8path(path), ec);
+    };
+    return choose_game_root(std::getenv("NX_GAME_ROOT"), true, base ? base : "", is_file, data_root());
 }
 
 std::string device_locale() { return ""; }
@@ -890,6 +930,15 @@ void game_thread() {
 int main(int argc, char** argv) {
     // acnh <game folder>: the folder ACNHRecomp-Importer prepared (else NX_DATA_ROOT, else the setup's data folder)
     if (argc > 1) setenv("NX_DATA_ROOT", argv[1], 1);
+#if TARGET_OS_IPHONE
+    // SideStore starts the app with no environment and no arguments: the writable data root is the app's
+    // Documents folder (visible in the Files app, ios/Info.plist.in), where config.ini, user/ and the logs live.
+    if (!std::getenv("NX_DATA_ROOT"))
+        if (const char* home = std::getenv("HOME")) {
+            const std::string docs = std::string(home) + "/Documents";
+            setenv("NX_DATA_ROOT", docs.c_str(), 1);
+        }
+#endif
     nx::config_apply();  // config.ini -> NX_* defaults, before anything reads them (config.h)
     if (nx::report_mode()) return 0;
     struct sigaction sa{};
@@ -915,9 +964,12 @@ int main(int argc, char** argv) {
     if (const char* base = SDL_GetBasePath()) {
         // Inside ACNHRecomp.app the libraries are in Contents/MacOS with the player, the ICD file in
         // Contents/Resources (SDL's base there); in a plain folder both are beside the player.
+        // ACNH-Universal.app (the one contained app, crates/core/src/assemble.rs) keeps them in Contents/Frameworks.
         std::string dir = base;
-        if (const size_t r = dir.rfind("/Contents/Resources/"); r != std::string::npos && r + 20 == dir.size())
-            dir = dir.substr(0, r) + "/Contents/MacOS/";
+        if (const size_t r = dir.rfind("/Contents/Resources/"); r != std::string::npos && r + 20 == dir.size()) {
+            dir = dir.substr(0, r) + "/Contents/Frameworks/";
+            if (access((dir + "libvulkan.1.dylib").c_str(), R_OK) != 0) dir = dir.substr(0, r) + "/Contents/MacOS/";
+        }
         const std::string loader = dir + "libvulkan.1.dylib", icd = std::string(base) + "MoltenVK_icd.json";
         if (access(loader.c_str(), R_OK) == 0 && access(icd.c_str(), R_OK) == 0) {
             setenv("SDL_VULKAN_LIBRARY", loader.c_str(), 0);

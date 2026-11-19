@@ -1,7 +1,7 @@
 # The Rust launcher (crates/): format, lint and test on every push to main and every pull request,
-# plus the game-data check over every tracked file (SPEC.md M14, M15), and the Android cross-build
-# (M15). A private repo, so it runs on our own runners (self-hosted Linux, Windows, macOS). The
-# macOS job also checks the iOS target (`aarch64-apple-ios`, M15).
+# plus the game-data check over every tracked file (SPEC.md M14, M15), the C++ unit tests on Linux
+# (0.01, M15), and the Android cross-build (M15). Runs on GitHub-hosted runners (#155)
+# (Linux, Windows, macOS). The macOS job also checks the iOS target (`aarch64-apple-ios`, M15).
 name: check
 
 on:
@@ -9,6 +9,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+
+env:
+  CARGO_BUILD_JOBS: "2"
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
 
 permissions:
   contents: read
@@ -20,7 +24,7 @@ concurrency:
 jobs:
   no-game-data:
     name: No game data
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Every tracked file
@@ -36,9 +40,9 @@ jobs:
       matrix:
         include:
           - name: Linux
-            runs-on: [self-hosted, linux]
+            runs-on: ubuntu-24.04
           - name: Windows
-            runs-on: [self-hosted, windows]
+            runs-on: windows-2025
     runs-on: ${{ matrix.runs-on }}
     defaults:
       run:
@@ -52,11 +56,10 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # The runner container has no linker; cargo's build scripts need cc.
           # Slint (app/) links fontconfig through yeslogic-fontconfig-sys, which needs its dev headers.
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update -q
-          $SUDO apt-get install -yq --no-install-recommends build-essential pkg-config libudev-dev libxkbcommon-dev libfontconfig1-dev
+          $SUDO apt-get install -yq --no-install-recommends libudev-dev libxkbcommon-dev libfontconfig1-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -69,9 +72,74 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test --workspace --all-features
 
+  cpp:
+    name: C++ unit tests (Linux)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: C++ toolchain
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update -q
+          $SUDO apt-get install -yq --no-install-recommends build-essential cmake ninja-build
+      - name: Configure
+        run: cmake -B build -G Ninja -DNX_TESTS=ON -DNX_GAME=acnh -DNX_LAUNCHER=OFF -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --target gpu_pick_test tiling_test astc_test game_root_test
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Game reads stay on the game root
+        run: bash tests/game_root_check.sh
+
+  boot-smoke:
+    name: Boot smoke (Linux)
+    runs-on: ubuntu-24.04
+    env:
+      SDL3: "3.4.16" # same version as the player release build
+      VK_HEADERS: "1.4.357" # matches the generated Vulkan bridge
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Toolchain
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update -q
+          $SUDO apt-get install -yq --no-install-recommends build-essential cmake ninja-build pkg-config libvulkan-dev mesa-vulkan-drivers xvfb xauth python3 libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev
+      - name: SDL3 and Vulkan headers
+        run: |
+          # Ubuntu 24.04 has no SDL3 package and its Vulkan headers predate the bridge.
+          mkdir -p target/sdl3
+          curl -fsSL "https://github.com/libsdl-org/SDL/releases/download/release-$SDL3/SDL3-$SDL3.tar.gz" | tar -xz -C target/sdl3
+          curl -fsSL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$VK_HEADERS.tar.gz" | tar -xz -C target
+          cmake -S "target/sdl3/SDL3-$SDL3" -B target/sdl3/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX="$PWD/target/sdl3/install"
+          cmake --build target/sdl3/build --parallel 2
+          cmake --install target/sdl3/build
+          echo "CMAKE_PREFIX_PATH=$PWD/target/sdl3/install:$PWD/target/Vulkan-Headers-$VK_HEADERS" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - name: Player through cargo, then boot on a fake game library
+        run: bash tools/boot_smoke.sh
+
   android:
     name: Cross-build (Android)
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -83,7 +151,6 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # As the Linux job above: build scripts need cc.
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update -q
           $SUDO apt-get install -yq --no-install-recommends build-essential pkg-config
@@ -93,20 +160,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-      - name: Android NDK (linker)
-        # NDK 28.2.13676358 (docs/ANDROID.md): the runner's ANDROID_NDK_HOME, else the SDK's ndk/ folder.
+      - name: Install Android NDK
         run: |
           SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}
-          NDK=${ANDROID_NDK_HOME:-$SDK/ndk/28.2.13676358}
+          SDKMANAGER=$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")
+          SUDO=$(command -v sudo || true)
+          $SUDO "$SDKMANAGER" --install "ndk;28.2.13676358" < <(yes 2>/dev/null)
+          CLANG="$SDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
+          [ -x "$CLANG" ] || { echo "::error::Android NDK 28.2.13676358 install failed: $CLANG not found"; exit 1; }
+          echo "ANDROID_NDK_HOME=$SDK/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - name: Android NDK (linker)
+        # NDK 28.2.13676358 (docs/ANDROID.md), installed in the hosted runner's SDK.
+        run: |
+          SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}
+          NDK=$SDK/ndk/28.2.13676358
+          if [ ! -d "$NDK" ]; then
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" --install 'ndk;28.2.13676358'
+          fi
           LINKER=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang
-          [ -x "$LINKER" ] || { echo "::error::Android NDK 28.2.13676358 not found at $NDK: set ANDROID_NDK_HOME on the runner"; exit 1; }
+          [ -x "$LINKER" ] || { echo "::error::Android NDK linker not found at $LINKER"; exit 1; }
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$LINKER" >> "$GITHUB_ENV"
           echo "CC_aarch64_linux_android=$LINKER" >> "$GITHUB_ENV"
       - run: cargo build --workspace --target aarch64-linux-android
 
   rust-macos:
     name: Rust (macOS)
-    runs-on: [self-hosted, macos]
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,6 +198,33 @@ jobs:
         with:
           cache-bin: false
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Homebrew MoltenVK and Vulkan loader (the contained app's, crates/core/tests/assemble.rs)
+        run: brew install molten-vk vulkan-loader
       - run: cargo test --workspace --all-features
+        env:
+          # The Mac assemble tests must use Homebrew's real libraries here, not stand-ins.
+          ACNH_TEST_HOMEBREW_VULKAN: "1"
       - name: iOS cross-check
         run: cargo check --workspace --target aarch64-apple-ios
+      - name: Homebrew headers (SDL3, Vulkan)
+        run: brew install ninja sdl3 vulkan-headers
+      - name: C++ compiles for iOS
+        run: bash tools/check_ios_compile.sh
+      - name: Cache the iOS dependencies
+        uses: actions/cache@v4
+        with:
+          path: private/third_party/ios
+          key: ios-deps-sdl3-3.4.18-mvk-1.3.0-${{ runner.os }}-${{ hashFiles('tools/build_ios.sh') }}
+      - name: iOS simulator app (stub game)
+        run: bash tools/build_ios.sh iphonesimulator
+      - name: iOS device app (stub game)
+        run: bash tools/build_ios.sh iphoneos
+      - name: Check the iOS bundles
+        run: |
+          for sdk in iphonesimulator iphoneos; do
+            app="private/ios/build-$sdk/ACNH.app"
+            plutil -lint "$app/Info.plist"
+            [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")" = io.github.acnhrecomp ]
+            [ "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")" = 15.0 ]
+            [ "$(lipo -archs "$app/ACNH")" = arm64 ]
+          done

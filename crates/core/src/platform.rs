@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 iannitram
+// Private-file creation adapted from iannitram/totk-universal at
+// 80148e16e60b5ca5d34ca87d3ef3360567490352, crates/core/src/hub.rs:526-533,925-932;
+// permission test from crates/core/tests/hub_pair.rs:119-148 at the same commit.
+// See NOTICE for the MIT notice.
 //! Which OS this is, and the folders the launcher and the player use there. Values come from
 //! environment variables through a lookup function, so the rules are tested on every OS
 //! without touching the real environment (docs/code-map.md, `platform`). Copied from
@@ -5,6 +11,108 @@
 
 use crate::error::{Error, Result};
 use std::path::PathBuf;
+#[cfg(all(test, feature = "hub", unix))]
+mod hub_file_tests {
+    use super::*;
+    use crate::hub::{pair_in, read_peers, remove_peer, MemoryTransport, PairingSession};
+    use std::fs;
+
+    struct Folders(PathBuf);
+
+    impl Folders {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("acnh-hub-private-{}", std::process::id()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn dirs(&self, side: &str) -> AppDirs {
+            AppDirs::new(&Vars {
+                home: self.0.clone(),
+                data: self.0.join(side),
+                config: self.0.join(side),
+            })
+        }
+    }
+
+    impl Drop for Folders {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn run_pair(
+        a: &AppDirs,
+        b: &AppDirs,
+        code: &str,
+    ) -> (Result<crate::hub::Peer>, Result<crate::hub::Peer>) {
+        let (mut left, mut right) = MemoryTransport::pair();
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                pair_in(
+                    &mut left,
+                    &mut PairingSession::new(code).unwrap(),
+                    "client",
+                    a,
+                )
+            });
+            let second = scope.spawn(|| {
+                pair_in(
+                    &mut right,
+                    &mut PairingSession::new(code).unwrap(),
+                    "hub",
+                    b,
+                )
+            });
+            (first.join().unwrap(), second.join().unwrap())
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peers_file_is_private_even_after_replacement_and_removal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let folders = Folders::new();
+        let (a, b) = (folders.dirs("a"), folders.dirs("b"));
+        for _ in 0..2 {
+            let (left, right) = run_pair(&a, &b, "012345");
+            left.unwrap();
+            right.unwrap();
+            assert_eq!(read_peers(&a).unwrap().len(), 1);
+            for dirs in [&a, &b] {
+                let mode = fs::metadata(dirs.config.join("peers.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
+        }
+        remove_peer(&a, "client").unwrap();
+        assert_eq!(
+            fs::metadata(a.config.join("peers.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+/// Create a new private file. Keep OS-specific permission rules in this module.
+#[cfg(feature = "hub")]
+pub(crate) fn open_private_new(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
 
 /// A device family the launcher builds for (SPEC.md M1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

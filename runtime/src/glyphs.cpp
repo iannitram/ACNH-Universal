@@ -4,7 +4,7 @@
 // own extension font in Font/ScalableFont.sarc.zs, which every combined font in Font/Fcpx.sarc.zs lists first; the
 // shared system fonts (hle_pl.cpp) play no part in them. tools/make_button_glyphs.py writes a copy of that archive
 // with the icons redrawn for each style and face-button layout (input.layout, which moves the game's A to the
-// bottom button), under <data root>/fonts/glyphs_<style>/<layout>/romfs/. This picks the copy to serve.
+// bottom button), under <game root>/fonts/glyphs_<style>/<layout>/romfs/. This picks the copy to serve.
 //
 // The game opens the archive once, while booting, so a change of style or layout shows at the next start; "auto"
 // asks which kind of controller is connected at that moment (none: the original icons).
@@ -40,11 +40,11 @@ std::string glyph_override(const std::string& romfs_path) {
     std::lock_guard lk(lock);
     std::string choice = style + "/" + layout, path;
     if (style != "switch" || layout != "console") {  // switch on the Switch layout is the RomFS's own archive
-        fs::path p = fs::u8path(plat::data_root()) / "fonts" / ("glyphs_" + style) / layout / "romfs" /
+        fs::path p = fs::u8path(plat::game_root()) / "fonts" / ("glyphs_" + style) / layout / "romfs" /
                      fs::u8path(romfs_path);
         std::error_code ec;
         if (layout == "console" && !fs::is_regular_file(p, ec)) {  // made before the layout was named "console"
-            fs::path old = fs::u8path(plat::data_root()) / "fonts" / ("glyphs_" + style) / "nintendo" / "romfs" /
+            fs::path old = fs::u8path(plat::game_root()) / "fonts" / ("glyphs_" + style) / "nintendo" / "romfs" /
                            fs::u8path(romfs_path);
             if (fs::is_regular_file(old, ec)) p = old;
         }

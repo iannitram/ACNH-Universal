@@ -1,0 +1,284 @@
+// The Continue page (docs/design/continue-screen.md): the island card, the one Play button,
+// the conflict chooser with both cards, and the drift warning. It only draws: every text and
+// flag comes from `ContinuePageVm::view()` (app/src/vm/continue_page.rs) and every click goes
+// back as the button it hit.
+
+// A button on the page (`FocusTarget` in the view model).
+export enum PadTarget { play, keep-this, keep-relay, update, back, saves, settings, fleet, about }
+
+// One save card, as lines of text.
+export struct CardView {
+    saved: string,
+    played: string,
+    version: string,
+    badges: string,
+}
+
+export struct ContinueView {
+    status: string,
+    has-card: bool,
+    card: CardView,
+    message: string,
+    // The one Play button's text; "" while the chooser or the warning holds the buttons.
+    button: string,
+    button-enabled: bool,
+    choosing: bool,
+    this-card: CardView,
+    relay-card: CardView,
+    keep-enabled: bool,
+    // The drift warning; "" for none.
+    warning: string,
+    play-anyway: bool,
+    back: bool,
+    pages-enabled: bool,
+    // The About overlay is open over the page.
+    about-open: bool,
+    focus: PadTarget,
+}
+
+// A button that works by pad, key, mouse and touch. It never takes keyboard focus: the view
+// model owns focus and the ring is drawn from it.
+export component PadButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> focused;
+    in property <bool> enabled: true;
+    in property <bool> primary;
+    callback clicked();
+
+    min-height: root.primary ? 64px : 48px;
+    min-width: label.preferred-width + 40px;
+    border-radius: 10px;
+    border-width: 3px;
+    border-color: root.focused ? #ffffff : transparent;
+    background: !root.enabled ? #2f4a43 : root.primary ? #2f9e77 : #2b6b58;
+
+    label := Text {
+        text: root.text;
+        color: root.enabled ? #ffffff : #9db5ad;
+        font-size: root.primary ? 24px : 17px;
+        font-weight: root.primary ? 700 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component IslandCard inherits Rectangle {
+    in property <string> title;
+    in property <CardView> card;
+    in property <bool> focused;
+
+    background: #1d3d35;
+    border-radius: 14px;
+    border-width: 3px;
+    border-color: root.focused ? #ffffff : #36635a;
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 6px;
+        alignment: start;
+
+        Text {
+            text: root.title;
+            color: #a8d8c8;
+            font-size: 15px;
+        }
+
+        Text {
+            text: root.card.saved;
+            color: #ffffff;
+            font-size: 22px;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: root.card.played;
+            color: #e4f2ed;
+            font-size: 17px;
+        }
+
+        Text {
+            text: root.card.version;
+            color: #e4f2ed;
+            font-size: 17px;
+        }
+
+        if root.card.badges != "": Text {
+            text: root.card.badges;
+            color: #ffd166;
+            font-size: 17px;
+            font-weight: 700;
+        }
+    }
+}
+
+export component ContinuePage inherits Rectangle {
+    in property <ContinueView> view;
+    callback clicked(PadTarget);
+
+    background: #10251f;
+
+    VerticalLayout {
+        padding: 28px;
+        spacing: 14px;
+
+        Text {
+            text: "Continue";
+            color: #ffffff;
+            font-size: 30px;
+            font-weight: 700;
+        }
+
+        if !root.view.choosing: IslandCard {
+            title: root.view.status;
+            card: root.view.card;
+        }
+
+        if root.view.choosing: HorizontalLayout {
+            spacing: 16px;
+
+            VerticalLayout {
+                spacing: 10px;
+
+                IslandCard {
+                    title: "This device";
+                    card: root.view.this-card;
+                    focused: root.view.focus == PadTarget.keep-this;
+                }
+
+                PadButton {
+                    text: "Keep this one";
+                    enabled: root.view.keep-enabled;
+                    focused: root.view.focus == PadTarget.keep-this;
+                    clicked => {
+                        root.clicked(PadTarget.keep-this);
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 10px;
+
+                IslandCard {
+                    title: "On the relay";
+                    card: root.view.relay-card;
+                    focused: root.view.focus == PadTarget.keep-relay;
+                }
+
+                PadButton {
+                    text: "Keep this one";
+                    enabled: root.view.keep-enabled;
+                    focused: root.view.focus == PadTarget.keep-relay;
+                    clicked => {
+                        root.clicked(PadTarget.keep-relay);
+                    }
+                }
+            }
+        }
+
+        if root.view.warning != "": Text {
+            text: root.view.warning;
+            color: #ffd166;
+            font-size: 18px;
+            wrap: word-wrap;
+        }
+
+        if root.view.message != "": Text {
+            text: root.view.message;
+            color: #e4f2ed;
+            font-size: 17px;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+
+            if root.view.button != "": PadButton {
+                primary: true;
+                text: root.view.button;
+                enabled: root.view.button-enabled;
+                focused: root.view.focus == PadTarget.play;
+                clicked => {
+                    root.clicked(PadTarget.play);
+                }
+            }
+
+            if root.view.play-anyway: PadButton {
+                primary: true;
+                text: "Play anyway";
+                focused: root.view.focus == PadTarget.play;
+                clicked => {
+                    root.clicked(PadTarget.play);
+                }
+            }
+
+            if root.view.warning != "": PadButton {
+                primary: true;
+                text: "Update";
+                focused: root.view.focus == PadTarget.update;
+                clicked => {
+                    root.clicked(PadTarget.update);
+                }
+            }
+
+            if root.view.back: PadButton {
+                text: "Back";
+                focused: root.view.focus == PadTarget.back;
+                clicked => {
+                    root.clicked(PadTarget.back);
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+
+            PadButton {
+                text: "Saves";
+                enabled: root.view.pages-enabled;
+                focused: root.view.focus == PadTarget.saves;
+                clicked => {
+                    root.clicked(PadTarget.saves);
+                }
+            }
+
+            PadButton {
+                text: "Settings";
+                enabled: root.view.pages-enabled;
+                focused: root.view.focus == PadTarget.settings;
+                clicked => {
+                    root.clicked(PadTarget.settings);
+                }
+            }
+
+            PadButton {
+                text: "Fleet";
+                enabled: root.view.pages-enabled;
+                focused: root.view.focus == PadTarget.fleet;
+                clicked => {
+                    root.clicked(PadTarget.fleet);
+                }
+            }
+
+            PadButton {
+                text: "About";
+                enabled: root.view.pages-enabled;
+                focused: root.view.focus == PadTarget.about;
+                clicked => {
+                    root.clicked(PadTarget.about);
+                }
+            }
+        }
+    }
+}

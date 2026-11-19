@@ -1,67 +1,49 @@
-import { Button, VerticalBox } from "std-widgets.slint";
 import { AboutPage, CreditEntry, FixEntry } from "about.slint";
-export { CreditEntry, FixEntry }
+import { ContinuePage, ContinueView, CardView, PadTarget } from "continue.slint";
 
+export { ContinueView, CardView, PadTarget, CreditEntry, FixEntry }
+
+// The launcher window. It shows the Continue page and hands every key and click to Rust:
+// `view` is `ContinuePageVm::view()`, `clicked` is a click or tap on a button, and `key` is
+// a key press (true when it was one of the launcher's keys).
 export component MainWindow inherits Window {
+    in property <ContinueView> view;
+    // What About shows (`AboutVm`), set once at start.
+    in property <string> about-upstream;
+    in property <string> about-slint-notice;
+    in property <[CreditEntry]> about-credits;
+    in property <[FixEntry]> about-fixes;
+    callback clicked(PadTarget);
+    callback key(string) -> bool;
+
     title: "ACNH Universal";
-    min-width: 560px;
-    min-height: 360px;
-    preferred-width: 720px;
-    preferred-height: 480px;
+    preferred-width: 960px;
+    preferred-height: 600px;
+    min-width: 720px;
+    min-height: 480px;
+    forward-focus: keys;
 
-    in-out property<int> selected: 0;
-    in-out property<string> selection: "Continue";
-    in-out property<string> status: "Ready to sync and play.";
-    in property<string> about-upstream;
-    in property<string> about-slint-notice;
-    in property<[CreditEntry]> about-credits;
-    in property<[FixEntry]> about-fixes;
-    callback activate;
+    keys := FocusScope {
+        key-pressed(event) => {
+            return root.key(event.text) ? EventResult.accept : EventResult.reject;
+        }
 
-    VerticalBox {
-        padding: 32px;
-        spacing: 16px;
-
-        if root.selection != "About": VerticalBox {
-            spacing: 16px;
-
-            Text {
-                text: "Continue";
-                font-size: 30px;
-                color: #f4f0e8;
-            }
-            Text {
-                text: "ACNH Universal  ·  " + root.selection;
-                font-size: 18px;
-                color: #b8c7bb;
-            }
-            Rectangle {
-                background: #283d35;
-                border-radius: 12px;
-                VerticalBox {
-                    spacing: 8px;
-                    Text { text: "Your island"; font-size: 22px; color: #f4f0e8; }
-                    Text { text: "Select Continue to sync and play"; color: #d2dfd5; }
-                    Text { text: root.status; color: #b8c7bb; }
-                }
-            }
-            Button {
-                text: root.selected == 0 ? "▶  Continue" : "Continue";
-                clicked => { root.activate(); }
+        ContinuePage {
+            view: root.view;
+            clicked(target) => {
+                root.clicked(target);
             }
         }
 
-        if root.selection == "About": AboutPage {
+        // The About overlay: opened by the About entry on the Continue page, closed by Back.
+        if root.view.about-open: AboutPage {
             upstream-credit: root.about-upstream;
             slint-notice: root.about-slint-notice;
             credits: root.about-credits;
             offered-fixes: root.about-fixes;
-        }
-
-        Text {
-            text: "D-pad / stick to browse     A to activate     B to go back";
-            color: #b8c7bb;
+            back => {
+                root.clicked(PadTarget.back);
+            }
         }
     }
-    background: #172821;
 }

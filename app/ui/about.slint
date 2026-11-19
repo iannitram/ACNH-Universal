@@ -1,4 +1,5 @@
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { PadButton } from "continue.slint";
 
 export struct CreditEntry {
     name: string,
@@ -16,6 +17,8 @@ export component AboutPage inherits Rectangle {
     in property<string> slint-notice;
     in property<[CreditEntry]> credits;
     in property<[FixEntry]> offered-fixes;
+    // Back is the only button; the view model owns focus, so it is drawn focused.
+    callback back;
 
     background: #172821;
 
@@ -96,6 +99,18 @@ export component AboutPage inherits Rectangle {
             text: root.slint-notice;
             font-size: 13px;
             color: #8da394;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        PadButton {
+            text: "Back";
+            focused: true;
+            clicked => {
+                root.back();
+            }
         }
     }
 }

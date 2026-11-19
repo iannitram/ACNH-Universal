@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The iOS bundle's Info.plist (8.03a/b): the Documents folder (the runtime's data root, platform_mac.cpp) shows in
+     the Files app and opens in place; the bundle is ACNH.app (CFBundleExecutable ACNH). No entitlements file: a free
+     Apple ID gets neither increased-memory-limit nor extended-virtual-addressing (docs/apple-ios.md, 8.01). -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>ACNHRecomp</string>
+    <key>CFBundleDisplayName</key>
+    <string>ACNHRecomp</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.acnhrecomp</string>
+    <key>CFBundleExecutable</key>
+    <string>ACNH</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>MinimumOSVersion</key>
+    <string>15.0</string>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+    <key>UIRequiresFullScreen</key>
+    <true/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>GCSupportsControllerUserInteraction</key>
+    <true/>
+    <key>GCSupportedGameControllers</key>
+    <array>
+        <dict>
+            <key>ProfileName</key>
+            <string>ExtendedGamepad</string>
+        </dict>
+    </array>
+</dict>
+</plist>

@@ -5,7 +5,7 @@
 // to nn::fontll::ScalableFontEngineHelper::Decode (sdk+3093c0 in SDK 16), which accepts the data already decoded
 // when the first word is the plain magic 0x18029A7F, and then only skips the header.
 //
-// So any TrueType font works: <data root>/fonts/shared_<type>.ttf (0 standard, 1 simplified Chinese, 2 its
+// So any TrueType font works: <game root>/fonts/shared_<type>.ttf (0 standard, 1 simplified Chinese, 2 its
 // extension, 3 traditional Chinese, 4 Korean, 5 extension), else shared.ttf, else the host's own
 // (NX_SHARED_FONT, or a system font on macOS, Android, Windows and Linux). The fonts on our own firmware dump can go there once decoded.
 #include <algorithm>
@@ -16,6 +16,10 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <nx/runtime.h>
 
@@ -98,10 +102,10 @@ const Font& font(uint32_t type) {
     std::lock_guard lk(lock);
     Font& f = fonts[type < 6 ? type : 0];
     if (f.addr) return f;
-    std::string root = plat::data_root() + "/fonts/";
+    std::string root = plat::game_root() + "/fonts/";
     std::vector<std::string> candidates = {root + "shared_" + std::to_string(type) + ".ttf", root + "shared.ttf"};
     if (const char* e = std::getenv("NX_SHARED_FONT")) candidates.push_back(e);
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !TARGET_OS_IPHONE  // iOS has no host fonts: the prepared game carries one
     candidates.push_back("/System/Library/Fonts/Supplemental/Arial Unicode.ttf");
     candidates.push_back("/System/Library/Fonts/Supplemental/Arial.ttf");
 #elif defined(__ANDROID__)
