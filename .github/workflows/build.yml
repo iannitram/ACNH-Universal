@@ -28,7 +28,7 @@ permissions:
 env:
   SDL3: "3.4.16"          # as tools/setup_acnh.py
   VK_HEADERS: "1.4.357"   # as tools/setup_acnh.py
-  LLVM: "19.1.7"          # clang-cl on Windows
+  LLVM: "20.1.8"          # clang-cl on Windows (VS 18's STL needs Clang 20+)
 
 jobs:
   version:
