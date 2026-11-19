@@ -262,61 +262,56 @@ fn process_runner_keeps_stdout_and_stderr_lines_separate() {
     assert_eq!(log, vec!["stdout", "stderr"]);
 }
 
-/// A runner whose script, started for an earlier stage, is already in the shaders stage
-/// when our own code reaches it.
-struct BusyShaders {
-    out: PathBuf,
-    ran: Vec<Stage>,
-    active: bool,
-}
+/// A runner that starts nothing: the Rust shaders stage must not need the script.
+struct Idle;
 
-impl ScriptRunner for BusyShaders {
-    fn run(&mut self, stage: Stage, _args: &[String]) -> Result<(), Vec<String>> {
-        self.ran.push(stage);
-        if stage == Stage::Shaders {
-            // The script owns the stage and leaves the output our stage would have written.
-            self.active = false;
-            let spirv = self.out.join("spirv");
-            std::fs::create_dir_all(&spirv).unwrap();
-            std::fs::write(spirv.join("summary.txt"), "blocks 3 files 9\n").unwrap();
-        } else {
-            self.active = true;
-        }
+impl ScriptRunner for Idle {
+    fn run(&mut self, _stage: Stage, _args: &[String]) -> Result<(), Vec<String>> {
         Ok(())
     }
+}
 
-    fn active(&self) -> bool {
-        self.active
-    }
+fn prepare_error(req: &Request) -> String {
+    prepare_with(
+        req,
+        Hub::StrixHalo,
+        &mut Idle,
+        Path::new("/home/me"),
+        &mut |_| {},
+    )
+    .unwrap_err()
+    .to_string()
 }
 
 #[test]
-fn rust_shaders_follows_a_script_that_is_already_in_the_stage() {
-    // An earlier stage leaves upstream's script running through the shaders stage. Our own
-    // stage must follow it, not extract a second copy into the same folders.
-    let mut req = request("busy-shaders", Os::Linux);
+fn prepare_reaches_the_rust_sarc_fix_for_a_mod() {
+    // The shaders stage runs `sarc::fix_archives` on each mod's romfs: an archive that is
+    // not a SARC is refused with the sarc reader's own message.
+    let req = request("sarc-live", Os::Linux);
+    let mod_romfs = req.out.join("mods").join("tr").join("romfs");
+    std::fs::create_dir_all(&mod_romfs).unwrap();
+    std::fs::write(mod_romfs.join("bad.sarc.zs"), b"not an archive").unwrap();
+
+    let message = prepare_error(&req);
+    assert!(message.contains("stage shaders"), "{message}");
+    assert!(
+        message.contains("SARC archive") || message.contains("zstd"),
+        "{message}"
+    );
+}
+
+#[test]
+fn prepare_reaches_the_rust_shader_extraction() {
+    // With a RomFS and no translator installed, the stage runs the Rust extraction (it makes
+    // `shaders_extracted`) and then refuses plainly, without starting the script.
+    let mut req = request("shaders-live", Os::Linux);
     let romfs = req.out.join("romfs");
     std::fs::create_dir_all(&romfs).unwrap();
     req.game.romfs = romfs;
 
-    let mut runner = BusyShaders {
-        out: req.out.clone(),
-        ran: vec![],
-        active: false,
-    };
-    prepare_with(
-        &req,
-        Hub::StrixHalo,
-        &mut runner,
-        Path::new("/home/me"),
-        &mut |_| {},
-    )
-    .unwrap();
-
-    assert!(runner.ran.contains(&Stage::Shaders));
-    assert!(req.out.join("spirv/summary.txt").is_file());
-    // The Rust stage's own extraction never ran beside the script.
-    assert!(!req.out.join("shaders_extracted").exists());
+    let message = prepare_error(&req);
+    assert!(req.out.join("shaders_extracted").exists(), "{message}");
+    assert!(message.contains("stage shaders"), "{message}");
 }
 
 // ---- The real runner (`ProcessRunner`) on a stand-in for upstream's script ----

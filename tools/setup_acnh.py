@@ -287,32 +287,6 @@ def link(target, p):
         os.symlink(target, p, target_is_directory=True)
 
 
-def fix_archives(romfs):
-    """A mod's .sarc.zs archives as the game reads them (tools/sarc_endian.py): a zstd frame without its decompressed
-    size, or little-endian headers, crashed the game at boot (a translation tool's output)."""
-    if not shutil.which("zstd"):
-        print("zstd not found: the mod's archives are not checked")
-        return
-    sys.path.insert(0, os.path.join(ROOT, "tools"))
-    import sarc_endian
-    fixed = 0
-    for base, _, files in os.walk(romfs):
-        for f in files:
-            if not f.endswith(".sarc.zs"):
-                continue
-            path = os.path.join(base, f)
-            info = subprocess.run(["zstd", "-lv", path], capture_output=True, text=True).stdout
-            data = sarc_endian.read(path)
-            if "Decompressed Size" in info and "XXH64" not in info and data[6:8] == b"\xfe\xff":
-                continue
-            subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "sarc_endian.py"), path, path + ".tmp.zs"],
-                           check=True)
-            os.replace(path + ".tmp.zs", path)
-            fixed += 1
-    if fixed:
-        print(f"{fixed} archives rewritten as the game reads them (size in the zstd frame, big-endian)")
-
-
 def rewrap_messages(game_romfs, romfs):
     """A translation's dialogue lines wider than the text boxes, re-flowed (tools/msg_rewrap.py), so the game does not
     break them by itself and leave a word alone on its line. Needs Pillow (to measure with the game's font)."""
@@ -331,6 +305,8 @@ def main():
     ap.add_argument("--out", default="")
     ap.add_argument("--no-build", action="store_true",
                     help="stop before compiling the desktop game (for tools/android_install.sh: Android compiles its own)")
+    ap.add_argument("--stop-before-shaders", action="store_true",
+                    help="end after the recompile stage: the launcher's Rust code runs shaders and the mod archive fix")
     a = ap.parse_args()
     G = os.path.abspath(a.out) if a.out else os.path.join(P, "acnh")
     os.makedirs(os.path.join(G, "logs"), exist_ok=True)
@@ -541,7 +517,6 @@ def main():
                 os.makedirs(os.path.dirname(out), exist_ok=True)
                 with z.open(i) as s, open(out, "wb") as d:
                     shutil.copyfileobj(s, d)
-        fix_archives(os.path.join(dst, "romfs"))
         rewrap_messages(romfs, os.path.join(dst, "romfs"))
 
     # ---- version ------------------------------------------------------------------------------------------------
@@ -590,14 +565,14 @@ def main():
             print(open(log, encoding="utf-8", errors="replace").read().strip().splitlines()[-1] if os.path.exists(log) else "")
 
     # ---- shaders ------------------------------------------------------------------------------------------------
+    # The launcher's Rust code (crates/core: shaders, sarc) extracts and translates the shaders and fixes the mods'
+    # archives; the script only waits for its summary.txt.
+    if a.stop_before_shaders:
+        return
     say("shaders (Maxwell -> SPIR-V)")
     summary = os.path.join(G, "spirv", "summary.txt")
-    if not os.path.exists(summary) or force("shaders"):
-        run([py, "tools/extract_shaders.py", G, "--jobs", str(cores)])
-        val = ["--spirv-val", shutil.which("spirv-val")] if shutil.which("spirv-val") else ["--no-val"]
-        ensure_harness(False)  # still there (it was, at the tools stage)
-        run([dotnet, harness, "--batch", os.path.join(G, "shaders_extracted"), "--out", os.path.join(G, "spirv"),
-             "--jobs", str(cores)] + val, log=os.path.join(logs, "spirv.log"), env=env)
+    if not os.path.exists(summary):
+        fail("the shaders stage left no spirv/summary.txt (it is the launcher's Rust code: run the launcher)")
     first = open(summary, encoding="utf-8", errors="replace").readline().strip()
     print(first)
     if first.startswith("blocks 0 "):  # nothing was extracted: the game would draw nothing
