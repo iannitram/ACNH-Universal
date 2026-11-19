@@ -12,21 +12,10 @@ export struct FixEntry {
 }
 
 export component AboutPage inherits Rectangle {
-    in property<string> upstream-credit: "Nycolazs/ACNHRecomp (MIT)";
-    in property<string> slint-notice: "GUI powered by Slint (https://slint.dev). Copyright © SixtyFPS GmbH.";
-    in property<[CreditEntry]> credits: [
-        { name: "Nycolazs/ACNHRecomp", licence: "MIT", role: "Upstream project" },
-        { name: "iannitram/totk-universal", licence: "MIT", role: "Launcher architecture & modules" },
-        { name: "iannitram/save-relay", licence: "MIT", role: "Cross-device save sync" },
-        { name: "cesar527/ACNHRecomp", licence: "MIT", role: "Thermal governor & power modes" },
-        { name: "ZUlxian/ACNHRecomp", licence: "MIT", role: "Game folder import & fixes" },
-        { name: "Norviah/animal-crossing", licence: "MIT", role: "Item & villager metadata" },
-        { name: "fedebuonco/nxrt", licence: "Unlicense", role: "Runtime & launcher prior art" },
-    ];
-    in property<[FixEntry]> offered-fixes: [
-        { title: "VSync timer pacing on 75/144/165 Hz displays", link: "https://github.com/Nycolazs/ACNHRecomp/pull/55" },
-        { title: "Thermal governor and handheld power profiles", link: "https://github.com/Nycolazs/ACNHRecomp/pull/56" },
-    ];
+    in property<string> upstream-credit;
+    in property<string> slint-notice;
+    in property<[CreditEntry]> credits;
+    in property<[FixEntry]> offered-fixes;
 
     background: #172821;
 

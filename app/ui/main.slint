@@ -1,5 +1,6 @@
 import { Button, VerticalBox } from "std-widgets.slint";
-import { AboutPage } from "about.slint";
+import { AboutPage, CreditEntry, FixEntry } from "about.slint";
+export { CreditEntry, FixEntry }
 
 export component MainWindow inherits Window {
     title: "ACNH Universal";
@@ -11,6 +12,10 @@ export component MainWindow inherits Window {
     in-out property<int> selected: 0;
     in-out property<string> selection: "Continue";
     in-out property<string> status: "Ready to sync and play.";
+    in property<string> about-upstream;
+    in property<string> about-slint-notice;
+    in property<[CreditEntry]> about-credits;
+    in property<[FixEntry]> about-fixes;
     callback activate;
 
     VerticalBox {
@@ -46,7 +51,12 @@ export component MainWindow inherits Window {
             }
         }
 
-        if root.selection == "About": AboutPage {}
+        if root.selection == "About": AboutPage {
+            upstream-credit: root.about-upstream;
+            slint-notice: root.about-slint-notice;
+            credits: root.about-credits;
+            offered-fixes: root.about-fixes;
+        }
 
         Text {
             text: "D-pad / stick to browse     A to activate     B to go back";
