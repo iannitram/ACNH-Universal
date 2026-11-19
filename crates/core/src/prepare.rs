@@ -118,7 +118,13 @@ pub trait ScriptRunner {
     /// The Rust part of the shaders stage. The default runs it (`rust_shaders`); a test runner
     /// may stand in for it, as no translator is installed on a test machine.
     fn shaders(&mut self, req: &Request) -> Result<()> {
-        rust_shaders(req)
+        rust_shaders(req, &self.root())
+    }
+
+    /// The source folder the tools are built under (what `set_root` last gave). The default
+    /// is the checkout this was built from.
+    fn root(&self) -> PathBuf {
+        repo_root()
     }
 
     /// No stage is left to ask for: wait for what `run` left running. A runner whose `run`
@@ -201,6 +207,10 @@ impl ScriptRunner for ProcessRunner {
         let result = self.follow(None);
         self.script = None;
         result
+    }
+
+    fn root(&self) -> PathBuf {
+        self.root.clone()
     }
 
     fn set_root(&mut self, root: &Path) {
@@ -365,13 +375,16 @@ fn pack_stage(req: &Request) -> Result<()> {
 /// The shaders stage, in Rust: extract the shaders, translate them with the tools' .NET
 /// harness (built by the tools stage), fix the mods' archives and pack. The script has ended
 /// before this stage and starts again after it.
-fn rust_shaders(req: &Request) -> Result<()> {
+fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
     let stage = Stage::Shaders;
     fix_mod_archives(req)
         .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
     if req.game.romfs.is_dir() {
         let extracted = req.out.join("shaders_extracted");
-        crate::shaders::extract(
+        let tools =
+            crate::shaders::Tools::new(root.to_owned(), crate::shaders::Tools::default().python);
+        crate::shaders::extract_with(
+            &tools,
             &req.game.romfs,
             &req.out.join("analysis").join("main.bin"),
             &extracted,
@@ -380,7 +393,7 @@ fn rust_shaders(req: &Request) -> Result<()> {
         )
         .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
     }
-    let translated = crate::shaders::translate(&req.out, req.jobs)
+    let translated = crate::shaders::translate(root, &req.out, req.jobs)
         .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
     if !translated {
         return Err(Error::Build(format!(

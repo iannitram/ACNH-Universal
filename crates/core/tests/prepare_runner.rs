@@ -789,3 +789,48 @@ fn a_packaged_source_from_another_commit_is_refused() {
     assert!(!dirs.data.join("source/abc123").exists());
     assert!(fake.ran.is_empty());
 }
+
+/// A runner that keeps the default `shaders` step and a source folder given by `set_root`, as
+/// an installed launcher's runner does.
+#[derive(Default)]
+struct Rooted {
+    root: Option<PathBuf>,
+}
+
+impl ScriptRunner for Rooted {
+    fn run(&mut self, _stage: Stage, _args: &[String]) -> Result<(), Vec<String>> {
+        Ok(())
+    }
+
+    fn set_root(&mut self, root: &Path) {
+        self.root = Some(root.to_owned());
+    }
+
+    fn root(&self) -> PathBuf {
+        self.root.clone().expect("root set")
+    }
+}
+
+#[test]
+fn shaders_step_looks_for_its_tools_under_the_runners_root() {
+    let mut req = request("shaders-root", Os::Linux);
+    let romfs = req.out.join("romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    req.game.romfs = romfs;
+    let root = req.out.join("installed-source");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut runner = Rooted::default();
+    runner.set_root(&root);
+    let message = prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut runner,
+        Path::new("/home/me"),
+        &mut |_| {},
+    )
+    .unwrap_err()
+    .to_string();
+    // The refusal names the runner's root, not the checkout this test was built in.
+    assert!(message.contains("installed-source"), "{message}");
+}

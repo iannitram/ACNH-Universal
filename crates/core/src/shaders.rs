@@ -297,8 +297,8 @@ pub fn cleanup(out: &Path) -> Result<()> {
 /// Translate the extracted shaders into `out/spirv` with the .NET harness the tools stage
 /// builds. `Ok(false)` when no harness or dotnet is installed (the caller can fall back to
 /// upstream's script); `Err` when the translator ran and failed.
-pub fn translate(out: &Path, jobs: u32) -> Result<bool> {
-    let Some((dotnet, harness)) = translator() else {
+pub fn translate(root: &Path, out: &Path, jobs: u32) -> Result<bool> {
+    let Some((dotnet, harness)) = translator(root) else {
         return Ok(false);
     };
     let extracted = out.join("shaders_extracted");
@@ -506,8 +506,7 @@ fn stem(path: &Path) -> String {
         .to_owned()
 }
 
-fn translator() -> Option<(PathBuf, PathBuf)> {
-    let root = repo_root();
+fn translator(root: &Path) -> Option<(PathBuf, PathBuf)> {
     let name = if cfg!(windows) {
         "dotnet.exe"
     } else {
