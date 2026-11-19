@@ -1,6 +1,4 @@
 // Builds without Dear ImGui (or a platform without SDL3 yet): no settings screen; config.ini still applies.
-#include "ui/amiibo_importer.h"
-#include "ui/i18n.h"
 #include "ui/ui.h"
 #include "ui/amiibo_importer.h"
 
@@ -19,20 +17,9 @@ bool ui_pad(uint64_t, int32_t, int32_t) { return false; }
 uint64_t ui_filter_game_buttons(uint64_t buttons, bool) { return buttons; }
 bool ui_visible() { return false; }
 bool ui_text_field() { return false; }
-void ui_toggle() {}
 void ui_open_online() {}
-bool ui_touch(float, float, bool) { return false; }
 void amiibo_importer_poll() {}
-
-const char* tr(const char* key) { return key ? key : ""; }
-
-std::string trf(const char* key, const std::string& arg) {
-    std::string text = key ? key : "";
-    const auto at = text.find("{}");
-    if (at != std::string::npos) {
-        text.replace(at, 2, arg);
-    }
-    return text;
-}
+void ui_toggle() {}
+bool ui_touch(float, float, bool) { return false; }
 
 }  // namespace nx::ui
