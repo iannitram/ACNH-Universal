@@ -1,8 +1,10 @@
 //! View state kept separate from Slint so page behavior can be tested headlessly.
 
+pub mod about;
 pub mod continue_page;
 pub mod saves;
 pub mod settings;
+pub use about::AboutVm;
 pub use continue_page::ContinuePageVm;
 
 /// Navigation actions shared by keyboard and gamepad input (docs/design/continue-screen.md,

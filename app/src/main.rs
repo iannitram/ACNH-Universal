@@ -7,8 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use acnh_app::input::{key_nav, poll_nav, Stick};
 use acnh_app::play::{Player, RelayOff, Runner, Session};
 use acnh_app::ui::{from_slint, to_slint};
-use acnh_app::vm::ContinuePageVm;
+use acnh_app::vm::{AboutVm, ContinuePageVm};
 use acnh_app::MainWindow;
+use acnh_app::{CreditEntry, FixEntry};
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::{assemble, backup, savecard, saves};
 use slint::{ComponentHandle, SharedString, Timer, TimerMode, Weak};
@@ -59,8 +60,35 @@ fn render(window: &Weak<MainWindow>, session: &Session) {
     }
 }
 
+fn set_about(window: &MainWindow) {
+    let about = AboutVm::new();
+    let upstream = about.upstream();
+    window.set_about_upstream(format!("{} ({})", upstream.name, upstream.licence).into());
+    window.set_about_slint_notice(about.slint_notice().into());
+    let credits: Vec<CreditEntry> = about
+        .credits()
+        .iter()
+        .map(|c| CreditEntry {
+            name: c.name.into(),
+            licence: c.licence.into(),
+            role: c.role.into(),
+        })
+        .collect();
+    window.set_about_credits(slint::ModelRc::new(slint::VecModel::from(credits)));
+    let fixes: Vec<FixEntry> = about
+        .offered_fixes()
+        .into_iter()
+        .map(|f| FixEntry {
+            title: f.title.as_str().into(),
+            link: f.link.as_str().into(),
+        })
+        .collect();
+    window.set_about_fixes(slint::ModelRc::new(slint::VecModel::from(fixes)));
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window = MainWindow::new()?;
+    set_about(&window);
     let session = Rc::new(RefCell::new(session()?));
     render(&window.as_weak(), &session.borrow());
 

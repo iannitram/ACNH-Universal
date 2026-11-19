@@ -1,12 +1,18 @@
+import { AboutPage, CreditEntry, FixEntry } from "about.slint";
 import { ContinuePage, ContinueView, CardView, PadTarget } from "continue.slint";
 
-export { ContinueView, CardView, PadTarget }
+export { ContinueView, CardView, PadTarget, CreditEntry, FixEntry }
 
 // The launcher window. It shows the Continue page and hands every key and click to Rust:
 // `view` is `ContinuePageVm::view()`, `clicked` is a click or tap on a button, and `key` is
 // a key press (true when it was one of the launcher's keys).
 export component MainWindow inherits Window {
     in property <ContinueView> view;
+    // What About shows (`AboutVm`), set once at start.
+    in property <string> about-upstream;
+    in property <string> about-slint-notice;
+    in property <[CreditEntry]> about-credits;
+    in property <[FixEntry]> about-fixes;
     callback clicked(PadTarget);
     callback key(string) -> bool;
 
@@ -26,6 +32,17 @@ export component MainWindow inherits Window {
             view: root.view;
             clicked(target) => {
                 root.clicked(target);
+            }
+        }
+
+        // The About overlay: opened by the About entry on the Continue page, closed by Back.
+        if root.view.about-open: AboutPage {
+            upstream-credit: root.about-upstream;
+            slint-notice: root.about-slint-notice;
+            credits: root.about-credits;
+            offered-fixes: root.about-fixes;
+            back => {
+                root.clicked(PadTarget.back);
             }
         }
     }

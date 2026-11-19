@@ -1,0 +1,4 @@
+# Fixes of ours offered upstream (SPEC.md M8)
+# Format: title | link | status
+# Status: "offered" (shown until upstream has it) or "upstream" (already landed upstream)
+# No entries yet: add a row only once a real PR exists upstream (owner ruling).

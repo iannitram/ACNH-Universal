@@ -275,6 +275,8 @@ pub struct PageView {
     /// Back is drawn: the chooser or the drift warning is open and can be left.
     pub back: bool,
     pub pages_enabled: bool,
+    /// The About overlay is open over the page; Back closes it.
+    pub about_open: bool,
     pub focus: FocusTarget,
 }
 
@@ -345,6 +347,8 @@ pub struct ContinuePageVm {
     pub play_action: Option<PlayAction>,
     pub conflict: Option<ConflictView>,
     pub focus: FocusTarget,
+    /// The About overlay, opened from the About entry in the page row.
+    about_open: bool,
     pub glyph_set: InputDevice,
     pub last_error: Option<String>,
     pub status_message: Option<String>,
@@ -383,6 +387,7 @@ impl ContinuePageVm {
             play_action: Some(PlayAction::Play),
             conflict: None,
             focus: FocusTarget::Play,
+            about_open: false,
             glyph_set: InputDevice::SteamDeck,
             last_error: None,
             status_message: None,
@@ -394,6 +399,11 @@ impl ContinuePageVm {
             conflict_step: SyncStep::Pull,
             request: None,
         }
+    }
+
+    /// Whether the About overlay is open.
+    pub fn about_open(&self) -> bool {
+        self.about_open
     }
 
     pub fn state(&self) -> &ContinueState {
@@ -533,6 +543,10 @@ impl ContinuePageVm {
         if self.busy() {
             return false;
         }
+        if self.about_open {
+            // Only Back works under the About overlay.
+            return target == FocusTarget::Back;
+        }
         let phase = self.conflict.as_ref().map(|conflict| &conflict.phase);
         let in_drift = matches!(self.state, ContinueState::Drift { .. });
         match target {
@@ -578,6 +592,12 @@ impl ContinuePageVm {
     /// Handle controller or keyboard navigation input. Returns true if an action was committed.
     pub fn handle(&mut self, nav: Nav) -> bool {
         if self.busy() {
+            return false;
+        }
+        if self.about_open {
+            if nav == Nav::Back {
+                self.about_open = false;
+            }
             return false;
         }
         match nav {
@@ -673,6 +693,9 @@ impl ContinuePageVm {
             (Some(_), Nav::Up) => self.focus = FocusTarget::Play,
             (Some(at), Nav::Left) if at > 0 => self.focus = PAGE_ROW[at - 1].0,
             (Some(at), Nav::Right) if at + 1 < PAGE_ROW.len() => self.focus = PAGE_ROW[at + 1].0,
+            (Some(at), Nav::Accept) if PAGE_ROW[at].0 == FocusTarget::About => {
+                self.about_open = true;
+            }
             (Some(at), Nav::Accept) => {
                 // The other pages come with their own issues (2.05 to 2.08).
                 self.status_message = Some(format!("{} is coming soon.", PAGE_ROW[at].1));
@@ -984,6 +1007,7 @@ impl ContinuePageVm {
             play_anyway: in_drift && self.available(FocusTarget::Play),
             back: self.available(FocusTarget::Back),
             pages_enabled: self.available(FocusTarget::Saves),
+            about_open: self.about_open,
             focus: self.focus,
         }
     }
@@ -1250,6 +1274,47 @@ mod tests {
 
         vm.handle(Nav::Up);
         assert_eq!(vm.focus(), FocusTarget::Play);
+    }
+
+    #[test]
+    fn the_about_entry_opens_the_overlay_and_back_returns_to_continue() {
+        let mut vm = ContinuePageVm::new(Some(fake_card(1, "dev", 1, "3.0.2")), None);
+        for nav in [Nav::Down, Nav::Right, Nav::Right, Nav::Right] {
+            vm.handle(nav);
+        }
+        assert_eq!(vm.focus(), FocusTarget::About);
+        assert!(!vm.view().about_open);
+
+        // Accept on About opens the overlay; nothing is asked of the driver.
+        assert!(!vm.handle(Nav::Accept));
+        assert!(vm.about_open());
+        let view = vm.view();
+        assert!(view.about_open && view.back && !view.pages_enabled);
+        assert_eq!(view.message, "");
+
+        // Under the overlay only Back works.
+        vm.handle(Nav::Up);
+        vm.handle(Nav::Left);
+        vm.handle(Nav::Menu);
+        assert!(!vm.click(FocusTarget::Settings));
+        assert!(!vm.click(FocusTarget::Play));
+        assert!(vm.about_open());
+        assert_eq!(vm.focus(), FocusTarget::About);
+
+        vm.handle(Nav::Back);
+        assert!(!vm.about_open());
+        let view = vm.view();
+        assert!(!view.about_open && !view.back && view.pages_enabled);
+        assert_eq!(vm.focus(), FocusTarget::About);
+    }
+
+    #[test]
+    fn a_click_on_about_opens_the_overlay_and_a_click_on_back_closes_it() {
+        let mut vm = ContinuePageVm::new(Some(fake_card(1, "dev", 1, "3.0.2")), None);
+        vm.click(FocusTarget::About);
+        assert!(vm.about_open());
+        assert!(!vm.click(FocusTarget::Back));
+        assert!(!vm.about_open());
     }
 
     // The page joined to the play flow: what a press asks for and what the results do.

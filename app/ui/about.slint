@@ -1,0 +1,116 @@
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { PadButton } from "continue.slint";
+
+export struct CreditEntry {
+    name: string,
+    licence: string,
+    role: string,
+}
+
+export struct FixEntry {
+    title: string,
+    link: string,
+}
+
+export component AboutPage inherits Rectangle {
+    in property<string> upstream-credit;
+    in property<string> slint-notice;
+    in property<[CreditEntry]> credits;
+    in property<[FixEntry]> offered-fixes;
+    // Back is the only button; the view model owns focus, so it is drawn focused.
+    callback back;
+
+    background: #172821;
+
+    VerticalBox {
+        padding: 24px;
+        spacing: 12px;
+
+        Text {
+            text: "About";
+            font-size: 28px;
+            color: #f4f0e8;
+            font-weight: 700;
+        }
+
+        Text {
+            text: "Upstream: " + root.upstream-credit;
+            font-size: 16px;
+            color: #d2dfd5;
+        }
+
+        Rectangle {
+            background: #283d35;
+            height: 1px;
+        }
+
+        Text {
+            text: "Fixes Offered Upstream (M8)";
+            font-size: 18px;
+            color: #f4f0e8;
+        }
+
+        if root.offered-fixes.length == 0: Text {
+            text: "No fixes offered upstream yet";
+            color: #8da394;
+            font-size: 14px;
+        }
+
+        for fix in root.offered-fixes: HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "• " + fix.title;
+                color: #d2dfd5;
+                font-size: 14px;
+            }
+            Text {
+                text: "(" + fix.link + ")";
+                color: #8da394;
+                font-size: 12px;
+            }
+        }
+
+        Rectangle {
+            background: #283d35;
+            height: 1px;
+        }
+
+        Text {
+            text: "Credits & Licences";
+            font-size: 18px;
+            color: #f4f0e8;
+        }
+
+        for c in root.credits: HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: c.name + " (" + c.licence + ") - " + c.role;
+                color: #b8c7bb;
+                font-size: 13px;
+            }
+        }
+
+        Rectangle {
+            background: #283d35;
+            height: 1px;
+        }
+
+        Text {
+            text: root.slint-notice;
+            font-size: 13px;
+            color: #8da394;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        PadButton {
+            text: "Back";
+            focused: true;
+            clicked => {
+                root.back();
+            }
+        }
+    }
+}

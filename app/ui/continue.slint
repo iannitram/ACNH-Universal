@@ -31,12 +31,14 @@ export struct ContinueView {
     play-anyway: bool,
     back: bool,
     pages-enabled: bool,
+    // The About overlay is open over the page.
+    about-open: bool,
     focus: PadTarget,
 }
 
 // A button that works by pad, key, mouse and touch. It never takes keyboard focus: the view
 // model owns focus and the ring is drawn from it.
-component PadButton inherits Rectangle {
+export component PadButton inherits Rectangle {
     in property <string> text;
     in property <bool> focused;
     in property <bool> enabled: true;
