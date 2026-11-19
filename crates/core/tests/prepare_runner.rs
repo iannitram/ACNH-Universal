@@ -32,6 +32,14 @@ fn request(name: &str, target: Os) -> Request {
     }
 }
 
+/// The stages that run the script: all but the shaders stage, which is Rust.
+fn scripted() -> Vec<Stage> {
+    STAGES
+        .into_iter()
+        .filter(|stage| *stage != Stage::Shaders)
+        .collect()
+}
+
 #[derive(Default)]
 struct Fake {
     ran: Vec<Stage>,
@@ -73,7 +81,7 @@ fn stages_run_in_order_and_progress_sees_each_once() {
     )
     .unwrap();
     assert_eq!(out, req.out);
-    assert_eq!(fake.ran, STAGES.to_vec());
+    assert_eq!(fake.ran, scripted());
     assert_eq!(seen, STAGES.to_vec());
 }
 
@@ -184,11 +192,11 @@ fn completed_tools_version_and_build_do_not_run_again() {
         seen.push(s)
     })
     .unwrap();
+    assert_eq!(fake.ran, vec![Stage::Game, Stage::Recompile, Stage::Fonts]);
     assert_eq!(
-        fake.ran,
+        seen,
         vec![Stage::Game, Stage::Recompile, Stage::Shaders, Stage::Fonts]
     );
-    assert_eq!(seen, fake.ran);
 }
 
 #[test]
@@ -534,25 +542,25 @@ fn stages_the_script_is_already_past_are_still_reported_once() {
 
 #[test]
 fn a_failing_script_run_names_the_stage_it_failed_in() {
-    let req = request("fail-shaders", Os::Linux);
+    let req = request("fail-fonts", Os::Linux);
     let mut seen = vec![];
     let err = prepare_with(
         &req,
         Hub::StrixHalo,
-        &mut stand_in(&req, 0, &["fail:shaders"]),
+        &mut stand_in(&req, 0, &["fail:fonts"]),
         Path::new("/home/me"),
         &mut report(&req, &mut seen),
     )
     .unwrap_err();
     match err {
         Error::Build(m) => {
-            assert!(m.starts_with("stage shaders: == shaders"), "{m}");
+            assert!(m.starts_with("stage fonts: == fonts"), "{m}");
             assert!(m.contains("boom at ~/x"), "{m}");
-            assert!(m.contains("trace of shaders"), "{m}");
+            assert!(m.contains("trace of fonts"), "{m}");
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(seen, STAGES[..5].to_vec());
+    assert_eq!(seen, STAGES[..6].to_vec());
     assert_eq!(starts(&req), 1);
     assert!(!req.out.join("build").exists());
 }
@@ -753,7 +761,7 @@ fn a_packaged_source_is_copied_to_the_data_folder_and_the_runner_runs_there() {
     let copy = dirs.data.join("source/abc123");
     assert!(copy.join("CMakeLists.txt").is_file());
     assert_eq!(fake.root.as_deref(), Some(copy.as_path()));
-    assert_eq!(fake.ran, STAGES.to_vec());
+    assert_eq!(fake.ran, scripted());
     assert_eq!(seen, STAGES.to_vec());
 }
 

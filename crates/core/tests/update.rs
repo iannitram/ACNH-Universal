@@ -118,6 +118,10 @@ impl ScriptRunner for Fake {
         self.ran.push(stage);
         Ok(())
     }
+
+    fn shaders(&mut self, _req: &Request) -> Result<(), acnh_core::error::Error> {
+        Ok(())
+    }
 }
 
 fn request(name: &str) -> Request {
