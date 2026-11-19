@@ -113,10 +113,11 @@ if(NX_TESTS AND NOT ANDROID)
     endif()
 endif()
 
-# Native Metal backend (docs/NATIVE_METAL.md), Apple only: SPIRV-Cross (Apache-2.0) turns the shaders into MSL.
+# Native Metal backend (docs/NATIVE_METAL.md), macOS only: SPIRV-Cross (Apache-2.0) turns the shaders into MSL.
 # Fetched at a fixed revision on the first configure. metal_shader_check runs every shader of a game through it
-# (cmake --build <dir> --target metal_shader_check; metal_shader_check private/acnh).
-if(APPLE)
+# (cmake --build <dir> --target metal_shader_check; metal_shader_check private/acnh). Skipped for iOS, which sets
+# APPLE too: nothing in the player links nx_mtl (8.03b).
+if(APPLE AND NOT IOS)
     include(FetchContent)
     set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
     set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
@@ -160,7 +161,7 @@ endif()
 # The launcher (launcher/): the program a player opens first. It has no game code, so it builds from a plain
 # checkout (cmake --build <dir> --target acnhrecomp_launcher) and leaves the game's targets as they are.
 option(NX_LAUNCHER "Build the first-run launcher (acnhrecomp_launcher)" ON)
-if(NX_LAUNCHER AND NOT ANDROID)
+if(NX_LAUNCHER AND NOT ANDROID AND NOT IOS)
     include(launcher/launcher.cmake)
 endif()
 
@@ -424,6 +425,53 @@ if(ANDROID)
         target_link_libraries(${NX_GAME}_game PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${NX_GAME_LIBS}>" ${NX_GAME})
         target_link_options(${NX_GAME}_game PRIVATE -Wl,-z,max-page-size=16384)
     endif()
+elseif(IOS)
+    # iOS (CMAKE_SYSTEM_NAME=iOS): the macOS player sources, built as ACNH.app. SDL3 and MoltenVK are static,
+    # built into private/third_party/ios/<sdk>/ by tools/build_ios.sh (never committed) and found through
+    # CMAKE_PREFIX_PATH and SDL3_DIR. There is no Vulkan loader: MoltenVK is linked into the app. No entitlements
+    # file: a free Apple ID gets neither increased-memory-limit nor extended-virtual-addressing
+    # (docs/apple-ios.md, 8.01).
+    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+        set(_nx_ios_sdk iphonesimulator)
+    else()
+        set(_nx_ios_sdk iphoneos)
+    endif()
+    # CMAKE_FIND_ROOT_PATH_MODE_PACKAGE is ONLY for iOS, so CMAKE_PREFIX_PATH alone cannot reach an install
+    # outside the SDK: point SDL3_DIR at the prefix tools/build_ios.sh installed.
+    if(NOT SDL3_DIR)
+        set(_nx_ios_sdl3 "${CMAKE_SOURCE_DIR}/private/third_party/ios/${_nx_ios_sdk}/sdl3/lib/cmake/SDL3")
+        if(EXISTS "${_nx_ios_sdl3}/SDL3Config.cmake")
+            set(SDL3_DIR "${_nx_ios_sdl3}" CACHE PATH "SDL3 built for iOS (tools/build_ios.sh)")
+        endif()
+    endif()
+    find_package(SDL3 REQUIRED CONFIG)
+    find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/include" /opt/homebrew/include
+              /opt/homebrew/opt/vulkan-headers/include /usr/local/include NO_CMAKE_FIND_ROOT_PATH)
+    if(NOT NX_VULKAN_INCLUDE)
+        message(FATAL_ERROR "Vulkan headers not found: set NX_VULKAN_INCLUDE (see tools/build_ios.sh)")
+    endif()
+    set(NX_IOS_MOLTENVK "${CMAKE_SOURCE_DIR}/private/third_party/ios/${_nx_ios_sdk}/moltenvk/lib/libMoltenVK.a"
+        CACHE FILEPATH "Static MoltenVK built for iOS (tools/build_ios.sh)")
+    if(NOT EXISTS "${NX_IOS_MOLTENVK}")
+        message(FATAL_ERROR "MoltenVK not found at ${NX_IOS_MOLTENVK}: run tools/build_ios.sh <sdk>")
+    endif()
+    add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp
+                   runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp)
+    set_target_properties(${NX_GAME} PROPERTIES
+        OUTPUT_NAME ACNH
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/ios/Info.plist.in")
+    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
+    # MoltenVK is whole-archived (SDL looks it up, so no symbol reference would pull it in) and needs Metal and its
+    # surroundings; SDL3's static target names the rest (UIKit, GameController, AVFoundation, ...).
+    target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3
+        "$<LINK_LIBRARY:WHOLE_ARCHIVE,${NX_IOS_MOLTENVK}>"
+        "-framework Metal" "-framework MetalKit" "-framework QuartzCore" "-framework CoreGraphics"
+        "-framework CoreFoundation" "-framework Foundation" "-framework UIKit" "-framework IOSurface"
+        "-framework CoreVideo" "-framework GameController" "-framework AVFoundation")
+    # iOS code signing refuses to load a library copied into Documents (runtime/src/game_folder.cpp): the game's
+    # code is linked in, as the macOS default.
+    target_link_libraries(${NX_GAME} PRIVATE ${NX_GAME_LIBS})
+    target_compile_options(${NX_GAME} PRIVATE -fvisibility=hidden)
 elseif(APPLE)
     # macOS: SDL3 (window, input, audio) and the Vulkan loader + MoltenVK from Homebrew
     # (brew install sdl3 vulkan-headers vulkan-loader molten-vk).
@@ -624,15 +672,16 @@ endif()
 # system: apt install libvpx-dev libvorbis-dev, brew install libvpx libvorbis. Without libvpx the movies play with
 # black frames; without libvorbis the SDK's own Vorbis decoder is used.
 find_package(PkgConfig QUIET)
-if(PKG_CONFIG_FOUND AND NOT ANDROID)
+if(PKG_CONFIG_FOUND AND NOT ANDROID AND NOT IOS)
     pkg_check_modules(VPX QUIET IMPORTED_TARGET vpx)
     pkg_check_modules(VORBIS QUIET IMPORTED_TARGET vorbis)
 endif()
 set(NX_VPX_TARGET PkgConfig::VPX)
 set(NX_VORBIS_TARGET PkgConfig::VORBIS)
 # Without pkg-config (a Mac with Homebrew's libvpx and libvorbis but no pkgconf) the libraries are looked up
-# directly; before, such a build quietly had black movies.
-if(NOT ANDROID AND NOT VPX_FOUND)
+# directly; before, such a build quietly had black movies. iOS skips both: Homebrew's macOS binaries do not link
+# for iOS, so it gets NX_NO_VPX and NX_NO_VORBIS below.
+if(NOT ANDROID AND NOT IOS AND NOT VPX_FOUND)
     find_path(NX_VPX_INCLUDE vpx/vpx_decoder.h
               HINTS $ENV{HOMEBREW_PREFIX}/include /opt/homebrew/include /opt/homebrew/opt/libvpx/include
                     /usr/local/include /usr/local/opt/libvpx/include
@@ -652,7 +701,7 @@ if(NOT ANDROID AND NOT VPX_FOUND)
         message(STATUS "libvpx: ${NX_VPX_LIBRARY} (without pkg-config)")
     endif()
 endif()
-if(NOT ANDROID AND NOT VORBIS_FOUND)
+if(NOT ANDROID AND NOT IOS AND NOT VORBIS_FOUND)
     find_path(NX_VORBIS_INCLUDE vorbis/codec.h
               HINTS $ENV{HOMEBREW_PREFIX}/include /opt/homebrew/include /opt/homebrew/opt/libvorbis/include
                     /usr/local/include /usr/local/opt/libvorbis/include

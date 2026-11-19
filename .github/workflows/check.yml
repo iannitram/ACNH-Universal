@@ -202,6 +202,24 @@ jobs:
       - name: iOS cross-check
         run: cargo check --workspace --target aarch64-apple-ios
       - name: Homebrew headers (SDL3, Vulkan)
-        run: brew install sdl3 vulkan-headers
+        run: brew install ninja sdl3 vulkan-headers
       - name: C++ compiles for iOS
         run: bash tools/check_ios_compile.sh
+      - name: Cache the iOS dependencies
+        uses: actions/cache@v4
+        with:
+          path: private/third_party/ios
+          key: ios-deps-sdl3-3.4.18-mvk-1.3.0-${{ runner.os }}-${{ hashFiles('tools/build_ios.sh') }}
+      - name: iOS simulator app (stub game)
+        run: bash tools/build_ios.sh iphonesimulator
+      - name: iOS device app (stub game)
+        run: bash tools/build_ios.sh iphoneos
+      - name: Check the iOS bundles
+        run: |
+          for sdk in iphonesimulator iphoneos; do
+            app="private/ios/build-$sdk/ACNH.app"
+            plutil -lint "$app/Info.plist"
+            [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")" = io.github.acnhrecomp ]
+            [ "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")" = 15.0 ]
+            [ "$(lipo -archs "$app/ACNH")" = arm64 ]
+          done
