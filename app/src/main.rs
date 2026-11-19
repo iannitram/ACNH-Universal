@@ -10,7 +10,7 @@ use acnh_app::ui::{from_slint, to_slint};
 use acnh_app::vm::ContinuePageVm;
 use acnh_app::MainWindow;
 use acnh_core::platform::{AppDirs, Os, Vars};
-use acnh_core::{backup, recipe, savecard, saves};
+use acnh_core::{assemble, backup, savecard, saves};
 use slint::{ComponentHandle, SharedString, Timer, TimerMode, Weak};
 
 /// The picture on the island card.
@@ -30,10 +30,9 @@ fn session() -> acnh_core::Result<Session> {
     let mut vm = ContinuePageVm::new(savecard::read_card(&save_dir, &picture).ok(), None);
     vm.home = vars.home.clone();
 
-    let mut program = dirs.install().join(recipe::output(os));
-    if matches!(os, Os::Mac) {
-        program = program.join("Contents").join("MacOS").join("acnh");
-    }
+    // On the Mac the player is beside this executable in the one contained app.
+    let launcher = std::env::current_exe().unwrap_or_default();
+    let program = assemble::player(os, &launcher, &dirs.install());
     let backups = saves::backups_dir(&root);
     let runner = Runner {
         // No relay is set up from the app yet (Settings): the island here is played, and

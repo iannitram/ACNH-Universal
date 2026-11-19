@@ -15,6 +15,7 @@
 //! Everything a prepare writes is made from my game folder: it stays in `out` on the hub, and
 //! reaches my other devices only through the hub, over the home network (M11, M14).
 
+pub use crate::assemble::assemble;
 use crate::error::{Error, Result};
 use crate::gamefolder::GameFolder;
 use crate::platform::{AppDirs, Os, Vars};
@@ -339,8 +340,8 @@ fn pack_stage(req: &Request) -> Result<()> {
 }
 
 /// Whether everything `stage` leaves in `req.out` is there. Game and recompile leave one
-/// file per module; upstream's build leaves the player itself in `build/` (on the Mac the
-/// plain executable: the app bundle is stage 8's).
+/// file per module; upstream's build leaves the bare player in `build/` (on the Mac the
+/// plain executable), which `assemble` then makes self-contained in the install folder.
 fn stage_complete(stage: Stage, req: &Request) -> bool {
     const MODULES: [&str; 3] = ["main", "sdk", "subsdk0"];
     match stage {
@@ -379,7 +380,7 @@ fn stage_complete(stage: Stage, req: &Request) -> bool {
 
 /// The repo root upstream's scripts run from: the checkout this was built from (as
 /// upstream's launcher falls back to its own source folder).
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 

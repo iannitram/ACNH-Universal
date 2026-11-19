@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The Mac app's Info.plist. Its version is filled in by .github/workflows/release.yml (the
+     release's app) and by crates/core/src/assemble.rs (the bundle made from a checkout). -->
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>ACNH Universal</string>
+<key>CFBundleIdentifier</key><string>io.github.iannitram.acnh-universal</string>
+<key>CFBundleExecutable</key><string>acnh-app</string>
+<key>CFBundleIconFile</key><string>acnhrecomp</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>@VERSION@</string>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>

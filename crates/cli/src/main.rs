@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+use acnh_core::assemble;
 use acnh_core::config::Config;
 use acnh_core::error::not_built;
 use acnh_core::fleet;
@@ -23,7 +24,6 @@ use acnh_core::launch::{self, Game, Keep, Relay, Sync};
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{self, Request};
 use acnh_core::profile;
-use acnh_core::recipe;
 use acnh_core::saves;
 use acnh_core::steam::{self, Shortcut};
 use acnh_core::{Error, Result};
@@ -213,6 +213,12 @@ fn build(options: &Options) -> Result<i32> {
     };
     let out = prepare::prepare(&request, &mut |stage| println!("== {}", stage.key()))?;
     println!("built {} for {}", out.display(), target.key());
+    // The bare player becomes a self-contained one in the install folder (on the Mac, the
+    // one contained app).
+    let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
+    let install = AppDirs::new(&vars).install();
+    let player = prepare::assemble(target, &out.join("build"), &install)?;
+    println!("assembled {}", player.display());
     Ok(0)
 }
 
@@ -232,10 +238,9 @@ fn play(options: &Options) -> Result<i32> {
         println!("profile {}: {}", chosen.id, chosen.name);
     }
 
-    let mut program = dirs.install().join(recipe::output(os));
-    if os == Os::Mac {
-        program = program.join("Contents").join("MacOS").join("acnh");
-    }
+    // On the Mac the player is beside this executable in the one contained app.
+    let launcher = std::env::current_exe().unwrap_or_default();
+    let program = assemble::player(os, &launcher, &dirs.install());
     let player = Player { program };
     let relay = Offline;
     let save_dir = saves::save_dir(&root);

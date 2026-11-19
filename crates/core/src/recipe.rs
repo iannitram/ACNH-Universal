@@ -112,8 +112,14 @@ impl Stage {
     }
 }
 
+/// The Mac's one contained app (owner, 2026-11-18): the launcher, the player and its
+/// libraries in one bundle, which `assemble` makes in the install folder.
+pub const MAC_APP: &str = "ACNH-Universal.app";
+
 /// What a build for `target` leaves in its output folder, the player's file name:
 /// Linux "acnh", Windows "acnh.exe", Mac "ACNH.app", Ios "ACNH.ipa", Android "acnh.apk".
+/// On the Mac the app a prepare makes is `MAC_APP`; the name here is the one issue 1.07's
+/// locked test holds, and nothing starts a player through it (`assemble::player`).
 pub fn output(target: Os) -> &'static str {
     match target {
         Os::Linux => "acnh",

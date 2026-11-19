@@ -140,20 +140,10 @@ jobs:
           for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
             test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
           done
-          cat > "$A/Contents/Info.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-          <key>CFBundleName</key><string>ACNH Universal</string>
-          <key>CFBundleIdentifier</key><string>io.github.iannitram.acnh-universal</string>
-          <key>CFBundleExecutable</key><string>acnh-app</string>
-          <key>CFBundleIconFile</key><string>acnhrecomp</string>
-          <key>CFBundlePackageType</key><string>APPL</string>
-          <key>CFBundleShortVersionString</key><string>${VERSION#v}</string>
-          <key>NSHighResolutionCapable</key><true/>
-          </dict></plist>
-          PLIST
-          sed -i '' 's/^ *//' "$A/Contents/Info.plist"
+          # The same Info.plist the launcher writes when it makes the bundle from a checkout
+          # (crates/core/src/assemble.rs), so the two cannot drift.
+          sed "s/@VERSION@/${VERSION#v}/" assets/mac/Info.plist.in > "$A/Contents/Info.plist"
+          plutil -lint "$A/Contents/Info.plist"
           codesign --force --deep --sign - "$A"
           find "$A" -type f | tee files.txt
           bash tools/check_release_files.sh < files.txt

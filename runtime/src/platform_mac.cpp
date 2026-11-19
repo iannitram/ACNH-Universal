@@ -964,9 +964,12 @@ int main(int argc, char** argv) {
     if (const char* base = SDL_GetBasePath()) {
         // Inside ACNHRecomp.app the libraries are in Contents/MacOS with the player, the ICD file in
         // Contents/Resources (SDL's base there); in a plain folder both are beside the player.
+        // ACNH-Universal.app (the one contained app, crates/core/src/assemble.rs) keeps them in Contents/Frameworks.
         std::string dir = base;
-        if (const size_t r = dir.rfind("/Contents/Resources/"); r != std::string::npos && r + 20 == dir.size())
-            dir = dir.substr(0, r) + "/Contents/MacOS/";
+        if (const size_t r = dir.rfind("/Contents/Resources/"); r != std::string::npos && r + 20 == dir.size()) {
+            dir = dir.substr(0, r) + "/Contents/Frameworks/";
+            if (access((dir + "libvulkan.1.dylib").c_str(), R_OK) != 0) dir = dir.substr(0, r) + "/Contents/MacOS/";
+        }
         const std::string loader = dir + "libvulkan.1.dylib", icd = std::string(base) + "MoltenVK_icd.json";
         if (access(loader.c_str(), R_OK) == 0 && access(icd.c_str(), R_OK) == 0) {
             setenv("SDL_VULKAN_LIBRARY", loader.c_str(), 0);
