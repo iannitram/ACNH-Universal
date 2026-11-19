@@ -4,7 +4,7 @@
 
 ## Decision
 
-The same recompiled C++ is compiled for `aarch64-apple-darwin` and `aarch64-apple-ios`; no JIT is needed. The renderer is MoltenVK today and upstream's native Metal (`runtime/src/mtl`, `docs/NATIVE_METAL.md`) when it lands. The Mac is the hub for both: the Mac launcher builds the iOS app as an unsigned `.ipa` and puts it in Dropbox, and I install it with SideStore (amended 2026-11-18, below). On iOS the game app is the launcher; save-relay runs in it through its C interface (iannitram/save-relay#49).
+The same recompiled C++ is compiled for `aarch64-apple-darwin` and `aarch64-apple-ios`; no JIT is needed. The renderer is MoltenVK today and upstream's native Metal (`runtime/src/mtl`, `docs/NATIVE_METAL.md`) when it lands. The Mac is the hub for both: the Mac launcher builds the iOS app as an unsigned `.ipa` and puts it in Dropbox, and I install it with SideStore (amended 2026-11-18, below). On iOS the game app is the launcher; save-relay runs in it through save-relay's Rust API (`acnh_core::relay`, as on the Mac and PC; owner ruling 2026-11-18: "Rust API (Recommended)"), replacing its C interface (iannitram/save-relay#49).
 
 ## Risks, checked first (piece 8.01)
 
