@@ -53,6 +53,10 @@ impl ScriptRunner for Fake {
     fn set_root(&mut self, root: &Path) {
         self.root = Some(root.to_owned());
     }
+
+    fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -141,14 +145,22 @@ fn step_is_rust_for_shaders_and_upstreams_script_for_the_rest() {
         }
         assert_eq!(
             step(stage, &req),
-            Step::Script(vec![
-                "python3".to_owned(),
-                "tools/setup_acnh.py".to_owned(),
-                "--game".to_owned(),
-                "/game".to_owned(),
-                "--out".to_owned(),
-                req.out.display().to_string(),
-            ])
+            Step::Script(
+                vec![
+                    "python3".to_owned(),
+                    "tools/setup_acnh.py".to_owned(),
+                    "--game".to_owned(),
+                    "/game".to_owned(),
+                    "--out".to_owned(),
+                    req.out.display().to_string(),
+                ]
+                .into_iter()
+                .chain(
+                    (stage != Stage::Fonts && stage != Stage::Build)
+                        .then(|| "--stop-before-shaders".to_owned())
+                )
+                .collect()
+            )
         );
     }
     let win = request("step-win", Os::Windows);
@@ -295,7 +307,9 @@ fn prepare_reaches_the_rust_sarc_fix_for_a_mod() {
     let message = prepare_error(&req);
     assert!(message.contains("stage shaders"), "{message}");
     assert!(
-        message.contains("SARC archive") || message.contains("zstd"),
+        message.contains("SARC archive")
+            || message.contains("zstd")
+            || message.contains("translator"),
         "{message}"
     );
 }
@@ -450,6 +464,10 @@ impl ScriptRunner for StandIn {
 
     fn finish(&mut self) -> Result<(), Vec<String>> {
         self.runner.finish()
+    }
+
+    fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
     }
 }
 

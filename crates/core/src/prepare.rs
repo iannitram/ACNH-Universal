@@ -115,12 +115,10 @@ pub trait ScriptRunner {
     /// Run `args` (a `Step::Script`) for `stage`, and come back when that stage of it is over.
     fn run(&mut self, stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>>;
 
-    /// Whether a script `run` started is still working. A `Step::Rust` stage must not write
-    /// the same folders while one is: upstream's script runs on to its own version of the
-    /// stage, and two writers would race. A runner whose `run` leaves nothing running is
-    /// never active.
-    fn active(&self) -> bool {
-        false
+    /// The Rust part of the shaders stage. The default runs it (`rust_shaders`); a test runner
+    /// may stand in for it, as no translator is installed on a test machine.
+    fn shaders(&mut self, req: &Request) -> Result<()> {
+        rust_shaders(req)
     }
 
     /// No stage is left to ask for: wait for what `run` left running. A runner whose `run`
@@ -189,10 +187,6 @@ impl ProcessRunner {
 }
 
 impl ScriptRunner for ProcessRunner {
-    fn active(&self) -> bool {
-        self.script.as_ref().is_some_and(|script| !script.ended)
-    }
-
     fn run(&mut self, stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>> {
         if self.script.as_ref().is_some_and(|s| s.args != args) {
             self.finish()?; // another command: the one before it ends first
@@ -366,6 +360,37 @@ fn pack_stage(req: &Request) -> Result<()> {
         crate::pack::spirv(&spirv, &req.out.join("spirv.pak"))?;
     }
     Ok(())
+}
+
+/// The shaders stage, in Rust: extract the shaders, translate them with the tools' .NET
+/// harness (built by the tools stage), fix the mods' archives and pack. The script has ended
+/// before this stage and starts again after it.
+fn rust_shaders(req: &Request) -> Result<()> {
+    let stage = Stage::Shaders;
+    fix_mod_archives(req)
+        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+    if req.game.romfs.is_dir() {
+        let extracted = req.out.join("shaders_extracted");
+        crate::shaders::extract(
+            &req.game.romfs,
+            &req.out.join("analysis").join("main.bin"),
+            &extracted,
+            req.jobs,
+            false,
+        )
+        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+    }
+    let translated = crate::shaders::translate(&req.out, req.jobs)
+        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+    if !translated {
+        return Err(Error::Build(format!(
+            "stage {}: the shader translator (dotnet and spirv_harness.dll) is not installed",
+            stage.key()
+        )));
+    }
+    // The stage's packs are ours (`pack::romfs`, `pack::spirv`), packed after either writer
+    // has left the loose folders.
+    pack_stage(req).map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))
 }
 
 /// Whether everything `stage` leaves in `req.out` is there. Game and recompile leave one
@@ -592,36 +617,7 @@ fn run_stages(
             Step::Script(args) => runner
                 .run(stage, &args)
                 .map_err(|log| build_error(stage, &log, home))?,
-            Step::Rust if stage == Stage::Shaders => {
-                // Rust owns the stage: extract the shaders, translate them with the tools'
-                // .NET harness (built by the tools stage), and fix the mods' archives. The
-                // script has ended before this stage and starts again after it.
-                fix_mod_archives(req)
-                    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-                if req.game.romfs.is_dir() {
-                    let extracted = req.out.join("shaders_extracted");
-                    crate::shaders::extract(
-                        &req.game.romfs,
-                        &req.out.join("analysis").join("main.bin"),
-                        &extracted,
-                        req.jobs,
-                        false,
-                    )
-                    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-                }
-                let translated = crate::shaders::translate(&req.out, req.jobs)
-                    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-                if !translated {
-                    return Err(Error::Build(format!(
-                        "stage {}: the shader translator (dotnet and spirv_harness.dll) is not installed",
-                        stage.key()
-                    )));
-                }
-                // The stage's packs are ours (`pack::romfs`, `pack::spirv`), packed after
-                // either writer has left the loose folders.
-                pack_stage(req)
-                    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-            }
+            Step::Rust if stage == Stage::Shaders => runner.shaders(req)?,
             Step::Rust => {}
         }
         if stage == Stage::Tools {

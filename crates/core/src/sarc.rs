@@ -264,6 +264,10 @@ pub fn fix_archives(romfs: &Path) -> Result<usize> {
     let mut files = Vec::new();
     collect_sarc_zs(romfs, &mut files)?;
     files.sort();
+    if !files.is_empty() && Command::new("zstd").arg("-V").output().is_err() {
+        eprintln!("zstd not found: the mod archives are left as they are");
+        return Ok(0);
+    }
     let mut fixed = 0;
     for path in files {
         let data = read(&path)?;
