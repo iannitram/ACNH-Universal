@@ -2,6 +2,7 @@
 #include "ui/amiibo_importer.h"
 #include "ui/i18n.h"
 #include "ui/ui.h"
+#include "ui/amiibo_importer.h"
 
 namespace nx::ui {
 

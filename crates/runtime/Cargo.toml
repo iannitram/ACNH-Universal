@@ -10,5 +10,16 @@ publish = false
 [lib]
 name = "acnh_runtime"
 path = "src/lib.rs"
+# rlib for the workspace; staticlib is what the C++ player links (header: build.rs, cbindgen).
+crate-type = ["rlib", "staticlib"]
+
+[features]
+# Build the C++ player (renderer, games/acnh, ui/) from build.rs through CMake and link this
+# library into it. Off by default: the workspace builds and tests without a C++ toolchain.
+player = ["dep:cmake"]
 
 [dependencies]
+
+[build-dependencies]
+cbindgen = { version = "0.27", default-features = false }
+cmake = { version = "0.1", optional = true }
