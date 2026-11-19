@@ -32,6 +32,14 @@ fn request(name: &str, target: Os) -> Request {
     }
 }
 
+/// The stages that run the script: all but the shaders stage, which is Rust.
+fn scripted() -> Vec<Stage> {
+    STAGES
+        .into_iter()
+        .filter(|stage| *stage != Stage::Shaders)
+        .collect()
+}
+
 #[derive(Default)]
 struct Fake {
     ran: Vec<Stage>,
@@ -53,6 +61,10 @@ impl ScriptRunner for Fake {
     fn set_root(&mut self, root: &Path) {
         self.root = Some(root.to_owned());
     }
+
+    fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -69,7 +81,7 @@ fn stages_run_in_order_and_progress_sees_each_once() {
     )
     .unwrap();
     assert_eq!(out, req.out);
-    assert_eq!(fake.ran, STAGES.to_vec());
+    assert_eq!(fake.ran, scripted());
     assert_eq!(seen, STAGES.to_vec());
 }
 
@@ -141,14 +153,22 @@ fn step_is_rust_for_shaders_and_upstreams_script_for_the_rest() {
         }
         assert_eq!(
             step(stage, &req),
-            Step::Script(vec![
-                "python3".to_owned(),
-                "tools/setup_acnh.py".to_owned(),
-                "--game".to_owned(),
-                "/game".to_owned(),
-                "--out".to_owned(),
-                req.out.display().to_string(),
-            ])
+            Step::Script(
+                vec![
+                    "python3".to_owned(),
+                    "tools/setup_acnh.py".to_owned(),
+                    "--game".to_owned(),
+                    "/game".to_owned(),
+                    "--out".to_owned(),
+                    req.out.display().to_string(),
+                ]
+                .into_iter()
+                .chain(
+                    (stage != Stage::Fonts && stage != Stage::Build)
+                        .then(|| "--stop-before-shaders".to_owned())
+                )
+                .collect()
+            )
         );
     }
     let win = request("step-win", Os::Windows);
@@ -172,11 +192,11 @@ fn completed_tools_version_and_build_do_not_run_again() {
         seen.push(s)
     })
     .unwrap();
+    assert_eq!(fake.ran, vec![Stage::Game, Stage::Recompile, Stage::Fonts]);
     assert_eq!(
-        fake.ran,
+        seen,
         vec![Stage::Game, Stage::Recompile, Stage::Shaders, Stage::Fonts]
     );
-    assert_eq!(seen, fake.ran);
 }
 
 #[test]
@@ -260,6 +280,60 @@ fn process_runner_keeps_stdout_and_stderr_lines_separate() {
         .run(Stage::Shaders, &command)
         .unwrap_err();
     assert_eq!(log, vec!["stdout", "stderr"]);
+}
+
+/// A runner that starts nothing: the Rust shaders stage must not need the script.
+struct Idle;
+
+impl ScriptRunner for Idle {
+    fn run(&mut self, _stage: Stage, _args: &[String]) -> Result<(), Vec<String>> {
+        Ok(())
+    }
+}
+
+fn prepare_error(req: &Request) -> String {
+    prepare_with(
+        req,
+        Hub::StrixHalo,
+        &mut Idle,
+        Path::new("/home/me"),
+        &mut |_| {},
+    )
+    .unwrap_err()
+    .to_string()
+}
+
+#[test]
+fn prepare_reaches_the_rust_sarc_fix_for_a_mod() {
+    // The shaders stage runs `sarc::fix_archives` on each mod's romfs: an archive that is
+    // not a SARC is refused with the sarc reader's own message.
+    let req = request("sarc-live", Os::Linux);
+    let mod_romfs = req.out.join("mods").join("tr").join("romfs");
+    std::fs::create_dir_all(&mod_romfs).unwrap();
+    std::fs::write(mod_romfs.join("bad.sarc.zs"), b"not an archive").unwrap();
+
+    let message = prepare_error(&req);
+    assert!(message.contains("stage shaders"), "{message}");
+    assert!(
+        message.contains("SARC archive")
+            || message.contains("zstd")
+            || message.contains("translator"),
+        "{message}"
+    );
+}
+
+#[test]
+fn prepare_reaches_the_rust_shader_extraction() {
+    // With a RomFS and no translator installed, the stage runs the Rust extraction (it makes
+    // `shaders_extracted`) and then refuses plainly, without starting the script.
+    let mut req = request("shaders-live", Os::Linux);
+    let romfs = req.out.join("romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    req.game.romfs = romfs;
+
+    let message = prepare_error(&req);
+    assert!(req.out.join("shaders_extracted").exists(), "{message}");
+    assert!(message.contains("stage shaders"), "{message}");
 }
 
 // ---- The real runner (`ProcessRunner`) on a stand-in for upstream's script ----
@@ -399,6 +473,10 @@ impl ScriptRunner for StandIn {
     fn finish(&mut self) -> Result<(), Vec<String>> {
         self.runner.finish()
     }
+
+    fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// A progress callback that records the stage and lets the stand-in work on it.
@@ -464,25 +542,25 @@ fn stages_the_script_is_already_past_are_still_reported_once() {
 
 #[test]
 fn a_failing_script_run_names_the_stage_it_failed_in() {
-    let req = request("fail-shaders", Os::Linux);
+    let req = request("fail-fonts", Os::Linux);
     let mut seen = vec![];
     let err = prepare_with(
         &req,
         Hub::StrixHalo,
-        &mut stand_in(&req, 0, &["fail:shaders"]),
+        &mut stand_in(&req, 0, &["fail:fonts"]),
         Path::new("/home/me"),
         &mut report(&req, &mut seen),
     )
     .unwrap_err();
     match err {
         Error::Build(m) => {
-            assert!(m.starts_with("stage shaders: == shaders"), "{m}");
+            assert!(m.starts_with("stage fonts: == fonts"), "{m}");
             assert!(m.contains("boom at ~/x"), "{m}");
-            assert!(m.contains("trace of shaders"), "{m}");
+            assert!(m.contains("trace of fonts"), "{m}");
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(seen, STAGES[..5].to_vec());
+    assert_eq!(seen, STAGES[..6].to_vec());
     assert_eq!(starts(&req), 1);
     assert!(!req.out.join("build").exists());
 }
@@ -683,7 +761,7 @@ fn a_packaged_source_is_copied_to_the_data_folder_and_the_runner_runs_there() {
     let copy = dirs.data.join("source/abc123");
     assert!(copy.join("CMakeLists.txt").is_file());
     assert_eq!(fake.root.as_deref(), Some(copy.as_path()));
-    assert_eq!(fake.ran, STAGES.to_vec());
+    assert_eq!(fake.ran, scripted());
     assert_eq!(seen, STAGES.to_vec());
 }
 
@@ -710,4 +788,49 @@ fn a_packaged_source_from_another_commit_is_refused() {
     );
     assert!(!dirs.data.join("source/abc123").exists());
     assert!(fake.ran.is_empty());
+}
+
+/// A runner that keeps the default `shaders` step and a source folder given by `set_root`, as
+/// an installed launcher's runner does.
+#[derive(Default)]
+struct Rooted {
+    root: Option<PathBuf>,
+}
+
+impl ScriptRunner for Rooted {
+    fn run(&mut self, _stage: Stage, _args: &[String]) -> Result<(), Vec<String>> {
+        Ok(())
+    }
+
+    fn set_root(&mut self, root: &Path) {
+        self.root = Some(root.to_owned());
+    }
+
+    fn root(&self) -> PathBuf {
+        self.root.clone().expect("root set")
+    }
+}
+
+#[test]
+fn shaders_step_looks_for_its_tools_under_the_runners_root() {
+    let mut req = request("shaders-root", Os::Linux);
+    let romfs = req.out.join("romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    req.game.romfs = romfs;
+    let root = req.out.join("installed-source");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut runner = Rooted::default();
+    runner.set_root(&root);
+    let message = prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut runner,
+        Path::new("/home/me"),
+        &mut |_| {},
+    )
+    .unwrap_err()
+    .to_string();
+    // The refusal names the runner's root, not the checkout this test was built in.
+    assert!(message.contains("installed-source"), "{message}");
 }

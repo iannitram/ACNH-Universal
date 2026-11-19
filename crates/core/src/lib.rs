@@ -43,8 +43,10 @@ pub mod profile;
 pub mod recipe;
 #[cfg(feature = "relay")]
 pub mod relay;
+pub mod sarc;
 pub mod savecard;
 pub mod saves;
+pub mod shaders;
 pub mod steam;
 pub mod update;
 pub mod vdf;

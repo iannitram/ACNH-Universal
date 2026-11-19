@@ -74,7 +74,7 @@ impl std::fmt::Display for Missing {
 }
 
 /// How `stage` runs for `req` right now. The shaders stage's packs are ours now
-/// (`pack::romfs`, `pack::spirv`), so it is `Rust`; the rest is
+/// (`pack::romfs`, `pack::spirv`) and it is Rust (`sarc`, `shaders`); the rest is
 /// `Script(["python3", "tools/setup_acnh.py", "--game", <game root>, "--out", <out>])`
 /// (`python` instead of `python3` on Windows). Upstream's script has no argument that picks a
 /// stage (its `FORCE` only redoes one), so the unported stages share this one command: a
@@ -83,12 +83,13 @@ impl std::fmt::Display for Missing {
 pub fn step(stage: Stage, req: &Request) -> Step {
     match stage {
         Stage::Shaders => Step::Rust,
-        Stage::Tools
-        | Stage::Game
-        | Stage::Version
-        | Stage::Recompile
-        | Stage::Fonts
-        | Stage::Build => Step::Script(stage_script(req)),
+        Stage::Tools | Stage::Game | Stage::Version | Stage::Recompile => {
+            let mut args = stage_script(req);
+            // The script ends before the shaders stage: that one is ours.
+            args.push("--stop-before-shaders".to_owned());
+            Step::Script(args)
+        }
+        Stage::Fonts | Stage::Build => Step::Script(stage_script(req)),
     }
 }
 
@@ -114,6 +115,18 @@ fn stage_script(req: &Request) -> Vec<String> {
 pub trait ScriptRunner {
     /// Run `args` (a `Step::Script`) for `stage`, and come back when that stage of it is over.
     fn run(&mut self, stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>>;
+
+    /// The Rust part of the shaders stage. The default runs it (`rust_shaders`); a test runner
+    /// may stand in for it, as no translator is installed on a test machine.
+    fn shaders(&mut self, req: &Request) -> Result<()> {
+        rust_shaders(req, &self.root())
+    }
+
+    /// The source folder the tools are built under (what `set_root` last gave). The default
+    /// is the checkout this was built from.
+    fn root(&self) -> PathBuf {
+        repo_root()
+    }
 
     /// No stage is left to ask for: wait for what `run` left running. A runner whose `run`
     /// leaves nothing running has nothing to do.
@@ -195,6 +208,10 @@ impl ScriptRunner for ProcessRunner {
         let result = self.follow(None);
         self.script = None;
         result
+    }
+
+    fn root(&self) -> PathBuf {
+        self.root.clone()
     }
 
     fn set_root(&mut self, root: &Path) {
@@ -324,6 +341,23 @@ fn tools_record(req: &Request) -> PathBuf {
     req.out.join(".prepare-tools.json")
 }
 
+/// A mod's `.sarc.zs` archives as the game reads them (`sarc::fix_archives`), for every mod
+/// installed in `out/mods/<name>/romfs`.
+fn fix_mod_archives(req: &Request) -> Result<()> {
+    let Ok(mods) = std::fs::read_dir(req.out.join("mods")) else {
+        return Ok(());
+    };
+    let mut romfs: Vec<PathBuf> = mods
+        .filter_map(|entry| entry.ok().map(|entry| entry.path().join("romfs")))
+        .filter(|path| path.is_dir())
+        .collect();
+    romfs.sort();
+    for path in romfs {
+        crate::sarc::fix_archives(&path)?;
+    }
+    Ok(())
+}
+
 /// The Rust part of the shaders stage: pack the RomFS and the stage's `.spv` files for the
 /// runtime (`pack::romfs`, `pack::spirv`). A source that is not there yet leaves its pack
 /// alone, as upstream keeps the loose folder until something packs it.
@@ -337,6 +371,40 @@ fn pack_stage(req: &Request) -> Result<()> {
         crate::pack::spirv(&spirv, &req.out.join("spirv.pak"))?;
     }
     Ok(())
+}
+
+/// The shaders stage, in Rust: extract the shaders, translate them with the tools' .NET
+/// harness (built by the tools stage), fix the mods' archives and pack. The script has ended
+/// before this stage and starts again after it.
+fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
+    let stage = Stage::Shaders;
+    fix_mod_archives(req)
+        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+    if req.game.romfs.is_dir() {
+        let extracted = req.out.join("shaders_extracted");
+        let tools =
+            crate::shaders::Tools::new(root.to_owned(), crate::shaders::Tools::default().python);
+        crate::shaders::extract_with(
+            &tools,
+            &req.game.romfs,
+            &req.out.join("analysis").join("main.bin"),
+            &extracted,
+            req.jobs,
+            false,
+        )
+        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+    }
+    let translated = crate::shaders::translate(root, &req.out, req.jobs)
+        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+    if !translated {
+        return Err(Error::Build(format!(
+            "stage {}: the shader translator (dotnet and spirv_harness.dll) is not installed",
+            stage.key()
+        )));
+    }
+    // The stage's packs are ours (`pack::romfs`, `pack::spirv`), packed after either writer
+    // has left the loose folders.
+    pack_stage(req).map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))
 }
 
 /// Whether everything `stage` leaves in `req.out` is there. Game and recompile leave one
@@ -563,15 +631,7 @@ fn run_stages(
             Step::Script(args) => runner
                 .run(stage, &args)
                 .map_err(|log| build_error(stage, &log, home))?,
-            Step::Rust if stage == Stage::Shaders => {
-                // The stage's packs are ours; extracting the shaders themselves is still
-                // upstream's script until its issue ports it (1.29), so it runs first.
-                runner
-                    .run(stage, &stage_script(req))
-                    .map_err(|log| build_error(stage, &log, home))?;
-                pack_stage(req)
-                    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-            }
+            Step::Rust if stage == Stage::Shaders => runner.shaders(req)?,
             Step::Rust => {}
         }
         if stage == Stage::Tools {
