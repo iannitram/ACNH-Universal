@@ -18,6 +18,7 @@ pub const UPSTREAM_CREDIT: ProjectCredit = ProjectCredit {
     role: "Upstream: recompilation, runtime, launcher, and releases",
 };
 
+// This list mirrors the project table in ROADMAP.md.
 /// Copied and referenced open-source projects credited with their licences.
 pub const COPIED_PROJECTS: &[ProjectCredit] = &[
     ProjectCredit {
@@ -41,14 +42,9 @@ pub const COPIED_PROJECTS: &[ProjectCredit] = &[
         role: "Game folder import, Windows port and 16:10 fixes",
     },
     ProjectCredit {
-        name: "Norviah/animal-crossing",
-        licence: "MIT",
-        role: "Item and villager metadata",
-    },
-    ProjectCredit {
         name: "fedebuonco/nxrt, nxrt-frontend",
         licence: "Unlicense",
-        role: "Shared runtime architecture and launcher prior art",
+        role: "Learned from, not copied: one shared runtime; launcher prior art",
     },
     ProjectCredit {
         name: "slint-ui/slint",
@@ -207,27 +203,27 @@ mod tests {
             .any(|c| c.name == "iannitram/save-relay"));
         assert!(vm.credits().iter().any(|c| c.name == "slint-ui/slint"));
 
-        // Fixes offered upstream: each has a link, shown until upstream has them
-        let offered = vm.offered_fixes();
-        assert!(!offered.is_empty(), "offered fixes list must not be empty");
-        for fix in &offered {
-            assert!(!fix.title.is_empty());
-            assert!(!fix.link.is_empty(), "each offered fix must have a link");
-            assert!(fix
-                .link
-                .starts_with("https://github.com/Nycolazs/ACNHRecomp/"));
-            assert!(fix.is_offered());
-        }
+        // The shipped file has no entries until real upstream PRs exist.
+        assert!(vm.offered_fixes().is_empty());
+        assert!(!vm.credits().iter().any(|c| c.name.contains("Norviah")));
+    }
 
-        // All fixes include landed ones, but offered_fixes filters them out
-        assert!(vm.all_fixes().len() > offered.len());
-        assert!(vm.all_fixes().iter().any(|f| f.upstream_has_it()));
+    #[test]
+    fn test_parse_offered_fixes_fixture() {
+        // Fixture only; not real data.
+        let text = "# c\nExample fix | https://example.invalid/pr/1 | offered\n\
+                    Landed example | https://example.invalid/pr/2 | upstream\n";
+        let fixes = parse_offered_fixes(text);
+        assert_eq!(fixes.len(), 2);
+        assert_eq!(fixes[0].link, "https://example.invalid/pr/1");
+        assert!(fixes[0].is_offered());
+        assert!(fixes[1].upstream_has_it());
     }
 
     #[test]
     fn test_default_view_model_matches_parsed_fixes() {
         let vm = AboutVm::default();
-        assert!(!vm.offered_fixes().is_empty());
+        assert!(vm.offered_fixes().is_empty());
         assert!(vm.slint_notice().contains("Slint"));
     }
 }

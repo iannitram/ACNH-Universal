@@ -47,6 +47,12 @@ export component AboutPage inherits Rectangle {
             color: #f4f0e8;
         }
 
+        if root.offered-fixes.length == 0: Text {
+            text: "No fixes offered upstream yet";
+            color: #8da394;
+            font-size: 14px;
+        }
+
         for fix in root.offered-fixes: HorizontalBox {
             spacing: 8px;
             Text {
