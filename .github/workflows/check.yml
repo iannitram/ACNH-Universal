@@ -121,15 +121,18 @@ jobs:
       - name: SDL3 and Vulkan headers
         run: |
           # Ubuntu 24.04 has no SDL3 package and its Vulkan headers predate the bridge.
-          mkdir -p target/sdl3
-          curl -fsSL "https://github.com/libsdl-org/SDL/releases/download/release-$SDL3/SDL3-$SDL3.tar.gz" | tar -xz -C target/sdl3
-          curl -fsSL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$VK_HEADERS.tar.gz" | tar -xz -C target
-          cmake -S "target/sdl3/SDL3-$SDL3" -B target/sdl3/build -G Ninja \
+          # Keep native dependencies outside target, which is restored from the Rust cache.
+          native="$RUNNER_TEMP/acnh-native"
+          mkdir -p "$native/sdl3"
+          curl -fsSL "https://github.com/libsdl-org/SDL/releases/download/release-$SDL3/SDL3-$SDL3.tar.gz" | tar -xz -C "$native/sdl3"
+          curl -fsSL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$VK_HEADERS.tar.gz" | tar -xz -C "$native"
+          cmake -S "$native/sdl3/SDL3-$SDL3" -B "$native/sdl3/build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
-            -DCMAKE_INSTALL_PREFIX="$PWD/target/sdl3/install"
-          cmake --build target/sdl3/build --parallel 2
-          cmake --install target/sdl3/build
-          echo "CMAKE_PREFIX_PATH=$PWD/target/sdl3/install:$PWD/target/Vulkan-Headers-$VK_HEADERS" >> "$GITHUB_ENV"
+            -DCMAKE_INSTALL_PREFIX="$native/sdl3/install"
+          cmake --build "$native/sdl3/build" --parallel 2
+          cmake --install "$native/sdl3/build"
+          echo "SDL3_DIR=$native/sdl3/install/lib/cmake/SDL3" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$native/sdl3/install:$native/Vulkan-Headers-$VK_HEADERS" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

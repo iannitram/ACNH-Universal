@@ -517,7 +517,13 @@ def main():
                 os.makedirs(os.path.dirname(out), exist_ok=True)
                 with z.open(i) as s, open(out, "wb") as d:
                     shutil.copyfileobj(s, d)
-        rewrap_messages(romfs, os.path.join(dst, "romfs"))
+        if os.environ.get("ACNH_RUST_MSG_REFLOW") == "1":
+            # Rust consumes this after extraction, when it follows the version marker below.
+            # Leave it on disk until the reflow succeeds so a later Prepare can retry it.
+            if os.path.isdir(dst):
+                os.mkdir(os.path.join(dst, ".msg-reflow-pending"))
+        else:
+            rewrap_messages(romfs, os.path.join(dst, "romfs"))
 
     # ---- version ------------------------------------------------------------------------------------------------
     say("version")
