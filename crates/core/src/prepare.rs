@@ -14,6 +14,8 @@
 //!
 //! Everything a prepare writes is made from my game folder: it stays in `out` on the hub, and
 //! reaches my other devices only through the hub, over the home network (M11, M14).
+//! During the game stage the script extracts mods, then Rust reflows their dialogue
+//! before Prepare advances past the script's version marker.
 
 pub use crate::assemble::assemble;
 use crate::error::{Error, Result};
@@ -96,12 +98,7 @@ pub fn step(stage: Stage, req: &Request) -> Step {
 /// Upstream's one command for a stage that is still its script.
 fn stage_script(req: &Request) -> Vec<String> {
     vec![
-        if req.target == Os::Windows {
-            "python"
-        } else {
-            "python3"
-        }
-        .to_owned(),
+        script_python(req.target).to_owned(),
         "tools/setup_acnh.py".to_owned(),
         "--game".to_owned(),
         req.game.root.display().to_string(),
@@ -110,11 +107,24 @@ fn stage_script(req: &Request) -> Vec<String> {
     ]
 }
 
+fn script_python(target: Os) -> &'static str {
+    if target == Os::Windows {
+        "python"
+    } else {
+        "python3"
+    }
+}
+
 /// Runs the script of a stage. `Err` holds the log lines of a failed run; a line
 /// `== <stage>` in them names the stage the script was in (`Stage::from_line`).
 pub trait ScriptRunner {
     /// Run `args` (a `Step::Script`) for `stage`, and come back when that stage of it is over.
     fn run(&mut self, stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>>;
+
+    /// Wait for any first-pass setup child before shaders inspect its output.
+    fn before_shaders(&mut self) -> std::result::Result<(), Vec<String>> {
+        Ok(())
+    }
 
     /// The Rust part of the shaders stage. The default runs it (`rust_shaders`); a test runner
     /// may stand in for it, as no translator is installed on a test machine.
@@ -138,6 +148,9 @@ pub trait ScriptRunner {
     /// runner that starts the script itself uses it; a test runner may record it. The
     /// default does nothing.
     fn set_root(&mut self, _root: &Path) {}
+
+    /// Where the game-stage script leaves work for Rust after mod extraction.
+    fn set_message_paths(&mut self, _game_romfs: &Path, _out: &Path) {}
 }
 
 /// The real runner: upstream's command as a child process in the repo root, started once
@@ -154,6 +167,12 @@ pub struct ProcessRunner {
     root: PathBuf,
     jobs: u32,
     script: Option<Script>,
+    messages: Option<MessagePaths>,
+}
+
+struct MessagePaths {
+    game_romfs: PathBuf,
+    out: PathBuf,
 }
 
 /// One run of upstream's command.
@@ -178,6 +197,7 @@ impl ProcessRunner {
             root,
             jobs,
             script: None,
+            messages: None,
         }
     }
 
@@ -185,7 +205,7 @@ impl ProcessRunner {
         let Some(script) = self.script.as_mut() else {
             return Ok(());
         };
-        let result = script.follow(until);
+        let result = script.follow(until, self.messages.as_ref());
         if result.is_err() {
             self.script = None;
         }
@@ -199,9 +219,18 @@ impl ScriptRunner for ProcessRunner {
             self.finish()?; // another command: the one before it ends first
         }
         if self.script.is_none() {
-            self.script = Some(Script::start(&self.root, self.jobs, args)?);
+            self.script = Some(Script::start(
+                &self.root,
+                self.jobs,
+                args,
+                self.messages.is_some(),
+            )?);
         }
         self.follow(Some(stage))
+    }
+
+    fn before_shaders(&mut self) -> std::result::Result<(), Vec<String>> {
+        self.finish()
     }
 
     fn finish(&mut self) -> std::result::Result<(), Vec<String>> {
@@ -223,13 +252,25 @@ impl ScriptRunner for ProcessRunner {
         }
         self.root = root.to_owned();
     }
+
+    fn set_message_paths(&mut self, game_romfs: &Path, out: &Path) {
+        self.messages = Some(MessagePaths {
+            game_romfs: game_romfs.to_owned(),
+            out: out.to_owned(),
+        });
+    }
 }
 
 impl Script {
     /// Start `args` in `root`, as upstream's launcher starts its setup: no input, unbuffered
     /// Python output (a stage line arrives when its stage begins). `FORCE` does not pass: it
     /// redoes work that is there, and `FORCE=game` deletes an imported copy of the game.
-    fn start(root: &Path, jobs: u32, args: &[String]) -> std::result::Result<Script, Vec<String>> {
+    fn start(
+        root: &Path,
+        jobs: u32,
+        args: &[String],
+        rust_reflow: bool,
+    ) -> std::result::Result<Script, Vec<String>> {
         let Some((program, rest)) = args.split_first() else {
             return Err(vec!["no command".to_owned()]);
         };
@@ -239,9 +280,13 @@ impl Script {
             .current_dir(root)
             .env("PYTHONUNBUFFERED", "1")
             .env_remove("FORCE")
+            .env_remove("ACNH_RUST_MSG_REFLOW")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if rust_reflow {
+            command.env("ACNH_RUST_MSG_REFLOW", "1");
+        }
         if jobs > 0 {
             command.env("JOBS", jobs.to_string());
         }
@@ -272,7 +317,11 @@ impl Script {
     /// Read the script's output until it begins a stage after `until` (`None`: until it
     /// ends). `Err` when it ended with a failure: the log of the stage it was in, then what
     /// it wrote to standard error.
-    fn follow(&mut self, until: Option<Stage>) -> std::result::Result<(), Vec<String>> {
+    fn follow(
+        &mut self,
+        until: Option<Stage>,
+        messages: Option<&MessagePaths>,
+    ) -> std::result::Result<(), Vec<String>> {
         while !self.ended {
             if until.is_some_and(|until| self.at.is_some_and(|at| at > until)) {
                 return Ok(());
@@ -281,6 +330,14 @@ impl Script {
                 break;
             };
             if let Some(stage) = Stage::from_line(&line) {
+                // Both setup passes revisit the game stage. Its mod extraction has
+                // ended at this marker, even if prepare skipped waiting on Game itself.
+                if stage == Stage::Version {
+                    if let Some(paths) = messages {
+                        crate::msg::finish_pending(&paths.game_romfs, &paths.out, &self.args[0])
+                            .map_err(|error| vec!["== game".to_owned(), error.to_string()])?;
+                    }
+                }
                 self.at = Some(stage);
                 self.log.clear();
             }
@@ -524,8 +581,9 @@ fn app_commit() -> Option<&'static str> {
 }
 
 /// Run every stage in order, calling `progress` as each one starts, and return `req.out`. A
-/// stage whose output was already in `req.out` is skipped, and when every stage's is, nothing
-/// runs. A failed stage is `Error::Build` naming it, with the last 20 lines of its log, run
+/// stage whose output was already in `req.out` is skipped. When all outputs exist, Prepare
+/// only recovers interrupted message reflow. A failed stage is `Error::Build` naming it,
+/// with the last 20 lines of its log, run
 /// through `redact`. Missing required tools are `Error::Build` before the first stage. A
 /// target this hub does not serve (`recipe::serves`), or one upstream's script does not build
 /// (Android, iOS), is `Error::Unsupported`.
@@ -618,6 +676,17 @@ fn run_stages(
         }
         return Err(Error::Build(message));
     }
+    runner.set_message_paths(&req.game.romfs, &req.out);
+    // Recover a mod left by a previous child, even when every stage is cached.
+    // Its font comes from that run's linked RomFS if the caller selected a new source.
+    let prepared_romfs = req.out.join("extract").join("romfs");
+    let recovery_romfs = if prepared_romfs.is_dir() {
+        &prepared_romfs
+    } else {
+        &req.game.romfs
+    };
+    crate::msg::finish_pending(recovery_romfs, &req.out, script_python(req.target))
+        .map_err(|error| build_error(Stage::Game, &[error.to_string()], home))?;
     // What was there before anything ran. A script that runs on while we look may have
     // finished its next stage already: only an output from before skips a stage.
     let before = STAGES.map(|stage| stage_complete(stage, req));
@@ -631,7 +700,14 @@ fn run_stages(
             Step::Script(args) => runner
                 .run(stage, &args)
                 .map_err(|log| build_error(stage, &log, home))?,
-            Step::Rust if stage == Stage::Shaders => runner.shaders(req)?,
+            Step::Rust if stage == Stage::Shaders => {
+                // If only an early stage ran, the script can still be installing mods.
+                // Wait for the first pass to leave before inspecting or packing its files.
+                runner
+                    .before_shaders()
+                    .map_err(|log| build_error(stage, &log, home))?;
+                runner.shaders(req)?;
+            }
             Step::Rust => {}
         }
         if stage == Stage::Tools {

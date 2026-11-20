@@ -9,7 +9,6 @@
 //! header plus the NUL-terminated names, padded until `data_offset`), then the member data.
 
 use crate::error::{Error, Result};
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +29,34 @@ impl Endian {
             Endian::Little
         } else {
             Endian::Big
+        }
+    }
+
+    pub(crate) fn decode_u16(self, bytes: [u8; 2]) -> u16 {
+        match self {
+            Self::Little => u16::from_le_bytes(bytes),
+            Self::Big => u16::from_be_bytes(bytes),
+        }
+    }
+
+    pub(crate) fn decode_u32(self, bytes: [u8; 4]) -> u32 {
+        match self {
+            Self::Little => u32::from_le_bytes(bytes),
+            Self::Big => u32::from_be_bytes(bytes),
+        }
+    }
+
+    pub(crate) fn encode_u16(self, value: u16) -> [u8; 2] {
+        match self {
+            Self::Little => value.to_le_bytes(),
+            Self::Big => value.to_be_bytes(),
+        }
+    }
+
+    pub(crate) fn encode_u32(self, value: u32) -> [u8; 4] {
+        match self {
+            Self::Little => value.to_le_bytes(),
+            Self::Big => value.to_be_bytes(),
         }
     }
 }
@@ -54,6 +81,7 @@ pub struct Archive<'a> {
     pub names: &'a [u8],
     pub data_offset: u32,
     data: &'a [u8],
+    nodes_start: usize,
 }
 
 /// One member of an archive: its name and its bytes.
@@ -135,6 +163,7 @@ pub fn parse(data: &[u8]) -> Result<Archive<'_>> {
         names: &data[names_start..data_offset],
         data_offset: data_offset as u32,
         data,
+        nodes_start,
     })
 }
 
@@ -165,6 +194,50 @@ impl<'a> Archive<'a> {
             members.push(Member { name, data });
         }
         Ok(members)
+    }
+
+    /// Keep the original header and SFNT, then rewrite only the size and member ranges.
+    pub(crate) fn replace_members(&self, replacements: &[Option<Vec<u8>>]) -> Result<Vec<u8>> {
+        if replacements.len() != self.nodes.len() {
+            return Err(malformed("replacement count disagrees with the archive"));
+        }
+        let base = self.data_offset as usize;
+        let mut output = self.data[..base].to_vec();
+        let mut alignment = 0x2000;
+        for node in &self.nodes {
+            while !(node.start as usize).is_multiple_of(alignment) {
+                alignment /= 2;
+            }
+        }
+        let alignment = alignment.max(8);
+        for (index, (node, replacement)) in self.nodes.iter().zip(replacements).enumerate() {
+            let data = match replacement {
+                Some(data) => data.as_slice(),
+                None => {
+                    let range = node.start as usize..node.end as usize;
+                    self.data[base..]
+                        .get(range)
+                        .ok_or_else(|| malformed("invalid member range"))?
+                }
+            };
+            let start = (output.len() - base)
+                .checked_next_multiple_of(alignment)
+                .ok_or_else(|| malformed("the archive is too large"))?;
+            output.resize(base + start, 0);
+            output.extend_from_slice(data);
+            let end = output.len() - base;
+            let offset = self.nodes_start + index * 0x10 + 8;
+            output[offset..offset + 4].copy_from_slice(&self.size_field(start)?);
+            output[offset + 4..offset + 8].copy_from_slice(&self.size_field(end)?);
+        }
+        let size = self.size_field(output.len())?;
+        output[8..12].copy_from_slice(&size);
+        Ok(output)
+    }
+
+    fn size_field(&self, size: usize) -> Result<[u8; 4]> {
+        let size = u32::try_from(size).map_err(|_| malformed("the archive is too large"))?;
+        Ok(self.endian.encode_u32(size))
     }
 }
 
@@ -231,24 +304,38 @@ pub fn rewrite(src: &Path, dst: &Path) -> Result<()> {
     let data = read(src)?;
     let out = big_endian(&data)?;
     if ends_with(dst, ".zs") {
-        let raw = raw_path(dst);
-        fs::write(&raw, &out)?;
-        let status = Command::new("zstd")
-            .args(["-19", "-q", "-f", "--no-check"])
-            .arg(&raw)
-            .arg("-o")
-            .arg(dst)
-            .status();
-        let _ = fs::remove_file(&raw);
-        match status {
-            Ok(status) if status.success() => Ok(()),
-            Ok(_) => Err(Error::Io(format!("zstd could not write {}", dst.display()))),
-            Err(error) => Err(Error::Io(format!("cannot run zstd: {error}"))),
-        }
+        write_compressed(dst, &out)
     } else {
         fs::write(dst, &out)?;
         Ok(())
     }
+}
+
+/// Write a replacement frame with the original's size/no-checksum flags, leaving the
+/// source archive intact until zstd succeeds.
+pub(crate) fn write_compressed(path: &Path, data: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| malformed("archive has no parent directory"))?;
+    let scratch = tempfile::tempdir_in(parent)?;
+    let raw = scratch.path().join("archive.raw");
+    let compressed = scratch.path().join("archive.zs");
+    fs::write(&raw, data)?;
+    let output = Command::new("zstd")
+        .args(["-19", "-q", "-f", "--no-check"])
+        .arg(raw)
+        .arg("-o")
+        .arg(&compressed)
+        .output()
+        .map_err(|error| Error::Io(format!("cannot run zstd: {error}")))?;
+    if !output.status.success() {
+        return Err(Error::Io(format!(
+            "zstd could not write {}",
+            path.display()
+        )));
+    }
+    fs::rename(compressed, path)?;
+    Ok(())
 }
 
 /// Upstream's `--check`: the byte order of `path`, for a plain message.
@@ -330,13 +417,6 @@ fn zstd_decompress(path: &Path) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// `path` with `.raw` appended (upstream's `dst + ".raw"`, an OS string, not a new extension).
-fn raw_path(path: &Path) -> PathBuf {
-    let mut raw: OsString = path.as_os_str().to_owned();
-    raw.push(".raw");
-    PathBuf::from(raw)
-}
-
 fn ends_with(path: &Path, suffix: &str) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -357,19 +437,13 @@ fn cstr(bytes: &[u8], offset: usize) -> Result<String> {
 fn u16_at(data: &[u8], offset: usize, endian: Endian) -> Result<u16> {
     let bytes = slice_at(data, offset, 2)?;
     let value = [bytes[0], bytes[1]];
-    Ok(match endian {
-        Endian::Little => u16::from_le_bytes(value),
-        Endian::Big => u16::from_be_bytes(value),
-    })
+    Ok(endian.decode_u16(value))
 }
 
 fn u32_at(data: &[u8], offset: usize, endian: Endian) -> Result<u32> {
     let bytes = slice_at(data, offset, 4)?;
     let value = [bytes[0], bytes[1], bytes[2], bytes[3]];
-    Ok(match endian {
-        Endian::Little => u32::from_le_bytes(value),
-        Endian::Big => u32::from_be_bytes(value),
-    })
+    Ok(endian.decode_u32(value))
 }
 
 fn slice_at(data: &[u8], offset: usize, len: usize) -> Result<&[u8]> {

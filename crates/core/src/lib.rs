@@ -34,6 +34,7 @@ pub mod gamefolder;
 #[cfg(feature = "hub")]
 pub mod hub;
 pub mod launch;
+pub mod msg;
 pub mod nso;
 pub mod nso2bin;
 pub mod pack;
