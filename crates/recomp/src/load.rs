@@ -99,7 +99,7 @@ pub struct Reloc {
     pub addend: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Module {
     pub name: String,
     pub image: Vec<u8>,
