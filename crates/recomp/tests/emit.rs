@@ -41,10 +41,7 @@ fn integer_aliases_and_memory_addresses() {
             "{word:#010x}"
         );
     }
-    assert!(matches!(
-        emitter.instruction(&function(0, 4), 0, 0x1e622820), // fadd d0, d1, d2
-        Err(Error::Unsupported(_))
-    ));
+    assert_eq!(emitter.instruction(&function(0, 4), 0, 0x1e622820).unwrap(), "{ double r_ = double((c.v[1].f64[0]) + (c.v[2].f64[0])); nx::V128 t_ = nx::vzero(); t_.f64[0] = r_; c.v[0] = t_; }");
 }
 
 #[test]

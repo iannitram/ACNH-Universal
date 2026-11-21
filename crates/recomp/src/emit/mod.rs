@@ -3,9 +3,14 @@
 //! The full Prepare driver remains in Python until all instruction groups are ported.
 //! Capstone provides its original disassembly and operand details, including aliases.
 
+mod extension;
+mod fp;
 mod integer;
 mod memory;
+mod neon;
+mod neon_wide;
 mod regcache;
+mod structured;
 
 pub use regcache::CacheOptions;
 
@@ -584,6 +589,21 @@ impl<'a> Emitter<'a> {
             return Ok(statement);
         }
         if let Some(statement) = self.misc(i)? {
+            return Ok(statement);
+        }
+        if let Some(statement) = self.structured(i)? {
+            return Ok(statement);
+        }
+        if let Some(statement) = self.extension(i)? {
+            return Ok(statement);
+        }
+        if let Some(statement) = self.neon(i)? {
+            return Ok(statement);
+        }
+        if let Some(statement) = self.neon_wide(i)? {
+            return Ok(statement);
+        }
+        if let Some(statement) = self.fp(i)? {
             return Ok(statement);
         }
         if let Some(statement) = self.integer(i)? {
