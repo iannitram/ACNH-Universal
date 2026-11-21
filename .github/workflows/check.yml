@@ -71,6 +71,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - run: cargo test --workspace --all-features
+      - name: Rust emitter matches Python and Unicorn (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/recomp-oracle"
+          oracle="$RUNNER_TEMP/recomp-oracle/bin/python"
+          "$oracle" -m pip --disable-pip-version-check install capstone==5.0.6 lz4==4.4.5 unicorn==2.1.4
+          cargo build --locked -p acnh-recomp --example recomp-emitter
+          "$oracle" -B -m tests.recomp_emit target/debug/examples/recomp-emitter
 
   cpp:
     name: C++ unit tests (Linux)

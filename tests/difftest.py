@@ -274,13 +274,18 @@ def same_v(a, b):
 
 
 def main():
+    global BUF
     ap = argparse.ArgumentParser()
     ap.add_argument("nso")
     ap.add_argument("work")
     ap.add_argument("--per-shape", type=int, default=2)
     ap.add_argument("--states", type=int, default=12)
     ap.add_argument("--filter", default="")
+    ap.add_argument("--rust-emitter", help="use the optional Rust recomp-emitter example for code emission")
+    ap.add_argument("--buffer-addr", type=lambda value: int(value, 0), default=BUF,
+                    help="override the native/Unicorn scratch address (hex or decimal)")
     args = ap.parse_args()
+    BUF = args.buffer_addr
     os.makedirs(args.work, exist_ok=True)
 
     m = nso.load(args.nso)
@@ -315,6 +320,20 @@ def main():
                 continue
             tests.append((k, a, f"{i.mnemonic} {i.op_str}", stmt))
     print(f"{len(tests)} tests; skipped {dict(skipped)}")
+
+    if args.rust_emitter:
+        if not tests:
+            ap.error("no instructions selected for the Rust differential test")
+        words = ((a, int.from_bytes(m.image[a:a + 4], "little")) for _, a, _, _ in tests)
+        reply = subprocess.run([args.rust_emitter, "instructions"], input="".join(
+            f"{a:x} {word:x}\n" for a, word in words
+        ), capture_output=True, text=True, check=True).stdout.splitlines()
+        if len(reply) != len(tests):
+            ap.error("Rust emitter returned an unexpected number of lines")
+        for (_, a, text, _), statement in zip(tests, reply):
+            if not statement:
+                ap.error(f"Rust emitter could not emit {text} at {a:#x}; filter to ported instructions")
+        tests = [(k, a, text, statement) for (k, a, text, _), statement in zip(tests, reply)]
 
     exe = build_runner(args.work, [t[3] for t in tests])
     rng = random.Random(42)
@@ -377,6 +396,9 @@ def main():
         line = f"[{seen[k]:6}x] {a:#x} {txt}: {d}"
         print(line[:300])
         rep.write(line + "\n    " + tests[[t[0] for t in tests].index(k)][3] + "\n")
+
+    if args.rust_emitter and fails:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

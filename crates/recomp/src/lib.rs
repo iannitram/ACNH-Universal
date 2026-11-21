@@ -2,9 +2,8 @@
 //! It replaces upstream's `recomp/` (Python: `python3 -m recomp`), which turns `exefs/main`
 //! (and `sdk`, `subsdk0`) into the C++ the game library is built from. Ported pass by pass;
 //! the Rust output must match the Python output byte for byte on the same input (hand-written
-//! AArch64, never game code), and `tests/difftest.py` stays the oracle. Until a pass is
-//! ported, `prepare` runs upstream's tool (`prepare::Step::Script`). Planned: only the pass
-//! list is in the skeleton.
+//! AArch64, never game code), and `tests/difftest.py` stays the oracle. Prepare runs
+//! upstream's driver (`prepare::Step::Script`) until the full emitter and Rust driver land.
 //!
 //! It reads my game folder on a hub and writes generated code beside the build; neither ever
 //! enters this repo or a bundle (M14).
@@ -12,6 +11,7 @@
 pub mod analyse;
 pub mod decode;
 pub mod ehframe;
+pub mod emit;
 pub mod load;
 
 pub use load::{
@@ -30,7 +30,7 @@ pub enum Pass {
     Load,
     /// Find functions and their bounds (`recomp/analysis.py`, `recomp/ehframe.py`).
     Analyse,
-    /// AArch64 to C++ (`recomp/emit*.py`, `recomp/regcache.py`).
+    /// Complete AArch64 to C++ emission, including the floating-point and SIMD pass (3.04).
     Emit,
 }
 

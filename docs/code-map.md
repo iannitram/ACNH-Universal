@@ -99,15 +99,24 @@ flowchart TD
 
 ## Modules: `crates/recomp` (`acnh_recomp`)
 
-Ported pass by pass (ADR 0002). Each pass's output must match `python3 -m recomp` byte for byte on the same hand-written AArch64 input (never game code); `tests/difftest.py` (Unicorn) stays the oracle. Until a pass is ported, `prepare` runs upstream's tool for the recompile stage.
+Ported pass by pass (ADR 0002). Each pass's output must match `python3 -m recomp` byte for byte on the same hand-written AArch64 input (never game code); `tests/difftest.py` (Unicorn) stays the oracle. `prepare` keeps upstream's driver for the recompile stage until 3.05.
 
 | Pass | Status | Replaces (lines) | Order | Musts |
 |---|---|---|---|---|
 | `Load` | present | `recomp/nso.py` (200): segments, symbols, relocations | 3.01 | M13 |
 | `Analyse` | present | `recomp/analysis.py` (439), `recomp/ehframe.py` (142): functions and their bounds | 3.02 | M13 |
-| `Emit` (integer, branches) | planned | `recomp/emit.py` (659), `emit_int.py` (421), `regcache.py` (218) | 3.03 | M13 |
+| `Emit` (integer, branches) | present in `crates/recomp/src/emit/` | Integer, memory and branch handlers in `recomp/emit.py`, plus `emit_int.py` and `regcache.py`. Capstone 5 supplies operand details | 3.03 | M13 |
 | `Emit` (FP, NEON) | planned | `emit_fp.py` (255), `emit_neon.py` (312), `emit_neon_wide.py` (369), `emit_vldst.py` (92), `emit_ext.py` (249), `emit_sdk20.py` (129) | 3.04 | M13 |
 | driver | planned | `recomp/__main__.py` (303), `stats.py` (48) | 3.05 | M13 |
+
+The synthetic emitter check compares the Rust translation unit with the Python driver in four cache and hook configurations, then runs the Rust statements through the Unicorn execution oracle. Linux CI runs it with Capstone 5.0.6, lz4 and Unicorn. The test creates its binary fixtures and generated C++ in a temporary directory.
+
+```sh
+cargo build -p acnh-recomp --example recomp-emitter
+python3 -m tests.recomp_emit target/debug/examples/recomp-emitter
+```
+
+If the default scratch address is unavailable on macOS, pass `--buffer-addr 0x10010000000`.
 
 ## Modules: `crates/runtime` (`acnh_runtime`)
 
