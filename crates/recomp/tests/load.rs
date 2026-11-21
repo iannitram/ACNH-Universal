@@ -12,7 +12,7 @@ fn passes_and_ported_flag() {
     assert_eq!(PASSES, [Pass::Load, Pass::Analyse, Pass::Emit]);
     assert!(ported(Pass::Load));
     assert!(ported(Pass::Analyse));
-    assert!(!ported(Pass::Emit));
+    assert!(ported(Pass::Emit));
 }
 
 /// Helper to encode raw LZ4 block containing only literals.

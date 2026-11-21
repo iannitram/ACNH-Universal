@@ -94,6 +94,22 @@ fn matching_code_confirms_both_directions_and_round_trips_peers() {
 }
 
 #[test]
+fn pairing_again_replaces_the_remembered_key() {
+    let folders = Folders::new();
+    let (a, b) = (folders.dirs("a"), folders.dirs("b"));
+    let (first, _) = run_pair(&a, &b, "012345");
+    let (left, right) = run_pair(&a, &b, "012345");
+    let (left, right) = (left.unwrap(), right.unwrap());
+    assert!(
+        left.key_hex != first.unwrap().key_hex,
+        "pairing reused the old key"
+    );
+    assert!(left.key_hex == right.key_hex, "paired keys differ");
+    assert_eq!(read_peers(&a).unwrap(), vec![left]);
+    assert_eq!(read_peers(&b).unwrap(), vec![right]);
+}
+
+#[test]
 fn wrong_code_fails_on_both_sides_without_writing() {
     let folders = Folders::new();
     let (a, b) = (folders.dirs("a"), folders.dirs("b"));

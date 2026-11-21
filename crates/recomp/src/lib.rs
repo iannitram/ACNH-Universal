@@ -39,5 +39,5 @@ pub const PASSES: [Pass; 3] = [Pass::Load, Pass::Analyse, Pass::Emit];
 
 /// True once a pass is ported to Rust; false sends it to upstream's tool.
 pub fn ported(pass: Pass) -> bool {
-    matches!(pass, Pass::Load | Pass::Analyse)
+    matches!(pass, Pass::Load | Pass::Analyse | Pass::Emit)
 }

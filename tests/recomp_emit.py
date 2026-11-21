@@ -44,6 +44,59 @@ WORDS = (
     0x910043FF,  # add sp, sp, #16
     0xD65F03C0,  # ret
     0xD2800049,  # mov x9, #2
+    0x1E622820,  # fadd d0, d1, d2
+    0x4EA2D420,  # fsub v0.4s, v1.4s, v2.4s
+    0x4E258483,  # add v3.16b, v4.16b, v5.16b
+    0x4EA29C20,  # mul v0.4s, v1.4s, v2.4s
+    0x4F01E542,  # movi v2.16b, #42
+    0x4E040C20,  # dup v0.4s, w1
+    0x4E0C1C20,  # mov v0.s[1], w1
+    0x0E0C3C01,  # umov w1, v0.s[1]
+    0x4F225420,  # shl v0.4s, v1.4s, #2
+    0x6EA28C20,  # cmeq v0.4s, v1.4s, v2.4s
+    0x0E220020,  # saddl v0.8h, v1.8b, v2.8b
+    0x0E212820,  # xtn v0.8b, v1.8h
+    0x4E823820,  # zip1 v0.4s, v1.4s, v2.4s
+    0x6E022020,  # ext v0.16b, v1.16b, v2.16b, #4
+    0x4E31B820,  # addv b0, v1.16b
+    0x4C408280,  # ld2 {v0.16b, v1.16b}, [x20]
+    0x4C004280,  # st3 {v0.16b, v1.16b, v2.16b}, [x20]
+    0x6E22F420,  # fmaxp v0.4s, v1.4s, v2.4s
+    0x0E22E020,  # pmull v0.8h, v1.8b, v2.8b
+    0x4F227420,  # sqshl v0.4s, v1.4s, #2
+    0xF8200281,  # ldadd x0, x1, [x20]
+    0xB37C1FE0,  # bfc x0, #4, #8
+    0x5F829820,  # fmul s0, s1, v2.s[2]
+    0x1F020C20,  # fmadd s0, s1, s2, s3
+    0x1E602008,  # fcmp d0, #0.0
+    0x1E217408,  # fccmp s0, s1, #8, vc
+    0x1E622C20,  # fcsel d0, d1, d2, hs
+    0x9EAF0020,  # fmov v0.d[1], x1
+    0x9EAE0020,  # fmov x0, v1.d[1]
+    0x1E22C020,  # fcvt d0, s1
+    0x9E582820,  # fcvtzs x0, d1, #54
+    0x6F40E420,  # ucvtf v0.2d, v1.2d, #64
+    0x4F003420,  # orr v0.4s, #1, lsl #8
+    0x5FA21020,  # fmla s0, s1, v2.s[1]
+    0x7EE28C20,  # cmeq d0, d1, d2
+    0x4E602820,  # saddlp v0.4s, v1.8h
+    0x6E621020,  # uaddw2 v0.4s, v1.4s, v2.8h
+    0x4F1D9420,  # sqshrn2 v0.8h, v1.4s, #3
+    0x4E616820,  # fcvtn2 v0.4s, v1.2d
+    0x4E032020,  # tbl v0.16b, {v1.16b, v2.16b}, v3.16b
+    0x0E045020,  # tbx v0.8b, {v1.16b, v2.16b, v3.16b}, v4.8b
+    0x0DFF5A80,  # ld2 {v0.h, v1.h}[3], [x20], #4
+    0x0DFFEA80,  # ld4r {v0.2s, v1.2s, v2.2s, v3.2s}, [x20], #16
+    0x0C9F8280,  # st2 {v0.8b, v1.8b}, [x20], #16
+    0x38E00281,  # ldaddalb w0, w1, [x20]
+    0x38E08281,  # swpalb w0, w1, [x20]
+    0x5E280820,  # sha1h s0, s1
+    0x4E284820,  # aese v0.16b, v1.16b
+    0x6EA04820,  # clz v0.4s, v1.4s
+    0x4EA04820,  # cls v0.4s, v1.4s
+    0x2E204820,  # clz v0.8b, v1.8b
+    0x4E604820,  # cls v0.8h, v1.8h
+    0x6E205820,  # mvn v0.16b, v1.16b
     0xD65F03C0,  # ret
 )
 
@@ -57,7 +110,7 @@ def fixture(path):
     strings = b"\0entry\0callee\0"
     sym_start = 0x100
     symbols = bytes(24) + struct.pack("<IBBHQQ", 1, 0x12, 0, 1, 8, 0x60)
-    symbols += struct.pack("<IBBHQQ", 7, 0x12, 0, 1, 0x68, 8)
+    symbols += struct.pack("<IBBHQQ", 7, 0x12, 0, 1, 0x68, (len(WORDS) * 4 - 0x68))
     str_start = sym_start + len(symbols)
     ro[sym_start:str_start] = symbols
     ro[str_start:str_start + len(strings)] = strings

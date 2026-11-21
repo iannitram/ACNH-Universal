@@ -80,7 +80,7 @@ impl Emitter<'_> {
         Ok(Some(format!("{{ {} }}", parts.join(" "))))
     }
 
-    fn address(
+    pub(super) fn address(
         &self,
         i: &Instruction<'_>,
         operand: &Arm64Operand,
