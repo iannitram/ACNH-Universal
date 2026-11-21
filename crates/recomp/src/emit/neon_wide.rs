@@ -117,8 +117,6 @@ impl Emitter<'_> {
             "usubl" | "ssubl" => Some(("{a} - {b}", false)),
             "umull" | "smull" => Some(("{a} * {b}", false)),
             "umlal" | "smlal" => Some(("{o} + {a} * {b}", false)),
-            "umlsl" | "smlsl" => Some(("{o} - {a} * {b}", false)),
-            "uabdl" | "sabdl" => Some(("{a} > {b} ? {a} - {b} : {b} - {a}", false)),
             _ => None,
         };
         if let Some((expr, second)) = wide {
@@ -136,7 +134,6 @@ impl Emitter<'_> {
         let narrow = match base {
             "xtn" => Some(("{a}", "u", "u")),
             "shrn" => Some(("{a} >> {n}", "u", "u")),
-            "rshrn" => Some(("(({a} >> {n}) + (({a} >> ({n} - 1)) & 1))", "u", "u")),
             "sqshrn" => Some(("nx::sat<int{dbits}_t>({a} >> {n})", "s", "s")),
             "sqrshrn" => Some((
                 "nx::sat<int{dbits}_t>(({a} + (int64_t(1) << ({n} - 1))) >> {n})",
@@ -200,8 +197,10 @@ impl Emitter<'_> {
                 if i.op(0)?.vas == Arm64Vas::ARM64_VAS_INVALID {
                     if fp {
                         let bits = self.vinfo(i.op(1)?)?.0;
-                        let ty = if bits == 32 { "float" } else { "double" };
-                        format!("{{ {ty} r_ = {ty}(c.v[{a}].f{bits}[0] + c.v[{a}].f{bits}[1]); nx::V128 t_ = nx::vzero(); t_.f{bits}[0] = r_; c.v[{d}] = t_; }}")
+                        super::fp::write(
+                            self.reg_at(i, 0)?,
+                            &format!("c.v[{a}].f{bits}[0] + c.v[{a}].f{bits}[1]"),
+                        )?
                     } else {
                         format!("{{ nx::V128 r = nx::vzero(); r.u64[0] = c.v[{a}].u64[0] + c.v[{a}].u64[1]; c.v[{d}] = r; }}")
                     }

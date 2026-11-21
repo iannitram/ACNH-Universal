@@ -1,16 +1,21 @@
 //! AdvSIMD lane operations and common helpers.
 use super::{unsupported, Emitter, Instruction, Result};
 use capstone::arch::arm64::{Arm64Operand, Arm64OperandType, Arm64Shift, Arm64Vas};
+use regex::Regex;
+use std::sync::LazyLock;
+
+static LANE_VARIABLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b[abo]\b").expect("valid lane variable pattern"));
 
 pub(super) fn substitute(expr: &str, pairs: &[(&str, String)]) -> String {
-    let re = regex::Regex::new(r"\b[abo]\b").unwrap();
-    re.replace_all(expr, |c: &regex::Captures<'_>| {
-        pairs
-            .iter()
-            .find(|(key, _)| *key == &c[0])
-            .map_or_else(|| c[0].to_owned(), |(_, v)| v.clone())
-    })
-    .into_owned()
+    LANE_VARIABLE
+        .replace_all(expr, |c: &regex::Captures<'_>| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == &c[0])
+                .map_or_else(|| c[0].to_owned(), |(_, v)| v.clone())
+        })
+        .into_owned()
 }
 impl Emitter<'_> {
     pub(super) fn vinfo(&self, op: &Arm64Operand) -> Result<(u32, u32)> {
@@ -200,7 +205,7 @@ impl Emitter<'_> {
         let un = match i.mnemonic {
             "neg" => Some(("-a", "s", false)),
             "cnt" => Some(("std::popcount(a)", "u", false)),
-            "not" => Some(("~a", "u", true)),
+            "not" | "mvn" => Some(("~a", "u", true)),
             "abs" => Some(("a < 0 ? -a : a", "s", false)),
             "fneg" => Some(("-a", "f", false)),
             "fabs" => Some(("std::fabs(a)", "f", false)),
@@ -276,6 +281,14 @@ impl Emitter<'_> {
                 .map(Some);
         }
         let bits = self.vinfo(d_op).map_or(0, |v| v.0);
+        if matches!(i.mnemonic, "clz" | "cls") {
+            let expression = if i.mnemonic == "clz" {
+                format!("std::countl_zero(uint{bits}_t(a))")
+            } else {
+                format!("std::countl_zero(uint{bits}_t((uint{bits}_t(a) ^ (uint{bits}_t(a) << 1)) | 1))")
+            };
+            return self.v_un(i, &expression, "u", "u", false).map(Some);
+        }
         let dynamic = match i.mnemonic {
             "sqadd" => Some((format!("nx::sat<int{bits}_t>(int64_t(a) + int64_t(b))"), "s")),
             "sqsub" => Some((format!("nx::sat<int{bits}_t>(int64_t(a) - int64_t(b))"), "s")),

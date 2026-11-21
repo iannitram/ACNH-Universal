@@ -138,7 +138,7 @@ impl Emitter<'_> {
             | "sha256h" | "sha256h2" | "sha256su1" | "sha1c" | "sha1p" | "sha1m" | "sha1h" => {
                 self.crypto(i)?
             }
-            _ => return self.lse(i),
+            _ => return Ok(None),
         };
         Ok(Some(statement))
     }
@@ -156,7 +156,7 @@ impl Emitter<'_> {
         Ok(format!("c.x[{base}]"))
     }
 
-    fn lse(&self, i: &Instruction<'_>) -> Result<Option<String>> {
+    pub(super) fn lse(&self, i: &Instruction<'_>) -> Result<Option<String>> {
         let Some(m) = LSE.captures(i.mnemonic) else {
             return Ok(None);
         };

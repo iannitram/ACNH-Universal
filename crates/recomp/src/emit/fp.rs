@@ -10,7 +10,7 @@ fn read(r: Reg) -> Result<String> {
         _ => Err(unsupported("fp read")),
     }
 }
-fn write(r: Reg, expr: &str) -> Result<String> {
+pub(super) fn write(r: Reg, expr: &str) -> Result<String> {
     let n = r.index()?;
     if r.bits == 16 {
         return Ok(format!("{{ uint16_t h_ = nx::f32_to_f16(float({expr})); nx::V128 t_ = nx::vzero(); t_.u16[0] = h_; c.v[{n}] = t_; }}"));

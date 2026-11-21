@@ -1,6 +1,6 @@
-//! Emit C++ for AArch64 integer and control-flow instructions (roadmap 3.03).
+//! Emit C++ for AArch64 instructions (roadmap 3.03 and 3.04).
 //!
-//! The full Prepare driver remains in Python until all instruction groups are ported.
+//! The Prepare driver remains in Python until its Rust replacement lands in 3.05.
 //! Capstone provides its original disassembly and operand details, including aliases.
 
 mod extension;
@@ -612,7 +612,7 @@ impl<'a> Emitter<'a> {
         if let Some(statement) = self.memory(i)? {
             return Ok(statement);
         }
-        Err(unsupported("no handler"))
+        self.lse(i)?.ok_or_else(|| unsupported("no handler"))
     }
 
     fn misc(&self, i: &Instruction<'_>) -> Result<Option<String>> {

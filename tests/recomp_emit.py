@@ -92,6 +92,11 @@ WORDS = (
     0x38E08281,  # swpalb w0, w1, [x20]
     0x5E280820,  # sha1h s0, s1
     0x4E284820,  # aese v0.16b, v1.16b
+    0x6EA04820,  # clz v0.4s, v1.4s
+    0x4EA04820,  # cls v0.4s, v1.4s
+    0x2E204820,  # clz v0.8b, v1.8b
+    0x4E604820,  # cls v0.8h, v1.8h
+    0x6E205820,  # mvn v0.16b, v1.16b
     0xD65F03C0,  # ret
 )
 
