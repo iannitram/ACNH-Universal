@@ -15,7 +15,7 @@ pub enum Hub {
     StrixHalo,
     /// The RTX 3090 Ti desktop (Windows): itself.
     Desktop,
-    /// The Mac: itself, and the iPhone or iPad by cable.
+    /// Builds for the Mac and produces the iOS IPA for Dropbox delivery and SideStore installation.
     Mac,
 }
 

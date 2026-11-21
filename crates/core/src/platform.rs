@@ -123,7 +123,7 @@ pub enum Os {
     Windows,
     /// macOS on Apple silicon.
     Mac,
-    /// iPhone and iPad (built on the Mac, installed by cable).
+    /// iPhone and iPad. The Mac builds the IPA for installation from Dropbox with SideStore.
     Ios,
     /// Android arm64 with an Adreno GPU.
     Android,
