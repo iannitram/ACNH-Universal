@@ -325,6 +325,10 @@ impl Drop for DiscoveryDaemon {
 
 // TXT schema: hub=<recipe::Hub::key()>, targets=<comma-separated Os::key() values>.
 fn resolved_hubs(service: &mdns_sd::ResolvedService) -> Vec<Found> {
+    let port = service.get_port();
+    if port == 0 {
+        return Vec::new();
+    }
     let Some(hub) = service
         .get_property_val_str("hub")
         .filter(|key| !key.is_empty())
@@ -353,7 +357,7 @@ fn resolved_hubs(service: &mdns_sd::ResolvedService) -> Vec<Found> {
         .map(|addr| Found {
             hub: hub.into(),
             addr,
-            port: service.get_port(),
+            port,
             targets: targets.clone(),
         })
         .collect()
@@ -1167,19 +1171,21 @@ mod tests {
 
     #[test]
     fn resolved_records_filter_public_addresses_and_malformed_txt() {
-        let service = |properties: [(&str, &str); 2]| {
+        let service = |port, properties: [(&str, &str); 2]| {
             mdns_sd::ServiceInfo::new(
                 SERVICE,
                 "test",
                 "test.local.",
                 "127.0.0.1,8.8.8.8,::1",
-                1234,
+                port,
                 properties.as_slice(),
             )
             .unwrap()
             .as_resolved_service()
         };
-        let found = resolved_hubs(&service([("hub", "mac"), ("targets", "mac,ios")]));
+        let properties = [("hub", "mac"), ("targets", "mac,ios")];
+        let found = resolved_hubs(&service(1234, properties));
+        assert!(resolved_hubs(&service(0, properties)).is_empty());
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|hub| is_home_network(hub.addr)
             && hub.hub == "mac"
@@ -1191,7 +1197,7 @@ mod tests {
             [("hub", ""), ("targets", "mac")],
             [("hub", "mac"), ("other", "mac")],
         ] {
-            assert!(resolved_hubs(&service(properties)).is_empty());
+            assert!(resolved_hubs(&service(1234, properties)).is_empty());
         }
     }
 }

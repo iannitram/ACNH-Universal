@@ -85,32 +85,30 @@ fn zero_wait_does_not_start_mdns() {
 #[cfg(target_os = "linux")]
 #[test]
 fn discovers_fake_hub_on_loopback() {
-    use acnh_core::hub::is_home_network;
-    use acnh_core::platform::Os;
+    use acnh_core::hub::{is_home_network, pair_in, PairingSession};
+    use acnh_core::platform::{AppDirs, Os};
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let instance = format!("hub-discover-{port}");
+    let addr = listener.local_addr().unwrap();
+    let instance = format!("hub-discover-{}", addr.port());
     let hostname = format!("{instance}.local.");
-    let announcement = announce(
+    let _announcement = announce(
         &instance,
         &hostname,
         Hub::StrixHalo,
-        &["127.0.0.1".parse().unwrap()],
-        port,
+        &[addr.ip()],
+        addr.port(),
     )
     .unwrap();
     let found = discover(5000).unwrap();
-    drop(announcement);
     assert!(found.iter().all(|hub| is_home_network(hub.addr)));
-    assert!(found.iter().any(|hub| hub.hub == "strix-halo"
-        && hub.addr.is_loopback()
-        && hub.port == port
-        && hub.targets == [Os::Linux, Os::Android]));
+    let endpoint = found
+        .iter()
+        .find(|hub| hub.hub == "strix-halo" && (hub.addr, hub.port) == (addr.ip(), addr.port()))
+        .expect("the advertised loopback hub was not discovered");
+    assert_eq!(endpoint.targets, [Os::Linux, Os::Android]);
 
     // The discovered endpoint is usable by the existing pairing protocol.
-    use acnh_core::hub::{pair_in, PairingSession};
-    use acnh_core::platform::AppDirs;
     let root = tempfile::tempdir().unwrap();
     let server_dirs = AppDirs {
         config: root.path().join("server"),
@@ -120,10 +118,6 @@ fn discovers_fake_hub_on_loopback() {
         config: root.path().join("client"),
         data: root.path().join("client-data"),
     };
-    let endpoint = found
-        .iter()
-        .find(|hub| hub.hub == "strix-halo" && hub.port == port)
-        .unwrap();
     std::thread::scope(|scope| {
         let server = scope.spawn(|| {
             let (stream, _) = listener.accept().unwrap();
@@ -144,7 +138,10 @@ fn discovers_fake_hub_on_loopback() {
             &client_dirs,
         )
         .unwrap();
-        assert_eq!(server.join().unwrap().key_hex, client.key_hex);
+        assert!(
+            server.join().unwrap().key_hex == client.key_hex,
+            "paired keys differ"
+        );
     });
 }
 
