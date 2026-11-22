@@ -4,7 +4,8 @@
 // crates/core/tests/hub_discover.rs. See NOTICE for the MIT notice.
 #![cfg(feature = "hub")]
 
-use acnh_core::hub::{discover, MemoryTransport, TcpTransport, Transport};
+use acnh_core::hub::{announce, discover, MemoryTransport, TcpTransport, Transport};
+use acnh_core::recipe::Hub;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
@@ -84,37 +85,88 @@ fn zero_wait_does_not_start_mdns() {
 #[cfg(target_os = "linux")]
 #[test]
 fn discovers_fake_hub_on_loopback() {
-    use acnh_core::hub::{is_home_network, SERVICE};
+    use acnh_core::hub::is_home_network;
     use acnh_core::platform::Os;
-    use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let daemon = ServiceDaemon::new().unwrap();
-    daemon.disable_interface(IfKind::All).unwrap();
-    daemon.enable_interface(IfKind::LoopbackV4).unwrap();
     let instance = format!("hub-discover-{port}");
     let hostname = format!("{instance}.local.");
-    let info = ServiceInfo::new(
-        SERVICE,
+    let announcement = announce(
         &instance,
         &hostname,
-        "127.0.0.1",
+        Hub::StrixHalo,
+        &["127.0.0.1".parse().unwrap()],
         port,
-        [("hub", "strix-halo"), ("targets", "linux,android")].as_slice(),
     )
     .unwrap();
-    daemon.register(info).unwrap();
-    let result = discover(5000);
-    daemon
-        .shutdown()
-        .unwrap()
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .unwrap();
-    let found = result.unwrap();
+    let found = discover(5000).unwrap();
+    drop(announcement);
     assert!(found.iter().all(|hub| is_home_network(hub.addr)));
     assert!(found.iter().any(|hub| hub.hub == "strix-halo"
         && hub.addr.is_loopback()
         && hub.port == port
         && hub.targets == [Os::Linux, Os::Android]));
+
+    // The discovered endpoint is usable by the existing pairing protocol.
+    use acnh_core::hub::{pair_in, PairingSession};
+    use acnh_core::platform::AppDirs;
+    let root = tempfile::tempdir().unwrap();
+    let server_dirs = AppDirs {
+        config: root.path().join("server"),
+        data: root.path().join("server-data"),
+    };
+    let client_dirs = AppDirs {
+        config: root.path().join("client"),
+        data: root.path().join("client-data"),
+    };
+    let endpoint = found
+        .iter()
+        .find(|hub| hub.hub == "strix-halo" && hub.port == port)
+        .unwrap();
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| {
+            let (stream, _) = listener.accept().unwrap();
+            let mut transport = TcpTransport::from_stream(stream).unwrap();
+            pair_in(
+                &mut transport,
+                &mut PairingSession::new("123456").unwrap(),
+                "client",
+                &server_dirs,
+            )
+            .unwrap()
+        });
+        let mut transport = TcpTransport::connect((endpoint.addr, endpoint.port).into()).unwrap();
+        let client = pair_in(
+            &mut transport,
+            &mut PairingSession::new("123456").unwrap(),
+            "hub",
+            &client_dirs,
+        )
+        .unwrap();
+        assert_eq!(server.join().unwrap().key_hex, client.key_hex);
+    });
+}
+
+#[test]
+fn announcement_rejects_public_and_unspecified_addresses_before_starting_mdns() {
+    for address in ["8.8.8.8", "2001:4860:4860::8888", "0.0.0.0", "::"] {
+        let result = announce(
+            "test",
+            "test.local.",
+            Hub::Mac,
+            &[address.parse().unwrap()],
+            1234,
+        );
+        assert!(matches!(result, Err(error) if error.code() == "hub"));
+    }
+    assert!(announce("test", "test.local.", Hub::Mac, &[], 1234).is_err());
+    assert!(announce(
+        "test",
+        "test.local.",
+        Hub::Mac,
+        &["127.0.0.1".parse().unwrap()],
+        0
+    )
+    .is_err());
 }
