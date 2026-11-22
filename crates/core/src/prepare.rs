@@ -469,6 +469,23 @@ fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
     pack_stage(req).map_err(invalidate)
 }
 
+/// The Rust fonts stage for the Prepare runner. The legacy script still owns
+/// stage dispatch until the remaining script stages can switch together.
+pub fn rust_fonts(req: &Request) -> Result<()> {
+    let host = [
+        r"C:\Windows\Fonts\arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    ]
+    .into_iter()
+    .map(Path::new)
+    .find(|path| path.is_file());
+    crate::glyphs::stage(&req.out.join("extract/romfs"), &req.out.join("fonts"), host)
+        .map_err(|error| Error::Build(format!("stage {}: {error}", Stage::Fonts.key())))
+}
+
 /// Whether everything `stage` leaves in `req.out` is there. Game and recompile leave one
 /// file per module; upstream's build leaves the bare player in `build/` (on the Mac the
 /// plain executable), which `assemble` then makes self-contained in the install folder.
