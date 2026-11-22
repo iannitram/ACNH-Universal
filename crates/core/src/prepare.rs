@@ -451,33 +451,22 @@ fn pack_stage(req: &Request) -> Result<()> {
 /// before this stage and starts again after it.
 fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
     let stage = Stage::Shaders;
-    fix_mod_archives(req)
-        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-    if req.game.romfs.is_dir() {
-        let extracted = req.out.join("shaders_extracted");
-        let tools =
-            crate::shaders::Tools::new(root.to_owned(), crate::shaders::Tools::default().python);
-        crate::shaders::extract_with(
-            &tools,
-            &req.game.romfs,
-            &req.out.join("analysis").join("main.bin"),
-            &extracted,
-            req.jobs,
-            false,
-        )
-        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-    }
-    let translated = crate::shaders::translate(root, &req.out, req.jobs)
-        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-    if !translated {
-        return Err(Error::Build(format!(
-            "stage {}: the shader translator (dotnet and spirv_harness.dll) is not installed",
-            stage.key()
-        )));
-    }
-    // The stage's packs are ours (`pack::romfs`, `pack::spirv`), packed after either writer
-    // has left the loose folders.
-    pack_stage(req).map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))
+    let invalidate = |error| {
+        let _ = std::fs::remove_file(req.out.join("spirv/summary.txt"));
+        Error::Build(format!("stage {}: {error}", stage.key()))
+    };
+    fix_mod_archives(req).map_err(invalidate)?;
+    crate::shaders::stage_with(
+        &mut crate::shaders::ProcessRunner,
+        root,
+        &req.game.romfs,
+        &req.out.join("analysis/main.bin"),
+        &req.out,
+        req.jobs,
+    )
+    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+    // A summary only marks the stage complete once its archives and packs are ready.
+    pack_stage(req).map_err(invalidate)
 }
 
 /// The Rust fonts stage for the Prepare runner. The legacy script still owns

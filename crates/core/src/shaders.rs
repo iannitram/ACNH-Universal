@@ -294,70 +294,162 @@ pub fn cleanup(out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Translate the extracted shaders into `out/spirv` with the .NET harness the tools stage
-/// builds. `Ok(false)` when no harness or dotnet is installed (the caller can fall back to
-/// upstream's script); `Err` when the translator ran and failed.
-pub fn translate(root: &Path, out: &Path, jobs: u32) -> Result<bool> {
-    let Some((dotnet, harness)) = translator(root) else {
-        return Ok(false);
-    };
-    let extracted = out.join("shaders_extracted");
-    let logs = out.join("logs");
-    fs::create_dir_all(&logs)?;
-    let log_path = logs.join("spirv.log");
-    let log = fs::File::create(&log_path)?;
-    let stderr = log.try_clone().ok();
+/// Operations used by the shader stage, injectable for tests.
+pub trait Runner {
+    /// Extract the shader containers.
+    fn extract(
+        &mut self,
+        root: &Path,
+        romfs: &Path,
+        main: &Path,
+        out: &Path,
+        jobs: u32,
+    ) -> Result<()>;
+    /// Find a program on the runner's PATH.
+    fn find_program(&self, name: &str) -> Option<PathBuf>;
+    /// Whether this dotnet has a 10.x SDK.
+    fn has_dotnet_10(&mut self, dotnet: &Path) -> bool;
+    /// Run the harness, writing its output to the stage log.
+    fn run(&mut self, args: &[String], out: &Path) -> Result<()>;
+}
 
-    let workers = workers(jobs, usize::MAX / 2).to_string();
-    let mut command = Command::new(dotnet);
-    command
-        .arg(harness)
-        .arg("--batch")
-        .arg(&extracted)
-        .arg("--out")
-        .arg(out.join("spirv"))
-        .arg("--jobs")
-        .arg(workers)
-        .stdout(Stdio::from(log));
-    if let Some(stderr) = stderr {
-        command.stderr(Stdio::from(stderr));
-    }
-    if let Some(val) = find_program("spirv-val") {
-        command.arg("--spirv-val").arg(val);
-    } else {
-        command.arg("--no-val");
-    }
+/// Runner using the local tools and processes.
+pub struct ProcessRunner;
 
-    let status = command
-        .status()
-        .map_err(|error| Error::Io(format!("cannot run the shader translator: {error}")))?;
-    if !status.success() {
-        return Err(Error::Build(format!(
-            "the shader translator failed (log: {})",
-            log_path.display()
-        )));
+impl Runner for ProcessRunner {
+    fn extract(
+        &mut self,
+        root: &Path,
+        romfs: &Path,
+        main: &Path,
+        out: &Path,
+        jobs: u32,
+    ) -> Result<()> {
+        let tools = Tools::new(root.to_owned(), Tools::default().python);
+        extract_with(&tools, romfs, main, out, jobs, false)?;
+        Ok(())
     }
-    // Upstream's setup fails when the harness extracted nothing: the player would draw
-    // nothing. Remove the summary so the next run tries again, as it does.
-    let summary = out.join("spirv").join("summary.txt");
-    let first = match fs::read_to_string(&summary) {
-        Ok(text) => text.lines().next().unwrap_or_default().trim().to_owned(),
-        Err(_) => {
+    fn find_program(&self, name: &str) -> Option<PathBuf> {
+        find_program(name)
+    }
+    fn has_dotnet_10(&mut self, dotnet: &Path) -> bool {
+        Command::new(dotnet)
+            .arg("--list-sdks")
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .any(|line| line.starts_with("10."))
+            })
+    }
+    fn run(&mut self, args: &[String], out: &Path) -> Result<()> {
+        let logs = out.join("logs");
+        fs::create_dir_all(&logs)?;
+        let log_path = logs.join("spirv.log");
+        let log = fs::File::create(&log_path)?;
+        let stderr = log.try_clone()?;
+        let (program, args) = args
+            .split_first()
+            .ok_or_else(|| Error::Build("the shader translator command is missing".into()))?;
+        let status = Command::new(program)
+            .args(args)
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(stderr))
+            .status()
+            .map_err(|error| Error::Io(format!("cannot run the shader translator: {error}")))?;
+        if !status.success() {
             return Err(Error::Build(format!(
-                "the shader translator wrote no summary (log: {})",
+                "the shader translator failed (log: {})",
                 log_path.display()
             )));
         }
-    };
-    if first.starts_with("blocks 0 ") {
-        let _ = fs::remove_file(&summary);
-        return Err(Error::Build(
-            "no shader was extracted: the build would draw nothing (see the FAIL lines and \
-             the logs in shaders_extracted)"
-                .to_owned(),
-        ));
+        Ok(())
     }
-    Ok(true)
+}
+
+/// Extract and translate the shaders with the harness built by the tools stage.
+pub fn stage_with(
+    runner: &mut impl Runner,
+    root: &Path,
+    romfs: &Path,
+    main: &Path,
+    out: &Path,
+    jobs: u32,
+) -> Result<()> {
+    let summary = out.join("spirv/summary.txt");
+    match fs::remove_file(&summary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    runner.extract(root, romfs, main, &out.join("shaders_extracted"), jobs)?;
+    let private = root
+        .join("private/third_party/dotnet")
+        .join(if cfg!(windows) {
+            "dotnet.exe"
+        } else {
+            "dotnet"
+        });
+    let mut candidates = Vec::new();
+    if let Some(dotnet) = runner.find_program("dotnet") {
+        candidates.push(dotnet);
+    }
+    if private.is_file() {
+        candidates.push(private);
+    }
+    let dotnet = candidates
+        .into_iter()
+        .find(|path| runner.has_dotnet_10(path))
+        .ok_or_else(|| Error::Build(".NET 10 SDK is missing; run the tools stage".into()))?;
+    let harness = [
+        root.join("private/build/spirv_harness/bin/Release/net10.0/spirv_harness.dll"),
+        root.join("private/build/spirv_harness/out/spirv_harness.dll"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .ok_or_else(|| Error::Build("spirv_harness.dll is missing; run the tools stage".into()))?;
+    let argument = |path: &Path| {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Build("the shader stage requires Unicode file paths".into()))
+    };
+    let mut args = vec![
+        argument(&dotnet)?,
+        argument(&harness)?,
+        "--batch".into(),
+        argument(&out.join("shaders_extracted"))?,
+        "--out".into(),
+        argument(&out.join("spirv"))?,
+        "--jobs".into(),
+        workers(jobs, usize::MAX / 2).to_string(),
+    ];
+    if let Some(val) = runner.find_program("spirv-val") {
+        args.extend(["--spirv-val".into(), argument(&val)?]);
+    } else {
+        args.push("--no-val".into());
+    }
+    if let Err(error) = runner.run(&args, out) {
+        let _ = fs::remove_file(&summary);
+        return Err(error);
+    }
+    let blocks = fs::read_to_string(&summary).ok().and_then(|text| {
+        let mut fields = text.lines().next()?.split_whitespace();
+        (fields.next()? == "blocks").then_some(())?;
+        fields.next()?.parse::<usize>().ok()
+    });
+    if blocks.is_some_and(|count| count > 0) {
+        return Ok(());
+    }
+    if summary.is_file() {
+        fs::remove_file(&summary)?;
+    }
+    let message = match blocks {
+        Some(0) => "no shader was extracted: the build would draw nothing (see logs/spirv.log)",
+        _ => "the shader translator wrote no valid summary (see logs/spirv.log)",
+    };
+    Err(Error::Build(message.into()))
 }
 
 fn run_container(tools: &Tools, group: &Group, out: &Path) -> Result<bool> {
@@ -504,40 +596,6 @@ fn stem(path: &Path) -> String {
         .next()
         .unwrap_or_default()
         .to_owned()
-}
-
-fn translator(root: &Path) -> Option<(PathBuf, PathBuf)> {
-    let name = if cfg!(windows) {
-        "dotnet.exe"
-    } else {
-        "dotnet"
-    };
-    let private = root
-        .join("private")
-        .join("third_party")
-        .join("dotnet")
-        .join(name);
-    let dotnet = if private.is_file() {
-        private
-    } else {
-        find_program("dotnet")?
-    };
-    let candidates = [
-        root.join("private")
-            .join("build")
-            .join("spirv_harness")
-            .join("bin")
-            .join("Release")
-            .join("net10.0")
-            .join("spirv_harness.dll"),
-        root.join("private")
-            .join("build")
-            .join("spirv_harness")
-            .join("out")
-            .join("spirv_harness.dll"),
-    ];
-    let harness = candidates.into_iter().find(|path| path.is_file())?;
-    Some((dotnet, harness))
 }
 
 fn find_program(name: &str) -> Option<PathBuf> {
