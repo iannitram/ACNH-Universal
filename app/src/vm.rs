@@ -3,6 +3,7 @@
 pub mod about;
 pub mod continue_page;
 pub mod first_run;
+pub mod fleet;
 pub mod saves;
 pub mod settings;
 pub use about::AboutVm;
