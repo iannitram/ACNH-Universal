@@ -211,6 +211,74 @@ pub fn is_home_network(addr: IpAddr) -> bool {
     }
 }
 
+/// An active mDNS announcement. Keep this value alive while the hub is listening;
+/// dropping it stops the announcement and its daemon.
+pub struct Announcement {
+    daemon: DiscoveryDaemon,
+    fullname: String,
+}
+
+impl Drop for Announcement {
+    fn drop(&mut self) {
+        // Enqueue the goodbye before shutting down the daemon.
+        if let Ok(done) = self.daemon.0.unregister(&self.fullname) {
+            let _ = done.recv_timeout(Duration::from_secs(2));
+        }
+    }
+}
+
+/// Announce a listening hub on the supplied local interfaces. All advertised addresses must
+/// be home-network addresses; pass actual interface addresses, not wildcard bind addresses.
+/// `instance` and `hostname` identify this service on the local network. The hostname must
+/// end in `.local.` and should be unique to this hub.
+pub fn announce(
+    instance: &str,
+    hostname: &str,
+    hub: crate::recipe::Hub,
+    addresses: &[IpAddr],
+    port: u16,
+) -> Result<Announcement> {
+    if addresses.is_empty() || port == 0 {
+        return Err(Error::Hub(
+            "announcement needs an address and listening port".into(),
+        ));
+    }
+    for address in addresses {
+        check_home(*address)?;
+    }
+    if instance.is_empty() || !hostname.ends_with(".local.") {
+        return Err(Error::Hub(
+            "announcement needs an instance and .local. hostname".into(),
+        ));
+    }
+    let targets = crate::recipe::serves(hub)
+        .iter()
+        .map(|os| os.key())
+        .collect::<Vec<_>>()
+        .join(",");
+    let properties = [("hub", hub.key()), ("targets", targets.as_str())];
+    let info = mdns_sd::ServiceInfo::new(
+        SERVICE,
+        instance,
+        hostname,
+        addresses,
+        port,
+        properties.as_slice(),
+    )
+    .map_err(mdns_error)?;
+    let fullname = info.get_fullname().to_owned();
+    let daemon = DiscoveryDaemon(mdns_sd::ServiceDaemon::new().map_err(mdns_error)?);
+    daemon
+        .0
+        .disable_interface(mdns_sd::IfKind::All)
+        .map_err(mdns_error)?;
+    for address in addresses {
+        daemon.0.enable_interface(*address).map_err(mdns_error)?;
+    }
+    daemon.0.register(info).map_err(mdns_error)?;
+    Ok(Announcement { daemon, fullname })
+}
+
 /// Hubs announcing `SERVICE`, waited for up to `wait_ms`.
 pub fn discover(wait_ms: u64) -> Result<Vec<Found>> {
     if wait_ms == 0 {
@@ -257,6 +325,10 @@ impl Drop for DiscoveryDaemon {
 
 // TXT schema: hub=<recipe::Hub::key()>, targets=<comma-separated Os::key() values>.
 fn resolved_hubs(service: &mdns_sd::ResolvedService) -> Vec<Found> {
+    let port = service.get_port();
+    if port == 0 {
+        return Vec::new();
+    }
     let Some(hub) = service
         .get_property_val_str("hub")
         .filter(|key| !key.is_empty())
@@ -285,7 +357,7 @@ fn resolved_hubs(service: &mdns_sd::ResolvedService) -> Vec<Found> {
         .map(|addr| Found {
             hub: hub.into(),
             addr,
-            port: service.get_port(),
+            port,
             targets: targets.clone(),
         })
         .collect()
@@ -1099,19 +1171,21 @@ mod tests {
 
     #[test]
     fn resolved_records_filter_public_addresses_and_malformed_txt() {
-        let service = |properties: [(&str, &str); 2]| {
+        let service = |port, properties: [(&str, &str); 2]| {
             mdns_sd::ServiceInfo::new(
                 SERVICE,
                 "test",
                 "test.local.",
                 "127.0.0.1,8.8.8.8,::1",
-                1234,
+                port,
                 properties.as_slice(),
             )
             .unwrap()
             .as_resolved_service()
         };
-        let found = resolved_hubs(&service([("hub", "mac"), ("targets", "mac,ios")]));
+        let properties = [("hub", "mac"), ("targets", "mac,ios")];
+        let found = resolved_hubs(&service(1234, properties));
+        assert!(resolved_hubs(&service(0, properties)).is_empty());
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|hub| is_home_network(hub.addr)
             && hub.hub == "mac"
@@ -1123,7 +1197,7 @@ mod tests {
             [("hub", ""), ("targets", "mac")],
             [("hub", "mac"), ("other", "mac")],
         ] {
-            assert!(resolved_hubs(&service(properties)).is_empty());
+            assert!(resolved_hubs(&service(1234, properties)).is_empty());
         }
     }
 }
