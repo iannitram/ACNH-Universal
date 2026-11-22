@@ -17,9 +17,6 @@ use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::{assemble, backup, savecard, saves};
 use slint::{ComponentHandle, SharedString, Timer, TimerMode, Weak};
 
-/// The picture on the island card.
-const PICTURE: &str = "assets/acnhrecomp.png";
-
 /// The Continue page for this device: its island, its player and its folders.
 fn session() -> acnh_core::Result<Session> {
     let os = Os::current();
@@ -27,7 +24,7 @@ fn session() -> acnh_core::Result<Session> {
     let dirs = AppDirs::new(&vars);
     let root = dirs.data_root();
     let save_dir = saves::save_dir(&root);
-    let picture = PathBuf::from(PICTURE);
+    let picture = acnh_core::steam::assets_dir()?.join("acnhrecomp.png");
 
     // `this_device` and `set_saved_by` take the fleet's records once the app keeps them
     // (the Fleet page); with neither, no drift is reported.
@@ -265,8 +262,17 @@ fn set_about(window: &MainWindow) {
     window.set_about_fixes(slint::ModelRc::new(slint::VecModel::from(fixes)));
 }
 
+fn fullscreen(flag: bool, desktop: Option<&str>, gamepad_ui: bool) -> bool {
+    flag || desktop == Some("gamescope") || gamepad_ui
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window = MainWindow::new()?;
+    window.window().set_fullscreen(fullscreen(
+        std::env::args().any(|arg| arg == "--fullscreen"),
+        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+        std::env::var_os("SteamGamepadUI").is_some(),
+    ));
     set_about(&window);
     let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
     let settings = Rc::new(SettingsVm::new(
@@ -454,6 +460,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fullscreen_follows_arguments_and_gamescope() {
+        assert!(!fullscreen(false, None, false));
+        assert!(fullscreen(true, None, false));
+        assert!(fullscreen(false, Some("gamescope"), false));
+        assert!(fullscreen(false, None, true));
+        assert!(!fullscreen(false, Some("desktop"), false));
+    }
 
     #[test]
     fn settings_focus_reaches_both_switches_and_back() {

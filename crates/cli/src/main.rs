@@ -26,7 +26,7 @@ use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{self, Request};
 use acnh_core::profile;
 use acnh_core::saves;
-use acnh_core::steam::{self, Shortcut};
+use acnh_core::steam;
 use acnh_core::{Error, Result};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -334,18 +334,18 @@ fn steam_add(_options: &Options) -> Result<i32> {
         .find(|path| path.is_dir())
         .ok_or_else(|| Error::Steam("no Steam user folder found".into()))?;
 
-    let exe = std::env::current_exe()?;
-    let start_dir = exe
-        .parent()
-        .map(|parent| parent.display().to_string())
-        .unwrap_or_default();
-    let shortcut = Shortcut {
-        name: NAME.to_owned(),
-        exe: exe.display().to_string(),
-        start_dir,
-        launch_options: "play".to_owned(),
-        icon: Path::new("assets/acnhrecomp.png").display().to_string(),
-    };
+    let exe = std::env::current_exe()?.with_file_name(if cfg!(windows) {
+        "acnh-app.exe"
+    } else {
+        "acnh-app"
+    });
+    let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
+    let shortcut = steam::launcher_shortcut(
+        &exe,
+        appimage.as_deref(),
+        NAME,
+        &steam::assets_dir()?.join("acnhrecomp.png"),
+    );
     let written = steam::write_shortcut(&userdata, &shortcut, &[], &steam_running)?;
     if written.is_empty() {
         return Err(Error::Steam("no Steam user folder found".into()));
