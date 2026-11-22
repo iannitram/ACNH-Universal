@@ -33,15 +33,18 @@ fn session() -> acnh_core::Result<Session> {
     let mut vm = ContinuePageVm::new(savecard::read_card(&save_dir, &picture).ok(), None);
     vm.home = vars.home.clone();
 
-    // On the Mac the player is beside this executable in the one contained app.
-    let launcher = std::env::current_exe().unwrap_or_default();
-    let program = assemble::player(os, &launcher, &dirs.install());
     let backups = saves::backups_dir(&root);
     let mut env = vec![("NX_DATA_ROOT".to_string(), root.display().to_string())];
     let prepared = dirs.data.join("prepare");
-    if dirs.config.join("first-run-complete").is_file() && prepared.is_dir() {
+    let completed_here = dirs.config.join("first-run-complete").is_file()
+        && prepared.join("analysis/main.bin").is_file();
+    let launcher = if completed_here {
         env.push(("NX_GAME_ROOT".into(), prepared.display().to_string()));
-    }
+        PathBuf::new()
+    } else {
+        std::env::current_exe().unwrap_or_default()
+    };
+    let program = assemble::player(os, &launcher, &dirs.install());
     let runner = Runner {
         // No relay is set up from the app yet (Settings): the island here is played, and
         // nothing is pulled or pushed.
@@ -156,6 +159,12 @@ fn render_first_run(window: &Weak<MainWindow>, first: &mut FirstRun) {
         format!("{} of {}", first.vm.focus + 1, options.len()).into()
     });
     window.set_first_run_busy(first.vm.busy);
+    window.set_first_run_message(first.vm.message.as_str().into());
+    window.set_first_run_cancel_available(first.can_cancel());
+    window.set_first_run_keypad(first.vm.keypad_open());
+    window.set_first_run_focus_index(first.vm.focus as i32);
+    let choices: Vec<SharedString> = options.into_iter().map(Into::into).collect();
+    window.set_first_run_choices(slint::ModelRc::new(slint::VecModel::from(choices)));
     let progress = if first.vm.step == acnh_app::vm::first_run::Step::GetBuild {
         first
             .vm
@@ -227,6 +236,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let first = Rc::new(RefCell::new(FirstRun::new(vars.clone())));
     window.set_first_run_open(first.borrow().needed());
     render_first_run(&window.as_weak(), &mut first.borrow_mut());
+    window.on_first_run_choose({
+        let first = Rc::clone(&first);
+        let weak = window.as_weak();
+        move |index| {
+            let mut first = first.borrow_mut();
+            first.click(index as usize);
+            render_first_run(&weak, &mut first);
+        }
+    });
     window.on_first_run_nav({
         let first = Rc::clone(&first);
         let weak = window.as_weak();
@@ -249,6 +267,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = window.as_weak();
         let session = Rc::clone(&session);
         move |target| {
+            if weak
+                .upgrade()
+                .is_some_and(|window| window.get_first_run_open())
+            {
+                return;
+            }
             let mut session = session.borrow_mut();
             session.click(from_slint(target));
             render(&weak, &session);
@@ -331,7 +355,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut session = session.borrow_mut();
         let now_open = weak.upgrade().is_some_and(|w| w.get_first_run_open());
         if was_first_open && !now_open {
-            session.set_game_root(&first.borrow().game_root());
+            let first = first.borrow();
+            session.set_prepared_player(first.prepared_player(), &first.game_root());
         }
         was_first_open = now_open;
         if !first_open {

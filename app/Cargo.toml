@@ -10,8 +10,12 @@ publish = false
 [dependencies]
 acnh-core = { path = "../crates/core", features = ["hub"] }
 gilrs = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"
 slint = { version = "1.13", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-18"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+arboard = { version = "3.7", default-features = false }
 
 [build-dependencies]
 slint-build = "1.13"

@@ -23,7 +23,9 @@ name = "acnh-app"
 version = "0.0.0"
 dependencies = [
  "acnh-core",
+ "arboard",
  "gilrs",
+ "image",
  "slint",
  "slint-build",
  "tempfile",

@@ -1,6 +1,7 @@
 //! Guided setup state, independent of Slint and the operating system.
 use crate::vm::Nav;
 use acnh_core::hub::Found;
+use acnh_core::profile;
 use acnh_core::recipe::Stage;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -18,6 +19,7 @@ pub enum Step {
     GetBuild,
     BuildFailed(String),
     DeviceAndSteam,
+    ChooseProfile,
     SteamFailed(String),
     Done,
 }
@@ -31,7 +33,11 @@ pub enum Request {
     Pair(SocketAddr, String, String),
     Build(PathBuf),
     Pull(SocketAddr, String),
-    AddSteam,
+    Finish {
+        profile: usize,
+        steam: Option<PathBuf>,
+    },
+    CopyLog(String),
 }
 
 #[derive(Clone, Debug)]
@@ -43,7 +49,10 @@ pub enum Event {
     Paired(Result<(), String>),
     Stage(Stage),
     Finished(Result<(), String>),
-    Steam(Result<(), String>),
+    FinishedSetup {
+        steam: bool,
+        result: Result<(), String>,
+    },
 }
 
 pub struct FirstRunVm {
@@ -62,13 +71,16 @@ pub struct FirstRunVm {
     pub port_caret: usize,
     pub code: String,
     pub stage: Option<Stage>,
+    version: String,
     pub busy: bool,
     pub message: String,
     pub steam_applicable: bool,
+    pub profile: usize,
     pulling: bool,
     request: Option<Request>,
     retry: Option<Request>,
     address_return: Step,
+    address_unreachable: bool,
     pair_from_address: bool,
 }
 
@@ -90,13 +102,16 @@ impl FirstRunVm {
             port_caret: 5,
             code: String::new(),
             stage: None,
+            version: String::new(),
             busy: false,
             message: String::new(),
             steam_applicable: cfg!(target_os = "linux"),
+            profile: profile::builtin().len() - 1,
             pulling: false,
             request: None,
             retry: None,
             address_return: Step::NoHubFound,
+            address_unreachable: false,
             pair_from_address: false,
         }
     }
@@ -105,6 +120,7 @@ impl FirstRunVm {
     }
     fn request(&mut self, request: Request) {
         self.busy = true;
+        self.message.clear();
         if matches!(request, Request::Build(_)) {
             self.stage = None;
         }
@@ -128,19 +144,13 @@ impl FirstRunVm {
             | Step::EnterAddress => 2,
             Step::Pair => 3,
             Step::GetBuild | Step::BuildFailed(_) => 4,
-            Step::DeviceAndSteam | Step::SteamFailed(_) | Step::Done => 6,
+            Step::DeviceAndSteam | Step::ChooseProfile | Step::SteamFailed(_) | Step::Done => 6,
         }
     }
     pub fn title(&self) -> String {
         match &self.step {
             Step::Welcome => "Welcome. The game is not included.".into(),
-            Step::FindGame => {
-                if self.message.is_empty() {
-                    "Where is the game?".into()
-                } else {
-                    self.message.clone()
-                }
-            }
+            Step::FindGame => "Where is the game?".into(),
             Step::PickFolder => format!(
                 "Choose a game folder: {}",
                 self.folder
@@ -152,15 +162,11 @@ impl FirstRunVm {
             Step::FindHub => "Choose a hub".into(),
             Step::NoHubFound => "No hub found on this network".into(),
             Step::EnterAddress => format!(
-                "{} Hub address: {}  Port: {}",
-                self.message,
+                "Hub address: {}  Port: {}",
                 Self::with_caret(&self.host, self.host_caret, !self.editing_port),
                 Self::with_caret(&self.port, self.port_caret, self.editing_port)
             ),
-            Step::Pair => format!(
-                "{} Enter the six-digit code used on the hub: {}",
-                self.message, self.code
-            ),
+            Step::Pair => format!("Enter the six-digit code used on the hub: {}", self.code),
             Step::GetBuild if self.pulling => "Getting the player build".into(),
             Step::GetBuild => {
                 let current = self.stage;
@@ -176,18 +182,13 @@ impl FirstRunVm {
                     })
                     .collect::<Vec<_>>()
                     .join("  •  ");
-                format!(
-                    "{}\n{}",
-                    if self.message.is_empty() {
-                        "Preparing. Back requests cancellation after this work finishes."
-                    } else {
-                        &self.message
-                    },
-                    list
-                )
+                format!("Preparing version {}\n{list}", self.version)
             }
-            Step::BuildFailed(reason) => reason.clone(),
-            Step::DeviceAndSteam => "Device setup".into(),
+            Step::BuildFailed(reason) => reason.lines().next().unwrap_or("Build failed").into(),
+            Step::DeviceAndSteam => {
+                format!("Device profile: {}", profile::builtin()[self.profile].name)
+            }
+            Step::ChooseProfile => "Choose a device profile".into(),
             Step::SteamFailed(reason) => reason.clone(),
             Step::Done => "Setup complete".into(),
         }
@@ -220,6 +221,9 @@ impl FirstRunVm {
                 out
             }
             Step::NoHubFound => vec!["Retry".into(), "Enter address".into()],
+            Step::EnterAddress if self.address_unreachable => {
+                vec!["Retry".into(), "Edit".into(), "Cancel".into()]
+            }
             Step::EnterAddress => "0123456789abcdef.:"
                 .chars()
                 .map(|c| c.to_string())
@@ -238,11 +242,19 @@ impl FirstRunVm {
                 .chain(["Delete".into(), "Pair".into(), "Back".into()])
                 .collect(),
             Step::GetBuild => vec![],
-            Step::BuildFailed(_) => vec!["Retry".into(), "Back".into()],
+            Step::BuildFailed(_) => vec!["Retry".into(), "Copy log".into(), "Back".into()],
             Step::DeviceAndSteam if self.steam_applicable => {
-                vec!["Add to Steam".into(), "Done".into()]
+                vec![
+                    "Change profile".into(),
+                    "Add to Steam".into(),
+                    "Done".into(),
+                ]
             }
-            Step::DeviceAndSteam => vec!["Done".into()],
+            Step::DeviceAndSteam => vec!["Change profile".into(), "Done".into()],
+            Step::ChooseProfile => profile::builtin()
+                .iter()
+                .map(|item| item.name.into())
+                .collect(),
             Step::SteamFailed(_) => vec!["Try again".into(), "Skip".into()],
             Step::Done => vec!["Continue".into()],
         }
@@ -252,9 +264,12 @@ impl FirstRunVm {
             return;
         }
         let count = self.options().len();
+        let rows = if self.keypad_open() { 6 } else { 1 };
         match nav {
-            Nav::Up | Nav::Left => self.focus = self.focus.saturating_sub(1),
-            Nav::Down | Nav::Right => self.focus = (self.focus + 1).min(count.saturating_sub(1)),
+            Nav::Up => self.focus = self.focus.saturating_sub(rows),
+            Nav::Down => self.focus = (self.focus + rows).min(count.saturating_sub(1)),
+            Nav::Left => self.focus = self.focus.saturating_sub(1),
+            Nav::Right => self.focus = (self.focus + 1).min(count.saturating_sub(1)),
             Nav::Back => self.back(),
             Nav::Accept => self.activate(self.focus),
             _ => {}
@@ -301,9 +316,15 @@ impl FirstRunVm {
             }
             Step::FindHub | Step::NoHubFound => {
                 self.address_return = self.step.clone();
+                self.address_unreachable = false;
                 self.message.clear();
                 self.go(Step::EnterAddress);
             }
+            Step::EnterAddress if self.address_unreachable => match index {
+                0 => self.connect_address(),
+                1 => self.edit_address(),
+                _ => self.back(),
+            },
             Step::EnterAddress if index < 18 => {
                 let c = "0123456789abcdef.:".chars().nth(index).unwrap();
                 self.insert_address(c);
@@ -324,16 +345,7 @@ impl FirstRunVm {
                 }
             }
             Step::EnterAddress if index == 21 => self.editing_port = !self.editing_port,
-            Step::EnterAddress if index == 22 => {
-                match (self.host.parse(), self.port.parse::<u16>()) {
-                    (Ok(ip), Ok(port)) if port != 0 && acnh_core::hub::is_home_network(ip) => {
-                        let endpoint = SocketAddr::new(ip, port);
-                        self.pending_endpoint = Some(endpoint);
-                        self.request(Request::Connect(endpoint));
-                    }
-                    _ => self.message = "Enter a valid home-network IP and port.".into(),
-                }
-            }
+            Step::EnterAddress if index == 22 => self.connect_address(),
             Step::EnterAddress => self.go(self.address_return.clone()),
             Step::Pair if index < 10 => {
                 if self.code.len() < 6 {
@@ -354,15 +366,50 @@ impl FirstRunVm {
                     self.request(request);
                 }
             }
-            Step::BuildFailed(_) => self.go(Step::FindGame),
-            Step::DeviceAndSteam if index == 0 && self.steam_applicable => {
-                self.request(Request::AddSteam)
+            Step::BuildFailed(reason) if index == 1 => {
+                self.request = Some(Request::CopyLog(reason));
             }
-            Step::DeviceAndSteam => self.go(Step::Done),
-            Step::SteamFailed(_) if index == 0 => self.request(Request::AddSteam),
-            Step::SteamFailed(_) => self.go(Step::Done),
+            Step::BuildFailed(_) => self.go(Step::FindGame),
+            Step::DeviceAndSteam if index == 0 => self.go(Step::ChooseProfile),
+            Step::DeviceAndSteam => self.finish_setup(index == 1 && self.steam_applicable),
+            Step::ChooseProfile => {
+                self.profile = index;
+                self.go(Step::DeviceAndSteam);
+            }
+            Step::SteamFailed(_) => self.finish_setup(index == 0),
             _ => {}
         }
+    }
+
+    fn finish_setup(&mut self, add_steam: bool) {
+        self.message.clear();
+        self.request(Request::Finish {
+            profile: self.profile,
+            steam: add_steam.then(|| self.folder.clone()),
+        });
+    }
+
+    pub fn keypad_open(&self) -> bool {
+        !self.busy
+            && (self.step == Step::Pair
+                || (self.step == Step::EnterAddress && !self.address_unreachable))
+    }
+
+    fn connect_address(&mut self) {
+        match (self.host.parse(), self.port.parse::<u16>()) {
+            (Ok(ip), Ok(port)) if port != 0 && acnh_core::hub::is_home_network(ip) => {
+                let endpoint = SocketAddr::new(ip, port);
+                self.pending_endpoint = Some(endpoint);
+                self.request(Request::Connect(endpoint));
+            }
+            _ => self.message = "Enter a valid home-network IP and port.".into(),
+        }
+    }
+
+    fn edit_address(&mut self) {
+        self.address_unreachable = false;
+        self.message.clear();
+        self.focus = 0;
     }
     fn with_caret(text: &str, at: usize, show: bool) -> String {
         let mut text = text.to_owned();
@@ -374,6 +421,9 @@ impl FirstRunVm {
     pub fn insert_address(&mut self, c: char) {
         if self.busy || self.step != Step::EnterAddress {
             return;
+        }
+        if self.address_unreachable {
+            self.edit_address();
         }
         if self.editing_port {
             if c.is_ascii_digit() && self.port.len() < 5 {
@@ -387,6 +437,9 @@ impl FirstRunVm {
         self.message.clear();
     }
     pub fn delete_address(&mut self) {
+        if self.address_unreachable {
+            self.edit_address();
+        }
         let (text, caret) = if self.editing_port {
             (&mut self.port, &mut self.port_caret)
         } else {
@@ -399,13 +452,18 @@ impl FirstRunVm {
         self.message.clear();
     }
     fn back(&mut self) {
+        self.message.clear();
         match self.step {
             Step::FindGame => self.go(Step::Welcome),
             Step::PickFolder => self.go(Step::FindGame),
+            Step::FolderRejected(_) => self.go(Step::PickFolder),
+            Step::FindHub | Step::NoHubFound | Step::BuildFailed(_) => self.go(Step::FindGame),
             Step::Pair if self.pair_from_address => self.go(Step::EnterAddress),
             Step::Pair => self.go(Step::FindHub),
             Step::EnterAddress => self.go(self.address_return.clone()),
             Step::DeviceAndSteam => self.go(Step::FindGame),
+            Step::ChooseProfile => self.go(Step::DeviceAndSteam),
+            Step::SteamFailed(_) => self.go(Step::DeviceAndSteam),
             _ => {}
         }
     }
@@ -413,7 +471,8 @@ impl FirstRunVm {
         self.busy = false;
         match event {
             Event::Folders(folders) => self.folders = folders,
-            Event::Checked(Ok(_version)) => {
+            Event::Checked(Ok(version)) => {
+                self.version = version;
                 self.go(Step::GetBuild);
                 self.request(Request::Build(self.folder.clone()));
             }
@@ -428,6 +487,7 @@ impl FirstRunVm {
             }
             Event::Hubs(Err(reason)) => self.go(Step::BuildFailed(reason)),
             Event::Connected(Ok(())) => {
+                self.address_unreachable = false;
                 self.endpoint = self.pending_endpoint.take();
                 self.hub_name = "hub".into();
                 self.pair_from_address = true;
@@ -436,9 +496,9 @@ impl FirstRunVm {
                 self.go(Step::Pair);
             }
             Event::Connected(Err(reason)) => {
+                self.address_unreachable = true;
                 self.message = reason;
                 self.go(Step::EnterAddress);
-                self.focus = 22;
             }
             Event::Paired(Ok(())) => {
                 self.pulling = true;
@@ -463,8 +523,18 @@ impl FirstRunVm {
             }
             Event::Finished(Ok(())) => self.go(Step::DeviceAndSteam),
             Event::Finished(Err(reason)) => self.go(Step::BuildFailed(reason)),
-            Event::Steam(Ok(())) => self.go(Step::Done),
-            Event::Steam(Err(reason)) => self.go(Step::SteamFailed(reason)),
+            Event::FinishedSetup { result: Ok(()), .. } => self.go(Step::Done),
+            Event::FinishedSetup {
+                steam: true,
+                result: Err(reason),
+            } => self.go(Step::SteamFailed(reason)),
+            Event::FinishedSetup {
+                steam: false,
+                result: Err(reason),
+            } => {
+                self.go(Step::DeviceAndSteam);
+                self.message = reason;
+            }
         }
     }
 }
@@ -498,6 +568,26 @@ mod tests {
         vm.handle(Nav::Back);
         assert_eq!(vm.step, Step::NoHubFound);
     }
+
+    #[test]
+    fn failed_connection_can_retry_or_edit_without_losing_the_address() {
+        let mut vm = vm();
+        vm.step = Step::NoHubFound;
+        vm.activate(1);
+        for c in "127.0.0.1".chars() {
+            vm.insert_address(c);
+        }
+        vm.activate(22);
+        assert!(matches!(vm.take_request(), Some(Request::Connect(_))));
+        vm.event(Event::Connected(Err("Hub unavailable".into())));
+        assert_eq!(vm.options(), ["Retry", "Edit", "Cancel"]);
+        vm.activate(0);
+        assert!(matches!(vm.take_request(), Some(Request::Connect(_))));
+        vm.event(Event::Connected(Err("Hub unavailable".into())));
+        vm.activate(1);
+        assert!(vm.keypad_open());
+        assert_eq!(vm.host, "127.0.0.1");
+    }
     #[test]
     fn local_path_names_errors_and_builds_after_check() {
         let mut vm = vm();
@@ -526,7 +616,21 @@ mod tests {
         vm.event(Event::Stage(Stage::Build));
         vm.event(Event::Finished(Ok(())));
         assert_eq!(vm.step, Step::DeviceAndSteam);
-        vm.activate(if vm.steam_applicable { 1 } else { 0 });
+        vm.activate(0);
+        assert_eq!(vm.step, Step::ChooseProfile);
+        vm.activate(2);
+        vm.activate(if vm.steam_applicable { 2 } else { 1 });
+        assert!(matches!(
+            vm.take_request(),
+            Some(Request::Finish {
+                profile: 2,
+                steam: None
+            })
+        ));
+        vm.event(Event::FinishedSetup {
+            steam: false,
+            result: Ok(()),
+        });
         assert_eq!(vm.step, Step::Done);
     }
     #[test]
@@ -548,7 +652,7 @@ mod tests {
         vm.activate(11);
         assert!(matches!(vm.take_request(), Some(Request::Pair(..))));
         vm.event(Event::Paired(Err("mismatch".into())));
-        assert!(vm.title().contains("Codes did not match"));
+        assert!(vm.message.contains("Codes did not match"));
         for digit in [1, 2, 3, 4, 5, 6] {
             vm.activate(digit);
         }
@@ -561,6 +665,6 @@ mod tests {
         assert!(matches!(vm.take_request(), Some(Request::Pull(..))));
         vm.event(Event::Finished(Ok(())));
         assert_eq!(vm.step, Step::FindGame);
-        assert!(vm.title().contains("Prepare the game"));
+        assert!(vm.message.contains("Prepare the game"));
     }
 }

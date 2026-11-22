@@ -1,8 +1,9 @@
 //! Runs first-run requests off the window thread.
 use crate::vm::first_run::{Event, FirstRunVm, Request, Step};
+use crate::vm::settings::SettingsVm;
 use crate::vm::Nav;
 use acnh_core::platform::{AppDirs, Os, Vars};
-use acnh_core::{bundle, gamefolder, hub, prepare};
+use acnh_core::{bundle, gamefolder, hub, prepare, profile};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
@@ -22,12 +23,20 @@ pub struct FirstRun {
     active: Option<Request>,
     cancelled: Arc<AtomicU8>,
     cancelling_build: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    clipboard: Option<arboard::Clipboard>,
 }
 impl FirstRun {
     pub fn new(vars: Vars) -> Self {
         let dirs = AppDirs::new(&vars);
         let (sender, receiver) = mpsc::channel();
         let mut vm = FirstRunVm::new(vars.home.clone());
+        let cpu = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+        let detected = profile::detect(&cpu);
+        vm.profile = profile::builtin()
+            .iter()
+            .position(|item| item.id == detected.id)
+            .unwrap_or(vm.profile);
         vm.steam_applicable = Os::current() == Os::Linux
             && acnh_core::steam::userdata_roots(&vars)
                 .iter()
@@ -42,14 +51,21 @@ impl FirstRun {
             active: None,
             cancelled: Arc::new(AtomicU8::new(0)),
             cancelling_build: false,
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+            clipboard: None,
         }
     }
     pub fn game_root(&self) -> PathBuf {
         self.dirs.data.join("prepare")
     }
+    pub fn prepared_player(&self) -> PathBuf {
+        acnh_core::assemble::player(Os::current(), Path::new(""), &self.dirs.install())
+    }
     pub fn needed(&self) -> bool {
-        if self.dirs.config.join("first-run-complete").is_file() {
-            return false;
+        if self.dirs.config.join("first-run-complete").is_file()
+            && self.game_root().join("analysis/main.bin").is_file()
+        {
+            return !self.prepared_player().is_file();
         }
         let launcher = std::env::current_exe().unwrap_or_default();
         let player = acnh_core::assemble::player(Os::current(), &launcher, &self.dirs.install());
@@ -64,13 +80,28 @@ impl FirstRun {
         !(prepared_here || packaged)
     }
     pub fn complete(&self) -> std::io::Result<()> {
+        use std::io::Write;
+
         std::fs::create_dir_all(&self.dirs.config)?;
-        std::fs::write(self.dirs.config.join("first-run-complete"), b"1\n")
+        let mut marker = tempfile::NamedTempFile::new_in(&self.dirs.config)?;
+        marker.write_all(b"1\n")?;
+        marker.as_file().sync_all()?;
+        marker.persist(self.dirs.config.join("first-run-complete"))?;
+        Ok(())
+    }
+    pub fn can_cancel(&self) -> bool {
+        matches!(
+            self.active.as_ref(),
+            Some(Request::Build(_) | Request::Pull(..) | Request::Connect(_) | Request::Discover)
+        ) && self.cancelled.load(Ordering::SeqCst) == 0
     }
     pub fn nav(&mut self, nav: Nav) {
         if nav == Nav::Back && self.vm.busy {
             match self.active.as_ref() {
-                Some(Request::Build(_)) => {
+                Some(Request::Build(_) | Request::Pull(..)) => {
+                    if self.cancelling_build {
+                        return;
+                    }
                     if self
                         .cancelled
                         .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
@@ -78,7 +109,7 @@ impl FirstRun {
                     {
                         self.cancelling_build = true;
                         self.vm.message =
-                            "Cancelling after the current preparation finishes.".into();
+                            "Waiting for the current work to finish before cancelling.".into();
                     } else {
                         self.vm.message = "Installing the completed build; please wait.".into();
                     }
@@ -113,7 +144,8 @@ impl FirstRun {
                     self.cancelling_build = false;
                     self.active = None;
                     self.vm.busy = false;
-                    self.vm.message = "Preparation cancelled; finished stages are kept.".into();
+                    self.vm.message =
+                        "Setup cancelled. Finished preparation stages are kept.".into();
                     self.vm.step = Step::FindGame;
                     self.vm.focus = 0;
                 }
@@ -134,6 +166,14 @@ impl FirstRun {
         let Some(request) = self.vm.take_request() else {
             return;
         };
+        if let Request::CopyLog(text) = request {
+            self.vm.message = if self.copy_log(text) {
+                "Log copied.".into()
+            } else {
+                "Clipboard unavailable.".into()
+            };
+            return;
+        }
         self.generation += 1;
         let generation = self.generation;
         self.active = Some(request.clone());
@@ -146,6 +186,21 @@ impl FirstRun {
             let event = run(request, &dirs, &vars, &sender, generation, &cancelled);
             let _ = sender.send((generation, event));
         });
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    fn copy_log(&mut self, text: String) -> bool {
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        self.clipboard
+            .as_mut()
+            .is_some_and(|clipboard| clipboard.set_text(text).is_ok())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    fn copy_log(&mut self, _text: String) -> bool {
+        false
     }
 }
 fn device(dirs: &AppDirs) -> acnh_core::Result<String> {
@@ -230,6 +285,12 @@ fn run(
                     .tempdir_in(&dirs.data)?;
                 let id = device(dirs)?;
                 let bundle = hub::pull_hub(addr, dirs, &id, &name, Os::current(), staged.path())?;
+                if cancelled
+                    .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    return Err(acnh_core::Error::Build("download cancelled".into()));
+                }
                 bundle::install(&bundle, staged.path(), &dirs.install())?;
                 hub::report_hub_build(addr, dirs, &id, &name, &bundle)?;
                 Ok(())
@@ -268,11 +329,25 @@ fn run(
             })()
             .map_err(|e| safe_error(e, &vars.home)),
         ),
-        Request::AddSteam => Event::Steam(add_steam(vars).map_err(|e| safe_error(e, &vars.home))),
+        Request::Finish { profile, steam } => Event::FinishedSetup {
+            steam: steam.is_some(),
+            result: (|| {
+                let selected = profile::builtin()
+                    .get(profile)
+                    .ok_or_else(|| acnh_core::Error::Config("Unknown device profile".into()))?;
+                SettingsVm::new(dirs.data_root(), selected).apply_profile()?;
+                if let Some(folder) = steam {
+                    add_steam(vars, dirs, &folder)?;
+                }
+                Ok(())
+            })()
+            .map_err(|error| safe_error(error, &vars.home)),
+        },
+        Request::CopyLog(_) => unreachable!("clipboard stays on the window thread"),
     }
 }
 
-fn add_steam(vars: &Vars) -> acnh_core::Result<()> {
+fn add_steam(vars: &Vars, dirs: &AppDirs, folder: &Path) -> acnh_core::Result<()> {
     use acnh_core::steam::{self, Shortcut};
     if Os::current() != Os::Linux {
         return Err(acnh_core::Error::Steam(
@@ -283,14 +358,6 @@ fn add_steam(vars: &Vars) -> acnh_core::Result<()> {
         .into_iter()
         .find(|p| p.is_dir())
         .ok_or_else(|| acnh_core::Error::Steam("No Steam user folder found".into()))?;
-    let exe = std::env::current_exe()?;
-    let shortcut = Shortcut {
-        name: "Animal Crossing: New Horizons".into(),
-        exe: exe.display().to_string(),
-        start_dir: exe.parent().unwrap_or(Path::new(".")).display().to_string(),
-        launch_options: "play".into(),
-        icon: "assets/acnhrecomp.png".into(),
-    };
     let running = || {
         std::process::Command::new("pgrep")
             .arg("-x")
@@ -299,15 +366,93 @@ fn add_steam(vars: &Vars) -> acnh_core::Result<()> {
             .map(|o| o.status.success())
             .unwrap_or(false)
     };
-    if steam::write_shortcut(&userdata, &shortcut, &[], &running)?.is_empty() {
+    if running() {
+        return Err(acnh_core::Error::Steam(
+            "Close Steam before adding the shortcut".into(),
+        ));
+    }
+    let images = steam_artwork(folder)?;
+    let icon = dirs.data.join("steam-icon.png");
+    if let Some((_, bytes)) = images
+        .iter()
+        .find(|(art, _)| *art == acnh_core::artwork::Art::Icon)
+    {
+        std::fs::write(&icon, bytes)?;
+    }
+    let exe = std::env::current_exe()?;
+    let shortcut = Shortcut {
+        name: "Animal Crossing: New Horizons".into(),
+        exe: exe.display().to_string(),
+        start_dir: exe.parent().unwrap_or(Path::new(".")).display().to_string(),
+        launch_options: String::new(),
+        icon: icon.display().to_string(),
+    };
+    if steam::write_shortcut(&userdata, &shortcut, &images, &running)?.is_empty() {
         return Err(acnh_core::Error::Steam("No Steam user folder found".into()));
     }
     Ok(())
 }
 
+fn steam_artwork(folder: &Path) -> acnh_core::Result<Vec<(acnh_core::artwork::Art, Vec<u8>)>> {
+    use acnh_core::artwork;
+    use image::{imageops, ImageFormat, RgbaImage};
+    use std::io::Cursor;
+
+    let icon = folder.join("icon.png");
+    let source = icon
+        .metadata()
+        .ok()
+        .filter(|metadata| metadata.is_file() && metadata.len() <= 8 * 1024 * 1024)
+        .and_then(|_| image::open(&icon).ok())
+        .map(Ok)
+        .unwrap_or_else(|| {
+            image::load_from_memory_with_format(
+                include_bytes!("../../assets/acnhrecomp.png"),
+                ImageFormat::Png,
+            )
+        })
+        .map_err(|_| acnh_core::Error::Steam("Could not load shortcut artwork".into()))?;
+    artwork::ALL
+        .into_iter()
+        .map(|art| {
+            let (width, height) = artwork::size(art);
+            let resized = source
+                .resize(width, height, imageops::FilterType::Lanczos3)
+                .to_rgba8();
+            let mut canvas = RgbaImage::new(width, height);
+            imageops::overlay(
+                &mut canvas,
+                &resized,
+                i64::from((width - resized.width()) / 2),
+                i64::from((height - resized.height()) / 2),
+            );
+            let mut bytes = Cursor::new(Vec::new());
+            canvas
+                .write_to(&mut bytes, ImageFormat::Png)
+                .map_err(|_| acnh_core::Error::Steam("Could not encode shortcut artwork".into()))?;
+            Ok((art, bytes.into_inner()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steam_artwork_uses_the_size_for_each_library_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let images = steam_artwork(root.path()).unwrap();
+        assert_eq!(images.len(), acnh_core::artwork::ALL.len());
+        for (art, bytes) in images {
+            let image =
+                image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).unwrap();
+            assert_eq!(
+                (image.width(), image.height()),
+                acnh_core::artwork::size(art)
+            );
+        }
+    }
     fn fake() -> FirstRun {
         let root = PathBuf::from("/fake");
         FirstRun::new(Vars {

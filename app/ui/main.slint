@@ -38,7 +38,13 @@ export component MainWindow inherits Window {
     in property <string> first-run-position;
     in property <bool> first-run-busy;
     in property <int> first-run-progress: -1;
+    in property <bool> first-run-keypad;
+    in property <bool> first-run-cancel-available;
+    in property <string> first-run-message;
+    in property <[string]> first-run-choices;
+    in property <int> first-run-focus-index;
     callback first-run-nav(int);
+    callback first-run-choose(int);
     // What About shows (`AboutVm`), set once at start.
     in property <string> about-upstream;
     in property <string> about-slint-notice;
@@ -106,6 +112,12 @@ export component MainWindow inherits Window {
             position: root.first-run-position;
             busy: root.first-run-busy;
             progress: root.first-run-progress;
+            keypad: root.first-run-keypad;
+            cancel-available: root.first-run-cancel-available;
+            message: root.first-run-message;
+            choices: root.first-run-choices;
+            focus-index: root.first-run-focus-index;
+            choose(index) => { root.first-run-choose(index); }
             previous => { root.first-run-nav(0); }
             next => { root.first-run-nav(1); }
             accept => { root.first-run-nav(2); }
