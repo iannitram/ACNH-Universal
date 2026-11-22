@@ -88,6 +88,7 @@ fn render(window: &Weak<MainWindow>, session: &Session) {
                         device: row.device.as_str().into(),
                         details: row.details.as_str().into(),
                         status: row.status.as_str().into(),
+                        drifting: row.drifting,
                     })
                     .collect();
                 window.set_fleet_rows(slint::ModelRc::new(slint::VecModel::from(entries)));
@@ -122,7 +123,7 @@ fn move_settings_focus(focus: SettingsControl, nav: Nav) -> SettingsControl {
 }
 
 fn navigate(window: &Weak<MainWindow>, session: &mut Session, nav: Nav) {
-    if let Some(window) = window.upgrade().filter(|w| w.get_view().fleet_open) {
+    if let Some(window) = window.upgrade().filter(|_| session.vm().fleet_open()) {
         match nav {
             Nav::Up | Nav::Left | Nav::Prev => {
                 window.set_fleet_offset(window.get_fleet_offset().saturating_sub(1).max(0))

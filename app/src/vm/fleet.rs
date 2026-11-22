@@ -7,6 +7,7 @@ pub struct FleetRow {
     pub device: String,
     pub details: String,
     pub status: String,
+    pub drifting: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,10 +34,11 @@ impl FleetVm {
         current: Option<&DeviceRecord>,
         now: u64,
     ) -> Self {
+        let synced = |record: &DeviceRecord| (1..=now).contains(&record.last_sync_unix);
         let reference = current.or_else(|| {
             records
                 .iter()
-                .filter(|r| r.last_sync_unix > 0)
+                .filter(|record| synced(record))
                 .max_by_key(|r| (r.last_sync_unix, &r.device))
                 .or_else(|| {
                     records
@@ -47,7 +49,7 @@ impl FleetVm {
         });
         let comparison = match (current, reference) {
             (Some(r), _) => format!("Comparing with this device: {}", r.device),
-            (None, Some(r)) if r.last_sync_unix > 0 => {
+            (None, Some(r)) if synced(r) => {
                 format!("Comparing with latest synced device: {}", r.device)
             }
             (None, Some(r)) => format!("Comparing with device (sync unknown): {}", r.device),
@@ -84,38 +86,9 @@ impl FleetVm {
                 } else {
                     format!("{} bytes", record.free_bytes)
                 };
-                let status = match reference {
-                    Some(r)
-                        if !record.version.is_empty()
-                            && !r.version.is_empty()
-                            && record.version != r.version =>
-                    {
-                        match fleet::drift(record, r) {
-                            Drift::Version { .. } => "Version differs",
-                            _ => unreachable!(),
-                        }
-                    }
-                    Some(r)
-                        if !record.build_id.is_empty()
-                            && !r.build_id.is_empty()
-                            && record.build_id != r.build_id =>
-                    {
-                        "Build differs"
-                    }
-                    Some(r)
-                        if !record.version.is_empty()
-                            && !r.version.is_empty()
-                            && !record.build_id.is_empty()
-                            && !r.build_id.is_empty() =>
-                    {
-                        match fleet::drift(record, r) {
-                            Drift::None => "Matches",
-                            _ => "Differs",
-                        }
-                    }
-                    _ => "Comparison unavailable",
-                }
-                .to_owned();
+                let (status, drifting) = reference
+                    .map(|reference| compare_record(record, reference))
+                    .unwrap_or(("Comparison unavailable", false));
                 FleetRow {
                     device: format!(
                         "{}{}",
@@ -134,7 +107,8 @@ impl FleetVm {
                         sync,
                         free
                     ),
-                    status,
+                    status: status.into(),
+                    drifting,
                 }
             })
             .collect();
@@ -147,6 +121,17 @@ impl FleetVm {
             },
             comparison,
         }
+    }
+}
+
+fn compare_record(record: &DeviceRecord, reference: &DeviceRecord) -> (&'static str, bool) {
+    let versions_known = !record.version.is_empty() && !reference.version.is_empty();
+    let builds_known = !record.build_id.is_empty() && !reference.build_id.is_empty();
+    match fleet::drift(record, reference) {
+        Drift::Version { .. } if versions_known => ("Version differs", true),
+        _ if builds_known && record.build_id != reference.build_id => ("Build differs", true),
+        Drift::None if versions_known && builds_known => ("Matches", false),
+        _ => ("Comparison unavailable", false),
     }
 }
 
@@ -175,6 +160,8 @@ mod tests {
             vm.rows[0].details.contains("1234 bytes") && vm.rows[0].details.contains("2 min ago")
         );
         assert_eq!(vm.rows[1].status, "Version differs");
+        assert!(vm.rows[1].drifting);
+        assert!(!vm.rows[0].drifting);
         assert!(vm.rows[1]
             .details
             .contains("Free space: Unknown or 0 bytes"));

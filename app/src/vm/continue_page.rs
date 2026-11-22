@@ -382,6 +382,10 @@ impl ContinuePageVm {
         self.settings_open
     }
 
+    pub fn fleet_open(&self) -> bool {
+        self.fleet_open
+    }
+
     pub fn new(local_card: Option<SaveCard>, this_device: Option<DeviceRecord>) -> Self {
         let state = if local_card.is_some() {
             ContinueState::Ready

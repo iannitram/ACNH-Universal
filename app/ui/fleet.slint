@@ -4,6 +4,7 @@ export struct FleetEntry {
     device: string,
     details: string,
     status: string,
+    drifting: bool,
 }
 
 export component FleetPage inherits Rectangle {
@@ -29,8 +30,8 @@ export component FleetPage inherits Rectangle {
             background: #253c32;
             VerticalBox {
                 padding: 8px;
-                Text { text: row.device + " — " + row.status; color: #f7d681; font-size: 16px; }
-                Text { text: row.details; color: white; font-size: 13px; }
+                Text { text: row.device + " · " + row.status; color: row.drifting ? #f7d681 : white; font-size: 16px; overflow: elide; }
+                Text { text: row.details; color: white; font-size: 13px; overflow: elide; }
             }
         }
         Text { text: root.position; color: #b8cfc1; font-size: 14px; }
