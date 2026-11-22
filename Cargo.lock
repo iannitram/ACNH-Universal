@@ -53,6 +53,7 @@ dependencies = [
  "sha2 0.10.9",
  "spake2",
  "tempfile",
+ "ttf-parser",
 ]
 
 [[package]]

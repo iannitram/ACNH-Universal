@@ -24,6 +24,8 @@ hub = ["dep:mdns-sd", "dep:spake2", "dep:hmac", "dep:serde", "dep:serde_json", "
 [dependencies]
 # SHA-256 for bundles (`bundle::manifest`, `verify`).
 sha2 = "0.10"
+# Pure-Rust TrueType parsing and composite outline traversal for the fonts stage.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 save-relay = { git = "https://github.com/iannitram/save-relay", optional = true }
 # Pure-Rust discovery, PAKE, peer records, and authenticated bounded-memory transfers.
 # Versions follow the credited sibling hub implementation (see NOTICE).
