@@ -24,6 +24,7 @@
 
 #include <nx/runtime.h>
 
+#include "config.h"
 #include "platform.h"
 #include "users.h"
 
@@ -200,6 +201,12 @@ const std::vector<fs::path>& mod_roots() {
             while (!name.empty() && name.back() == ' ') name.pop_back();
             while (!name.empty() && name.front() == ' ') name.erase(0, 1);
             if (name.empty() || name.find("..") != std::string::npos) continue;
+            const auto enabled = [](const char* key) {
+                const auto value = config_get(key, "0");
+                return value == "1" || value == "on" || value == "true";
+            };
+            if ((name == "ptbr" && !enabled("mods.ptbr")) ||
+                (name == "speedfix60" && !enabled("mods.speedfix"))) continue;
             fs::path root = data_root() / "mods" / fs::u8path(name) / "romfs";
             std::error_code ec;
             if (fs::is_directory(root, ec)) {

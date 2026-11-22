@@ -41,6 +41,13 @@ pub enum Step {
     Script(Vec<String>),
 }
 
+/// Fan mod choices, off on a fresh install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FanMods {
+    pub ptbr: bool,
+    pub speedfix: bool,
+}
+
 /// What a prepare is asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -53,6 +60,8 @@ pub struct Request {
     /// The source tree to build from. `None` finds the packaged source beside the executable,
     /// and keeps the checkout when there is none (a `cargo run`).
     pub source: Option<PathBuf>,
+    /// Snapshot of the two opt-in settings for the whole prepare.
+    pub fan_mods: FanMods,
 }
 
 /// A build tool a hub is missing, and how to install it. Required pieces stop a prepare
@@ -97,14 +106,21 @@ pub fn step(stage: Stage, req: &Request) -> Step {
 
 /// Upstream's one command for a stage that is still its script.
 fn stage_script(req: &Request) -> Vec<String> {
-    vec![
+    let mut args = vec![
         script_python(req.target).to_owned(),
         "tools/setup_acnh.py".to_owned(),
         "--game".to_owned(),
         req.game.root.display().to_string(),
         "--out".to_owned(),
         req.out.display().to_string(),
-    ]
+    ];
+    if req.fan_mods.ptbr {
+        args.push("--ptbr".to_owned());
+    }
+    if req.fan_mods.speedfix {
+        args.push("--speedfix".to_owned());
+    }
+    args
 }
 
 fn script_python(target: Os) -> &'static str {
@@ -689,7 +705,30 @@ fn run_stages(
         .map_err(|error| build_error(Stage::Game, &[error.to_string()], home))?;
     // What was there before anything ran. A script that runs on while we look may have
     // finished its next stage already: only an output from before skips a stage.
-    let before = STAGES.map(|stage| stage_complete(stage, req));
+    let flags = format!("{} {}\n", req.fan_mods.ptbr, req.fan_mods.speedfix);
+    let record = req.out.join(".fan-mod-settings");
+    let changed = std::fs::read_to_string(&record).ok().as_deref() != Some(flags.as_str());
+    let source_changed = std::fs::read_to_string(req.out.join("game_source.txt"))
+        .ok()
+        .is_some_and(|source| Path::new(source.trim()) != req.game.root);
+    // Recheck opted-in inputs for changed archives and patches, and migrate old builds.
+    let ptbr_present = std::fs::symlink_metadata(req.out.join("mods/ptbr")).is_ok();
+    let speedfix_present = std::fs::read_to_string(req.out.join("gen/main/profile.txt"))
+        .is_ok_and(|profile| profile.split_whitespace().any(|arg| arg == "--variant"));
+    let recheck = changed
+        || source_changed
+        || req.fan_mods.ptbr
+        || req.fan_mods.speedfix
+        || ptbr_present
+        || speedfix_present;
+    let before = STAGES.map(|stage| {
+        stage_complete(stage, req)
+            && !(recheck
+                && matches!(
+                    stage,
+                    Stage::Game | Stage::Recompile | Stage::Shaders | Stage::Build
+                ))
+    });
     let mut last = None;
     for (stage, was_there) in STAGES.into_iter().zip(before) {
         if was_there && stage_complete(stage, req) {
@@ -721,6 +760,7 @@ fn run_stages(
             .finish()
             .map_err(|log| build_error(stage, &log, home))?;
     }
+    std::fs::write(record, flags)?;
     Ok(req.out.clone())
 }
 

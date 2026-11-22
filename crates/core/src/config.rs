@@ -74,6 +74,11 @@ impl Config {
         Ok(Config { lines })
     }
 
+    /// Whether an opt-in switch is enabled. Missing values are off.
+    pub fn enabled(&self, key: &str) -> bool {
+        matches!(self.get(key), Some("1" | "true" | "on"))
+    }
+
     /// The value of the last `key` entry, or `None`.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.lines.iter().rev().find_map(|line| match line {

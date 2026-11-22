@@ -277,6 +277,7 @@ pub struct PageView {
     pub pages_enabled: bool,
     /// The About overlay is open over the page; Back closes it.
     pub about_open: bool,
+    pub settings_open: bool,
     pub focus: FocusTarget,
 }
 
@@ -349,6 +350,7 @@ pub struct ContinuePageVm {
     pub focus: FocusTarget,
     /// The About overlay, opened from the About entry in the page row.
     about_open: bool,
+    settings_open: bool,
     pub glyph_set: InputDevice,
     pub last_error: Option<String>,
     pub status_message: Option<String>,
@@ -374,6 +376,10 @@ impl Default for ContinuePageVm {
 }
 
 impl ContinuePageVm {
+    pub fn settings_open(&self) -> bool {
+        self.settings_open
+    }
+
     pub fn new(local_card: Option<SaveCard>, this_device: Option<DeviceRecord>) -> Self {
         let state = if local_card.is_some() {
             ContinueState::Ready
@@ -388,6 +394,7 @@ impl ContinuePageVm {
             conflict: None,
             focus: FocusTarget::Play,
             about_open: false,
+            settings_open: false,
             glyph_set: InputDevice::SteamDeck,
             last_error: None,
             status_message: None,
@@ -543,7 +550,7 @@ impl ContinuePageVm {
         if self.busy() {
             return false;
         }
-        if self.about_open {
+        if self.about_open || self.settings_open {
             // Only Back works under the About overlay.
             return target == FocusTarget::Back;
         }
@@ -594,9 +601,10 @@ impl ContinuePageVm {
         if self.busy() {
             return false;
         }
-        if self.about_open {
+        if self.about_open || self.settings_open {
             if nav == Nav::Back {
                 self.about_open = false;
+                self.settings_open = false;
             }
             return false;
         }
@@ -693,6 +701,9 @@ impl ContinuePageVm {
             (Some(_), Nav::Up) => self.focus = FocusTarget::Play,
             (Some(at), Nav::Left) if at > 0 => self.focus = PAGE_ROW[at - 1].0,
             (Some(at), Nav::Right) if at + 1 < PAGE_ROW.len() => self.focus = PAGE_ROW[at + 1].0,
+            (Some(at), Nav::Accept) if PAGE_ROW[at].0 == FocusTarget::Settings => {
+                self.settings_open = true;
+            }
             (Some(at), Nav::Accept) if PAGE_ROW[at].0 == FocusTarget::About => {
                 self.about_open = true;
             }
@@ -1008,6 +1019,7 @@ impl ContinuePageVm {
             back: self.available(FocusTarget::Back),
             pages_enabled: self.available(FocusTarget::Saves),
             about_open: self.about_open,
+            settings_open: self.settings_open,
             focus: self.focus,
         }
     }

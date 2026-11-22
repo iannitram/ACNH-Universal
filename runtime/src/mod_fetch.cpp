@@ -1,14 +1,7 @@
-// The two mods every player gets without doing anything (config.h mods_fetch): the pt-BR fan translation (mods/ptbr)
-// and the parameter files of tmouh's 60 FPS SpeedFix (mods/speedfix60, with the code the importer compiled into the
-// game). They come with the port: tools/bundle_mods.sh puts them in every package (beside the player, in
-// ACNHRecomp.app's Resources, in the APK's assets) with mods/bundle.txt, and the start copies them into the game
-// folder's mods/, where the runtime reads them.
-//
-// bundle.txt: its first line is the bundle's version, the other lines the files (paths under mods/). The game folder's
-// mods/.bundle holds the version last copied there: a package with another version copies its files again (a fixed
-// translation reaches folders that have the old one). Downloads were tried first (0.6.1): MediaFire's page changed,
-// and Linux without unzip or a blocked curl left many players without either mod. NX_MOD_FETCH=0 or
-// game.mod_fetch = off: nothing is copied.
+// Copy bundled SpeedFix parameters only when the player opted in. The pt-BR translation is
+// installed from the player's zip during prepare; this path never copies it. The version marker
+// is separate from older bundles so an existing installation can migrate independently.
+// NX_MOD_FETCH=0 or game.mod_fetch = off disables copying.
 #include "platform.h"
 
 #include <algorithm>
@@ -118,14 +111,15 @@ void mods_fetch() {
     if (!bundled("bundle.txt", list)) return;  // a build without them (development)
     const std::string version = first_line(list);
     const fs::path mods = fs::u8path(plat::data_root()) / "mods";
-    if (version.empty() || read_small(mods / ".bundle") == version) return;
+    if (version.empty() || read_small(mods / ".bundle-speedfix") == version) return;
     std::vector<std::string> files;
     std::istringstream lines(list.substr(std::min(list.size(), list.find('\n') + 1)));
     for (std::string rel; std::getline(lines, rel);) {
         while (!rel.empty() && rel.back() == '\r') rel.pop_back();
-        if (!rel.empty() && rel.find("..") == std::string::npos && rel.find('/') != std::string::npos)
+        if (rel.rfind("speedfix60/", 0) == 0 && rel.find("..") == std::string::npos)
             files.push_back(rel);
     }
+    if (files.empty()) return;
     // The folders these files go to are replaced whole: a file an older copy had and this one dropped goes too.
     std::error_code ec;
     for (const std::string& rel : files) fs::remove_all(mods / fs::u8path(rel.substr(0, rel.find('/'))), ec);
@@ -139,7 +133,7 @@ void mods_fetch() {
         copied++, bytes += data.size();
     }
     const bool ok = copied == files.size();
-    if (ok) write_file(mods / ".bundle", version + "\n");
+    if (ok) write_file(mods / ".bundle-speedfix", version + "\n");
     log("mods: the package's mods (%s) copied into %s: %zu of %zu files, %zu KB%s", version.c_str(), u8(mods).c_str(),
         copied, files.size(), bytes >> 10, ok ? "" : " (the rest: at the next start)");
 }

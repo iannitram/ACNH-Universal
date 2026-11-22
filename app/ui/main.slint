@@ -1,7 +1,30 @@
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 import { AboutPage, CreditEntry, FixEntry } from "about.slint";
 import { ContinuePage, ContinueView, CardView, PadTarget } from "continue.slint";
 
 export { ContinueView, CardView, PadTarget, CreditEntry, FixEntry }
+export enum SettingsControl { ptbr, speedfix, back }
+
+component SettingsRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> selected;
+    callback activate();
+
+    min-height: 48px;
+    border-width: 2px;
+    border-color: root.selected ? #f7d681 : transparent;
+    border-radius: 6px;
+    background: touch.has-hover ? #29453a : #22382e;
+
+    HorizontalBox {
+        padding: 10px;
+        Text { text: root.label; color: white; vertical-alignment: center; horizontal-stretch: 1; }
+        Text { text: root.value; color: #f7d681; vertical-alignment: center; }
+    }
+
+    touch := TouchArea { clicked => { root.activate(); } }
+}
 
 // The launcher window. It shows the Continue page and hands every key and click to Rust:
 // `view` is `ContinuePageVm::view()`, `clicked` is a click or tap on a button, and `key` is
@@ -13,6 +36,12 @@ export component MainWindow inherits Window {
     in property <string> about-slint-notice;
     in property <[CreditEntry]> about-credits;
     in property <[FixEntry]> about-fixes;
+    in property <bool> ptbr;
+    in property <bool> speedfix;
+    in property <SettingsControl> settings-focus: SettingsControl.ptbr;
+    in property <string> settings-error;
+    callback set-ptbr(bool);
+    callback set-speedfix(bool);
     callback clicked(PadTarget);
     callback key(string) -> bool;
 
@@ -32,6 +61,34 @@ export component MainWindow inherits Window {
             view: root.view;
             clicked(target) => {
                 root.clicked(target);
+            }
+        }
+
+        if root.view.settings-open: Rectangle {
+            background: #172821;
+            VerticalBox {
+                padding: 24px;
+                spacing: 16px;
+                Text { text: "Settings"; color: white; font-size: 28px; }
+                Text { text: "Prepare again to apply these changes to your build."; color: white; }
+                SettingsRow {
+                    label: "Brazilian Portuguese fan translation";
+                    value: root.ptbr ? "On" : "Off";
+                    selected: root.settings-focus == SettingsControl.ptbr;
+                    activate => { root.set-ptbr(!root.ptbr); }
+                }
+                SettingsRow {
+                    label: "60 FPS SpeedFix (3.0.2 and 3.0.3)";
+                    value: root.speedfix ? "On" : "Off";
+                    selected: root.settings-focus == SettingsControl.speedfix;
+                    activate => { root.set-speedfix(!root.speedfix); }
+                }
+                if root.settings-error != "": Text { text: root.settings-error; color: #f7d681; }
+                SettingsRow {
+                    label: "Back";
+                    selected: root.settings-focus == SettingsControl.back;
+                    activate => { root.clicked(PadTarget.back); }
+                }
             }
         }
 

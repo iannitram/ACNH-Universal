@@ -244,6 +244,7 @@ fn late_setup_and_a_fully_cached_retry_consume_pending_reflow() {
         target,
         jobs: 0,
         source: None,
+        fan_mods: Default::default(),
     };
     for name in [
         ".prepare-tools.json",
@@ -261,6 +262,7 @@ fn late_setup_and_a_fully_cached_retry_consume_pending_reflow() {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, "synthetic").unwrap();
     }
+    fs::write(out.join(".fan-mod-settings"), "false false\n").unwrap();
     let script = root.join("tools/setup_acnh.py");
     fs::create_dir_all(script.parent().unwrap()).unwrap();
     fs::write(

@@ -277,12 +277,11 @@ game, and none needs a compiler. You need two things:
 
 #### The first start, updates and versions
 
-- **Brazilian Portuguese and 60 FPS** come with the package: the first start copies the pt-BR fan translation and
-  the files of tmouh's 60 FPS SpeedFix into your game folder (no download). Português (Brasil) is then in the game's
-  languages (chosen by itself on a Portuguese system). *Settings* > *Video* > *Frame rate* > *60* then plays at 60 FPS
-  at the game's normal speed (30 is the default); it needs a game folder prepared by ACNHRecomp-Importer 1.0.6 or
-  newer, which builds the SpeedFix into the game's code (an older folder stays at 30). A new package with newer files copies
-  them again; `game.mod_fetch = off` in `config.ini` turns the copy off.
+- **Brazilian Portuguese and 60 FPS SpeedFix** are off by default. Turn on each fan mod separately in the
+  launcher's Settings, then prepare again. Supply the translation zip in your game folder or
+  `private/translations/` and the SpeedFix patch for your game version in your game folder (or in the prepared
+  output). SpeedFix supports versions 3.0.2 and 3.0.3. Turning a switch off removes its effect on the next prepare;
+  your zip and patch remain in place.
 - **New versions:** the launcher looks for a newer release on GitHub each time it opens and says so on its home page,
   with a button to its download page. *Settings* > *Look for new versions when the launcher opens* turns it off. To
   update, download the new package and replace the old folder (or app): your game folder, saves and settings are
