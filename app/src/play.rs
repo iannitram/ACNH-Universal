@@ -180,6 +180,14 @@ impl Session {
         }
     }
 
+    /// Set the prepared game root used by subsequent launches.
+    pub fn set_game_root(&mut self, root: &Path) {
+        self.runner.env.retain(|(name, _)| name != "NX_GAME_ROOT");
+        self.runner
+            .env
+            .push(("NX_GAME_ROOT".into(), root.display().to_string()));
+    }
+
     pub fn vm(&self) -> &ContinuePageVm {
         &self.vm
     }

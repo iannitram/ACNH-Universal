@@ -8,8 +8,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-acnh-core = { path = "../crates/core" }
+acnh-core = { path = "../crates/core", features = ["hub"] }
 gilrs = "0.11"
+tempfile = "3"
 slint = { version = "1.13", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-18"] }
 
 [build-dependencies]

@@ -1,3 +1,4 @@
+import { FirstRunPage } from "first_run.slint";
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 import { AboutPage, CreditEntry, FixEntry } from "about.slint";
 import { ContinuePage, ContinueView, CardView, PadTarget } from "continue.slint";
@@ -31,6 +32,13 @@ component SettingsRow inherits Rectangle {
 // a key press (true when it was one of the launcher's keys).
 export component MainWindow inherits Window {
     in property <ContinueView> view;
+    in property <bool> first-run-open;
+    in property <string> first-run-title;
+    in property <string> first-run-choice;
+    in property <string> first-run-position;
+    in property <bool> first-run-busy;
+    in property <int> first-run-progress: -1;
+    callback first-run-nav(int);
     // What About shows (`AboutVm`), set once at start.
     in property <string> about-upstream;
     in property <string> about-slint-notice;
@@ -92,8 +100,20 @@ export component MainWindow inherits Window {
             }
         }
 
+        if root.first-run-open: FirstRunPage {
+            title: root.first-run-title;
+            choice: root.first-run-choice;
+            position: root.first-run-position;
+            busy: root.first-run-busy;
+            progress: root.first-run-progress;
+            previous => { root.first-run-nav(0); }
+            next => { root.first-run-nav(1); }
+            accept => { root.first-run-nav(2); }
+            back => { root.first-run-nav(3); }
+        }
+
         // The About overlay: opened by the About entry on the Continue page, closed by Back.
-        if root.view.about-open: AboutPage {
+        if root.view.about-open && !root.first-run-open: AboutPage {
             upstream-credit: root.about-upstream;
             slint-notice: root.about-slint-notice;
             credits: root.about-credits;

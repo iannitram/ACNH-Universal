@@ -1,0 +1,44 @@
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+export component FirstRunPage inherits Rectangle {
+    in property <string> title;
+    in property <string> choice;
+    in property <string> position;
+    in property <bool> busy;
+    in property <int> progress;
+    callback previous();
+    callback next();
+    callback accept();
+    callback back();
+    background: #172821;
+    VerticalBox {
+        padding: 32px;
+        spacing: 18px;
+        Text { text: "Guided setup"; color: white; font-size: 30px; }
+        Text { text: root.title; color: white; font-size: 24px; wrap: word-wrap; }
+        Text { text: root.busy ? "Working…" : root.position; color: #f7d681; font-size: 20px; }
+        if root.progress >= 0: Rectangle {
+            min-height: 12px;
+            background: #354a40;
+            Rectangle { width: parent.width * root.progress / 100; height: parent.height; background: #f7d681; }
+        }
+        Rectangle {
+            min-height: 60px;
+            border-width: 3px;
+            border-color: #f7d681;
+            border-radius: 8px;
+            background: #29453a;
+            Text { text: root.choice; color: white; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
+            TouchArea { clicked => { root.accept(); } }
+        }
+        HorizontalBox {
+            spacing: 10px;
+            for item[index] in ["Previous", "Next", "Select", "Back"]: Rectangle {
+                min-height: 54px;
+                border-radius: 6px;
+                background: #29453a;
+                Text { text: item; color: white; font-size: 20px; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea { clicked => { if index == 0 { root.previous(); } else if index == 1 { root.next(); } else if index == 2 { root.accept(); } else { root.back(); } } }
+            }
+        }
+    }
+}

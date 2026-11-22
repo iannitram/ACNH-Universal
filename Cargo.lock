@@ -26,6 +26,7 @@ dependencies = [
  "gilrs",
  "slint",
  "slint-build",
+ "tempfile",
 ]
 
 [[package]]

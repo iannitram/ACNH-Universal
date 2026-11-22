@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use acnh_app::first_run::FirstRun;
 use acnh_app::input::{key_nav, poll_nav, Stick};
 use acnh_app::play::{Player, RelayOff, Runner, Session};
 use acnh_app::ui::{from_slint, to_slint};
@@ -36,13 +37,18 @@ fn session() -> acnh_core::Result<Session> {
     let launcher = std::env::current_exe().unwrap_or_default();
     let program = assemble::player(os, &launcher, &dirs.install());
     let backups = saves::backups_dir(&root);
+    let mut env = vec![("NX_DATA_ROOT".to_string(), root.display().to_string())];
+    let prepared = dirs.data.join("prepare");
+    if dirs.config.join("first-run-complete").is_file() && prepared.is_dir() {
+        env.push(("NX_GAME_ROOT".into(), prepared.display().to_string()));
+    }
     let runner = Runner {
         // No relay is set up from the app yet (Settings): the island here is played, and
         // nothing is pulled or pushed.
         relay: Arc::new(RelayOff),
         game: Arc::new(Player { program }),
         save_dir,
-        env: vec![("NX_DATA_ROOT".to_string(), root.display().to_string())],
+        env,
         backup: Arc::new(move |save_dir: &Path| {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -120,6 +126,49 @@ fn save_fan_mod(window: &MainWindow, settings: &SettingsVm, control: SettingsCon
     });
 }
 
+fn render_first_run(window: &Weak<MainWindow>, first: &mut FirstRun) {
+    let Some(window) = window.upgrade() else {
+        return;
+    };
+    if first.done() {
+        match first.complete() {
+            Ok(()) => {
+                window.set_first_run_open(false);
+                return;
+            }
+            Err(_) => first.vm.message = "Could not save setup state.".into(),
+        }
+    }
+    let options = first.vm.options();
+    window.set_first_run_title(
+        format!("Step {} of 6\n{}", first.vm.step_number(), first.vm.title()).into(),
+    );
+    window.set_first_run_choice(
+        options
+            .get(first.vm.focus)
+            .map(String::as_str)
+            .unwrap_or("")
+            .into(),
+    );
+    window.set_first_run_position(if options.is_empty() {
+        "".into()
+    } else {
+        format!("{} of {}", first.vm.focus + 1, options.len()).into()
+    });
+    window.set_first_run_busy(first.vm.busy);
+    let progress = if first.vm.step == acnh_app::vm::first_run::Step::GetBuild {
+        first
+            .vm
+            .stage
+            .and_then(|stage| acnh_core::recipe::STAGES.iter().position(|s| *s == stage))
+            .map(|n| (n * 100 / 7) as i32)
+            .unwrap_or(0)
+    } else {
+        -1
+    };
+    window.set_first_run_progress(progress);
+}
+
 fn set_about(window: &MainWindow) {
     let about = AboutVm::new();
     let upstream = about.upstream();
@@ -175,6 +224,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+    let first = Rc::new(RefCell::new(FirstRun::new(vars.clone())));
+    window.set_first_run_open(first.borrow().needed());
+    render_first_run(&window.as_weak(), &mut first.borrow_mut());
+    window.on_first_run_nav({
+        let first = Rc::clone(&first);
+        let weak = window.as_weak();
+        move |index| {
+            let nav = match index {
+                0 => Nav::Up,
+                1 => Nav::Down,
+                2 => Nav::Accept,
+                _ => Nav::Back,
+            };
+            let mut first = first.borrow_mut();
+            first.nav(nav);
+            render_first_run(&weak, &mut first);
+        }
+    });
     let session = Rc::new(RefCell::new(session()?));
     render(&window.as_weak(), &session.borrow());
 
@@ -190,11 +257,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     window.on_key({
         let weak = window.as_weak();
+        let first = Rc::clone(&first);
         let session = Rc::clone(&session);
         move |text: SharedString| {
+            if weak.upgrade().is_some_and(|w| w.get_first_run_open()) {
+                let mut first = first.borrow_mut();
+                if first.vm.step == acnh_app::vm::first_run::Step::Pair && !first.vm.busy {
+                    if text.starts_with(char::from(slint::platform::Key::Backspace)) {
+                        first.vm.activate(10);
+                        render_first_run(&weak, &mut first);
+                        return true;
+                    }
+                    if let Some(digit) = text.chars().next().and_then(|c| c.to_digit(10)) {
+                        first.vm.activate(digit as usize);
+                        render_first_run(&weak, &mut first);
+                        return true;
+                    }
+                }
+                if first.vm.step == acnh_app::vm::first_run::Step::EnterAddress && !first.vm.busy {
+                    if text.starts_with(char::from(slint::platform::Key::Backspace)) {
+                        first.vm.delete_address();
+                        render_first_run(&weak, &mut first);
+                        return true;
+                    }
+                    if let Some(c) = text
+                        .chars()
+                        .next()
+                        .filter(|c| c.is_ascii_hexdigit() || matches!(c, '.' | ':'))
+                    {
+                        first.vm.insert_address(c);
+                        render_first_run(&weak, &mut first);
+                        return true;
+                    }
+                }
+            }
             let Some(nav) = key_nav(&text) else {
                 return false;
             };
+            if weak.upgrade().is_some_and(|w| w.get_first_run_open()) {
+                let mut first = first.borrow_mut();
+                first.nav(nav);
+                render_first_run(&weak, &mut first);
+                return true;
+            }
             let mut session = session.borrow_mut();
             navigate(&weak, &mut session, nav);
             render(&weak, &session);
@@ -207,14 +312,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stick = Stick::default();
     let timer = Timer::default();
     let weak = window.as_weak();
+    let mut was_first_open = window.get_first_run_open();
     timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
         let navs = match gilrs.as_mut() {
             Some(gilrs) => poll_nav(gilrs, &mut stick),
             None => Vec::new(),
         };
+        let first_open = weak.upgrade().is_some_and(|w| w.get_first_run_open());
+        if first_open {
+            let mut first = first.borrow_mut();
+            for nav in &navs {
+                first.nav(*nav);
+            }
+            if first.pump() || !navs.is_empty() {
+                render_first_run(&weak, &mut first);
+            }
+        }
         let mut session = session.borrow_mut();
-        for nav in &navs {
-            navigate(&weak, &mut session, *nav);
+        let now_open = weak.upgrade().is_some_and(|w| w.get_first_run_open());
+        if was_first_open && !now_open {
+            session.set_game_root(&first.borrow().game_root());
+        }
+        was_first_open = now_open;
+        if !first_open {
+            for nav in &navs {
+                navigate(&weak, &mut session, *nav);
+            }
         }
         if session.pump() || !navs.is_empty() {
             render(&weak, &session);
