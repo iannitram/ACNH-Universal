@@ -89,7 +89,7 @@ VmInfo vm_query(uint64_t addr) {
 #if defined(NX_COMPACT_LAYOUT)
     const uint64_t end = kAddressSpaceBase + kAddressSpaceSize;
     if (addr < kAddressSpaceBase) return {0, kAddressSpaceBase, kMemInaccessible, 0};
-    if (addr >= end) return {end, UINT64_MAX - end, kMemInaccessible, 0};
+    if (addr >= end) return {end, UINT64_MAX - end + 1, kMemInaccessible, 0};
 #endif
     auto it = g_vm.upper_bound(addr);
     uint64_t gap_end = it == g_vm.end() ? kAddressSpaceBase + kAddressSpaceSize : it->first;

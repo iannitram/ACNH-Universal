@@ -1,4 +1,4 @@
-// Guest CPU context and helpers used by recompiled AArch64 code.
+﻿// Guest CPU context and helpers used by recompiled AArch64 code.
 //
 // Guest memory is host memory: the module is mapped at NX_BASE and every guest pointer is a host pointer.
 // Both sides are little endian, so loads and stores are plain (unaligned-safe) memory accesses.

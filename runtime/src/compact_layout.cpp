@@ -15,8 +15,9 @@ constexpr uint64_t kLimit = 0x8000000000ull;  // 2^39
 
 uint64_t place_window() {
     const uint64_t page = vm_page_size;
-    uint64_t rejected[8]{};
-    for (unsigned attempt = 0; attempt < 8; ++attempt) {
+    constexpr unsigned max_attempts = 8;
+    uint64_t rejected[max_attempts]{};
+    for (unsigned attempt = 0; attempt < max_attempts; ++attempt) {
         uint64_t cursor = kFloor;
         nx::compact::Choice best;
         while (cursor < kLimit) {
@@ -28,10 +29,11 @@ uint64_t place_window() {
             const kern_return_t result = vm_region_64(mach_task_self(), &address, &size,
                 VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object);
             if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+            if (result != KERN_SUCCESS && result != KERN_INVALID_ADDRESS) return 0;
             const uint64_t next = result == KERN_SUCCESS ? std::min<uint64_t>(address, kLimit) : kLimit;
             nx::compact::consider_gap(cursor, next, page, nx::kAddressSpaceSize, rejected, attempt, best);
             if (result != KERN_SUCCESS || address >= kLimit) break;
-            if (size == 0 || address > UINT64_MAX - size || address + size <= cursor) break;
+            if (size == 0 || address > UINT64_MAX - size || address + size <= cursor) return 0;
             cursor = address + size;
         }
         if (!best.address) return 0;

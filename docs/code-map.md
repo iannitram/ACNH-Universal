@@ -21,7 +21,7 @@ Where the game root is: `plat::game_root()` (`runtime/src/game_root.h`) is `NX_G
 | Path | Current behavior | Remaining integration |
 |---|---|---|
 | `crates/core/src/assemble.rs` | After desktop Prepare, assembles the Mac launcher and arm64 player with their libraries and MoltenVK. `assemble::player` resolves the child executable beside the Mac launcher. | #171 stages prepared game resources in the final app and aligns the launcher's data root with the player's before delivery. |
-| `tools/check_ios_compile.sh`, `tools/build_ios.sh`, `ios/Info.plist.in` | Verify iOS C++ compilation and build `ACNH.app` with CMake, SDL3 and MoltenVK. The script defaults to handwritten stubs in `tests/ios_stub_gen/` and accepts a generated-source directory. | #150 changes guest-memory placement and #170 connects the device build to Prepare. |
+| `tools/check_ios_compile.sh`, `tools/build_ios.sh`, `ios/Info.plist.in` | Verify iOS C++ compilation and build `ACNH.app` with CMake, SDL3 and MoltenVK. The script defaults to handwritten stubs in `tests/ios_stub_gen/` and accepts a generated-source directory. | Device builds use a runtime-selected compact guest window. #170 connects the device build to Prepare. |
 | `tools/package_ios.sh`, `docs/IOS.md` | Package an arm64 device bundle as a versioned IPA. macOS CI exercises the script with a stub. | #170 wires the package step into Prepare, #172 stages the prepared game in the app, and #74 verifies SideStore on the owner's device. |
 | `app/src/play.rs`, `crates/core/src/launch.rs`, `crates/core/src/relay.rs` | Desktop launches the player as a child and core exposes the relay and conflict flows. The Slint entry point supplies `RelayOff`. | #164 wires real desktop relay. #172 uses the same Rust adapter in the iOS player with app lifecycle hooks. |
 
@@ -135,7 +135,7 @@ Built as a static library linked into the player while C++ remains; each Rust gr
 | `Audio` | stub (listed) | `hle_audio.cpp` | 4.07 | M13 |
 | `Services` | stub (listed) | `svc_am.cpp`, `svc_set.cpp`, `svc_misc.cpp`, `svc_process.cpp`, the other `hle_*.cpp` (bcat, friends, ldn, movie, net, nfp, ngc, pl, ro, vi) | 4.08 | M13 |
 | `Kernel` | stub (listed) | `kernel.cpp`, `ipc.cpp`, `kernel_watch.cpp` | 4.09 | M13 |
-| `Memory` | stub (listed) | `memory.cpp`, `memguard_*.cpp`, `write_watch.cpp`: the guest address space. The C++ Apple build uses the desktop layout today. #150 tracks the compact iOS layout | 4.10 | M4, M5, M13 |
+| `Memory` | stub (listed) | `memory.cpp`, `memguard_*.cpp`, `write_watch.cpp`: the guest address space. Device iOS uses the compact window from `compact_layout.cpp`. macOS and the iOS Simulator use the desktop layout | 4.10 | M4, M5, M13 |
 | `Platform` | stub (listed) | `platform_*.cpp`, `thermal.cpp`, `perf_hint.cpp` | 4.11 | M13 |
 | `Loader` | stub (listed) | `loader.cpp`, `game_abi.cpp`, `main.cpp`: load the game library and start it | 4.12 | M13 |
 
