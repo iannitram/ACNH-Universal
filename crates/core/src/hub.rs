@@ -734,26 +734,32 @@ impl Channel {
 
 // Both fresh 256-bit salts and the target are authenticated with distinct role labels.
 // An unpaired connection sees only a version and random challenge, never a bundle.
-fn handshake(t: &mut dyn Transport, key: &[u8], target: Os, server: bool) -> Result<Channel> {
+fn handshake_for(
+    t: &mut dyn Transport,
+    key: &[u8],
+    target: Os,
+    server: bool,
+    wire: &[u8; 8],
+) -> Result<Channel> {
     let mut server_salt = [0; 32];
     let mut client_salt = [0; 32];
     if server {
         server_salt = random_salt()?;
-        t.write_all(WIRE)?;
+        t.write_all(wire)?;
         t.write_all(&server_salt)?;
         t.flush()?;
         t.read_exact(&mut client_salt)?;
     } else {
         let mut version = [0; 8];
         t.read_exact(&mut version)?;
-        if &version != WIRE {
+        if &version != wire {
             return Err(hub_error("unsupported hub transfer protocol"));
         }
         t.read_exact(&mut server_salt)?;
         client_salt = random_salt()?;
         t.write_all(&client_salt)?;
     }
-    let mut transcript = Vec::from(WIRE.as_slice());
+    let mut transcript = Vec::from(wire.as_slice());
     transcript.extend_from_slice(&server_salt);
     transcript.extend_from_slice(&client_salt);
     transcript.extend_from_slice(target.key().as_bytes());
@@ -785,6 +791,13 @@ fn handshake(t: &mut dyn Transport, key: &[u8], target: Os, server: bool) -> Res
     }
     Ok(Channel::new(key, &transcript, server))
 }
+
+fn handshake(t: &mut dyn Transport, key: &[u8], target: Os, server: bool) -> Result<Channel> {
+    handshake_for(t, key, target, server, WIRE)
+}
+
+mod prepared;
+pub use prepared::{pull_prepared, serve_prepared};
 
 // Reject traversal, Windows aliases, duplicate names, file/directory collisions and our
 // private staging namespace before opening any listed file, on both ends.
