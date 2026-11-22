@@ -1,3 +1,4 @@
+import { FirstRunPage } from "first_run.slint";
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 import { FleetPage, FleetEntry } from "fleet.slint";
 import { AboutPage, CreditEntry, FixEntry } from "about.slint";
@@ -32,6 +33,19 @@ component SettingsRow inherits Rectangle {
 // a key press (true when it was one of the launcher's keys).
 export component MainWindow inherits Window {
     in property <ContinueView> view;
+    in property <bool> first-run-open;
+    in property <string> first-run-title;
+    in property <string> first-run-choice;
+    in property <string> first-run-position;
+    in property <bool> first-run-busy;
+    in property <int> first-run-progress: -1;
+    in property <bool> first-run-keypad;
+    in property <bool> first-run-cancel-available;
+    in property <string> first-run-message;
+    in property <[string]> first-run-choices;
+    in property <int> first-run-focus-index;
+    callback first-run-nav(int);
+    callback first-run-choose(int);
     // What About shows (`AboutVm`), set once at start.
     in property <string> about-upstream;
     in property <string> about-slint-notice;
@@ -101,7 +115,25 @@ export component MainWindow inherits Window {
             }
         }
 
-        if root.view.fleet-open: FleetPage {
+        if root.first-run-open: FirstRunPage {
+            title: root.first-run-title;
+            choice: root.first-run-choice;
+            position: root.first-run-position;
+            busy: root.first-run-busy;
+            progress: root.first-run-progress;
+            keypad: root.first-run-keypad;
+            cancel-available: root.first-run-cancel-available;
+            message: root.first-run-message;
+            choices: root.first-run-choices;
+            focus-index: root.first-run-focus-index;
+            choose(index) => { root.first-run-choose(index); }
+            previous => { root.first-run-nav(0); }
+            next => { root.first-run-nav(1); }
+            accept => { root.first-run-nav(2); }
+            back => { root.first-run-nav(3); }
+        }
+
+        if root.view.fleet-open && !root.first-run-open: FleetPage {
             rows: root.fleet-rows;
             message: root.fleet-message;
             comparison: root.fleet-comparison;
@@ -114,7 +146,7 @@ export component MainWindow inherits Window {
         }
 
         // The About overlay: opened by the About entry on the Continue page, closed by Back.
-        if root.view.about-open: AboutPage {
+        if root.view.about-open && !root.first-run-open: AboutPage {
             upstream-credit: root.about-upstream;
             slint-notice: root.about-slint-notice;
             credits: root.about-credits;

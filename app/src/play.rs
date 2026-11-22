@@ -180,6 +180,15 @@ impl Session {
         }
     }
 
+    /// Use the locally prepared player and game root for subsequent launches.
+    pub fn set_prepared_player(&mut self, program: PathBuf, root: &Path) {
+        self.runner.game = Arc::new(Player { program });
+        self.runner.env.retain(|(name, _)| name != "NX_GAME_ROOT");
+        self.runner
+            .env
+            .push(("NX_GAME_ROOT".into(), root.display().to_string()));
+    }
+
     pub fn vm(&self) -> &ContinuePageVm {
         &self.vm
     }
