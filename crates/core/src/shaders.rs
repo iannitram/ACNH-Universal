@@ -350,8 +350,11 @@ impl Runner for ProcessRunner {
         let log_path = logs.join("spirv.log");
         let log = fs::File::create(&log_path)?;
         let stderr = log.try_clone()?;
-        let status = Command::new(&args[0])
-            .args(&args[1..])
+        let (program, args) = args
+            .split_first()
+            .ok_or_else(|| Error::Build("the shader translator command is missing".into()))?;
+        let status = Command::new(program)
+            .args(args)
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(stderr))
             .status()
@@ -376,8 +379,10 @@ pub fn stage_with(
     jobs: u32,
 ) -> Result<()> {
     let summary = out.join("spirv/summary.txt");
-    if summary.exists() {
-        fs::remove_file(&summary)?;
+    match fs::remove_file(&summary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     runner.extract(root, romfs, main, &out.join("shaders_extracted"), jobs)?;
     let private = root
@@ -405,18 +410,23 @@ pub fn stage_with(
     .into_iter()
     .find(|path| path.is_file())
     .ok_or_else(|| Error::Build("spirv_harness.dll is missing; run the tools stage".into()))?;
+    let argument = |path: &Path| {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Build("the shader stage requires Unicode file paths".into()))
+    };
     let mut args = vec![
-        dotnet.display().to_string(),
-        harness.display().to_string(),
+        argument(&dotnet)?,
+        argument(&harness)?,
         "--batch".into(),
-        out.join("shaders_extracted").display().to_string(),
+        argument(&out.join("shaders_extracted"))?,
         "--out".into(),
-        out.join("spirv").display().to_string(),
+        argument(&out.join("spirv"))?,
         "--jobs".into(),
         workers(jobs, usize::MAX / 2).to_string(),
     ];
     if let Some(val) = runner.find_program("spirv-val") {
-        args.extend(["--spirv-val".into(), val.display().to_string()]);
+        args.extend(["--spirv-val".into(), argument(&val)?]);
     } else {
         args.push("--no-val".into());
     }
@@ -424,21 +434,22 @@ pub fn stage_with(
         let _ = fs::remove_file(&summary);
         return Err(error);
     }
-    let first = fs::read_to_string(&summary).map_err(|_| {
-        let _ = fs::remove_file(&summary);
-        Error::Build("the shader translator wrote no readable summary (see logs/spirv.log)".into())
-    })?;
-    if first
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .starts_with("blocks 0 ")
-    {
-        fs::remove_file(&summary)?;
-        return Err(Error::Build("no shader was extracted: the build would draw nothing (see the FAIL lines and the logs in shaders_extracted)".into()));
+    let blocks = fs::read_to_string(&summary).ok().and_then(|text| {
+        let mut fields = text.lines().next()?.split_whitespace();
+        (fields.next()? == "blocks").then_some(())?;
+        fields.next()?.parse::<usize>().ok()
+    });
+    if blocks.is_some_and(|count| count > 0) {
+        return Ok(());
     }
-    Ok(())
+    if summary.is_file() {
+        fs::remove_file(&summary)?;
+    }
+    let message = match blocks {
+        Some(0) => "no shader was extracted: the build would draw nothing (see logs/spirv.log)",
+        _ => "the shader translator wrote no valid summary (see logs/spirv.log)",
+    };
+    Err(Error::Build(message.into()))
 }
 
 fn run_container(tools: &Tools, group: &Group, out: &Path) -> Result<bool> {

@@ -451,12 +451,11 @@ fn pack_stage(req: &Request) -> Result<()> {
 /// before this stage and starts again after it.
 fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
     let stage = Stage::Shaders;
-    let summary = req.out.join("spirv/summary.txt");
-    if summary.exists() {
-        std::fs::remove_file(&summary)?;
-    }
-    fix_mod_archives(req)
-        .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+    let invalidate = |error| {
+        let _ = std::fs::remove_file(req.out.join("spirv/summary.txt"));
+        Error::Build(format!("stage {}: {error}", stage.key()))
+    };
+    fix_mod_archives(req).map_err(invalidate)?;
     crate::shaders::stage_with(
         &mut crate::shaders::ProcessRunner,
         root,
@@ -466,12 +465,8 @@ fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
         req.jobs,
     )
     .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
-    // The stage's packs are ours (`pack::romfs`, `pack::spirv`), packed after either writer
-    // has left the loose folders.
-    pack_stage(req).map_err(|error| {
-        let _ = std::fs::remove_file(req.out.join("spirv/summary.txt"));
-        Error::Build(format!("stage {}: {error}", stage.key()))
-    })
+    // A summary only marks the stage complete once its archives and packs are ready.
+    pack_stage(req).map_err(invalidate)
 }
 
 /// Whether everything `stage` leaves in `req.out` is there. Game and recompile leave one
