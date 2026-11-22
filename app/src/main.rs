@@ -7,10 +7,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use acnh_app::input::{key_nav, poll_nav, Stick};
 use acnh_app::play::{Player, RelayOff, Runner, Session};
 use acnh_app::ui::{from_slint, to_slint};
+use acnh_app::vm::fleet::FleetVm;
 use acnh_app::vm::settings::SettingsVm;
 use acnh_app::vm::{AboutVm, ContinuePageVm, Nav};
 use acnh_app::MainWindow;
-use acnh_app::{CreditEntry, FixEntry, SettingsControl};
+use acnh_app::{CreditEntry, FixEntry, FleetEntry, SettingsControl};
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::{assemble, backup, savecard, saves};
 use slint::{ComponentHandle, SharedString, Timer, TimerMode, Weak};
@@ -61,7 +62,51 @@ fn render(window: &Weak<MainWindow>, session: &Session) {
             window.set_settings_focus(SettingsControl::Ptbr);
             window.set_settings_error(SharedString::default());
         }
-        window.set_view(to_slint(&session.vm().view()));
+        let view = session.vm().view();
+        if view.fleet_open {
+            if !window.get_view().fleet_open {
+                window.set_fleet_offset(0);
+            }
+            if let Ok(vars) = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok()) {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|v| v.as_secs())
+                    .unwrap_or(0);
+                let fleet =
+                    FleetVm::load(&AppDirs::new(&vars), session.vm().this_device.as_ref(), now);
+                let max = fleet.rows.len().saturating_sub(3);
+                let offset = (window.get_fleet_offset().max(0) as usize).min(max);
+                window.set_fleet_offset(offset as i32);
+                window.set_fleet_has_previous(offset > 0);
+                window.set_fleet_has_next(offset < max);
+                let entries: Vec<FleetEntry> = fleet
+                    .rows
+                    .iter()
+                    .skip(offset)
+                    .take(3)
+                    .map(|row| FleetEntry {
+                        device: row.device.as_str().into(),
+                        details: row.details.as_str().into(),
+                        status: row.status.as_str().into(),
+                    })
+                    .collect();
+                window.set_fleet_rows(slint::ModelRc::new(slint::VecModel::from(entries)));
+                window.set_fleet_message(fleet.message.into());
+                window.set_fleet_comparison(fleet.comparison.into());
+                window.set_fleet_position(if fleet.rows.len() > 3 {
+                    format!(
+                        "Showing {}–{} of {}",
+                        offset + 1,
+                        (offset + 3).min(fleet.rows.len()),
+                        fleet.rows.len()
+                    )
+                    .into()
+                } else {
+                    "".into()
+                });
+            }
+        }
+        window.set_view(to_slint(&view));
     }
 }
 
@@ -77,6 +122,21 @@ fn move_settings_focus(focus: SettingsControl, nav: Nav) -> SettingsControl {
 }
 
 fn navigate(window: &Weak<MainWindow>, session: &mut Session, nav: Nav) {
+    if let Some(window) = window.upgrade().filter(|w| w.get_view().fleet_open) {
+        match nav {
+            Nav::Up | Nav::Left | Nav::Prev => {
+                window.set_fleet_offset(window.get_fleet_offset().saturating_sub(1).max(0))
+            }
+            Nav::Down | Nav::Right | Nav::Next => {
+                window.set_fleet_offset(window.get_fleet_offset().saturating_add(1))
+            }
+            Nav::Back | Nav::Accept => {
+                session.nav(Nav::Back);
+            }
+            _ => {}
+        }
+        return;
+    }
     let Some(window) = window.upgrade().filter(|_| session.vm().settings_open()) else {
         session.nav(nav);
         return;
@@ -178,6 +238,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = Rc::new(RefCell::new(session()?));
     render(&window.as_weak(), &session.borrow());
 
+    window.on_fleet_scroll({
+        let weak = window.as_weak();
+        let session = Rc::clone(&session);
+        move |delta| {
+            if let Some(window) = weak.upgrade() {
+                window.set_fleet_offset(window.get_fleet_offset().saturating_add(delta).max(0));
+                render(&weak, &session.borrow());
+            }
+        }
+    });
+
     window.on_clicked({
         let weak = window.as_weak();
         let session = Rc::clone(&session);
@@ -207,6 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stick = Stick::default();
     let timer = Timer::default();
     let weak = window.as_weak();
+    let mut fleet_tick = 0_u32;
     timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
         let navs = match gilrs.as_mut() {
             Some(gilrs) => poll_nav(gilrs, &mut stick),
@@ -216,7 +288,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for nav in &navs {
             navigate(&weak, &mut session, *nav);
         }
-        if session.pump() || !navs.is_empty() {
+        fleet_tick = fleet_tick.wrapping_add(1);
+        let refresh_fleet = fleet_tick.is_multiple_of(60)
+            && weak
+                .upgrade()
+                .is_some_and(|window| window.get_view().fleet_open);
+        if session.pump() || !navs.is_empty() || refresh_fleet {
             render(&weak, &session);
         }
     });
