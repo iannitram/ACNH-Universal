@@ -74,7 +74,7 @@ pub struct TcpTransport(TcpStream);
 impl TcpTransport {
     pub fn connect(addr: SocketAddr) -> Result<Self> {
         connect_home(addr, |addr| {
-            let stream = TcpStream::connect(addr)?;
+            let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
             Self::configure(&stream)?;
             Ok(Self(stream))
         })
@@ -469,8 +469,18 @@ pub fn pair_in<C: Clock>(
     device: &str,
     dirs: &AppDirs,
 ) -> Result<Peer> {
+    pair_with_context(t, session, device, dirs, b"acnh-universal/hub/pair/v1")
+}
+
+fn pair_with_context<C: Clock>(
+    t: &mut dyn Transport,
+    session: &mut PairingSession<C>,
+    device: &str,
+    dirs: &AppDirs,
+    context: &[u8],
+) -> Result<Peer> {
     session.check_open()?;
-    let result = exchange(t, session, device, dirs);
+    let result = exchange(t, session, device, dirs, context);
     session.record(&result);
     result
 }
@@ -480,10 +490,11 @@ fn exchange<C: Clock>(
     session: &PairingSession<C>,
     device: &str,
     dirs: &AppDirs,
+    context: &[u8],
 ) -> Result<Peer> {
     let (state, outbound) = Spake2::<Ed25519Group>::start_symmetric(
         &Password::new(&session.code[..]),
-        &Identity::new(b"acnh-universal/hub/pair/v1"),
+        &Identity::new(context),
     );
     t.write_all(&outbound)?;
     t.flush()?;
@@ -796,7 +807,9 @@ fn handshake(t: &mut dyn Transport, key: &[u8], target: Os, server: bool) -> Res
 }
 
 mod prepared;
+mod service;
 pub use prepared::{pull_prepared, serve_prepared};
+pub use service::{pair_hub, pull_hub, pull_hub_prepared, read_fleet, report_hub, serve_request};
 
 // Reject traversal, Windows aliases, duplicate names, file/directory collisions and our
 // private staging namespace before opening any listed file, on both ends.

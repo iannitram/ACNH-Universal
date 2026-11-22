@@ -16,10 +16,11 @@
 #![forbid(unsafe_code)]
 
 use acnh_core::assemble;
+use acnh_core::bundle;
 use acnh_core::config::Config;
-use acnh_core::error::not_built;
 use acnh_core::fleet;
 use acnh_core::gamefolder;
+use acnh_core::hub::{self, TcpTransport};
 use acnh_core::launch::{self, Game, Keep, Relay, Sync};
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{self, Request};
@@ -27,10 +28,15 @@ use acnh_core::profile;
 use acnh_core::saves;
 use acnh_core::steam::{self, Shortcut};
 use acnh_core::{Error, Result};
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const USAGE: &str = "usage: acnh-universal check|build|play|steam-add|hub|fleet";
+const USAGE: &str = "usage: acnh-universal check|build|play|steam-add|hub|fleet\n\
+hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>]\n\
+hub pair --address <ip:port> --name <device> --peer <hub> [--target <os>]\n\
+hub pull --address <ip:port> --name <device> --peer <hub> [--target <os>] [--prepared <private-data-root>]\n\
+hub report --address <ip:port> --name <device> --peer <hub> --target <os> --version <version> --build-id <id> --last-sync <seconds> --free <bytes>";
 const NAME: &str = "Animal Crossing: New Horizons";
 
 #[derive(Default)]
@@ -42,6 +48,17 @@ struct Options {
     profile: Option<String>,
     json: bool,
     help: bool,
+    hub_action: Option<String>,
+    address: Option<String>,
+    name: Option<String>,
+    peer: Option<String>,
+    hub: Option<String>,
+    prepared: Option<PathBuf>,
+    pair: bool,
+    version: Option<String>,
+    build_id: Option<String>,
+    last_sync: Option<String>,
+    free: Option<String>,
 }
 
 fn parse(args: &[String]) -> std::result::Result<Options, String> {
@@ -70,7 +87,8 @@ fn parse(args: &[String]) -> std::result::Result<Options, String> {
             continue;
         }
 
-        if options.command == "hub" {
+        if options.command == "hub" && options.hub_action.is_none() && !arg.starts_with('-') {
+            options.hub_action = Some(arg.clone());
             index += 1;
             continue;
         }
@@ -88,7 +106,12 @@ fn parse(args: &[String]) -> std::result::Result<Options, String> {
                 options.help = true;
                 index += 1;
             }
-            "--game" | "--target" | "--out" | "--profile" => {
+            "--pair" if inline.is_none() => {
+                options.pair = true;
+                index += 1;
+            }
+            "--game" | "--target" | "--out" | "--profile" | "--address" | "--name" | "--peer"
+            | "--hub" | "--prepared" | "--version" | "--build-id" | "--last-sync" | "--free" => {
                 let value = match inline {
                     Some(value) => {
                         index += 1;
@@ -124,6 +147,15 @@ fn set_value(options: &mut Options, flag: &str, value: String) -> std::result::R
         "--target" => options.target = Some(value),
         "--out" => options.out = Some(PathBuf::from(value)),
         "--profile" => options.profile = Some(value),
+        "--address" => options.address = Some(value),
+        "--name" => options.name = Some(value),
+        "--peer" => options.peer = Some(value),
+        "--hub" => options.hub = Some(value),
+        "--prepared" => options.prepared = Some(PathBuf::from(value)),
+        "--version" => options.version = Some(value),
+        "--build-id" => options.build_id = Some(value),
+        "--last-sync" => options.last_sync = Some(value),
+        "--free" => options.free = Some(value),
         _ => return Err(format!("unknown option {flag}\n{USAGE}")),
     }
     Ok(())
@@ -151,7 +183,7 @@ fn run(args: Vec<String>) -> i32 {
         "build" => build(&options),
         "play" => play(&options),
         "steam-add" => steam_add(&options),
-        "hub" => not_built("hub"),
+        "hub" => hub_command(&options),
         "fleet" => fleet_command(&options),
         _ => {
             println!("{USAGE}");
@@ -332,24 +364,162 @@ fn steam_running() -> bool {
     })
 }
 
-fn fleet_command(_options: &Options) -> Result<i32> {
-    let os = Os::current();
-    let vars = Vars::from_lookup(os, |name| std::env::var(name).ok())?;
-    let dirs = AppDirs::new(&vars);
-    let file = dirs.config.join("fleet.txt");
-    if file.is_file() {
-        let text = std::fs::read_to_string(&file)?;
-        let mut records = 0;
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let record = fleet::from_line(line)?;
-            println!("{}", fleet::to_line(&record)?);
-            records += 1;
-        }
-        if records > 0 {
-            return Ok(0);
-        }
+fn app_dirs() -> Result<AppDirs> {
+    Ok(AppDirs::new(&Vars::from_lookup(Os::current(), |name| {
+        std::env::var(name).ok()
+    })?))
+}
+
+fn required<'a>(value: &'a Option<String>, label: &str) -> Result<&'a str> {
+    value
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Hub(format!("{label} is required")))
+}
+
+fn address(options: &Options) -> Result<SocketAddr> {
+    let address: SocketAddr = required(&options.address, "--address")?
+        .parse()
+        .map_err(|_| Error::Hub("invalid address".into()))?;
+    if !hub::is_home_network(address.ip()) || address.port() == 0 {
+        return Err(Error::Hub(
+            "address is outside the home network or has no port".into(),
+        ));
     }
-    println!("Only this device so far");
+    Ok(address)
+}
+
+fn target(options: &Options) -> Result<Os> {
+    match options.target.as_deref() {
+        Some(value) => Os::from_key(value).ok_or_else(|| Error::Hub("invalid target".into())),
+        None => Ok(Os::current()),
+    }
+}
+
+fn code() -> Result<String> {
+    use std::io::{self, Write};
+    eprint!("Enter the six-digit pairing code: ");
+    io::stderr().flush()?;
+    let mut code = String::new();
+    io::stdin().read_line(&mut code)?;
+    let code = code.trim().to_owned();
+    hub::PairingSession::new(&code)?;
+    Ok(code)
+}
+
+fn hub_command(options: &Options) -> Result<i32> {
+    let dirs = app_dirs()?;
+    let name = required(&options.name, "--name")?;
+    let addr = address(options)?;
+    match options.hub_action.as_deref() {
+        Some("serve") => {
+            let role = acnh_core::recipe::hub_by_key(required(&options.hub, "--hub")?)?;
+            if options.prepared.is_some() && role != acnh_core::recipe::Hub::StrixHalo {
+                return Err(Error::Hub(
+                    "prepared Android data requires the Strix Halo hub".into(),
+                ));
+            }
+            let builds = options
+                .out
+                .as_deref()
+                .ok_or_else(|| Error::Hub("--out is required".into()))?;
+            let listener = TcpListener::bind(addr)?;
+            let hostname = format!("{name}.local.");
+            let _announcement = hub::announce(name, &hostname, role, &[addr.ip()], addr.port())?;
+            let mut pairing = if options.pair {
+                Some(hub::PairingSession::new(&code()?)?)
+            } else {
+                None
+            };
+            println!(
+                "Hub listening; pairing {}",
+                if pairing.is_some() { "armed" } else { "off" }
+            );
+            for incoming in listener.incoming() {
+                let stream = incoming?;
+                let mut transport = match TcpTransport::from_stream(stream) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if let Err(error) = hub::serve_request(
+                    &mut transport,
+                    &dirs,
+                    builds,
+                    options.prepared.as_deref(),
+                    pairing.as_mut(),
+                ) {
+                    eprintln!("Hub request failed: {}", error.code());
+                }
+            }
+            Ok(0)
+        }
+        Some("pair") => {
+            let peer = required(&options.peer, "--peer")?;
+            hub::pair_hub(addr, &dirs, name, peer, &code()?, target(options)?)?;
+            println!("Paired with hub");
+            Ok(0)
+        }
+        Some("pull") => {
+            let peer = required(&options.peer, "--peer")?;
+            let target = target(options)?;
+            if let Some(root) = &options.prepared {
+                hub::pull_hub_prepared(addr, &dirs, name, peer, target, root)?;
+                println!("Prepared data installed");
+            } else {
+                if options.out.is_some() {
+                    return Err(Error::Hub("--out is not used for pulls".into()));
+                }
+                std::fs::create_dir_all(&dirs.data)?;
+                let staged = tempfile::Builder::new()
+                    .prefix(".hub-pull-")
+                    .tempdir_in(&dirs.data)?;
+                let bundle = hub::pull_hub(addr, &dirs, name, peer, target, staged.path())?;
+                bundle::install(&bundle, staged.path(), &dirs.install())?;
+                let record = fleet::DeviceRecord {
+                    device: name.into(),
+                    os: target,
+                    version: bundle.version,
+                    build_id: bundle.build_id,
+                    last_sync_unix: 0,
+                    free_bytes: 0,
+                };
+                hub::report_hub(addr, &dirs, peer, &record)
+                    .map_err(|_| Error::Hub("build installed, but fleet report failed".into()))?;
+                println!("Build installed");
+            }
+            Ok(0)
+        }
+        Some("report") => {
+            let peer = required(&options.peer, "--peer")?;
+            let parse = |value: &Option<String>, label: &str| -> Result<u64> {
+                required(value, label)?
+                    .parse()
+                    .map_err(|_| Error::Hub(format!("invalid {label}")))
+            };
+            let record = fleet::DeviceRecord {
+                device: name.into(),
+                os: target(options)?,
+                version: required(&options.version, "--version")?.into(),
+                build_id: required(&options.build_id, "--build-id")?.into(),
+                last_sync_unix: parse(&options.last_sync, "--last-sync")?,
+                free_bytes: parse(&options.free, "--free")?,
+            };
+            hub::report_hub(addr, &dirs, peer, &record)?;
+            println!("Fleet report sent");
+            Ok(0)
+        }
+        _ => Err(Error::Hub("usage: hub serve|pair|pull|report".into())),
+    }
+}
+
+fn fleet_command(_options: &Options) -> Result<i32> {
+    let records = hub::read_fleet(&app_dirs()?)?;
+    if records.is_empty() {
+        println!("Only this device so far");
+    }
+    for record in records {
+        println!("{}", fleet::to_line(&record)?);
+    }
     Ok(0)
 }
 
