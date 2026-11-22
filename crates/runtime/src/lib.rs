@@ -50,7 +50,7 @@ pub const SERVICES: [Service; 11] = [
     Service::Loader,
 ];
 
-/// How far the guest's address space is moved up on Mac and iOS (upstream's `kGuestShift` in
+/// How far the guest's address space is moved up on Mac (and iOS Simulator) (upstream's `kGuestShift` in
 /// `runtime/include/nx/runtime.h`); the address space then starts at `0xC0_0800_0000`.
 pub const APPLE_GUEST_SHIFT: u64 = 0xC0_0000_0000;
 

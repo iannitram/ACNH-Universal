@@ -68,8 +68,8 @@ void vblank_hold() {
 
 namespace {
 
-constexpr uint64_t kFakeDisplay = kKernelBase - 0x1000;  // opaque pointers, never dereferenced by the game
-constexpr uint64_t kFakeLayer = kKernelBase - 0x2000;
+const uint64_t kFakeDisplay = kKernelBase - 0x1000;  // opaque pointers, never dereferenced by the game
+const uint64_t kFakeLayer = kKernelBase - 0x2000;
 
 void ok(CPU& c) { c.x[0] = 0; }
 

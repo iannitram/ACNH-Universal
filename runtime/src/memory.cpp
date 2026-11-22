@@ -24,11 +24,15 @@ void reserve(uint64_t addr, uint64_t size, const char* what) {
 }  // namespace
 
 void memory_init() {
-    reserve(kModuleBase, 0x20000000, "modules");
+#if defined(NX_COMPACT_LAYOUT)
+    if (!NX_BASE) fatal("cannot reserve a compact guest window below 2^39");
+#else
+    reserve(kModuleBase, kModuleSize, "modules");
     reserve(kHeapBase, kHeapMax, "heap");
     reserve(kAliasBase, kAliasSize, "alias");
     reserve(kStackBase, kStackSize, "stack");
     reserve(kKernelBase, kKernelSize, "kernel");
+#endif
     // The thunk range only names HLE functions: calls to it are dispatched by address (loader.cpp) and nothing is ever
     // mapped, read or run there, so a host mapping already in it is harmless. On a POCO F6 (Android 15, Adreno 735,
     // Xiaomi 24069PC21G) something sat at 0x6F00000000 and this was fatal: the app closed as soon as the game started.
@@ -82,6 +86,11 @@ void vm_set(uint64_t addr, uint64_t size, uint32_t state, uint32_t perm) {
 
 VmInfo vm_query(uint64_t addr) {
     std::lock_guard lk(g_vm_lock);
+#if defined(NX_COMPACT_LAYOUT)
+    const uint64_t end = kAddressSpaceBase + kAddressSpaceSize;
+    if (addr < kAddressSpaceBase) return {0, kAddressSpaceBase, kMemInaccessible, 0};
+    if (addr >= end) return {end, UINT64_MAX - end, kMemInaccessible, 0};
+#endif
     auto it = g_vm.upper_bound(addr);
     uint64_t gap_end = it == g_vm.end() ? kAddressSpaceBase + kAddressSpaceSize : it->first;
     if (it != g_vm.begin()) {

@@ -1,4 +1,4 @@
-﻿// Guest CPU context and helpers used by recompiled AArch64 code.
+// Guest CPU context and helpers used by recompiled AArch64 code.
 //
 // Guest memory is host memory: the module is mapped at NX_BASE and every guest pointer is a host pointer.
 // Both sides are little endian, so loads and stores are plain (unaligned-safe) memory accesses.
@@ -18,6 +18,20 @@
 #include <intrin.h>
 #endif
 
+// Device iOS uses one runtime-selected compact guest window. Simulator keeps the Mac layout.
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+#define NX_COMPACT_LAYOUT 1
+#endif
+#endif
+#if defined(NX_COMPACT_LAYOUT)
+#ifdef NX_BASE
+#error "NX_BASE cannot be overridden for the compact layout"
+#endif
+extern "C" __attribute__((visibility("default"))) uint64_t nx_guest_base();
+#define NX_BASE (nx_guest_base())
+#else
 // Where the modules are mapped. macOS on Apple silicon reserves 0x2_DC00_0000..0x6F_FFFF_FFFF for the dyld shared
 // region and a guard (macOS 27; fixed mappings there fail) and puts malloc's zones at random addresses in
 // 0x70_0000_0000..0x80_0000_0000, so the whole guest layout moves up by 0xC0_0000_0000 there: modules at
@@ -29,6 +43,8 @@
 #define NX_BASE 0x0000004000000000ull
 #endif
 #endif
+
+#endif  // NX_COMPACT_LAYOUT
 
 namespace nx {
 

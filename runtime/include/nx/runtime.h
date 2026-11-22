@@ -19,6 +19,34 @@ extern bool g_trace;  // verbose tracing (NX_TRACE=1)
 // ---- address space --------------------------------------------------------------------------------------------
 // Guest pointers are host pointers. Everything the guest can see lives in these reserved ranges.
 
+#if defined(NX_COMPACT_LAYOUT)
+// One reserved window: modules, 3.25 GiB heap, alias, stack, guard and kernel.
+// The 16 KiB guard accommodates the two fake display handles on every supported Apple page size.
+constexpr uint64_t kModuleSize = 0x20000000ull;
+constexpr uint64_t kHeapMax = 0xD0000000ull;
+constexpr uint64_t kAliasSize = 0x10000000ull;
+constexpr uint64_t kStackSize = 0x10000000ull;
+constexpr uint64_t kKernelSize = 0x10000000ull;
+constexpr uint64_t kGuardSize = 0x4000ull;
+constexpr uint64_t kAddressSpaceSize = kModuleSize + kHeapMax + kAliasSize + kStackSize + kGuardSize + kKernelSize;
+constexpr uint64_t kThunkSize = 0x100000ull;
+struct GuestAddress {
+    uint64_t offset;
+    operator uint64_t() const { return NX_BASE + offset; }
+};
+inline constexpr GuestAddress kAddressSpaceBase{0};
+inline constexpr GuestAddress kModuleBase{0};
+inline constexpr GuestAddress kHeapBase{kModuleSize};
+inline constexpr GuestAddress kAliasBase{kModuleSize + kHeapMax};
+inline constexpr GuestAddress kStackBase{kModuleSize + kHeapMax + kAliasSize};
+inline constexpr GuestAddress kKernelBase{kModuleSize + kHeapMax + kAliasSize + kStackSize + kGuardSize};
+inline constexpr GuestAddress kThunkBase{kAddressSpaceSize};
+static_assert(kAddressSpaceSize <= 5ull * 1024 * 1024 * 1024);
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+static_assert(kHeapMax == 0xD0000000ull && kAliasSize == 0x10000000ull && kStackSize == 0x10000000ull,
+              "iOS device builds must use the compact layout");
+#endif
+#else
 // macOS: the same layout as Linux, moved up by kGuestShift (see NX_BASE in nx/cpu.h): the guest's 39-bit address
 // space is 0xC0_0800_0000..0x140_0000_0000 there. svcGetInfo hands every region to the guest, nothing assumes 0.
 #if defined(__APPLE__)
@@ -48,6 +76,8 @@ constexpr uint64_t kStackBase = kGuestShift + 0x6800000000ull;
 // Kept below 0x70_0000_0000: Android (39-bit address space) maps the process's own libraries and heap up there.
 constexpr uint64_t kKernelBase = kGuestShift + 0x6A00000000ull;
 constexpr uint64_t kThunkBase = kGuestShift + 0x6F00000000ull;
+constexpr uint64_t kModuleSize = 0x20000000ull;
+#endif
 // kKernelBase: TLS pages, main thread stack (memory we hand out). kThunkBase: HLE function addresses (never mapped).
 
 void memory_init();
