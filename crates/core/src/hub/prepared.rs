@@ -401,10 +401,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_rejects_duplicates_wrong_target_and_bad_hashes() {
+    fn manifest_rejects_duplicates_wrong_target_empty_packs_and_bad_hashes() {
         let entry = |path: &str| Entry {
             path: path.into(),
-            size: 0,
+            size: 1,
             hash: "0".repeat(64),
         };
         let mut manifest = Manifest {
@@ -422,6 +422,9 @@ mod tests {
         manifest.target = "linux".into();
         assert!(validate(&manifest).is_err());
         manifest.target = "android".into();
+        manifest.files[1].size = 0;
+        assert!(validate(&manifest).is_err());
+        manifest.files[1].size = 1;
         manifest.files[0].hash = "bad".into();
         assert!(validate(&manifest).is_err());
     }
