@@ -25,8 +25,10 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 import zipfile
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 P = os.path.join(ROOT, "private")
@@ -324,54 +326,89 @@ def speedfix_args(enabled, mod, version, game, output, source_changed):
     return ["--variant", patch]
 
 
+def mod_component(name):
+    return (bool(name) and name not in (".", "..") and not name.endswith((" ", "."))
+            and not re.search(r'[\\/:<>"|?*\x00-\x1f]', name))
+
+
+def install_mod_archive(mods_root, name, zpath, romfs):
+    dst = os.path.join(mods_root, name)
+    if is_link(dst):
+        fail("mod output must be a regular directory")
+    if Path(zpath).resolve().is_relative_to(Path(dst).resolve()):
+        fail("keep the source mod archive outside its prepared output")
+    say(f"mod {name}")
+    os.makedirs(mods_root, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".prepare-mod-", dir=mods_root) as temporary:
+        ready = os.path.join(temporary, "ready")
+        os.mkdir(ready)
+        with zipfile.ZipFile(zpath) as z:
+            names = [entry.filename for entry in z.infolist()]
+            if any(not all(mod_component(part) for part in path.rstrip("/").split("/")) for path in names):
+                fail("unsafe path in the zip")
+            prefix = ""
+            if not any(path.startswith("romfs/") for path in names):
+                tops = {path.split("/")[0] for path in names if "/romfs/" in path}
+                if len(tops) != 1:
+                    fail("no romfs/ folder in the zip")
+                prefix = tops.pop() + "/"
+            for entry in z.infolist():
+                if entry.is_dir() or not entry.filename.startswith(prefix + "romfs/"):
+                    continue
+                out = os.path.join(ready, entry.filename[len(prefix):])
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with z.open(entry) as source, open(out, "wb") as dest:
+                    shutil.copyfileobj(source, dest)
+        if not os.path.isdir(os.path.join(ready, "romfs")):
+            fail("the mod archive contains no RomFS files")
+        if os.environ.get("ACNH_RUST_MSG_REFLOW") == "1":
+            os.mkdir(os.path.join(ready, ".msg-reflow-pending"))
+        else:
+            rewrap_messages(romfs, os.path.join(ready, "romfs"))
+        previous = os.path.join(temporary, "previous")
+        if os.path.lexists(dst):
+            os.replace(dst, previous)
+        try:
+            os.replace(ready, dst)
+        except OSError:
+            if os.path.lexists(previous):
+                os.replace(previous, dst)
+            raise
+
+
 def install_mods(G, romfs, game_src, enabled, mods):
     # ---- mods: a zip with romfs/ at its root (or one folder holding it), extracted to <folder>/mods/<name>/ ---------
     # A player-supplied pt-BR package is installed only when explicitly requested.
-    if enabled:
+    mods = list(mods)
+    mods_root = os.path.join(G, "mods")
+    if is_link(mods_root):
+        if enabled or mods:
+            fail("mod output must be a regular directory")
+        return
+    ptbr = os.path.join(mods_root, "ptbr")
+    explicit_ptbr = any(mod.partition("=")[0] == "ptbr" for mod in mods)
+    if enabled and not explicit_ptbr:
         found = []
         for d in (game_src, os.path.join(ROOT, "private", "translations")):
             if d and os.path.isdir(d):
                 found += [os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith(".zip") and "ptbr" in f.lower()]
-        if not found and not os.path.isdir(os.path.join(G, "mods", "ptbr", "romfs")):
+        if not found and not os.path.isdir(os.path.join(ptbr, "romfs")):
             fail("pt-BR is enabled but no ptbr zip was found in the game folder or private/translations")
         if found:
             newest = max(found, key=os.path.getmtime)
-            have = os.path.join(G, "mods", "ptbr", "romfs")
+            have = os.path.join(ptbr, "romfs")
             if not os.path.isdir(have) or os.path.getmtime(newest) > os.path.getmtime(have):
                 mods.append("ptbr=" + newest)
-    else:
-        shutil.rmtree(os.path.join(G, "mods", "ptbr"), ignore_errors=True)
+    elif not enabled and not explicit_ptbr and os.path.lexists(ptbr):
+        if is_link(ptbr):
+            unlink(ptbr)
+        else:
+            shutil.rmtree(ptbr)
     for m in mods:
         name, _, zpath = m.partition("=")
-        if not name or not os.path.isfile(zpath):
+        if not mod_component(name) or not os.path.isfile(zpath):
             fail("--mod wants <name>=<zip>")
-        say(f"mod {name} ({zpath})")
-        dst = os.path.join(G, "mods", name)
-        with zipfile.ZipFile(zpath) as z:
-            names = [i.filename for i in z.infolist()]
-            if any(n.startswith("/") or ".." in n.split("/") for n in names):
-                fail("unsafe path in the zip")
-            prefix = ""
-            if not any(n.startswith("romfs/") for n in names):  # one wrapping folder
-                tops = {n.split("/")[0] for n in names if "/romfs/" in n}
-                if len(tops) != 1:
-                    fail("no romfs/ folder in the zip")
-                prefix = tops.pop() + "/"
-            shutil.rmtree(dst, ignore_errors=True)
-            for i in z.infolist():
-                if i.is_dir() or not i.filename.startswith(prefix + "romfs/"):
-                    continue
-                out = os.path.join(dst, i.filename[len(prefix):])
-                os.makedirs(os.path.dirname(out), exist_ok=True)
-                with z.open(i) as s, open(out, "wb") as d:
-                    shutil.copyfileobj(s, d)
-        if os.environ.get("ACNH_RUST_MSG_REFLOW") == "1":
-            # Rust consumes this after extraction, when it follows the version marker below.
-            # Leave it on disk until the reflow succeeds so a later Prepare can retry it.
-            if os.path.isdir(dst):
-                os.mkdir(os.path.join(dst, ".msg-reflow-pending"))
-        else:
-            rewrap_messages(romfs, os.path.join(dst, "romfs"))
+        install_mod_archive(mods_root, name, zpath, romfs)
 
 
 def main():
@@ -585,7 +622,7 @@ def main():
         h = []
         if mod == "main" and hooks != "-":
             h = ["--hooks", hooks]  # instructions that call the runtime first, at the addresses of this build only
-        variant = speedfix_args(a.speedfix, mod, version, a.game, G, source_changed)
+        variant = speedfix_args(a.speedfix, mod, version, game_src, G, source_changed)
         h += variant
         pch = variant[1] if variant else None
         profile = " ".join(h) or "none"

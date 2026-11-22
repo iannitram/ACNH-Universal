@@ -712,7 +712,15 @@ fn run_stages(
         .ok()
         .is_some_and(|source| Path::new(source.trim()) != req.game.root);
     // Recheck opted-in inputs for changed archives and patches, and migrate old builds.
-    let recheck = changed || source_changed || req.fan_mods.ptbr || req.fan_mods.speedfix;
+    let ptbr_present = std::fs::symlink_metadata(req.out.join("mods/ptbr")).is_ok();
+    let speedfix_present = std::fs::read_to_string(req.out.join("gen/main/profile.txt"))
+        .is_ok_and(|profile| profile.split_whitespace().any(|arg| arg == "--variant"));
+    let recheck = changed
+        || source_changed
+        || req.fan_mods.ptbr
+        || req.fan_mods.speedfix
+        || ptbr_present
+        || speedfix_present;
     let before = STAGES.map(|stage| {
         stage_complete(stage, req)
             && !(recheck

@@ -8,9 +8,9 @@ use acnh_app::input::{key_nav, poll_nav, Stick};
 use acnh_app::play::{Player, RelayOff, Runner, Session};
 use acnh_app::ui::{from_slint, to_slint};
 use acnh_app::vm::settings::SettingsVm;
-use acnh_app::vm::{AboutVm, ContinuePageVm};
+use acnh_app::vm::{AboutVm, ContinuePageVm, Nav};
 use acnh_app::MainWindow;
-use acnh_app::{CreditEntry, FixEntry};
+use acnh_app::{CreditEntry, FixEntry, SettingsControl};
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::{assemble, backup, savecard, saves};
 use slint::{ComponentHandle, SharedString, Timer, TimerMode, Weak};
@@ -57,8 +57,67 @@ fn session() -> acnh_core::Result<Session> {
 
 fn render(window: &Weak<MainWindow>, session: &Session) {
     if let Some(window) = window.upgrade() {
+        if !session.vm().settings_open() && window.get_view().settings_open {
+            window.set_settings_focus(SettingsControl::Ptbr);
+            window.set_settings_error(SharedString::default());
+        }
         window.set_view(to_slint(&session.vm().view()));
     }
+}
+
+fn move_settings_focus(focus: SettingsControl, nav: Nav) -> SettingsControl {
+    use SettingsControl::{Back, Ptbr, Speedfix};
+
+    match (focus, nav) {
+        (Ptbr, Nav::Down | Nav::Right) | (Back, Nav::Up | Nav::Left) => Speedfix,
+        (Speedfix, Nav::Down | Nav::Right) => Back,
+        (Speedfix, Nav::Up | Nav::Left) => Ptbr,
+        _ => focus,
+    }
+}
+
+fn navigate(window: &Weak<MainWindow>, session: &mut Session, nav: Nav) {
+    let Some(window) = window.upgrade().filter(|_| session.vm().settings_open()) else {
+        session.nav(nav);
+        return;
+    };
+    let focus = window.get_settings_focus();
+    if nav == Nav::Accept {
+        match focus {
+            SettingsControl::Ptbr => window.invoke_set_ptbr(!window.get_ptbr()),
+            SettingsControl::Speedfix => window.invoke_set_speedfix(!window.get_speedfix()),
+            SettingsControl::Back => {
+                session.nav(Nav::Back);
+            }
+        }
+    } else if nav == Nav::Back {
+        session.nav(nav);
+    } else {
+        window.set_settings_focus(move_settings_focus(focus, nav));
+    }
+}
+
+fn save_fan_mod(window: &MainWindow, settings: &SettingsVm, control: SettingsControl, value: bool) {
+    let key = match control {
+        SettingsControl::Ptbr => "mods.ptbr",
+        SettingsControl::Speedfix => "mods.speedfix",
+        SettingsControl::Back => return,
+    };
+    let saved = settings
+        .set_value(key, if value { "1" } else { "0" })
+        .is_ok();
+    let shown = if saved { value } else { !value };
+    if control == SettingsControl::Ptbr {
+        window.set_ptbr(shown);
+    } else {
+        window.set_speedfix(shown);
+    }
+    window.set_settings_focus(control);
+    window.set_settings_error(if saved {
+        SharedString::default()
+    } else {
+        "Could not save the setting. Check that config.ini is writable.".into()
+    });
 }
 
 fn set_about(window: &MainWindow) {
@@ -102,13 +161,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let settings = Rc::clone(&settings);
         let weak = window.as_weak();
         move |value| {
-            if settings
-                .set_value("mods.ptbr", if value { "1" } else { "0" })
-                .is_ok()
-            {
-                if let Some(window) = weak.upgrade() {
-                    window.set_ptbr(value);
-                }
+            if let Some(window) = weak.upgrade() {
+                save_fan_mod(&window, &settings, SettingsControl::Ptbr, value);
             }
         }
     });
@@ -116,13 +170,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let settings = Rc::clone(&settings);
         let weak = window.as_weak();
         move |value| {
-            if settings
-                .set_value("mods.speedfix", if value { "1" } else { "0" })
-                .is_ok()
-            {
-                if let Some(window) = weak.upgrade() {
-                    window.set_speedfix(value);
-                }
+            if let Some(window) = weak.upgrade() {
+                save_fan_mod(&window, &settings, SettingsControl::Speedfix, value);
             }
         }
     });
@@ -147,7 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return false;
             };
             let mut session = session.borrow_mut();
-            session.nav(nav);
+            navigate(&weak, &mut session, nav);
             render(&weak, &session);
             true
         }
@@ -165,7 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut session = session.borrow_mut();
         for nav in &navs {
-            session.nav(*nav);
+            navigate(&weak, &mut session, *nav);
         }
         if session.pump() || !navs.is_empty() {
             render(&weak, &session);
@@ -174,4 +223,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     window.run()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_focus_reaches_both_switches_and_back() {
+        use SettingsControl::{Back, Ptbr, Speedfix};
+
+        assert_eq!(move_settings_focus(Ptbr, Nav::Down), Speedfix);
+        assert_eq!(move_settings_focus(Speedfix, Nav::Down), Back);
+        assert_eq!(move_settings_focus(Back, Nav::Down), Back);
+        assert_eq!(move_settings_focus(Back, Nav::Up), Speedfix);
+        assert_eq!(move_settings_focus(Speedfix, Nav::Up), Ptbr);
+    }
 }

@@ -1,8 +1,9 @@
-import { VerticalBox, CheckBox, Button } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, CheckBox, Button } from "std-widgets.slint";
 import { AboutPage, CreditEntry, FixEntry } from "about.slint";
 import { ContinuePage, ContinueView, CardView, PadTarget } from "continue.slint";
 
 export { ContinueView, CardView, PadTarget, CreditEntry, FixEntry }
+export enum SettingsControl { ptbr, speedfix, back }
 
 // The launcher window. It shows the Continue page and hands every key and click to Rust:
 // `view` is `ContinuePageVm::view()`, `clicked` is a click or tap on a button, and `key` is
@@ -16,6 +17,8 @@ export component MainWindow inherits Window {
     in property <[FixEntry]> about-fixes;
     in-out property <bool> ptbr;
     in-out property <bool> speedfix;
+    in property <SettingsControl> settings-focus: SettingsControl.ptbr;
+    in property <string> settings-error;
     callback set-ptbr(bool);
     callback set-speedfix(bool);
     callback clicked(PadTarget);
@@ -46,10 +49,20 @@ export component MainWindow inherits Window {
                 padding: 24px;
                 spacing: 16px;
                 Text { text: "Settings"; color: white; font-size: 28px; }
-                Text { text: "Changes take effect on the next prepare."; color: white; }
-                CheckBox { text: "Brazilian Portuguese fan translation"; checked: root.ptbr; toggled => { root.set-ptbr(self.checked); } }
-                CheckBox { text: "60 FPS SpeedFix (3.0.2 and 3.0.3)"; checked: root.speedfix; toggled => { root.set-speedfix(self.checked); } }
-                Button { text: "Back"; clicked => { root.clicked(PadTarget.back); } }
+                Text { text: "Prepare again to apply these changes to your build."; color: white; }
+                HorizontalBox {
+                    Rectangle { width: 4px; background: root.settings-focus == SettingsControl.ptbr ? #f7d681 : transparent; }
+                    CheckBox { text: "Brazilian Portuguese fan translation"; checked <=> root.ptbr; toggled => { root.set-ptbr(self.checked); } }
+                }
+                HorizontalBox {
+                    Rectangle { width: 4px; background: root.settings-focus == SettingsControl.speedfix ? #f7d681 : transparent; }
+                    CheckBox { text: "60 FPS SpeedFix (3.0.2 and 3.0.3)"; checked <=> root.speedfix; toggled => { root.set-speedfix(self.checked); } }
+                }
+                if root.settings-error != "": Text { text: root.settings-error; color: #f7d681; }
+                HorizontalBox {
+                    Rectangle { width: 4px; background: root.settings-focus == SettingsControl.back ? #f7d681 : transparent; }
+                    Button { text: "Back"; clicked => { root.clicked(PadTarget.back); } }
+                }
             }
         }
 

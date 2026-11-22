@@ -12,6 +12,20 @@ spec.loader.exec_module(setup)
 
 
 class FanMods(unittest.TestCase):
+    def test_incomplete_archive_preserves_the_prepared_translation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            installed = root / "mods/ptbr/romfs/previous.txt"
+            installed.parent.mkdir(parents=True)
+            installed.write_text("previous translation")
+            archive = root / "ptbr.zip"
+            with zipfile.ZipFile(archive, "w") as z:
+                z.writestr("romfs/", "")
+            with self.assertRaises(SystemExit):
+                setup.install_mod_archive(str(root / "mods"), "ptbr", str(archive), str(root))
+            self.assertEqual(installed.read_text(), "previous translation")
+            self.assertTrue(archive.is_file())
+
     def test_translation_opt_in_then_off_preserves_inputs_and_other_mods(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
