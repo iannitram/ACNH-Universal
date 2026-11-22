@@ -1,0 +1,61 @@
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export struct FleetEntry {
+    device: string,
+    details: string,
+    status: string,
+    drifting: bool,
+}
+
+export component FleetPage inherits Rectangle {
+    in property <[FleetEntry]> rows;
+    in property <string> message;
+    in property <string> comparison;
+    in property <string> position;
+    in property <bool> has-previous;
+    in property <bool> has-next;
+    callback back();
+    callback previous();
+    callback next();
+    background: #172821;
+    VerticalBox {
+        padding: 20px;
+        spacing: 6px;
+        Text { text: "Fleet"; color: white; font-size: 28px; }
+        Text { text: root.comparison; color: #b8cfc1; font-size: 14px; }
+        if root.message != "": Text { text: root.message; color: white; font-size: 18px; }
+        for row in root.rows: Rectangle {
+            min-height: 75px;
+            border-radius: 6px;
+            background: #253c32;
+            VerticalBox {
+                padding: 8px;
+                Text { text: row.device + " · " + row.status; color: row.drifting ? #f7d681 : white; font-size: 16px; overflow: elide; }
+                Text { text: row.details; color: white; font-size: 13px; overflow: elide; }
+            }
+        }
+        Text { text: root.position; color: #b8cfc1; font-size: 14px; }
+        HorizontalBox {
+            spacing: 8px;
+            Rectangle {
+                height: 36px; background: root.has-previous ? #315143 : #26342d; border-radius: 6px;
+                Text { text: "Previous devices"; color: root.has-previous ? white : #839087; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea { enabled: root.has-previous; clicked => { root.previous(); } }
+            }
+            Rectangle {
+                height: 36px; background: root.has-next ? #315143 : #26342d; border-radius: 6px;
+                Text { text: "Next devices"; color: root.has-next ? white : #839087; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea { enabled: root.has-next; clicked => { root.next(); } }
+            }
+        }
+        Rectangle {
+            height: 42px;
+            background: #315143;
+            border-width: 2px;
+            border-color: #f7d681;
+            border-radius: 6px;
+            Text { text: "Back (Esc / east button)    •    Up / Down: more devices"; color: white; horizontal-alignment: center; vertical-alignment: center; }
+            TouchArea { clicked => { root.back(); } }
+        }
+    }
+}

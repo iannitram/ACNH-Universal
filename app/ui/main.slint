@@ -1,8 +1,9 @@
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { FleetPage, FleetEntry } from "fleet.slint";
 import { AboutPage, CreditEntry, FixEntry } from "about.slint";
 import { ContinuePage, ContinueView, CardView, PadTarget } from "continue.slint";
 
-export { ContinueView, CardView, PadTarget, CreditEntry, FixEntry }
+export { ContinueView, CardView, PadTarget, CreditEntry, FixEntry, FleetEntry }
 export enum SettingsControl { ptbr, speedfix, back }
 
 component SettingsRow inherits Rectangle {
@@ -36,10 +37,18 @@ export component MainWindow inherits Window {
     in property <string> about-slint-notice;
     in property <[CreditEntry]> about-credits;
     in property <[FixEntry]> about-fixes;
+    in property <[FleetEntry]> fleet-rows;
+    in property <string> fleet-message;
+    in property <string> fleet-comparison;
+    in property <string> fleet-position;
+    in-out property <int> fleet-offset;
+    in property <bool> fleet-has-previous;
+    in property <bool> fleet-has-next;
     in property <bool> ptbr;
     in property <bool> speedfix;
     in property <SettingsControl> settings-focus: SettingsControl.ptbr;
     in property <string> settings-error;
+    callback fleet-scroll(int);
     callback set-ptbr(bool);
     callback set-speedfix(bool);
     callback clicked(PadTarget);
@@ -90,6 +99,18 @@ export component MainWindow inherits Window {
                     activate => { root.clicked(PadTarget.back); }
                 }
             }
+        }
+
+        if root.view.fleet-open: FleetPage {
+            rows: root.fleet-rows;
+            message: root.fleet-message;
+            comparison: root.fleet-comparison;
+            position: root.fleet-position;
+            has-previous: root.fleet-has-previous;
+            has-next: root.fleet-has-next;
+            back => { root.clicked(PadTarget.back); }
+            previous => { root.fleet-scroll(-1); }
+            next => { root.fleet-scroll(1); }
         }
 
         // The About overlay: opened by the About entry on the Continue page, closed by Back.
