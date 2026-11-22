@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use acnh_app::first_run::FirstRun;
-use acnh_app::input::{key_nav, poll_nav, Stick};
+use acnh_app::input::{key_nav, poll_nav, DeviceEvent, Devices, Stick};
 use acnh_app::play::{Player, RelayOff, Runner, Session};
 use acnh_app::ui::{from_slint, to_slint};
 use acnh_app::vm::fleet::FleetVm;
-use acnh_app::vm::settings::SettingsVm;
+use acnh_app::vm::settings::{move_focus, SettingsFocus, SettingsVm};
 use acnh_app::vm::{AboutVm, ContinuePageVm, Nav};
 use acnh_app::MainWindow;
 use acnh_app::{CreditEntry, FixEntry, FleetEntry, SettingsControl};
@@ -121,29 +121,31 @@ fn render(window: &Weak<MainWindow>, session: &Session) {
 }
 
 fn move_settings_focus(focus: SettingsControl, nav: Nav) -> SettingsControl {
-    use SettingsControl::{Back, Ptbr, Speedfix};
-
-    match (focus, nav) {
-        (Ptbr, Nav::Down | Nav::Right) | (Back, Nav::Up | Nav::Left) => Speedfix,
-        (Speedfix, Nav::Down | Nav::Right) => Back,
-        (Speedfix, Nav::Up | Nav::Left) => Ptbr,
-        _ => focus,
+    let focus = match focus {
+        SettingsControl::Ptbr => SettingsFocus::Ptbr,
+        SettingsControl::Speedfix => SettingsFocus::Speedfix,
+        SettingsControl::Back => SettingsFocus::Back,
+    };
+    match move_focus(focus, nav) {
+        SettingsFocus::Ptbr => SettingsControl::Ptbr,
+        SettingsFocus::Speedfix => SettingsControl::Speedfix,
+        SettingsFocus::Back => SettingsControl::Back,
     }
 }
 
 fn navigate(window: &Weak<MainWindow>, session: &mut Session, nav: Nav) {
     if let Some(window) = window.upgrade().filter(|_| session.vm().fleet_open()) {
-        match nav {
-            Nav::Up | Nav::Left | Nav::Prev => {
-                window.set_fleet_offset(window.get_fleet_offset().saturating_sub(1).max(0))
-            }
-            Nav::Down | Nav::Right | Nav::Next => {
-                window.set_fleet_offset(window.get_fleet_offset().saturating_add(1))
-            }
-            Nav::Back | Nav::Accept => {
-                session.nav(Nav::Back);
-            }
-            _ => {}
+        // The row count is reflected by the existing previous/next flags.
+        let offset = window.get_fleet_offset().max(0) as usize;
+        let rows = if window.get_fleet_has_next() {
+            offset + 4
+        } else {
+            offset + 3
+        };
+        let (offset, close) = acnh_app::vm::fleet::navigate(offset, rows, nav);
+        window.set_fleet_offset(offset as i32);
+        if close {
+            session.nav(Nav::Back);
         }
         return;
     }
@@ -268,6 +270,18 @@ fn set_about(window: &MainWindow) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window = MainWindow::new()?;
     set_about(&window);
+    let devices = Rc::new(RefCell::new(Devices::default()));
+    window.set_input_device(devices.borrow().current() as i32);
+    window.on_pointer_used({
+        let devices = Rc::clone(&devices);
+        let weak = window.as_weak();
+        move || {
+            devices.borrow_mut().apply(DeviceEvent::Touch);
+            if let Some(window) = weak.upgrade() {
+                window.set_input_device(devices.borrow().current() as i32);
+            }
+        }
+    });
     let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
     let settings = Rc::new(SettingsVm::new(
         AppDirs::new(&vars).data_root(),
@@ -352,10 +366,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     window.on_key({
+        let devices = Rc::clone(&devices);
         let weak = window.as_weak();
         let first = Rc::clone(&first);
         let session = Rc::clone(&session);
         move |text: SharedString| {
+            devices.borrow_mut().apply(DeviceEvent::Keyboard);
+            if let Some(window) = weak.upgrade() {
+                window.set_input_device(devices.borrow().current() as i32);
+            }
             if weak.upgrade().is_some_and(|w| w.get_first_run_open()) {
                 let mut first = first.borrow_mut();
                 if first.vm.step == acnh_app::vm::first_run::Step::Pair && !first.vm.busy {
@@ -412,9 +431,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fleet_tick = 0_u32;
     timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
         let navs = match gilrs.as_mut() {
-            Some(gilrs) => poll_nav(gilrs, &mut stick),
+            Some(gilrs) => poll_nav(gilrs, &mut stick, &mut devices.borrow_mut()),
             None => Vec::new(),
         };
+        if let Some(window) = weak.upgrade() {
+            window.set_input_device(devices.borrow().current() as i32);
+        }
         let first_open = weak.upgrade().is_some_and(|w| w.get_first_run_open());
         if first_open {
             let mut first = first.borrow_mut();

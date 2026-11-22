@@ -192,17 +192,6 @@ const PAGE_ROW: [(FocusTarget, &str); 4] = [
     (FocusTarget::About, "About"),
 ];
 
-/// Controller / input layout for glyph display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputDevice {
-    Xbox,
-    PlayStation,
-    SteamDeck,
-    Switch,
-    Keyboard,
-    Touch,
-}
-
 /// What a press asks the driver to run; taken with `ContinuePageVm::take_request`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
@@ -353,7 +342,6 @@ pub struct ContinuePageVm {
     about_open: bool,
     settings_open: bool,
     fleet_open: bool,
-    pub glyph_set: InputDevice,
     pub last_error: Option<String>,
     pub status_message: Option<String>,
     pub warning_text: Option<String>,
@@ -402,7 +390,6 @@ impl ContinuePageVm {
             about_open: false,
             settings_open: false,
             fleet_open: false,
-            glyph_set: InputDevice::SteamDeck,
             last_error: None,
             status_message: None,
             warning_text: None,
@@ -442,10 +429,6 @@ impl ContinuePageVm {
 
     pub fn focus(&self) -> FocusTarget {
         self.focus
-    }
-
-    pub fn glyph_set(&self) -> InputDevice {
-        self.glyph_set
     }
 
     pub fn status_message(&self) -> Option<&str> {
