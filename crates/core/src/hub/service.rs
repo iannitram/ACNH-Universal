@@ -5,6 +5,8 @@ use std::net::SocketAddr;
 
 const ROUTE: &[u8; 8] = b"ACNHREQ1";
 const FLEET_WIRE: &[u8; 8] = b"ACNHFLT1";
+const BUILD_REPORT: &str = "build\n";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RECORDS: usize = 1024 * 1024;
 static FLEET_LOCK: Mutex<()> = Mutex::new(());
 
@@ -105,16 +107,24 @@ fn record_line(record: &DeviceRecord, identity: &str) -> Result<String> {
 /// Read the hub's fleet; malformed or excessive records are rejected without echoing them.
 pub fn read_fleet(dirs: &AppDirs) -> Result<Vec<DeviceRecord>> {
     let path = dirs.config.join("fleet.txt");
-    let meta = match fs::symlink_metadata(&path) {
-        Ok(m) if m.is_file() && !m.file_type().is_symlink() && m.len() <= MAX_RECORDS as u64 => m,
+    match fs::symlink_metadata(&path) {
+        Ok(m) if m.is_file() && m.len() <= MAX_RECORDS as u64 => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         _ => return Err(hub_error("invalid fleet file")),
-    };
-    let _ = meta;
-    let text = fs::read_to_string(path).map_err(|_| hub_error("invalid fleet file"))?;
+    }
+    let mut text = String::new();
+    File::open(&path)
+        .and_then(|file| {
+            file.take((MAX_RECORDS + 1) as u64)
+                .read_to_string(&mut text)
+        })
+        .map_err(|_| hub_error("invalid fleet file"))?;
+    if text.len() > MAX_RECORDS {
+        return Err(hub_error("invalid fleet file"));
+    }
     let mut result = Vec::new();
     let mut names = BTreeSet::new();
-    for line in text.lines() {
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let record = fleet::from_line(line).map_err(|_| hub_error("invalid fleet file"))?;
         if record_line(&record, &record.device)? != line || !names.insert(record.device.clone()) {
             return Err(hub_error("invalid fleet file"));
@@ -124,9 +134,16 @@ pub fn read_fleet(dirs: &AppDirs) -> Result<Vec<DeviceRecord>> {
     Ok(result)
 }
 
-fn save_record(dirs: &AppDirs, record: DeviceRecord) -> Result<()> {
+fn save_record(dirs: &AppDirs, mut record: DeviceRecord, build_only: bool) -> Result<()> {
     let _guard = FLEET_LOCK.lock().map_err(|_| hub_error("fleet is busy"))?;
     let mut records = read_fleet(dirs)?;
+    if let Some(previous) = records
+        .iter()
+        .find(|item| build_only && item.device == record.device)
+    {
+        record.last_sync_unix = previous.last_sync_unix;
+        record.free_bytes = previous.free_bytes;
+    }
     records.retain(|old| old.device != record.device);
     records.push(record);
     records.sort_by(|a, b| a.device.cmp(&b.device));
@@ -150,14 +167,19 @@ fn save_record(dirs: &AppDirs, record: DeviceRecord) -> Result<()> {
 /// Handle one already accepted home-network connection. `pairing` is present only while
 /// the owner has explicitly armed pairing; its expiry and attempt limit persist across calls.
 pub fn serve_request(
-    t: &mut dyn Transport,
+    t: &mut TcpTransport,
     dirs: &AppDirs,
     builds: &Path,
     prepared: Option<&Path>,
     pairing: Option<&mut PairingSession>,
 ) -> Result<()> {
     (|| {
+        t.0.set_read_timeout(Some(REQUEST_TIMEOUT))?;
+        t.0.set_write_timeout(Some(REQUEST_TIMEOUT))?;
         let (op, device, target) = read_route(t)?;
+        if matches!(op, Operation::Bundle | Operation::Prepared) {
+            TcpTransport::configure(&t.0)?;
+        }
         match op {
             Operation::Pair => {
                 let session = pairing.ok_or_else(|| hub_error("pairing is not active"))?;
@@ -178,12 +200,16 @@ pub fn serve_request(
                 let bytes = channel.receive(t, b"fleet-record/v1", 1024)?;
                 let text =
                     std::str::from_utf8(&bytes).map_err(|_| hub_error("invalid device record"))?;
+                let (build_only, text) = match text.strip_prefix(BUILD_REPORT) {
+                    Some(line) => (true, line),
+                    None => (false, text),
+                };
                 let record =
                     fleet::from_line(text).map_err(|_| hub_error("invalid device record"))?;
                 if record.os != target || record_line(&record, &device)? != text {
                     return Err(hub_error("invalid device record"));
                 }
-                save_record(dirs, record)?;
+                save_record(dirs, record, build_only)?;
                 channel.send(t, b"fleet-record/v1", vec![1])?;
             }
         }
@@ -256,12 +282,46 @@ pub fn report_hub(
     hub_name: &str,
     record: &DeviceRecord,
 ) -> Result<()> {
+    send_report(addr, dirs, hub_name, record, false)
+}
+
+/// Report a newly installed build while retaining earlier save-sync and disk-space fields.
+pub fn report_hub_build(
+    addr: SocketAddr,
+    dirs: &AppDirs,
+    this_device: &str,
+    hub_name: &str,
+    bundle: &Bundle,
+) -> Result<()> {
+    let record = DeviceRecord {
+        device: this_device.into(),
+        os: bundle.target,
+        version: bundle.version.clone(),
+        build_id: bundle.build_id.clone(),
+        last_sync_unix: 0,
+        free_bytes: 0,
+    };
+    send_report(addr, dirs, hub_name, &record, true)
+}
+
+fn send_report(
+    addr: SocketAddr,
+    dirs: &AppDirs,
+    hub_name: &str,
+    record: &DeviceRecord,
+    build_only: bool,
+) -> Result<()> {
     let line = record_line(record, &record.device)?;
+    let payload = if build_only {
+        format!("{BUILD_REPORT}{line}")
+    } else {
+        line
+    };
     let peer = remembered(dirs, hub_name)?;
     let key = pairing_key(&peer)?;
     let mut t = connect(addr, Operation::Report, &record.device, record.os)?;
     let mut channel = handshake_for(&mut t, &key, record.os, false, FLEET_WIRE)?;
-    channel.send(&mut t, b"fleet-record/v1", line.into_bytes())?;
+    channel.send(&mut t, b"fleet-record/v1", payload.into_bytes())?;
     if channel.receive(&mut t, b"fleet-record/v1", 1)? != [1] {
         return Err(hub_error("fleet report not confirmed"));
     }

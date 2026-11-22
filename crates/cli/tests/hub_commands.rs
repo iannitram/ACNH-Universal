@@ -59,7 +59,7 @@ fn commands_pair_pull_and_report_to_fake_hub() {
     std::thread::scope(|s| {
         let worker = s.spawn(|| {
             let mut session = hub::PairingSession::new("123456").unwrap();
-            for _ in 0..4 {
+            for _ in 0..6 {
                 let (stream, _) = listener.accept().unwrap();
                 hub::serve_request(
                     &mut hub::TcpTransport::from_stream(stream).unwrap(),
@@ -125,6 +125,14 @@ fn commands_pair_pull_and_report_to_fake_hub() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+        let mut args = vec!["hub", "pull"];
+        args.extend(common);
+        let out = command(&client_home, &args, None);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         worker.join().unwrap();
     });
     let records = hub::read_fleet(&server).unwrap();
@@ -134,7 +142,7 @@ fn commands_pair_pull_and_report_to_fake_hub() {
             device: "client".into(),
             os: Os::Android,
             version: "3.0.2".into(),
-            build_id: "test".into(),
+            build_id: manifest.build_id,
             last_sync_unix: 12,
             free_bytes: 34
         }]

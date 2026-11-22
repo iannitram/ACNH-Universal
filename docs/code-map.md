@@ -145,7 +145,7 @@ Built as a static library linked into the player while C++ remains; each Rust gr
 
 | Path | Status | Owns | Replaces | Musts |
 |---|---|---|---|---|
-| `crates/cli` (`acnh-universal`) | present (`hub` at #66) | `check`, `build`, `play`, `steam-add`, `fleet`; plain messages, `--json` prints the error `code()`, unknown commands exit 2 with usage; the Steam shortcut runs `play`; `hub` joins at #66 | `tools/setup_acnh.py`'s command line, `tools/launcher.sh` | M1, M2, M6, M11 |
+| `crates/cli` (`acnh-universal`) | present | `check`, `build`, `play`, `steam-add`, `hub serve\|pair\|pull\|report`, `fleet`; `hub --help` shows the arguments; `--json` prints the error `code()`; the Steam shortcut runs `play` | `tools/setup_acnh.py`'s command line, `tools/launcher.sh` | M1, M2, M6, M11 |
 | `app/` (`acnh-app`) | partial | Desktop Slint launcher links `acnh_core`. Continue launches the player and About opens from its menu. First run, Fleet, relay and Android integration are tracked separately | `launcher/` (SDL3 + ImGui: `main.cpp`, `desktop.cpp`, `pages.cpp`, `pipeline.cpp`, `files.cpp`) | M2, M4, M9-M11, M13 |
 | `app/src/play.rs` | present | Continue action, player process and save-sync results including conflict choices | | M6, M10 |
 | `app/src/ui.rs` | present | Converts Continue view state and focus targets between Rust and Slint | | M10 |

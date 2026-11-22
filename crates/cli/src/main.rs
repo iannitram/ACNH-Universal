@@ -475,15 +475,7 @@ fn hub_command(options: &Options) -> Result<i32> {
                     .tempdir_in(&dirs.data)?;
                 let bundle = hub::pull_hub(addr, &dirs, name, peer, target, staged.path())?;
                 bundle::install(&bundle, staged.path(), &dirs.install())?;
-                let record = fleet::DeviceRecord {
-                    device: name.into(),
-                    os: target,
-                    version: bundle.version,
-                    build_id: bundle.build_id,
-                    last_sync_unix: 0,
-                    free_bytes: 0,
-                };
-                hub::report_hub(addr, &dirs, peer, &record)
+                hub::report_hub_build(addr, &dirs, name, peer, &bundle)
                     .map_err(|_| Error::Hub("build installed, but fleet report failed".into()))?;
                 println!("Build installed");
             }
