@@ -146,12 +146,12 @@ Built as a static library linked into the player while C++ remains; each Rust gr
 | Path | Status | Owns | Replaces | Musts |
 |---|---|---|---|---|
 | `crates/cli` (`acnh-universal`) | present | `check`, `build`, `play`, `steam-add`, `hub serve\|pair\|pull\|report`, `fleet`; `hub --help` shows the arguments; `--json` prints the error `code()`; the Steam shortcut runs `play` | `tools/setup_acnh.py`'s command line, `tools/launcher.sh` | M1, M2, M6, M11 |
-| `app/` (`acnh-app`) | partial | Desktop Slint launcher links `acnh_core`. Continue launches the player and About opens from its menu. First run, Fleet, relay and Android integration are tracked separately | `launcher/` (SDL3 + ImGui: `main.cpp`, `desktop.cpp`, `pages.cpp`, `pipeline.cpp`, `files.cpp`) | M2, M4, M9-M11, M13 |
+| `app/` (`acnh-app`) | partial | Desktop Slint launcher links `acnh_core`. Continue launches the player. The navigation row opens About, fan-mod Settings and the local Fleet page (#41). First run, relay and Android integration remain on the roadmap | `launcher/` (SDL3 + ImGui: `main.cpp`, `desktop.cpp`, `pages.cpp`, `pipeline.cpp`, `files.cpp`) | M2, M4, M9-M11, M13 |
 | `app/src/play.rs` | present | Continue action, player process and save-sync results including conflict choices | | M6, M10 |
 | `app/src/ui.rs` | present | Converts Continue view state and focus targets between Rust and Slint | | M10 |
-| `app/src/vm/` | partial | `continue_page`, `saves`, `settings`, and `about` exist. Settings stores the pt-BR and SpeedFix opt-ins in `config.ini` (#85), and Prepare snapshots them for each build. First run and Fleet remain open | | M8, M10, M11 |
+| `app/src/vm/` | partial | `continue_page`, `saves`, `settings`, and `about` exist. Settings stores the pt-BR and SpeedFix opt-ins in `config.ini` (#85), and Prepare snapshots them for each build. `fleet` reads the local hub’s authenticated records, presents versions, builds, save-sync and free-space fields, and labels the comparison device. First run remains open | | M8, M10, M11 |
 | `app/src/input.rs` | partial | Maps gilrs events and keyboard text to desktop `Nav`. Per-controller glyphs and Android input are follow-ups | | M9, M10 |
-| `app/ui/` | partial | Slint window, Continue, About and the controller-accessible fan-mod Settings overlay | `launcher/pages.cpp` | M10 |
+| `app/ui/` | partial | Slint window, Continue, About, Fleet and the controller-accessible fan-mod Settings overlay | `launcher/pages.cpp` | M10 |
 | `docs/design/continue-screen.md` | present | the Continue screen brief, shared with totk-universal | | M10 |
 
 ## Upstream code that stays (C++ or Java, behind a C ABI)
