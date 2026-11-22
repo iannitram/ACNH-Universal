@@ -1,3 +1,6 @@
+#[path = "fixtures/font_bytes.rs"]
+mod font_bytes;
+
 use acnh_core::glyphs::{decode_bfttf, encode_bfttf, replace_extension};
 use acnh_core::sarc::parse;
 
@@ -56,11 +59,7 @@ fn replacement_retains_other_members_and_key() {
 #[test]
 fn builds_button_font_from_synthetic_font() {
     use acnh_core::glyphs::{button_font, truetype::Font};
-    let hex = include_str!("fixtures/synthetic-buttons.hex").replace('\n', "");
-    let source: Vec<u8> = (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-        .collect();
+    let source = font_bytes::decode_hex(include_str!("fixtures/synthetic-buttons.hex"));
     let output = button_font::build(&source).unwrap();
     let font = Font::parse(&output).unwrap();
     // Point lists recorded from tools/fonts/make_button_font.py with FontTools.
@@ -113,11 +112,7 @@ fn builds_button_font_from_synthetic_font() {
 #[test]
 fn composite_host_letters_are_flattened() {
     use acnh_core::glyphs::{button_font, truetype::Font};
-    let hex = include_str!("fixtures/synthetic-buttons-composite.hex").replace('\n', "");
-    let source: Vec<u8> = (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-        .collect();
+    let source = font_bytes::decode_hex(include_str!("fixtures/synthetic-buttons-composite.hex"));
     let output = button_font::build(&source).unwrap();
     let font = Font::parse(&output).unwrap();
     let outline = font.outline(font.glyph_id('\u{e0e1}').unwrap()).unwrap();

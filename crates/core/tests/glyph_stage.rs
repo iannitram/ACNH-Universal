@@ -1,5 +1,8 @@
 //! Full fonts stage with a made-up host font and a generated archive.
 
+#[path = "fixtures/font_bytes.rs"]
+mod font_bytes;
+
 use acnh_core::glyphs::truetype::{Font, Outline, Point};
 use acnh_core::glyphs::{decode_bfttf, encode_bfttf, stage};
 use acnh_core::sarc;
@@ -11,17 +14,6 @@ const ICONS: [char; 13] = [
     '\u{e0e0}', '\u{e0a0}', '\u{e0e1}', '\u{e0a1}', '\u{e0e2}', '\u{e0a2}', '\u{e0a4}', '\u{e0e6}',
     '\u{e0b3}', '\u{e0f2}', '\u{e0aa}', '\u{e23f}', '\u{e27f}',
 ];
-
-fn fixture() -> Vec<u8> {
-    include_str!("fixtures/synthetic-buttons.hex")
-        .split_whitespace()
-        .flat_map(|line| {
-            (0..line.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&line[i..i + 2], 16).unwrap())
-        })
-        .collect()
-}
 
 fn outline(index: usize) -> Outline {
     let width = 700.0 + 11.0 * index as f64;
@@ -96,7 +88,7 @@ fn writes_each_archive_with_original_metrics_and_unrelated_members() {
         return; // The archive stage uses the same zstd CLI as the other SARC stages.
     }
     let temp = tempfile::tempdir().unwrap();
-    let host = fixture();
+    let host = font_bytes::decode_hex(include_str!("fixtures/synthetic-buttons.hex"));
     let host_path = temp.path().join("host.ttf");
     fs::write(&host_path, &host).unwrap();
 
