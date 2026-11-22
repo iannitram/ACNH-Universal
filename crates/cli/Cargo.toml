@@ -12,4 +12,6 @@ name = "acnh-universal"
 path = "src/main.rs"
 
 [dependencies]
-acnh-core = { path = "../core" }
+acnh-core = { path = "../core", features = ["hub"] }
+
+tempfile = "3"
