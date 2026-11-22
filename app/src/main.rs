@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use acnh_app::input::{key_nav, poll_nav, Stick};
 use acnh_app::play::{Player, RelayOff, Runner, Session};
 use acnh_app::ui::{from_slint, to_slint};
+use acnh_app::vm::settings::SettingsVm;
 use acnh_app::vm::{AboutVm, ContinuePageVm};
 use acnh_app::MainWindow;
 use acnh_app::{CreditEntry, FixEntry};
@@ -89,6 +90,42 @@ fn set_about(window: &MainWindow) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window = MainWindow::new()?;
     set_about(&window);
+    let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
+    let settings = Rc::new(SettingsVm::new(
+        AppDirs::new(&vars).data_root(),
+        &acnh_core::profile::builtin()[2],
+    ));
+    let (ptbr, speedfix) = settings.fan_mods()?;
+    window.set_ptbr(ptbr);
+    window.set_speedfix(speedfix);
+    window.on_set_ptbr({
+        let settings = Rc::clone(&settings);
+        let weak = window.as_weak();
+        move |value| {
+            if settings
+                .set_value("mods.ptbr", if value { "1" } else { "0" })
+                .is_ok()
+            {
+                if let Some(window) = weak.upgrade() {
+                    window.set_ptbr(value);
+                }
+            }
+        }
+    });
+    window.on_set_speedfix({
+        let settings = Rc::clone(&settings);
+        let weak = window.as_weak();
+        move |value| {
+            if settings
+                .set_value("mods.speedfix", if value { "1" } else { "0" })
+                .is_ok()
+            {
+                if let Some(window) = weak.upgrade() {
+                    window.set_speedfix(value);
+                }
+            }
+        }
+    });
     let session = Rc::new(RefCell::new(session()?));
     render(&window.as_weak(), &session.borrow());
 

@@ -65,6 +65,7 @@ pub fn to_slint(view: &PageView) -> ContinueView {
         back: view.back,
         pages_enabled: view.pages_enabled,
         about_open: view.about_open,
+        settings_open: view.settings_open,
         focus: pad_target(view.focus),
     }
 }

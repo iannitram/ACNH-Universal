@@ -141,6 +141,7 @@ fn request(name: &str) -> Request {
         target: Os::Mac,
         jobs: 0,
         source: None,
+        fan_mods: Default::default(),
     }
 }
 

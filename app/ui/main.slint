@@ -1,3 +1,4 @@
+import { VerticalBox, CheckBox, Button } from "std-widgets.slint";
 import { AboutPage, CreditEntry, FixEntry } from "about.slint";
 import { ContinuePage, ContinueView, CardView, PadTarget } from "continue.slint";
 
@@ -13,6 +14,10 @@ export component MainWindow inherits Window {
     in property <string> about-slint-notice;
     in property <[CreditEntry]> about-credits;
     in property <[FixEntry]> about-fixes;
+    in-out property <bool> ptbr;
+    in-out property <bool> speedfix;
+    callback set-ptbr(bool);
+    callback set-speedfix(bool);
     callback clicked(PadTarget);
     callback key(string) -> bool;
 
@@ -32,6 +37,19 @@ export component MainWindow inherits Window {
             view: root.view;
             clicked(target) => {
                 root.clicked(target);
+            }
+        }
+
+        if root.view.settings-open: Rectangle {
+            background: #172821;
+            VerticalBox {
+                padding: 24px;
+                spacing: 16px;
+                Text { text: "Settings"; color: white; font-size: 28px; }
+                Text { text: "Changes take effect on the next prepare."; color: white; }
+                CheckBox { text: "Brazilian Portuguese fan translation"; checked: root.ptbr; toggled => { root.set-ptbr(self.checked); } }
+                CheckBox { text: "60 FPS SpeedFix (3.0.2 and 3.0.3)"; checked: root.speedfix; toggled => { root.set-speedfix(self.checked); } }
+                Button { text: "Back"; clicked => { root.clicked(PadTarget.back); } }
             }
         }
 

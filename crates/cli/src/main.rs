@@ -204,12 +204,28 @@ fn build(options: &Options) -> Result<i32> {
         .out
         .clone()
         .unwrap_or_else(|| repo_root().join("private").join("acnh"));
+    let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
+    let config_path = AppDirs::new(&vars).data_root().join("config.ini");
+    let config = match std::fs::read_to_string(&config_path) {
+        Ok(text) => acnh_core::config::Config::parse(&text)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) => {
+            return Err(Error::Io(format!(
+                "cannot read {}: {error}",
+                config_path.display()
+            )))
+        }
+    };
     let request = Request {
         game: gamefolder::check(game)?,
         out,
         target,
         jobs: 0,
         source: None,
+        fan_mods: prepare::FanMods {
+            ptbr: config.enabled("mods.ptbr"),
+            speedfix: config.enabled("mods.speedfix"),
+        },
     };
     let out = prepare::prepare(&request, &mut |stage| println!("== {}", stage.key()))?;
     println!("built {} for {}", out.display(), target.key());

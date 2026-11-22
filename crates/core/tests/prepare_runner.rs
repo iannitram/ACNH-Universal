@@ -16,6 +16,7 @@ fn request(name: &str, target: Os) -> Request {
     let d = std::env::temp_dir().join(format!("acnh-prep-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join(".fan-mod-settings"), "false false\n").unwrap();
     Request {
         game: GameFolder {
             root: PathBuf::from("/game"),
@@ -29,6 +30,7 @@ fn request(name: &str, target: Os) -> Request {
         target,
         jobs: 0,
         source: None,
+        fan_mods: Default::default(),
     }
 }
 
@@ -833,4 +835,22 @@ fn shaders_step_looks_for_its_tools_under_the_runners_root() {
     .to_string();
     // The refusal names the runner's root, not the checkout this test was built in.
     assert!(message.contains("installed-source"), "{message}");
+}
+
+#[test]
+fn fan_mod_choices_are_snapshotted_in_each_script_pass() {
+    let mut req = request("fan-mods", Os::Linux);
+    let args = |req: &Request| match step(Stage::Game, req) {
+        Step::Script(args) => args,
+        _ => unreachable!(),
+    };
+    assert!(!args(&req).contains(&"--ptbr".to_owned()));
+    assert!(!args(&req).contains(&"--speedfix".to_owned()));
+    req.fan_mods.ptbr = true;
+    assert!(args(&req).contains(&"--ptbr".to_owned()));
+    assert!(!args(&req).contains(&"--speedfix".to_owned()));
+    req.fan_mods.speedfix = true;
+    req.fan_mods.ptbr = false;
+    assert!(!args(&req).contains(&"--ptbr".to_owned()));
+    assert!(args(&req).contains(&"--speedfix".to_owned()));
 }

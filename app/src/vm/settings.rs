@@ -40,6 +40,13 @@ impl SettingsVm {
         read_config(&self.config_path())
     }
 
+    /// Fan mods are opt-in, including when the setting is absent.
+    pub fn fan_mods(&self) -> Result<(bool, bool)> {
+        let config = self.config()?;
+        let enabled = |key| config.enabled(key);
+        Ok((enabled("mods.ptbr"), enabled("mods.speedfix")))
+    }
+
     /// Write the profile's settings for keys the player has not set; keys already in the file
     /// keep their values.
     pub fn apply_profile(&self) -> Result<()> {
@@ -94,6 +101,19 @@ mod tests {
     use crate::vm::scratch;
     use acnh_core::profile;
     use std::fs;
+
+    #[test]
+    fn fan_mod_switches_start_off_and_persist_independently() {
+        let root = scratch("fan-mod-settings");
+        let vm = SettingsVm::new(&root, &profile::builtin()[2]);
+        assert_eq!(vm.fan_mods().unwrap(), (false, false));
+        vm.set_value("mods.ptbr", "1").unwrap();
+        assert_eq!(vm.fan_mods().unwrap(), (true, false));
+        vm.set_value("mods.speedfix", "1").unwrap();
+        vm.set_value("mods.ptbr", "0").unwrap();
+        assert_eq!(vm.fan_mods().unwrap(), (false, true));
+        fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn changing_a_setting_keeps_my_own_lines() {

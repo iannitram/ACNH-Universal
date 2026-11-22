@@ -282,7 +282,10 @@ void log_environment() {
 void config_apply() {
     if (!g_loaded) config_load();
     log_environment();  // before set_env_default adds the settings' own
-    mods_fetch();  // before the language and the frame rate look for them
+    // Fan mods are installed by prepare only after the player opts in.
+    const bool ptbr_enabled = on_off(config_get("mods.ptbr", "0")) == "1";
+    const bool speedfix_enabled = on_off(config_get("mods.speedfix", "0")) == "1";
+    if (speedfix_enabled) mods_fetch();
     // Game language "auto": from the system, unless a language file or NX_LANGUAGE says otherwise. Only applied:
     // the entry keeps "auto", so the choice stays automatic.
     std::string game_lang = config_get("game.language", "auto");
@@ -308,6 +311,8 @@ void config_apply() {
             log("config: game language from the system: %s", game_lang.c_str());
         }
     }
+    if (!ptbr_enabled && game_lang == "pt-BR") game_lang = "en-US";
+    if (!speedfix_enabled) unset_env("NX_SPEEDFIX");
     std::unique_lock lk(g_lock);
     for (const Mapping& m : kMappings) {
         ConfigEntry* e = find(m.key);
@@ -316,6 +321,7 @@ void config_apply() {
         // ACNHRecomp-Importer 1.0.6 on, and the loader keeps 30 when a folder's code lacks it.
         if (value.empty()) continue;
         std::string v = m.map(value);
+        if (!speedfix_enabled && value == "60" && (std::string(m.env) == "NX_SPEEDFIX" || std::string(m.env) == "NX_PRESENT_INTERVAL")) v.clear();
         if (std::string(m.env) == "NX_HANDHELD") {
             if (v == "0") unset_env("NX_HANDHELD");
             else if (v == "1") set_env_default("NX_HANDHELD", "1");
@@ -334,9 +340,9 @@ void config_apply() {
     // The pt-BR translation is a mod: enable it with the language (game.mods can list more, comma separated).
     std::string mods;
     if (ConfigEntry* e = find("game.mods")) mods = e->value;
-    if (game_lang == "pt-BR")
+    if (ptbr_enabled && game_lang == "pt-BR")
         mods = mods.empty() ? "ptbr" : (mods.find("ptbr") == std::string::npos ? mods + ",ptbr" : mods);
-    if (const char* sf = std::getenv("NX_SPEEDFIX"); sf && sf[0] == '1')  // its parameter files go with its code
+    if (const char* sf = std::getenv("NX_SPEEDFIX"); speedfix_enabled && sf && sf[0] == '1')  // its parameter files go with its code
         mods = mods.empty() ? "speedfix60" : mods + ",speedfix60";
     if (!mods.empty()) set_env_default("NX_MODS", mods);
     const size_t count = g_entries.size();
