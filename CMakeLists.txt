@@ -106,6 +106,16 @@ if(NX_TESTS AND NOT ANDROID)
     if(EXISTS "${CMAKE_SOURCE_DIR}/private/wonder/spirv")  # the game's own shaders: never in the repository
         add_test(NAME shader_cache COMMAND shader_cache_test "${CMAKE_SOURCE_DIR}/private/wonder")
     endif()
+    if(APPLE AND NOT IOS)
+        add_executable(layout_test tests/layout_test.cpp runtime/src/memory.cpp runtime/src/compact_layout.cpp)
+        target_include_directories(layout_test PRIVATE runtime/include runtime/src)
+        target_compile_definitions(layout_test PRIVATE NX_COMPACT_LAYOUT=1)
+        target_compile_options(layout_test PRIVATE -UNDEBUG)
+        add_test(NAME compact_layout COMMAND layout_test)
+        add_executable(desktop_layout_test tests/desktop_layout_test.cpp)
+        target_include_directories(desktop_layout_test PRIVATE runtime/include)
+        add_test(NAME desktop_layout COMMAND desktop_layout_test)
+    endif()
     if(WIN32)
         add_executable(memguard_test tests/memguard_test.cpp)
         target_link_libraries(memguard_test PRIVATE psapi)
@@ -231,6 +241,7 @@ foreach(mod ${NX_MODULES})
 endforeach()
 
 set(NX_RUNTIME_SOURCES
+    runtime/src/compact_layout.cpp
     runtime/src/game_folder.cpp
     runtime/src/main.cpp
     runtime/src/sampler.cpp
