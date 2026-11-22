@@ -1,9 +1,10 @@
-//! Prepared Android game data, separate from the public player bundle protocol.
+//! Prepared Android game data over a separate paired protocol.
 use super::*;
 use serde::{Deserialize, Serialize};
 
 const DATA_WIRE: &[u8; 8] = b"ACNHDAT1";
 const MAX_FILES: usize = 100_000;
+const REQUIRED: &[&str] = &["libacnh_game.so", "romfs.pak", "spirv.pak"];
 
 #[derive(Serialize, Deserialize)]
 struct Manifest {
@@ -18,7 +19,7 @@ struct Entry {
     hash: String,
 }
 
-// The prepared Android layout, not the dump or a general directory synchronizer.
+// Accept the prepared Android layout and the RomFS overlays produced by Prepare.
 fn allowed(path: &str) -> bool {
     let parts: Vec<_> = path.split('/').collect();
     if parts.iter().any(|p| {
@@ -39,14 +40,57 @@ fn allowed(path: &str) -> bool {
         ["fonts", "glyphs_xbox" | "glyphs_playstation" | "glyphs_switch", "console" | "xbox" | "nintendo", "romfs", "Font", "ScalableFont.sarc.zs"] => {
             true
         }
-        ["mods", "ptbr" | "speedfix60", "romfs", rest @ ..] if !rest.is_empty() => {
-            let name = rest.last().unwrap().to_ascii_lowercase();
-            [".pack", ".bcsv", ".msbt", ".szs", ".sarc", ".zs"]
-                .iter()
-                .any(|suffix| name.ends_with(suffix))
-        }
+        ["mods", name, "romfs", rest @ ..] if !rest.is_empty() => std::iter::once(name)
+            .chain(rest)
+            .all(|component| overlay_component(component)),
         _ => false,
     }
+}
+
+fn overlay_component(component: &str) -> bool {
+    let lower = component.to_ascii_lowercase();
+    let mut segments = lower.split('.');
+    let stem = segments.next().unwrap_or_default();
+    !matches!(
+        stem,
+        "" | "analysis"
+            | "aoc"
+            | "backups"
+            | "device_save"
+            | "exefs"
+            | "firmware"
+            | "gen"
+            | "keys"
+            | "logs"
+            | "user"
+            | "con"
+            | "prn"
+            | "aux"
+            | "nul"
+    ) && !(stem.len() == 4
+        && matches!(&stem.as_bytes()[..3], b"com" | b"lpt")
+        && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+        && !matches!(
+            lower.as_str(),
+            "config.ini" | "launcher.ini" | "main.dat" | "mainheader.dat"
+        )
+        && !segments.any(|ext| {
+            matches!(
+                ext,
+                "keys"
+                    | "key"
+                    | "pem"
+                    | "p12"
+                    | "nsp"
+                    | "xci"
+                    | "nca"
+                    | "nsz"
+                    | "xcz"
+                    | "nso"
+                    | "sav"
+                    | "log"
+            )
+        })
 }
 
 fn validate(manifest: &Manifest) -> Result<()> {
@@ -74,8 +118,12 @@ fn validate(manifest: &Manifest) -> Result<()> {
             }
         }
     }
-    for required in ["libacnh_game.so", "romfs.pak", "spirv.pak"] {
-        if !paths.contains(required) {
+    for &required in REQUIRED {
+        if !manifest
+            .files
+            .iter()
+            .any(|file| file.path == required && file.size > 0)
+        {
             return Err(hub_error("prepared data is incomplete"));
         }
     }
@@ -150,7 +198,7 @@ fn collect(root: &Path, relative: &str, files: &mut Vec<Entry>) -> Result<()> {
 fn make_manifest(root: &Path) -> Result<Manifest> {
     require_dir(root)?;
     let mut files = Vec::new();
-    for name in ["libacnh_game.so", "romfs.pak", "spirv.pak"] {
+    for &name in REQUIRED {
         let (size, hash) = hash_file(&file_path(root, name, false)?)?;
         files.push(Entry {
             path: name.into(),
@@ -171,7 +219,8 @@ fn make_manifest(root: &Path) -> Result<Manifest> {
 }
 
 /// Serve prepared Android data to a locally remembered peer over a sealed channel.
-/// `root` is a prepared layout, never a game dump. The caller owns the home-network transport.
+/// `root` contains a prepared library, packs and optional assets. The caller supplies a
+/// home-network transport. Success means the client received and verified every file.
 pub fn serve_prepared(
     t: &mut dyn Transport,
     dirs: &AppDirs,
@@ -211,21 +260,71 @@ pub fn serve_prepared(
         if channel.receive(t, &digest, 1)? != [1] {
             return Err(hub_error("prepared transfer not confirmed"));
         }
+        channel.send(t, &digest, vec![1])?;
         Ok(())
     })()
     .map_err(transfer_error)
 }
 
-struct InstallLock(PathBuf);
-
-impl Drop for InstallLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.0);
+fn lock_install(data_root: &Path) -> Result<File> {
+    // Keep this inode between transfers so a waiting process always locks the same file.
+    // Closing the handle also releases the lock if the app exits before installing.
+    let path = data_root.join(".prepared-install-lock");
+    let file = match crate::platform::open_private_new(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            if !fs::symlink_metadata(&path)?.is_file() {
+                return Err(hub_error("prepared install lock is not a plain file"));
+            }
+            fs::OpenOptions::new().write(true).open(&path)?
+        }
+        Err(e) => return Err(e.into()),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(hub_error("prepared installation is busy")),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
 }
 
+struct Staging(PathBuf);
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn directory_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => Ok(true),
+        Ok(_) => Err(hub_error("prepared install path is not a plain directory")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+// Called with the install lock held. The previous tree is authoritative until the staged
+// tree has been renamed to game. A retry can always tell which rename had completed.
+fn recover_install(dest: &Path, backup: &Path, stage: &Path) -> Result<bool> {
+    let mut has_game = directory_exists(dest)?;
+    if directory_exists(backup)? {
+        if has_game {
+            fs::remove_dir_all(backup)?;
+        } else {
+            fs::rename(backup, dest)?;
+            has_game = true;
+        }
+    }
+    if directory_exists(stage)? {
+        fs::remove_dir_all(stage)?;
+    }
+    Ok(has_game)
+}
+
 /// Receive a verified prepared Android tree into `data_root/game`, preserving its siblings
-/// (including the client's saves and settings). `data_root` must be app-private storage.
+/// (including the client's saves and settings). `data_root` must be app-private storage,
+/// with `game/` reserved for files managed by this transfer.
 pub fn pull_prepared(
     t: &mut dyn Transport,
     dirs: &AppDirs,
@@ -243,16 +342,16 @@ pub fn pull_prepared(
             .map_err(|_| hub_error("invalid prepared data manifest"))?;
         validate(&manifest)?;
         require_dir(data_root)?;
-        let lock_path = data_root.join(".prepared-install-lock");
-        fs::create_dir(&lock_path)
-            .map_err(|_| hub_error("prepared installation is busy or needs recovery"))?;
-        let _lock = InstallLock(lock_path);
-        let stage = tempfile::Builder::new()
-            .prefix(".prepared-")
-            .tempdir_in(data_root)?;
+        let _lock = lock_install(data_root)?;
+        let dest = data_root.join("game");
+        let backup = data_root.join(".prepared-previous");
+        let stage_path = data_root.join(".prepared-staging");
+        let had_old = recover_install(&dest, &backup, &stage_path)?;
+        fs::create_dir(&stage_path)?;
+        let stage = Staging(stage_path);
         let digest = Sha256::digest(&text);
         for (i, entry) in manifest.files.iter().enumerate() {
-            let path = file_path(stage.path(), &entry.path, true)?;
+            let path = file_path(&stage.0, &entry.path, true)?;
             let mut output = crate::platform::open_private_new(&path)?;
             let mut hash = Sha256::new();
             let mut remaining = entry.size;
@@ -276,32 +375,22 @@ pub fn pull_prepared(
                 return Err(hub_error("prepared file failed verification"));
             }
         }
-        let dest = data_root.join("game");
-        let backup = data_root.join(".prepared-previous");
-        match fs::symlink_metadata(&backup) {
-            Ok(_) => return Err(hub_error("previous prepared data needs recovery")),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+        channel.send(t, &digest, vec![1])?;
+        if channel.receive(t, &digest, 1)? != [1] {
+            return Err(hub_error("hub did not finish the prepared transfer"));
         }
-        let had_old = match fs::symlink_metadata(&dest) {
-            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => true,
-            Ok(_) => return Err(hub_error("game root is not a plain directory")),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
-            Err(e) => return Err(e.into()),
-        };
         if had_old {
             fs::rename(&dest, &backup)?;
         }
-        if let Err(e) = fs::rename(stage.path(), &dest) {
+        if let Err(e) = fs::rename(&stage.0, &dest) {
             if had_old {
                 let _ = fs::rename(&backup, &dest);
             }
             return Err(e.into());
         }
         if had_old {
-            fs::remove_dir_all(backup)?;
+            let _ = fs::remove_dir_all(backup);
         }
-        channel.send(t, &digest, vec![1])?;
         Ok(())
     })()
     .map_err(transfer_error)
@@ -343,6 +432,10 @@ mod tests {
             "../romfs.pak",
             "mods/ptbr/romfs/../key.pack",
             "mods/ptbr/romfs/secret.keys",
+            "mods/ptbr/romfs/secret.keys.zs",
+            "mods/ptbr/romfs/user/device_save/test.pack",
+            "mods/ptbr/romfs/con.pack",
+            "mods/ptbr/romfs/config.ini",
             "fonts/../romfs.pak",
             "analysis/main.bin",
             "user/device_save",
@@ -351,11 +444,39 @@ mod tests {
             assert!(!allowed(path), "{path}");
         }
         assert!(allowed("fonts/shared.ttf"));
+        assert!(allowed("mods/custom/romfs/Layout/test.bflyt"));
         assert!(allowed(
             "fonts/glyphs_xbox/console/romfs/Font/ScalableFont.sarc.zs"
         ));
         assert!(!allowed(
             "fonts/glyphs_xbox/console/romfs/Font/other.sarc.zs"
         ));
+    }
+
+    #[test]
+    fn install_recovers_both_sides_of_an_interrupted_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("game");
+        let backup = root.path().join(".prepared-previous");
+        let stage = root.path().join(".prepared-staging");
+        let lock = lock_install(root.path()).unwrap();
+        assert!(lock_install(root.path()).is_err());
+
+        fs::create_dir(&backup).unwrap();
+        fs::write(backup.join("old"), b"old tree").unwrap();
+        fs::create_dir(&stage).unwrap();
+        assert!(recover_install(&dest, &backup, &stage).unwrap());
+        assert_eq!(fs::read(dest.join("old")).unwrap(), b"old tree");
+        assert!(!backup.exists());
+        assert!(!stage.exists());
+
+        fs::rename(&dest, &backup).unwrap();
+        fs::create_dir(&dest).unwrap();
+        fs::write(dest.join("new"), b"new tree").unwrap();
+        drop(lock);
+        let _lock = lock_install(root.path()).unwrap();
+        assert!(recover_install(&dest, &backup, &stage).unwrap());
+        assert_eq!(fs::read(dest.join("new")).unwrap(), b"new tree");
+        assert!(!backup.exists());
     }
 }

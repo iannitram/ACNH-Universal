@@ -4,9 +4,8 @@
 // crates/core/src/hub.rs (discovery/transport: 27-285, pairing: 287-544,
 // authenticated resumable transfer: 546-1136). See NOTICE for the MIT notice.
 //! The build hub on the home network (SPEC.md M11; docs/adr/0004-build-hubs.md): find a hub,
-//! pair with it once, serve and pull bundles. Behind the feature `hub`, so the core builds and
-//! tests with no network. Nothing here ever reads the dump, the keys or a save; it moves only
-//! what `bundle` lists. Home network only: an address outside the private ranges is refused.
+//! pair with it once, and transfer player bundles or prepared Android data. The `hub` feature
+//! enables both protocols. TCP checks that addresses are on the home network.
 
 use crate::bundle::{self, Bundle, BundleFile};
 use crate::error::{Error, Result};

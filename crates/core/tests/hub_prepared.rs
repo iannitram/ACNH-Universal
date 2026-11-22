@@ -1,6 +1,7 @@
 #![cfg(feature = "hub")]
 
-use acnh_core::hub::{self, MemoryTransport, PairingSession, TcpTransport};
+use acnh_core::bundle;
+use acnh_core::hub::{self, MemoryTransport, PairingSession, TcpTransport, CHUNK_SIZE};
 use acnh_core::platform::{AppDirs, Os};
 use std::fs;
 use std::net::TcpListener;
@@ -59,7 +60,9 @@ fn paired_loopback_installs_only_prepared_files_and_preserves_client_data() {
     pair(&server, &client);
     let source = temp.path().join("source");
     fixture(&source);
-    let root = temp.path().join("private");
+    let packed = vec![0x65; CHUNK_SIZE + 17];
+    fs::write(source.join("romfs.pak"), &packed).unwrap();
+    let root = client.data_root();
     fs::create_dir_all(root.join("game")).unwrap();
     fs::write(root.join("game/old"), "old").unwrap();
     fs::write(root.join("config.ini"), "settings").unwrap();
@@ -81,10 +84,13 @@ fn paired_loopback_installs_only_prepared_files_and_preserves_client_data() {
         hub::pull_prepared(&mut transport, &client, "hub", Os::Android, &root).unwrap();
         worker.join().unwrap();
     });
-    assert_eq!(
-        fs::read(root.join("game/romfs.pak")).unwrap(),
-        b"synthetic romfs"
-    );
+    let build = temp.path().join("player-update");
+    fs::create_dir(&build).unwrap();
+    fs::write(build.join("player"), b"synthetic player").unwrap();
+    let bundle = bundle::manifest(&build, Os::Android, "3.0.2", "synthetic").unwrap();
+    bundle::install(&bundle, &build, &client.install()).unwrap();
+
+    assert_eq!(fs::read(root.join("game/romfs.pak")).unwrap(), packed);
     assert_eq!(
         fs::read(root.join("game/mods/ptbr/romfs/Pack/test.pack")).unwrap(),
         b"synthetic mod"
