@@ -121,8 +121,15 @@ mod tests {
             "game_folder=/games/acnh\n",
         )
         .unwrap();
-        std::fs::create_dir_all(builds.dirs.data.join("prepare/analysis")).unwrap();
-        std::fs::write(builds.dirs.data.join("prepare/analysis/main.bin"), b"").unwrap();
+        std::fs::create_dir_all(
+            acnh_core::prepare::prepared_folder(Os::Mac, &builds.dirs).join("analysis"),
+        )
+        .unwrap();
+        std::fs::write(
+            acnh_core::prepare::prepared_folder(Os::Mac, &builds.dirs).join("analysis/main.bin"),
+            b"",
+        )
+        .unwrap();
         let installed = acnh_core::assemble::player(Os::Mac, Path::new(""), &builds.dirs.install());
         std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
         std::fs::write(&installed, b"").unwrap();

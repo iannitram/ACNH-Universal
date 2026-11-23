@@ -550,6 +550,19 @@ fn mac_layout_is_one_contained_app_from_the_launcher_bundle() {
 }
 
 #[test]
+fn mac_never_copies_the_game_of_the_delivered_app_it_runs_from() {
+    let dir = tmp("mac-bundle-game");
+    let plan = mac_plan(&dir, &fake_binary, None, true);
+    let game = dir.join("release/ACNH Universal.app/Contents/Resources/game");
+    put(&game.join("analysis/main.bin"), b"");
+    put(&game.join("romfs.pak"), b"");
+    let mut fake = Fake::default();
+    let made = assemble_with(&plan, &mut fake).unwrap();
+    assert!(!made.join("Contents/Resources/game").exists());
+    assert!(game.join("analysis/main.bin").is_file());
+}
+
+#[test]
 fn mac_layout_is_the_same_app_from_a_checkout() {
     let dir = tmp("mac-checkout");
     let plan = mac_plan(&dir, &fake_binary, None, false);
