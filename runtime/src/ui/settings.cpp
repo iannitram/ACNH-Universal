@@ -5,6 +5,8 @@
 // when the screen is narrow or portrait), each setting a row with its name and a short explanation on the left and
 // the control on the right (under them when narrow). Sizes are in design pixels times `scale` (ui.cpp).
 #include "../hle_ldn.h"
+#include "../nextendo.h"
+#include "../save_unlink.h"
 #include "ui/settings.h"
 
 #if !defined(__ANDROID__)
@@ -15,6 +17,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -63,7 +66,8 @@ struct Page {
 const Page kPages[] = {
     {"tab.game", rgb(124, 194, 103), 0},  {"tab.video", rgb(79, 179, 217), 1},   {"tab.audio", rgb(245, 166, 35), 2},
     {"tab.controls", rgb(155, 125, 212), 3}, {"tab.saves", rgb(232, 115, 122), 4}, {"tab.online", rgb(72, 190, 170), kIconBox},
-    {"tab.amiibo", rgb(255, 180, 80), kIconKey}, {"tab.about", rgb(176, 140, 100), 5},
+    {"tab.amiibo", rgb(255, 180, 80), kIconKey}, {"tab.discord", rgb(88, 101, 242), kIconGlobe},
+    {"tab.about", rgb(176, 140, 100), 5},
 };
 constexpr int kPageCount = int(sizeof(kPages) / sizeof(kPages[0]));
 
@@ -131,13 +135,23 @@ void toast(const std::string& text) {
     g_toast_until = ImGui::GetTime() + 4.0;
 }
 
+// config.ini written; a failure said once a session (a setting that won't stay is otherwise a mystery; nx.log has why)
+void save_settings() {
+    static bool told = false;
+    if (!config_save() && !told) told = true, toast(tr("settings.save_failed"));
+}
+
 // ---- settings helpers -----------------------------------------------------------------------------------------
 
 // Whether a setting waits for the game to start again. On phones the picture's upscaling, sharpness, anti-aliasing and
 // frame generation are read while the game runs (nvn_present.cpp, nvn_framegen.cpp); elsewhere they are not (the
 // desktop's present pass is chosen at start).
 bool needs_restart(const std::string& key) {
-    if (key.rfind("online.", 0) == 0) return false;  // read when the game next starts local play (hle_ldn.cpp)
+    if (key.rfind("online.", 0) == 0) {
+        if (key == "online.mode")
+            ::nx::nextendo::presence_start();  // starts once, when signed in and in Nextendo mode; idles while not online
+        return false;  // LDN reads online.enabled at session start; Nextendo reads mode live
+    }
 #if defined(__ANDROID__)
     for (const char* k : {"video.upscaler", "video.fsr_sharpness_pct", "video.antialiasing", "video.frame_gen"})
         if (key == k) return false;
@@ -181,7 +195,7 @@ void apply_live(const std::string& key, const std::string& value) {
     }
     else if (key == "audio.volume") plat::set_master_volume(std::clamp(std::atoi(value.c_str()), 0, 100) / 100.0f);
     else if (key == "ui.language") ui_set_language(value);
-    else if (key == "game.time_travel_enabled") game_clock_apply_config();
+    else if (key == "game.time_travel_enabled" || key == "game.clock_speed") game_clock_apply_config();
     if (needs_restart(key)) g_restart_note = true;
 }
 
@@ -197,7 +211,7 @@ void store(const std::string& key, const std::string& value) {
         for (auto& [k, v] : config_preset(config_get("video.preset", "custom")))
             if (k == key && v != value) config_set("video.preset", "custom");
     }
-    config_save();
+    save_settings();
     apply_live(key, value);
 }
 
@@ -408,7 +422,7 @@ void slider(const std::string& key, int lo, int hi, int fallback, const char* fm
         ImVec2 rmax = ImGui::GetItemRectMax();
         dl->AddRect(rmin, rmax, rgb(246, 170, 40), ImGui::GetStyle().FrameRounding, 0, 2.5f * g_scale);
     }
-    if (ImGui::IsItemDeactivatedAfterEdit()) config_save();
+    if (ImGui::IsItemDeactivatedAfterEdit()) save_settings();
 }
 
 bool button(const char* text, float width = 0) {
@@ -455,7 +469,7 @@ void touch_layout_editor() {
         b = plat::touch_buttons(n, aspect);
     }
     if (ImGui::IsItemDeactivated()) {
-        if (dragging >= 0) config_save();
+        if (dragging >= 0) save_settings();
         dragging = -1;
     }
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -478,7 +492,7 @@ void touch_layout_editor() {
     ImGui::Dummy(ImVec2(0, 4.0f * g_scale));
     if (button(tr("controls.touch_layout.reset"))) {
         config_set("input.touch_layout", "");
-        config_save();
+        save_settings();
     }
     ImGui::SameLine();
     if (button(tr("controls.touch_layout.done"))) g_touch_edit = false;
@@ -562,9 +576,7 @@ void store_custom_game_time(int year, int month, int day, int hour, int minute) 
     tm.tm_hour = hour;
     tm.tm_min = minute;
     tm.tm_isdst = -1;
-    config_set("game.time_travel_offset", std::to_string(int64_t(std::mktime(&tm)) - game_clock_real_unix_seconds()));
-    config_save();
-    game_clock_apply_config();
+    game_clock_set_offset(int64_t(std::mktime(&tm)) - game_clock_real_unix_seconds());
 }
 
 void page_game() {
@@ -622,6 +634,13 @@ void page_game() {
             changed |= int_dropdown("minute", s_minute, 0, 59, "%02d", part);
             if (changed) store_custom_game_time(s_year, s_month, s_day, s_hour, s_minute);
         });
+        row("game.clock_speed", "game.clock_speed.desc", [&](float w) {
+            combo("game.clock_speed", "1",
+                  {{"0", tr("game.clock_speed.stopped")}, {"1", tr("game.clock_speed.real")},
+                   {"2", "2×"}, {"4", "4×"}, {"12", trf("game.clock_speed.day", "2 h")},
+                   {"24", trf("game.clock_speed.day", "1 h")}, {"60", "60×"}},
+                  w);
+        });
         {
             const std::tm now_tm = local_tm_from_unix(game_clock_unix_seconds());
             char when[64];
@@ -666,8 +685,276 @@ void section(const char* key) {
 // The choice that matches the console, tagged as such ("1080p (TV mode) · console original").
 std::string console(const char* key) { return std::string(tr(key)) + " · " + tr("common.console_tag"); }
 
-// Direct play over the internet: the switch, what the router allows, the address to share, a friend's address.
+// ---- Nextendo: server status and the Friends view of the Online page ------------------------------------------
+
+namespace nxo = ::nx::nextendo;
+
+// The status check runs on a worker thread (its HTTP requests take a moment); the page shows the last result.
+struct StatusCheck {
+    std::mutex mu;
+    std::atomic<bool> running{false};
+    bool done = false;
+    nxo::ServiceStatus result;
+} g_status;
+
+void status_check_start() {
+    if (g_status.running.exchange(true)) return;
+    std::thread([] {
+        const nxo::ServiceStatus s = nxo::check_service_status();
+        std::lock_guard lk(g_status.mu);
+        g_status.result = s;
+        g_status.done = true;
+        g_status.running = false;
+    }).detach();
+}
+
+// One system's line: "Account service: OK" / "...: degraded (HTTP 502)" / "...: no answer". `any_answer`: any HTTP
+// status means up (the game servers answer their root with an error page).
+std::string status_line(const char* name_key, int http, bool any_answer, int& ok, int& total) {
+    total++;
+    std::string s = std::string(tr(name_key)) + ": ";
+    if (http >= 200 && (any_answer || http < 300)) {
+        ok++;
+        return s + tr("online.server.ok");
+    }
+    if (http) return s + trf("online.server.degraded", std::to_string(http));
+    return s + tr("online.server.down");
+}
+
+std::string status_text() {
+    if (g_status.running) return tr("online.server.checking");
+    std::lock_guard lk(g_status.mu);
+    if (!g_status.done) return tr("online.server.desc");
+    const nxo::ServiceStatus& s = g_status.result;
+    int ok = 0, total = 0;
+    std::string lines = status_line("online.server.health", s.health, false, ok, total) + "\n";
+    if (s.account) lines += status_line("online.server.account", s.account, false, ok, total) + "\n";
+    lines += status_line("online.server.game", s.game, true, ok, total);
+    if (s.players >= 0) lines += "\n" + trf("online.server.players", std::to_string(s.players));
+    const char* overall = ok == total ? "online.server.operational" : ok ? "online.server.partial" : "online.server.offline";
+    return std::string(tr(overall)) + "\n" + lines;
+}
+
+// Friend actions (send a request, accept, decline) run on a worker thread too; their outcome shows on the Friends view.
+struct FriendAction {
+    std::mutex mu;
+    std::atomic<bool> busy{false};
+    std::string message;
+} g_friend_action;
+
+void friend_action(std::function<bool(std::string&)> fn, const char* done_key) {
+    if (g_friend_action.busy.exchange(true)) return;
+    std::thread([fn = std::move(fn), done_key] {
+        std::string message;
+        const bool ok = fn(message);
+        std::lock_guard lk(g_friend_action.mu);
+        g_friend_action.message = ok && message.empty() ? tr(done_key) : message;
+        g_friend_action.busy = false;
+    }).detach();
+}
+
+bool g_friends_view = false;  // the Online page shows the Friends view instead of its rows
+
+std::string friend_state(const nxo::Friend& f) {
+    if (f.status == 0) return tr("online.friends.offline");
+    if (!f.app_id.empty() && std::strtoull(f.app_id.c_str(), nullptr, 16) == nxo::kAcnhTitleId)
+        return tr(f.status == 2 ? "online.friends.acnh_online" : "online.friends.acnh");
+    return tr(f.app_id.empty() ? "online.friends.online" : "online.friends.other_game");
+}
+
+// A line of the Friends view: the name and its state on the left, `buttons` (may be none) on the right.
+void friend_line(const nxo::Friend& f, const std::string& state, const std::vector<std::pair<const char*, std::function<void()>>>& buttons) {
+    ImGui::PushID(int(f.pid));
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float bw = 150.0f * g_scale, gap = ImGui::GetStyle().ItemSpacing.x;
+    ImGui::BeginGroup();
+    ImGui::TextUnformatted(f.name.c_str());
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.47f, 0.39f, 0.31f, 1.0f));
+    ImGui::SetWindowFontScale(0.86f);
+    ImGui::TextUnformatted(state.c_str());
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::PopStyleColor();
+    ImGui::EndGroup();
+    float x = avail - float(buttons.size()) * (bw + gap) + gap;
+    for (const auto& [label, act] : buttons) {
+        ImGui::SameLine(x);
+        if (ImGui::Button(tr(label), ImVec2(bw, 0)) && !g_friend_action.busy) act();
+        page_nav_item();
+        x += bw + gap;
+    }
+    ImGui::PopID();
+    ImGui::Separator();
+}
+
+void page_friends() {
+    row("online.friends.back", nullptr, [&](float w) {
+        if (ImGui::Button(tr("online.friends.back"), ImVec2(w, 0))) g_friends_view = false;
+        page_nav_item();
+    });
+    const nxo::Account acc = nxo::account();
+    std::string add_desc;
+    {
+        std::lock_guard lk(g_friend_action.mu);
+        add_desc = g_friend_action.busy ? tr("online.friends.sending") : g_friend_action.message;
+    }
+    if (add_desc.empty()) add_desc = trf("online.friends.add.desc", acc.friend_code.empty() ? "-" : acc.friend_code);
+    row("online.friends.add", add_desc.c_str(), [&](float w) {
+        static char code[40] = {};
+        ImGui::SetNextItemWidth(w);
+        ImGuiContext& ctx = *ImGui::GetCurrentContext();
+        if (ctx.NavActivateId == ImGui::GetID("##friend_code") && ctx.NavInputSource == ImGuiInputSource_Gamepad)
+            ctx.NavActivateFlags |= ImGuiActivateFlags_PreferInput;
+        ImGui::InputTextWithHint("##friend_code", "SW-0000-0000-0000", code, sizeof code);
+        page_nav_item();
+        if (ImGui::Button(tr("online.friends.send"), ImVec2(w, 0)) && code[0] && !g_friend_action.busy) {
+            const std::string c = code;
+            friend_action([c](std::string& m) { return nxo::send_friend_request(c, m); }, "online.friends.sent");
+            code[0] = 0;
+        }
+        page_nav_item();
+    });
+    const nxo::FriendLists lists = nxo::friend_lists_cached();
+    if (!lists.loaded) {
+        ImGui::TextWrapped("%s", tr("online.friends.loading"));
+        return;
+    }
+    if (!lists.incoming.empty()) {
+        section("online.friends.incoming");
+        for (const auto& f : lists.incoming) {
+            const uint64_t pid = f.pid;
+            friend_line(f, tr("online.friends.wants"),
+                        {{"online.friends.accept",
+                          [pid] {
+                              friend_action([pid](std::string& m) { return nxo::answer_friend_request(pid, true, m); },
+                                            "online.friends.accepted");
+                          }},
+                         {"online.friends.decline", [pid] {
+                              friend_action([pid](std::string& m) { return nxo::answer_friend_request(pid, false, m); },
+                                            "online.friends.declined");
+                          }}});
+        }
+    }
+    if (!lists.outgoing.empty()) {
+        section("online.friends.outgoing");
+        for (const auto& f : lists.outgoing) friend_line(f, tr("online.friends.pending"), {});
+    }
+    section("online.friends.list");
+    if (lists.friends.empty()) ImGui::TextWrapped("%s", tr("online.friends.none"));
+    std::vector<nxo::Friend> sorted = lists.friends;  // online first, then by name
+    std::stable_sort(sorted.begin(), sorted.end(), [](const nxo::Friend& a, const nxo::Friend& b) {
+        if ((a.status != 0) != (b.status != 0)) return a.status != 0;
+        return a.name < b.name;
+    });
+    for (const auto& f : sorted) friend_line(f, friend_state(f), {});
+}
+
+bool g_fix_link_view = false;  // the Online page shows the "Fix Save Linked Account" page instead of its rows
+
+bool red_button(const char* text, float width) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.16f, 0.16f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.82f, 0.22f, 0.22f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.58f, 0.12f, 0.12f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
+    const bool pressed = ImGui::Button(text, ImVec2(width, 0));
+    ImGui::PopStyleColor(4);
+    return pressed;
+}
+
+#if !defined(__ANDROID__)
+// Everything the player should know before the fix, then the fix itself (save_unlink.h): the game restarts, the save
+// is copied unaltered to backups/save-link-fix, and the online account link is cleared from every resident.
+void page_fix_link() {
+    row("online.friends.back", nullptr, [&](float w) {
+        if (ImGui::Button(tr("online.friends.back"), ImVec2(w, 0))) g_fix_link_view = false;
+        page_nav_item();
+    });
+    section("online.fix_link");
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.42f, 0.42f, 1.0f));
+    ImGui::TextWrapped("%s", tr("online.fix_link.experimental"));
+    ImGui::PopStyleColor();
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s", tr("online.fix_link.what"));
+    section("online.fix_link.when_title");
+    ImGui::TextWrapped("%s", tr("online.fix_link.when"));
+    section("online.fix_link.warn_title");
+    ImGui::TextWrapped("%s", tr("online.fix_link.warn"));
+    section("online.fix_link.backup_title");
+    ImGui::TextWrapped("%s", tr("online.fix_link.backup"));
+    if (const std::string r = save_unlink::last_result(); !r.empty()) {
+        section("online.fix_link.result_title");
+        ImGui::TextWrapped("%s", r.c_str());
+    }
+    ImGui::Spacing();
+    if (red_button(tr("online.fix_link.button"), ImGui::GetContentRegionAvail().x) && !save_unlink::request_restart())
+        toast(tr("online.fix_link.fail"));  // request_restart returns only on failure
+    page_nav_item();
+}
+#endif
+
+// Network mode: Local Only (no Nextendo at all) or Nextendo (account, server status, friends). Local Play peer visits
+// (docs/LOCAL_PLAY.md) follow their own switch in both.
 void page_online() {
+    const bool nextendo = config_get("online.mode", "nextendo") == "nextendo";
+    const nxo::Account acc = nxo::account();
+    if (g_friends_view && nextendo && acc.signed_in) return page_friends();
+    g_friends_view = false;
+#if !defined(__ANDROID__)
+    if (g_fix_link_view) return page_fix_link();
+#endif
+    row("online.mode", tr("online.mode.desc"), [&](float w) {
+        [[maybe_unused]] const float x = ImGui::GetCursorPosX();  // the control column, on the right
+        combo("online.mode", "nextendo", {{"local", tr("online.mode.local")}, {"nextendo", tr("online.mode.nextendo")}}, w);
+#if !defined(__ANDROID__)
+        // A save linked on another network (Rustendo, Pretendo, a console) refuses to load here: the red button,
+        // under the dropdown in either mode, opens the page that explains the fix and runs it (save_unlink.h).
+        ImGui::SetCursorPosX(x);
+        if (red_button(tr("online.fix_link"), w)) g_fix_link_view = true;
+        page_nav_item();
+#endif
+    });
+    if (nextendo) {
+        section("online.section.nextendo");
+        if (!nxo::version_ok_for_nextendo()) {
+            ImGui::TextWrapped("%s", tr("online.nextendo.need_303"));
+        } else if (acc.signed_in) {
+            std::string desc = trf("online.nextendo.signed_in", acc.username);
+            if (!acc.friend_code.empty()) desc += "\n" + trf("online.nextendo.friend_code", acc.friend_code);
+            desc += std::string("\n") + tr("online.nextendo.requirements");  // the game's only sign is a generic error
+            if (!nxo::last_error().empty()) desc += "\n" + nxo::last_error();  // a refused game token says why
+            row("online.nextendo.account", desc.c_str(), [&](float w) {
+                if (ImGui::Button(tr("online.nextendo.sign_out"), ImVec2(w, 0))) nxo::sign_out();
+                page_nav_item();
+            });
+            const nxo::FriendLists lists = nxo::friend_lists_cached();
+            int online = 0;
+            for (const auto& f : lists.friends) online += f.status != 0;
+            std::string fdesc = trf("online.friends.desc", std::to_string(online));
+            if (!lists.incoming.empty()) fdesc += "\n" + trf("online.friends.desc.requests", std::to_string(lists.incoming.size()));
+            row("online.friends", fdesc.c_str(), [&](float w) {
+                if (ImGui::Button(tr("online.friends.open"), ImVec2(w, 0))) g_friends_view = true;
+                page_nav_item();
+            });
+        } else {
+            std::string desc = std::string(tr("online.nextendo.desc")) + "\n" + tr("online.nextendo.requirements");
+            if (nxo::client_id().empty()) desc += std::string("\n") + tr("online.nextendo.need_client_id");
+            if (!nxo::last_error().empty()) desc += "\n" + nxo::last_error();
+            row("online.nextendo.account", desc.c_str(), [&](float w) {
+                const bool busy = nxo::sign_in_busy();
+                if (ImGui::Button(tr(busy ? "online.nextendo.signing_in" : "online.nextendo.sign_in"), ImVec2(w, 0)) &&
+                    !busy)
+                    nxo::sign_in_start();
+                page_nav_item();
+            });
+        }
+        const std::string sdesc = status_text();
+        row("online.server", sdesc.c_str(), [&](float w) {
+            if (ImGui::Button(tr(g_status.running ? "online.server.checking_button" : "online.server.check"),
+                              ImVec2(w, 0)))
+                status_check_start();
+            page_nav_item();
+        });
+    }
+    section("online.section.local");
     const bool busy = ldn_enabled();  // held until the session ends (hle_ldn.cpp): no switch to touch
     row("online.enabled", tr(busy ? "online.enabled.busy" : "online.enabled.desc"), [&](float w) {
         if (busy) ImGui::TextDisabled("%s", tr("common.on"));
@@ -675,39 +962,23 @@ void page_online() {
     });
     if (config_get("online.enabled", "0") != "1") return;
     static bool checked = false;
+    static std::string address;
     if (!checked) {  // once per session, as soon as it is on
         checked = true;
-        link_check();
+        address = ip_text(local_address());
         address_check_start(config_get("online.join"));
     }
     const LinkStatus s = link_status();
-    const char* text = "online.status.idle";
-    switch (s.check) {
-    case LinkCheck::Running: text = "online.status.running"; break;
-    case LinkCheck::NoRouter: text = "online.status.no_router"; break;
-    case LinkCheck::Refused: text = "online.status.refused"; break;
-    case LinkCheck::NoPublicAddress: text = "online.status.no_public"; break;
-    case LinkCheck::Open: text = "online.status.open"; break;
-    case LinkCheck::OpenVerified: text = "online.status.verified"; break;
-    case LinkCheck::Idle: break;
-    }
-    if (s.hosting && (s.check == LinkCheck::Open || s.check == LinkCheck::OpenVerified)) text = "online.status.hosting";
-    row("online.status", tr(text), [&](float w) {
-        if (!s.hosting && !busy) {
-            if (ImGui::Button(tr("online.test"), ImVec2(w, 0))) link_check();
-            page_nav_item();
-        }
-    });
-    if (!s.address.empty()) {
+    {
         static bool shown = false;
         row("online.address", tr("online.address.desc"), [&](float w) {
-            ImGui::TextUnformatted(shown ? s.address.c_str() : "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2");
+            ImGui::TextUnformatted(shown ? address.c_str() : "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2");
             const float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
             if (ImGui::Button(tr(shown ? "online.hide" : "online.show"), ImVec2(half, 0))) shown = !shown;
             page_nav_item();
             ImGui::SameLine();
             if (ImGui::Button(tr("online.copy"), ImVec2(half, 0))) {
-                ImGui::SetClipboardText(s.address.c_str());
+                ImGui::SetClipboardText(address.c_str());
                 toast(tr("online.copied"));
             }
             page_nav_item();
@@ -767,7 +1038,9 @@ void page_video() {
 #if defined(__ANDROID__)
     resolutions.insert(resolutions.begin(), {"auto", tr("video.resolution.auto")});
 #endif
-    for (const char* r : {"540", "720", "900", "1080", "1440"}) resolutions.push_back({r, std::string(r) + "p"});
+    // Below 540 for weak phones and integrated GPUs (#82): blurrier, but the 3D scene's cost falls with the rows.
+    for (const char* r : {"360", "432", "480", "540", "720", "900", "1080", "1440"})
+        resolutions.push_back({r, std::string(r) + "p"});
     resolutions.push_back({"2160", "2160p (4K)"});
     row("video.resolution", "video.resolution.desc", [&](float w) {
         combo("video.resolution", plat::kDefaultResolution, resolutions, w);
@@ -953,6 +1226,23 @@ void page_video() {
                {"system", tr("video.gpu_driver.system")}, {"custom", tr("video.gpu_driver.custom")}},
               w);
     });
+    // A custom driver without moving files by hand: picked here, copied into drivers/ and chosen.
+    static bool s_driver_pick = false;
+    row("video.gpu_driver.import", "video.gpu_driver.import.desc", [&](float w) {
+        ImGui::BeginDisabled(s_driver_pick);
+        if (ImGui::Button(tr("video.gpu_driver.import.button"), ImVec2(w, 0))) s_driver_pick = true, plat::import_gpu_driver();
+        ImGui::EndDisabled();
+        page_nav_item();
+    });
+    if (std::string answer; s_driver_pick && plat::pick_result(answer)) {
+        s_driver_pick = false;
+        if (answer.rfind("ok:", 0) == 0) {
+            store("video.gpu_driver", "custom");  // saved by store()
+            toast(trf("video.gpu_driver.import.ok", answer.substr(3)));
+        } else if (answer.rfind("error:", 0) == 0) {
+            toast(trf("video.gpu_driver.import.failed", answer.substr(6)));
+        }
+    }
 #endif
 }
 
@@ -1016,6 +1306,7 @@ void page_controls() {
     row("controls.touch", "controls.touch.desc", [&](float w) { toggle("input.touch_controls", true, w); });
     row("controls.touch_opacity", nullptr, [&](float w) { slider("input.touch_opacity", 10, 100, 60, "%d%%", w); });
     row("controls.touch_size", nullptr, [&](float w) { slider("input.touch_size", 50, 150, 100, "%d%%", w); });
+    row("controls.touch_run", "controls.touch_run.desc", [&](float w) { toggle("input.touch_run", true, w); });
     if (plat::touch_group(0)) {
         row("controls.touch_layout", "controls.touch_layout.desc", [&](float w) {
             if (button(tr(g_touch_edit ? "controls.touch_layout.done" : "controls.touch_layout.edit"), w))
@@ -1074,7 +1365,7 @@ void page_controls() {
     if (button(tr("controls.reset_keys"))) {
         for (const Binding& b : kBindings) config_set(std::string("input.key.") + b.key, b.def);
         for (int k = 0; k < kAltKeys; k++) config_set(std::string("input.key2.") + kBindings[k].key, "");
-        config_save();
+        save_settings();
         toast(tr("common.saved"));
     }
 #endif
@@ -1087,8 +1378,8 @@ std::string g_confirm_import;  // a path waiting for the player's yes
 std::string g_confirm_restore;
 
 // After an import or a restore the running game must not save again (it would write the old island over the new
-// one): the screen then only offers to quit.
-bool g_must_quit = false;
+// one): the screen then only offers to quit. Also set by the game's own Island Backup restore (hle_olsc.cpp).
+std::atomic<bool> g_must_quit{false};
 
 void do_import(const std::string& from) {
     std::string err;
@@ -1097,6 +1388,8 @@ void do_import(const std::string& from) {
     else
         toast(trf("saves.import.fail", err));
 }
+
+double g_backups_listed = -100;  // when the Saves page last read the backups (-100: at once)
 
 void page_saves() {
     bool has = saves::has_save();
@@ -1117,6 +1410,7 @@ void page_saves() {
     if (button(tr("saves.backup"), bw)) {
         std::string err, name = saves::backup_now(&err);
         toast(name.empty() ? err : trf("saves.backup.ok", name));
+        g_backups_listed = -100;  // the new one in the list now, not up to 2 s later
     }
     ImGui::EndDisabled();
     ImGui::Dummy(ImVec2(0, 4 * g_scale));
@@ -1167,9 +1461,19 @@ void page_saves() {
     }
     ImGui::Dummy(ImVec2(0, 6 * g_scale));
     ImGui::TextUnformatted(tr("saves.backups"));
-    for (const std::string& b : saves::list_backups()) {
+    std::string island;  // list_backups gives "<island folder>/<backup>", grouped by island
+    // Read again every 2 s, not every frame: it walks every island's folder under the saves' lock, which a backup
+    // being copied (10-40 MB, at boot) holds.
+    static std::vector<std::string> backups;
+    if (ImGui::GetTime() - g_backups_listed > 2) backups = saves::list_backups(), g_backups_listed = ImGui::GetTime();
+    for (const std::string& b : backups) {
+        const size_t slash = b.find('/');
+        if (b.compare(0, slash, island) != 0) {
+            island = b.substr(0, slash);
+            ImGui::TextDisabled("%s", island.c_str());
+        }
         ImGui::PushID(b.c_str());
-        ImGui::BulletText("%s", b.c_str());
+        ImGui::BulletText("%s", b.c_str() + slash + 1);
         ImGui::SameLine();
         if (ImGui::SmallButton(tr("saves.restore"))) g_confirm_restore = b;
         page_nav_item();
@@ -1255,6 +1559,22 @@ void report_section() {
     ImGui::SameLine();
 #if !defined(__ANDROID__)
     if (button(tr("report.github"))) SDL_OpenURL("https://github.com/Nycolazs/ACNHRecomp/issues/new");
+#endif
+}
+
+// The project's Discord server (also launcher/pages.cpp)
+const char* const kDiscordUrl = "https://discord.gg/VJW9Dtdu7a";
+
+void page_discord() {
+#if !defined(__ANDROID__)  // Rich Presence talks to the Discord desktop app (discord_presence.cpp)
+    row("discord.presence", "discord.presence.desc", [&](float w) { toggle("discord.enabled", true, w); });
+    ImGui::Dummy(ImVec2(0, 6 * g_scale));
+#endif
+    ImGui::TextWrapped("%s", tr("discord.server.desc"));
+#if !defined(__ANDROID__)
+    if (button(tr("discord.server"))) SDL_OpenURL(kDiscordUrl);
+#else
+    if (button(tr("discord.server"))) plat::open_url_in_app(kDiscordUrl, "com.discord");
 #endif
 }
 
@@ -1362,6 +1682,8 @@ void settings_nav_item() {
 }
 
 void settings_show_online() { g_show_online = true; }
+void settings_must_quit() { g_must_quit = true; }
+bool settings_quit_pending() { return g_must_quit; }
 
 bool settings_draw(float scale, ImFont* title, float opening) {
     g_scale = scale;
@@ -1685,6 +2007,7 @@ bool settings_draw(float scale, ImFont* title, float opening) {
         case 4: page_saves(); break;
         case 5: page_online(); break;
         case 6: settings_page_amiibo(g_scale); break;
+        case 7: page_discord(); break;
         default: page_about(); break;
     }
     g_page_navigation = false;
@@ -1709,7 +2032,8 @@ bool settings_draw(float scale, ImFont* title, float opening) {
             if (g_restart_note && msg == tr("common.restart_needed")) {
                 ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(124, 194, 103, 255));
                 if (ImGui::Button(tr("common.restart_now"))) {
-                    config_save();
+                    game_clock_save();  // a faster or stopped clock's last seconds (saved every 10 s otherwise)
+                    save_settings();
                     plat::restart_app();
                 }
                 ImGui::PopStyleColor();
@@ -1749,7 +2073,8 @@ bool settings_draw(float scale, ImFont* title, float opening) {
         const float gap = 12.0f * scale;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (ImGui::GetContentRegionAvail().x - yes_w - no_w - gap) * 0.5f));
         if (ImGui::Button(tr("common.yes"), ImVec2(yes_w, 0))) {
-            config_save();
+            game_clock_save();
+            save_settings();
             plat::exit_process(0);
         }
         ImGui::SameLine(0, gap);
@@ -1762,7 +2087,7 @@ bool settings_draw(float scale, ImFont* title, float opening) {
     if (g_must_quit) ImGui::OpenPopup("must_quit");
     if (ImGui::BeginPopupModal("must_quit", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
         ImGui::TextWrapped("%s", tr("saves.import.ok"));
-        if (ImGui::Button(tr("common.quit_game"))) plat::exit_process(0);
+        if (ImGui::Button(tr("common.quit_game"))) game_clock_save(), plat::exit_process(0);
         ImGui::EndPopup();
     }
     // Cancel (B / Escape) closes the screen when nothing else wants it (never after an import: see g_must_quit).
@@ -1855,7 +2180,7 @@ void hdr_panel_draw(float scale) {
             std::snprintf(b, sizeof b, "%.2f", double(v));
             config_set("video.hdr_exposure", b);
         }
-        if (ImGui::IsItemDeactivatedAfterEdit()) config_save();
+        if (ImGui::IsItemDeactivatedAfterEdit()) save_settings();
     });
     ImGui::Separator();
     line("hi", tr("video.hdr_highlights"), [&] { slider("video.hdr_highlights", 0, 100, 50, "%d", w); });
@@ -1875,7 +2200,7 @@ void hdr_panel_draw(float scale) {
             {"video.hdr_temperature", "0"},   {"video.hdr_tint", "0"},
         };
         for (const auto& [key, value] : kDefaults) config_set(key, value);
-        config_save();
+        save_settings();
     }
     ImGui::End();
 }

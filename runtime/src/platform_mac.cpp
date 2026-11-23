@@ -73,6 +73,11 @@ void boot();
 void cpu_profile_register(const char* name);  // cpu_profile.cpp
 }
 
+namespace nx {
+void olsc_backup_on_exit();  // hle_olsc.cpp
+void game_clock_save();     // game_clock.cpp: a faster clock's gained time into config.ini
+}
+
 namespace nx::plat {
 
 namespace {
@@ -597,6 +602,12 @@ void update_refresh_hz() {
 }
 int display_refresh_hz() { return g_refresh_hz.load(); }
 
+void show_fatal(const char* text) {
+    if (headless()) return;
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ACNHRecomp", text, nullptr);
+}
+
+
 void set_fullscreen(bool on) {
     run_on_main([on] {
         if (g_window) SDL_SetWindowFullscreen(g_window, on);
@@ -969,7 +980,7 @@ void game_thread() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // acnh <game folder>: the folder ACNHRecomp-Importer prepared (else NX_DATA_ROOT, else the setup's data folder)
+    // acnh <game folder>: the prepared game folder (else NX_DATA_ROOT, else the setup's data folder)
     if (argc > 1) setenv("NX_DATA_ROOT", argv[1], 1);
 #if TARGET_OS_IPHONE
     // SideStore starts the app with no environment and no arguments: the writable data root is the app's
@@ -1057,6 +1068,8 @@ int main(int argc, char** argv) {
             switch (e.type) {
             case SDL_EVENT_QUIT:
                 nx::log("platform: quit requested (window closed / Cmd-Q)");
+                nx::olsc_backup_on_exit();
+                nx::game_clock_save();
                 relay_after_game();
                 exit_process(0);
             case SDL_EVENT_WINDOW_MINIMIZED:

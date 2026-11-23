@@ -20,6 +20,11 @@ bool ui_text_field() { return false; }
 void ui_open_online() {}
 void amiibo_importer_poll() {}
 void ui_toggle() {}
+void ui_open_online() {}
+void ui_must_quit() {}
 bool ui_touch(float, float, bool) { return false; }
+bool ui_text_field() { return false; }
+void ui_text_input(const char*) {}
+void ui_text_key(TextKey) {}
 
 }  // namespace nx::ui

@@ -17,8 +17,8 @@
   </a>
 </p>
 
-ACNHRecomp turns the Switch code of *Animal Crossing: New Horizons* (title ID `01006F8002326000`; version 3.0.2
-recommended, 3.0.3, 2.0.7 and 1.0.0 supported) into native code for your computer. It is not an emulator: the game's AArch64 machine code is
+ACNHRecomp turns the Switch code of *Animal Crossing: New Horizons* (title ID `01006F8002326000`; version 3.0.3
+recommended, which Nextendo Online needs; 3.0.2, 2.0.7 and 1.0.0 supported) into native code for your computer. It is not an emulator: the game's AArch64 machine code is
 translated ahead of time into C++ and compiled for the host, the system services the game calls are reimplemented
 natively, and the game's NVN graphics calls are translated to **Vulkan**. It is built on the framework of
 [SuperMarioWonderRecomp](https://github.com/BelmanteGu/SuperMarioWonderRecomp).
@@ -129,9 +129,10 @@ GPU; see [docs/STATUS.md](docs/STATUS.md) for the full, regularly updated log.
 | Opening movie (VP9 + Vorbis), arrival on the island | Working |
 | Free roaming on the island | Working, 30 fps on an Intel Iris Xe |
 | First save (written at the end of the first day) | Not yet verified in a full playthrough |
-| 60 fps | Native with ACNHRecomp-Importer 1.0.6+ ([credits](#credits-and-references)) |
-| Online features through Nintendo (Dodo codes, Nook Link, Dream Suite) | Unavailable |
-| Visits between PCs (airport, Local Play), over LAN or the internet, no server | Works on Windows; [docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md) |
+| 60 fps | Native: the launcher's *Native 60 FPS* when preparing (or a folder from ACNHRecomp-Importer 1.0.6+) ([credits](#credits-and-references)) |
+| Online features through Nintendo | Unavailable (never contacted) |
+| Online via Nextendo (Dodo Codes, Search for a friend) | Supported on 3.0.3; [docs/NEXTENDO.md](docs/NEXTENDO.md) |
+| Visits between PCs and Switches with ldn_mitm (airport, Local Play), over LAN or a virtual LAN | New: PC ↔ Switch (ldn_mitm) tested on Windows; PC ↔ PC, Linux and macOS not yet; [docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md) |
 
 **Known issues**
 
@@ -140,8 +141,8 @@ GPU; see [docs/STATUS.md](docs/STATUS.md) for the full, regularly updated log.
 - The first save only happens at the end of the first in-game day, and that path has not been verified end to end
   in a full playthrough. Back up and be prepared for surprises.
 - 60 fps - When shooting down a balloon game will fatal crash, fix is to switch to 30fps for any balloon challenges or DIYs.
-- Nintendo's online services are not available: the game sees a console with no internet connection. Visits between
-  PCs go through Local Play instead (page Online in the settings, [docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md)).
+- Nintendo's online services are not available. Use **Nextendo Online** (default) for Dodo Codes / Search for a friend
+  ([docs/NEXTENDO.md](docs/NEXTENDO.md)), or **Local** peer visits ([docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md)).
 
 **Platforms**
 
@@ -170,26 +171,33 @@ via Claude Code), directed and tested by a person. Its base, SuperMarioWonderRec
 
 ### Your game folder
 
-A folder **prepared by ACNHRecomp-Importer** from your own copy of the game.
+A game folder **prepared by ACNHRecomp** from your own copy of the game, with update 3.0.3.
 
-> **ACNHRecomp only accepts game folders made by ACNHRecomp-Importer.** The launcher and `tools/setup_acnh.py`
-> refuse any other folder, including an ExeFS + RomFS dump extracted with other tools. ACNHRecomp-Importer is a
-> separate companion app (Windows, macOS, Linux and Android) that turns your NSP or XCI, its update and your console's
-> keys into this folder, and recompiles the game's code on the way. It is **available on our Discord:
-> [discord.gg/VJW9Dtdu7a](https://discord.gg/VJW9Dtdu7a)**. Get it there, prepare your own copy with it, and point the
-> launcher (or `tools/setup_acnh.py --game`) at the folder it writes.
+> **You prepare it in the launcher.** Extract the ExeFS and the RomFS of your own copy with your emulator's Extract
+> feature (update 3.0.3 installed first): in Ryujinx, right-click the game > *Extract Data* > *ExeFS*, and again >
+> *RomFS*; in yuzu or Eden, right-click > *Dump RomFS* (Full), with *Dump ExeFS* turned on in the debugging settings.
+> Then open the launcher, choose **Prepare the game from your extracted files**, pick what you extracted (one folder
+> holding `exefs/` and `romfs/`, or the two folders), and it writes the game folder: it recompiles the game's code,
+> converts the shaders and compiles the game for this computer (and, if you tick them, for other platforms, the
+> Android app included). It takes a while, once. ACNHRecomp never reads NSP, XCI or NCA files and never uses keys,
+> and it provides no game files: it only reads what you extracted from your own copy. `acnh_prepare` (beside the
+> launcher in a release) does the same from the command line ([prepare/README.md](prepare/README.md)).
+>
+> Folders prepared by ACNHRecomp-Importer, the companion app that came before, are still accepted as they are.
 
 The folder's layout:
 
 | Path | Contents | Required |
 |---|---|---|
 | `exefs/` | `main`, `sdk`, `subsdk0` (the game's executables, NSO) and `main.npdm` | Yes |
-| `romfs/` | The game's files, with the update applied (about 10.5 GB). `extract/romfs/` is accepted too | Yes |
+| `romfs.pak` or `romfs/` | The game's files, with the update applied (about 10.5 GB): packed into `romfs.pak`, or left where they are (`romfs/`, `extract/romfs/`) when prepared in place | Yes |
 | `aoc/<index>/` | Add-on content (DLC), one folder per add-on | Optional |
-| `game.ini`, `.import/` | What ACNHRecomp-Importer imported (title, update version, main's build id) and its record of a finished import: how the launcher and the setup recognise its folders | Yes |
-| `gen/` | The game's code recompiled to C++ by the importer. When it was made by the same recompiler as this repository's `recomp/`, the setup uses it instead of recompiling | Optional |
+| `game.ini`, `.import/` | What was prepared (title, update version, main's build id) and the record of a finished preparation: how the launcher and the setup recognise a prepared folder (ACNHRecomp's or ACNHRecomp-Importer's) | Yes |
+| `game/<platform>/`, `analysis/`, `spirv.pak` | The game's code compiled for each platform chosen, the executables as the loader maps them, the converted shaders | Yes (a release's player) |
+| `gen/` | The game's code recompiled to C++ (ACNHRecomp-Importer's folders; the launcher removes it once compiled). When it was made by the same recompiler as this repository's `recomp/`, the setup uses it instead of recompiling | Optional |
 
-Version 3.0.2 (or 3.0.3) gets every fix of the port (native 60 FPS, wide screens, the mouse); 2.0.7 and 1.0.0 play
+Version 3.0.3 (or 3.0.2) gets every fix of the port (native 60 FPS, wide screens, the mouse), and 3.0.3 plays online
+with Nextendo; 2.0.7 and 1.0.0 play
 with picture, sound and the mouse; any other version is built as it is ([docs/VERSIONS.md](docs/VERSIONS.md)). The
 setup links to this folder instead of copying it: keep it where it is.
 
@@ -233,14 +241,15 @@ has .NET 10), the Ryubing shader translator source and Dear ImGui.
 The [releases](https://github.com/Nycolazs/ACNHRecomp/releases) are ready to play: none of them has any part of the
 game, and none needs a compiler. You need two things:
 
-1. **Your game folder**, made by [ACNHRecomp-Importer](#your-game-folder) (on our
-   [Discord](https://discord.gg/VJW9Dtdu7a)) from your own copy of the game. Run it once and keep the folder it writes.
+1. **The ExeFS and RomFS of your own copy** (update 3.0.3), extracted with your emulator's Extract feature
+   ([how](#your-game-folder)). The launcher prepares the game folder from them, once (a folder prepared before, by
+   ACNHRecomp or ACNHRecomp-Importer, works as it is).
 2. **The package for your system** from the [latest release](https://github.com/Nycolazs/ACNHRecomp/releases/latest):
 
 | File | System |
 |---|---|
 | `ACNHRecomp-<version>-windows-x64.zip` | Windows 10/11, x64 |
-| `ACNHRecomp-<version>-macOS-arm64.zip` | macOS 14 or newer, Apple Silicon (M1 or newer) |
+| `ACNHRecomp-<version>-macOS-arm64.zip` | macOS 15 or newer, Apple Silicon (M1 or newer) |
 | `ACNHRecomp-<version>-linux-x64.tar.gz` | Linux x86-64, glibc 2.35+ (Ubuntu 22.04, Fedora 36, Debian 12 and newer) |
 | `ACNHRecomp-<version>-android.apk` | Android 10+, Snapdragon (Adreno 6xx or newer): see [docs/ANDROID.md](docs/ANDROID.md) |
 | `libvulkan_freedreno.so` | The Turnip Vulkan driver (Mesa, MIT), already inside the APK; for `tools/android_install.sh` |
@@ -251,7 +260,7 @@ game, and none needs a compiler. You need two things:
    inside the zip viewer.
 2. Double-click **`ACNHRecomp Launcher.exe`** (or `Start ACNHRecomp.bat`). If SmartScreen warns about an unknown
    app: *More info* > *Run anyway*.
-3. Choose your game folder. The game starts.
+3. **Prepare the game from your extracted files** (or choose a game folder prepared before). The game starts.
 4. On the launcher's home page, **Add to desktop** puts a shortcut with the ACNHRecomp icon on the desktop and in the
    Start menu (search for "ACNHRecomp"). Keep the unzipped folder where it is: the shortcut points into it.
 
@@ -261,7 +270,7 @@ game, and none needs a compiler. You need two things:
 2. The first time, double-click **`Start ACNHRecomp.command`**: the app is not signed by Apple, and this lets macOS
    open it (it removes the download quarantine) and then opens it. If macOS still refuses, right-click
    `ACNHRecomp.app` > *Open* > *Open*, or *System Settings* > *Privacy & Security* > *Open Anyway*.
-3. Choose your game folder. The game starts.
+3. **Prepare the game from your extracted files** (or choose a game folder prepared before). The game starts.
 4. On the launcher's home page, **Install in Applications** copies `ACNHRecomp.app` into Applications (or
    `~/Applications` without administrator rights) and puts it on the desktop. From then on open it from Launchpad,
    Spotlight or the Dock like any app; the downloaded folder can be deleted.
@@ -271,17 +280,19 @@ game, and none needs a compiler. You need two things:
 1. Extract the package: `tar -xzf ACNHRecomp-<version>-linux-x64.tar.gz`.
 2. Run **`./Start ACNHRecomp.sh`** in the `ACNHRecomp` folder (or double-click it in your file manager). You need a
    Vulkan driver: `sudo apt install mesa-vulkan-drivers` (or your distribution's, or NVIDIA's).
-3. Choose your game folder. The game starts.
+3. **Prepare the game from your extracted files** (or choose a game folder prepared before). The game starts.
 4. On the launcher's home page, **Add to desktop** adds ACNHRecomp, with its icon, to the applications menu and to
    the desktop (`~/.local/share/applications/io.github.acnhrecomp.desktop`). Keep the extracted folder where it is.
 
 #### The first start, updates and versions
 
-- **Brazilian Portuguese and 60 FPS SpeedFix** are off by default. Turn on each fan mod separately in the
-  launcher's Settings, then prepare again. Supply the translation zip in your game folder or
-  `private/translations/` and the SpeedFix patch for your game version in your game folder (or in the prepared
-  output). SpeedFix supports versions 3.0.2 and 3.0.3. Turning a switch off removes its effect on the next prepare;
-  your zip and patch remain in place.
+- **Brazilian Portuguese and 60 FPS** come with the package: the first start copies the pt-BR fan translation and
+  the files of tmouh's 60 FPS SpeedFix into your game folder (no download). Português (Brasil) is then in the game's
+  languages (chosen by itself on a Portuguese system). *Settings* > *Video* > *Frame rate* > *60* then plays at 60 FPS
+  at the game's normal speed (30 is the default); it needs a game folder prepared with *Native 60 FPS* (on by
+  default; a folder from ACNHRecomp-Importer 1.0.6 or newer has it too), which builds the SpeedFix into the game's
+  code (an older folder stays at 30). A new package with newer files copies
+  them again; `game.mod_fetch = off` in `config.ini` turns the copy off.
 - **New versions:** the launcher looks for a newer release on GitHub each time it opens and says so on its home page,
   with a button to its download page. *Settings* > *Look for new versions when the launcher opens* turns it off. To
   update, download the new package and replace the old folder (or app): your game folder, saves and settings are
@@ -289,8 +300,12 @@ game, and none needs a compiler. You need two things:
 - **The version in use** is at the bottom of the launcher's *Settings*, and in the game's settings (F1) > *About*.
 - **The icon:** the launcher, the game's window, the taskbar / Dock and the shortcuts all show the ACNHRecomp icon.
 
-The launcher asks for one thing, the game folder ACNHRecomp-Importer wrote, and starts the game; the player beside
-it (`acnh`) loads the game's code from that folder (`game/<platform>/`, see [Building from source](#building-from-source)).
+The launcher prepares the game folder from what you extracted (or takes one prepared before) and starts the game;
+the player beside it (`acnh`) loads the game's code from that folder (`game/<platform>/`, see
+[Building from source](#building-from-source)). The preparation's tools come in the package: `tools/zig/` (the zig
+compiler, trimmed, that builds the game's code) and `tools/shaders/` (the shader converter), beside the launcher
+(inside `ACNHRecomp.app/Contents/Resources/` on macOS), with `acnh_prepare`, its command line. A new version of
+ACNHRecomp whose runtime changed asks to **Prepare again** on the home page: only the game's code is built again.
 Each package carries what it needs (SDL3, and on macOS the Vulkan loader and MoltenVK); a GPU with a Vulkan 1.3
 driver is the one requirement. The packages are made by the repository's **Build** workflow (`.github/workflows/build.yml`,
 `tools/package_release_*.sh`; the icons are in `assets/`).
@@ -434,7 +449,7 @@ Japanese, Korean, Simplified Chinese and Traditional Chinese.
 | Page | Options |
 |---|---|
 | Game | Game language (automatic from the system, the game's 14 languages, Brazilian Portuguese fan translation); menu language |
-| Video | Quality preset (quality, balanced, low), windowed / fullscreen, window size, game mode (1080p TV mode or 720p handheld mode), internal resolution (540p to 2160p/4K, or the window's), upscaling (bilinear or FSR 1, with sharpness), anti-aliasing (FXAA, supersampling), anisotropic filtering, aspect ratio (16:9, automatic from the window, 16:10, 4:3, 21:9, 32:9, phone ratios; applied live), frame rate, frame generation (built-in, or lsfg-vk if installed), GPU (automatic, dedicated, integrated), prepare shaders at startup |
+| Video | Quality preset (quality, balanced, low), windowed / fullscreen, window size, game mode (1080p TV mode or 720p handheld mode), internal resolution (360p to 2160p/4K, or the window's), upscaling (bilinear or FSR 1, with sharpness), anti-aliasing (FXAA, supersampling), anisotropic filtering, aspect ratio (16:9, automatic from the window, 16:10, 4:3, 21:9, 32:9, phone ratios; applied live), frame rate, frame generation (built-in, or lsfg-vk if installed), GPU (automatic, dedicated, integrated), prepare shaders at startup |
 | Audio | Master volume, environmental reverb, mute when the window is in the background |
 | Controls | Connected controller, confirm/cancel layout, button icons, vibration, stick dead zone, keyboard remapping |
 | Saves | Open the save folder, back up now, import, export, saves found on this computer, restore backups |
@@ -457,7 +472,7 @@ restart are marked on the screen. Environment variables set on the command line 
 | `video.mode` | `docked`, `handheld` | `NX_HANDHELD` |
 | `video.upscaler` | `linear`, `fsr` | `NX_FSR` |
 | `video.fsr_sharpness_pct` | `0`-`100` | `NX_FSR_SHARP` |
-| `video.resolution` | `native`, `540`, `720`, `900`, `1080`, `1440`, `2160`, `window` | `NX_RENDER_HEIGHT` |
+| `video.resolution` | `native`, `360`, `432`, `480`, `540`, `720`, `900`, `1080`, `1440`, `2160`, `window` | `NX_RENDER_HEIGHT` |
 | `video.antialiasing` | `off`, `fxaa`, `ssaa15`, `ssaa2` (supersampling 1.5x / 2x) | `NX_AA` |
 | `video.anisotropy` | `game`, `2`, `4`, `8`, `16` | `NX_ANISOTROPY` |
 | `video.aspect` | `16:9`, `auto`, `16:10`, `4:3`, `21:9`, `32:9`, phone ratios, any `W:H` | `NX_ULTRAWIDE` |
@@ -541,8 +556,11 @@ From the **Saves** page you can import a save from:
 | **Ryujinx** / **Ryubing** | Detected automatically, including Flatpak installs |
 | Another **ACNHRecomp** folder | |
 
-- **Before every import or restore, the current save is backed up** to `private/acnh/user/backups/`. The 10 newest
-  backups are kept, and "Back up now" makes one on demand.
+- **Before every import or restore, the current save is backed up** to `user/backups/<island> <id>/`, a folder per
+  island (two islands with the same name share one). Per island, the 10 newest backups are kept, and "Back up now"
+  makes one on demand. The game's own *Island Backup* makes automatic ones (`.auto`) at the start, at the title screen
+  and when quitting (not on Android), of which the 3 newest are kept apart from the others. The Saves tab lists every
+  island's backups.
 - Imports are staged next to the save folder and moved in at once, so a failure never leaves a half-written save.
 - After an import or restore, **quit and restart the game**, so it does not write the old island over the new one.
 - **Export** writes the save to a folder (`ACNH-<date>-<time>/`) or a `.zip` in the layout that JKSV and Checkpoint
@@ -608,11 +626,11 @@ CC=clang CXX=clang++ cmake -S . -B private/acnh/build -G Ninja -DNX_GAME=acnh -D
 ninja -C private/acnh/build acnh
 ```
 
-**The player** (what plays a folder ACNHRecomp-Importer prepared, with no game code of its own): configure with
+**The player** (what plays a prepared game folder, with no game code of its own): configure with
 `-DNX_GAME_FROM_FOLDER=ON` and put `acnh` (`acnh.exe`) beside the launcher. It loads the game's code from the folder
 (`game/linux-x64/libacnh_game.so`, `game/macos-arm64/libacnh_game.dylib`, `game/windows-x64/acnh_game.dll`;
 `runtime/src/game_folder.cpp`) and refuses a library built against other runtime headers (`NX_GAME_ABI`, a hash of
-`runtime/include/nx/{cpu,module,runtime}.h`, which the importer carries a copy of). The Android app loads
+`runtime/include/nx/{cpu,module,runtime}.h`, which the preparation compiles the library against). The Android app loads
 `game/android-arm64/libacnh_game.so` the same way.
 
 Notes:
@@ -636,7 +654,8 @@ opens, run `NX_REPORT=1 private/acnh/build/acnh` once after the crash.
 **The picture tears in full screen.** Settings > Video > VSync (on by default).
 
 **Native 60 FPS at the normal game speed.** Run `tools/setup_60fps.sh` once: it downloads tmouh's
-[ACNH 60 FPS + SpeedFix](https://github.com/tmouh/acnh-60fps) (CC BY-NC 4.0; not part of this repository), builds
+[ACNH 60 FPS + SpeedFix](https://github.com/tmouh/acnh-60fps) (CC BY-NC 4.0; its patches of main are in
+`prepare/recomp/acnh/`), builds
 its parameter file from your dump and recompiles `main` with it as a second version of every function it changes.
 Then Settings > Video > Frame rate > 60. The game's speed follows the frame rate, so it plays slower wherever the
 computer cannot hold 60.
@@ -644,11 +663,16 @@ computer cannot hold 60.
 **The setup stops with "no game in ...: pass --game".**
 The game folder has not been linked yet: pass `--game <your game folder>` on the first run.
 
-**The launcher or the setup says the folder was not prepared by ACNHRecomp-Importer.**
-ACNHRecomp only accepts game folders made by ACNHRecomp-Importer. Download it on our Discord
-([discord.gg/VJW9Dtdu7a](https://discord.gg/VJW9Dtdu7a)), prepare your game with it (your NSP or XCI, update 3.0.2 and
-your console's keys) and choose the folder it writes. A folder it is still working on, or that it stopped preparing, is
-not accepted either: let it finish.
+**The launcher or the setup says the folder is not prepared yet.**
+ACNHRecomp plays prepared game folders. Choose **Prepare the game from your extracted files** on the launcher's first
+page (a folder of extracted files chosen as the game folder is offered the same), pick the ExeFS and RomFS you
+extracted from your own copy with update 3.0.3 ([how](#your-game-folder)), and let it finish. A preparation stopped
+half way is not taken as finished: Prepare again continues where it stopped. Folders from ACNHRecomp-Importer are
+accepted as they are.
+
+**The launcher says the preparation's tools are missing.**
+`tools/zig/` and `tools/shaders/` beside the launcher are part of the package: unpack it again, whole. An antivirus
+may have removed some of zig's files; allow the ACNHRecomp folder.
 
 **The setup says the game folder has no exefs/ and romfs/, or that romfs/ has no Shader/ folder.**
 Choose the folder that holds both `exefs/` and `romfs/` (see [Requirements](#your-game-folder)), with the update
@@ -672,9 +696,9 @@ Some GNOME setups make libdecor/GTK abort the process; the runtime prefers X11/X
 `private/acnh/nx_play.log`.
 
 **Can I visit friends or use Nook Link?**
-Visiting friends: yes, through Local Play at the airport, on a LAN or over the internet (page Online in the settings,
-[docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md)). Nook Link and the rest of Nintendo's online services: no, they answer as a
-console without an internet connection.
+Visiting friends: **Nextendo Online** (Dodo / Search, [docs/NEXTENDO.md](docs/NEXTENDO.md)) or **Local** play at the
+airport, on a LAN or a virtual LAN, with PCs or a Switch running ldn_mitm ([docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md)).
+Nintendo's own online services (including Nook Link) are never used.
 
 **Does time pass on my island?**
 Yes. The island follows your computer's date, time and time zone.
@@ -693,10 +717,12 @@ Join our [Discord Community](https://discord.gg/VJW9Dtdu7a) with your hardware d
 | Path | Contents |
 |---|---|
 | `recomp/` | AArch64 to C++ static recompiler (Python, Capstone) |
+| `prepare/` | The game folder's preparation (the launcher's *Prepare*, `acnh_prepare`): `recomp/` ported to C++ (`prepare/recomp/`), the game's library built with zig, the stages ([prepare/README.md](prepare/README.md)) |
+| `third_party/capstone/` | Capstone 5.0.7 (AArch64 only), the C++ recompiler's disassembler |
 | `runtime/` | Shared runtime: Horizon kernel, IPC and services, `nn::*` HLE, NVN to Vulkan, settings UI, platform layers |
 | `games/acnh/` | ACNH-specific code (name, program ID, engine hooks, diagnostics) |
 | `tools/maxwell/` | Shader container extraction and the Maxwell to SPIR-V harness |
-| `launcher/` | The first-run launcher: file checks, setup pipeline, home page (no game code) |
+| `launcher/` | The first-run launcher: the game folder's preparation, file checks, setup pipeline, home page (no game code) |
 | `tools/setup_acnh.py`, `tools/launcher.sh`, `tools/acnh_linux.sh`, `tools/acnh_mac.sh` | Setup and launch scripts |
 | `tools/acnh_version.py`, `games/acnh/versions.txt` | The game version a folder holds, by main's build id, and its hooks |
 | `tools/check_no_game_data.sh` | Pre-commit hook that blocks game data |
@@ -756,7 +782,8 @@ More detail: [docs/ACNH.md](docs/ACNH.md) (the game's modules, RomFS and shader 
 - [erickgodev](https://github.com/erickgodev): controller navigation in the launcher and in-game settings, controller
   vibration, launcher fullscreen, and related UI fixes.
 - [SirOMGitsYOU](https://github.com/SirOMGitsYOU): Amiibo / NFC support, Time Travel, Auto-start overhaul, Mod Manager,
-  Multi Save system.
+  Multi Save system, Discord Rich Presence integration, Camera App functionality, Nextendo + Online support,
+  Ultrawide flicker fix, and FidelityFX / DLSS in the Windows release.
 - [vzeol](https://github.com/vzeol): online / local play between computers, Discord Rich Presence, Windows packaging
   fixes, present pacing, and SpeedFix for 3.0.3.
 - [YaBoi69er](https://github.com/YaBoi69er): HDR output (scRGB / HDR10) and temporal AA / upscaling — NVIDIA DLSS,
@@ -775,12 +802,15 @@ More detail: [docs/ACNH.md](docs/ACNH.md) (the game's modules, RomFS and shader 
 - [Dear ImGui](https://github.com/ocornut/imgui) (MIT): the settings screen.
 - [MHGURecomp](https://github.com/morerokk/MHGURecomp) by morerokk (MIT): the design of local play between PCs
   (`nn::ldn`, virtual sockets), [docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md).
+- [ldn_mitm](https://github.com/spacemeowx2/ldn_mitm) by spacemeowx2 (GPLv2): the LAN protocol local play speaks, so a
+  Switch running it plays with PCs (reimplemented, no code taken), [docs/LOCAL_PLAY.md](docs/LOCAL_PLAY.md).
 - [RenoDX](https://github.com/clshortfuse/renodx) by Carlos Lopez Jr. (MIT): the HDR output and tonemapping
   (`SwapChainPass`, `ToneMapPass`, RenoDRT, user grading) compiled into the HDR shaders (`tools/shaders/hdr`; the
   generated `.inc` files are in the repository, regenerating them needs a RenoDX checkout: `tools/gen_spirv_inc.py`).
 - [ACNH 60 FPS + SpeedFix](https://github.com/tmouh/acnh-60fps) by tmouh (CC BY-NC 4.0): the 60 FPS game-speed
   rescaling, downloaded by `tools/setup_60fps.sh` (or, with a release, at the first start) and applied on your
-  machine (not part of this repository).
+  machine. Its patches of main for 3.0.2 and 3.0.3 are in `prepare/recomp/acnh/`, unchanged, under that license
+  (`prepare/recomp/acnh/SPEEDFIX.md`).
 - [SDL3](https://github.com/libsdl-org/SDL), [Capstone](https://www.capstone-engine.org/),
   [Unicorn](https://www.unicorn-engine.org/), libvpx, libvorbis, AMD FidelityFX FSR 1.
 - Projects studied before starting (summary in [docs/REFERENCES.md](docs/REFERENCES.md)):
@@ -793,7 +823,9 @@ More detail: [docs/ACNH.md](docs/ACNH.md) (the game's modules, RomFS and shader 
 ## License
 
 ACNHRecomp is released under the [MIT License](LICENSE). Code inherited from SuperMarioWonderRecomp keeps its
-original copyright notice.
+original copyright notice. Third-party code and data in the repository keep their own licenses: Capstone
+(`third_party/capstone/`) is BSD-3-Clause (`LICENSE.TXT`; its LLVM-derived tables: `LICENSE_LLVM.TXT`), and tmouh's
+SpeedFix (`prepare/recomp/acnh/speedfix-*.pchtxt`) is CC BY-NC 4.0 (`prepare/recomp/acnh/SPEEDFIX.md`).
 
 This license covers the project's own source code only. It grants no rights to *Animal Crossing: New Horizons*,
 which is the property of Nintendo.

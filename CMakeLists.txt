@@ -90,6 +90,16 @@ if(NX_TESTS AND NOT ANDROID)
     target_compile_definitions(gpu_pick_test PRIVATE NX_GPU_PICK_STANDALONE)
     target_include_directories(gpu_pick_test PRIVATE runtime/src/nvn)
     add_test(NAME gpu_pick COMMAND gpu_pick_test)
+    add_executable(nextendo_test tests/nextendo_test.cpp runtime/src/nextendo.cpp runtime/src/nextendo_http.cpp)
+    target_compile_definitions(nextendo_test PRIVATE NX_LAUNCHER_UI)
+    target_include_directories(nextendo_test PRIVATE runtime/src)
+    if(WIN32)
+        target_link_libraries(nextendo_test PRIVATE ws2_32 bcrypt shell32)
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(nextendo_test PRIVATE Threads::Threads)
+    endif()
+    add_test(NAME nextendo COMMAND nextendo_test)
     add_executable(tiling_test tests/tiling_test.cpp runtime/src/nvn/nvn_tiling.cpp)
     target_include_directories(tiling_test PRIVATE runtime/src/nvn)
     add_test(NAME tiling COMMAND tiling_test --selftest)
@@ -116,6 +126,12 @@ if(NX_TESTS AND NOT ANDROID)
         target_include_directories(desktop_layout_test PRIVATE runtime/include)
         add_test(NAME desktop_layout COMMAND desktop_layout_test)
     endif()
+    add_executable(ldn_net_test tests/ldn_net_test.cpp)
+    target_include_directories(ldn_net_test PRIVATE runtime/src)
+    if(WIN32)
+        target_link_libraries(ldn_net_test PRIVATE ws2_32)
+    endif()
+    add_test(NAME ldn_net COMMAND ldn_net_test)
     if(WIN32)
         add_executable(memguard_test tests/memguard_test.cpp)
         target_link_libraries(memguard_test PRIVATE psapi)
@@ -168,22 +184,45 @@ if(ZLIB_FOUND)
     target_compile_definitions(nx_mod_manager PRIVATE NX_HAVE_ZLIB)
 endif()
 
+# What the player and lib<game>_game must agree on (the CPU context, the module tables, the runtime's calls): a game
+# library built from other headers is refused at start, asking for the game folder to be prepared again. Computed
+# before the game's targets and the preparation (prepare/prepare.cmake), which compiles the game folder's libraries
+# with it.
+set(NX_ABI_TEXT "")
+foreach(h cpu.h module.h runtime.h)
+    file(READ "${CMAKE_SOURCE_DIR}/runtime/include/nx/${h}" t)
+    string(APPEND NX_ABI_TEXT "${t}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/runtime/include/nx/${h}")
+endforeach()
+string(SHA1 NX_GAME_ABI "${NX_ABI_TEXT}")
+string(SUBSTRING "${NX_GAME_ABI}" 0 12 NX_GAME_ABI)
+
 # The launcher (launcher/): the program a player opens first. It has no game code, so it builds from a plain
 # checkout (cmake --build <dir> --target acnhrecomp_launcher) and leaves the game's targets as they are.
 option(NX_LAUNCHER "Build the first-run launcher (acnhrecomp_launcher)" ON)
 if(NX_LAUNCHER AND NOT ANDROID AND NOT IOS)
     include(launcher/launcher.cmake)
+    include(prepare/io/io.cmake)  # preparing the game folder: the player's ExeFS and RomFS, the packs
 endif()
 
-# Desktop: the game's code from the game folder (game/<platform>/lib<game>_game, which ACNHRecomp-Importer builds)
+# The game folder's preparation (prepare/README.md): the recompiler (nx_recomp, acnh_recomp), the game library's build
+# and the stages (nx_gamelib, nx_prepare) and the command line acnh_prepare, on desktop; on Android the app's own
+# libacnh_prepare.so (prepare_jni.cpp), which the APK carries with or without the game set up here. Not in a desktop
+# build with the generated code (NX_GEN_PROBE, used below too: tools/setup_acnh.py's, made by the Python recompiler).
+file(GLOB NX_GEN_PROBE "${NX_GEN_DIR}/main/*.cpp")
+if(ANDROID OR NOT NX_GEN_PROBE)
+    include(prepare/recomp/recomp.cmake)
+    include(prepare/prepare.cmake)  # the game library's build (gamelib), the stages, acnh_prepare
+endif()
+
+# Desktop: the game's code from the game folder (game/<platform>/lib<game>_game, which the preparation builds)
 # instead of linked into the executable: the player then only needs the folder.
 option(NX_GAME_FROM_FOLDER "Desktop: load the game's code from the game folder" OFF)
 
-# Without the generated code (a checkout with no game data) only the tests and the launcher above are built.
+# Without the generated code (a checkout with no game data) only the tests, launcher and recompiler above are built.
 # Android builds the runtime without it too: the app (lib<game>.so) holds no game code and loads lib<game>_game.so,
 # made from the player's own copy on their computer, from the game folder picked on the phone (docs/ANDROID.md). So
 # does the desktop player (NX_GAME_FROM_FOLDER): the release's, which loads the game folder's library.
-file(GLOB NX_GEN_PROBE "${NX_GEN_DIR}/main/*.cpp")
 if(NOT NX_GEN_PROBE AND NOT ANDROID AND NOT NX_GAME_FROM_FOLDER)
     message(WARNING "No generated code in ${NX_GEN_DIR}/main: building the unit tests only")
     return()
@@ -266,13 +305,18 @@ set(NX_RUNTIME_SOURCES
     runtime/src/hle_hid.cpp
     runtime/src/hle_hid_system_nfc.cpp
     runtime/src/hle_net.cpp
+    runtime/src/hle_web.cpp
+    runtime/src/hle_hostnet.cpp
     runtime/src/hle_ldn.cpp
     runtime/src/hle_vsock.cpp
     runtime/src/ldn_link.cpp
-    runtime/src/ldn_discovery.cpp
-    runtime/src/ldn_upnp.cpp
+    runtime/src/ldn_lan.cpp
+    runtime/src/nextendo.cpp
+    runtime/src/nextendo_http.cpp
     runtime/src/hle_audio.cpp
     runtime/src/hle_pl.cpp
+    runtime/src/hle_album.cpp
+    runtime/src/hle_jpeg.cpp
     runtime/src/hle_nfp.cpp
     runtime/src/nfp_host.cpp
     runtime/src/acnh_amiibo_hook.cpp
@@ -369,16 +413,6 @@ if(DEFINED ENV{VULKAN_SDK})
 else()
     set(NX_VULKAN_SDK "C:/VulkanSDK/1.4.357.0" CACHE PATH "Vulkan SDK")
 endif()
-
-# What the player and lib<game>_game must agree on (the CPU context, the module tables, the runtime's calls): a game
-# library built from other headers is refused at start, asking for the game folder to be prepared again.
-set(NX_ABI_TEXT "")
-foreach(h cpu.h module.h runtime.h)
-    file(READ "${CMAKE_SOURCE_DIR}/runtime/include/nx/${h}" t)
-    string(APPEND NX_ABI_TEXT "${t}")
-endforeach()
-string(SHA1 NX_GAME_ABI "${NX_ABI_TEXT}")
-string(SUBSTRING "${NX_GAME_ABI}" 0 12 NX_GAME_ABI)
 
 if(ANDROID)
     # NativeActivity app: lib<game>.so, entry android_main (android_native_app_glue).
@@ -670,6 +704,34 @@ else()
 endif()
 target_sources(${NX_GAME} PRIVATE runtime/src/saves.cpp)
 target_link_libraries(${NX_GAME} PRIVATE nx_save_storage)
+target_sources(${NX_GAME} PRIVATE runtime/src/hle_olsc.cpp)  # the Island Backup, kept with the saves (saves.cpp)
+
+# Mbed TLS (Apache-2.0): the game's nn::ssl connections (NEX, the island services) and the signed account id_token
+# for Nextendo Online (docs/NEXTENDO.md). Fetched as a release archive on the first configure.
+include(FetchContent)
+set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
+set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
+# Its threading layer (runtime/src/mbedtls/nx_mbedtls_config.h): TLS is used from several threads.
+set(MBEDTLS_USER_CONFIG_FILE "${CMAKE_SOURCE_DIR}/runtime/src/mbedtls/nx_mbedtls_config.h" CACHE FILEPATH "" FORCE)
+if(NOT WIN32)
+    set(LINK_WITH_PTHREAD ON CACHE BOOL "" FORCE)
+endif()
+FetchContent_Declare(mbedtls
+    URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2
+    URL_HASH SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
+    EXCLUDE_FROM_ALL)
+FetchContent_MakeAvailable(mbedtls)
+if(WIN32)  # threading_alt.h, which <mbedtls/threading.h> includes with MBEDTLS_THREADING_ALT
+    foreach(t mbedcrypto mbedx509 mbedtls)
+        target_include_directories(${t} PUBLIC "${CMAKE_SOURCE_DIR}/runtime/src/mbedtls")
+    endforeach()
+endif()
+target_sources(${NX_GAME} PRIVATE runtime/src/hle_ssl.cpp runtime/src/hle_npns.cpp runtime/src/nextendo_token.cpp
+    runtime/src/nextendo_status.cpp runtime/src/save_unlink.cpp)
+target_link_libraries(${NX_GAME} PRIVATE mbedtls mbedx509 mbedcrypto)
 if(WIN32)
     set(ZLIB_USE_STATIC_LIBS ON)  # vcpkg's static zlib (tools/setup_acnh.py): zs.lib
 endif()
@@ -678,8 +740,14 @@ if(ZLIB_FOUND)
     target_link_libraries(${NX_GAME} PRIVATE ZLIB::ZLIB)
     target_compile_definitions(${NX_GAME} PRIVATE NX_HAVE_ZLIB)
 endif()
-execute_process(COMMAND git describe --always --dirty WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                OUTPUT_VARIABLE NX_GIT_DESCRIBE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+# A release build (.github/workflows/build.yml) names its version: git describe would give the previous tag when the
+# packages are built before the release's tag exists, and 0.8.0 then called itself 0.7.0 (issue #76).
+if("$ENV{NX_RELEASE_VERSION}" MATCHES "^v?[0-9]+\\.[0-9]+")
+    set(NX_GIT_DESCRIBE "$ENV{NX_RELEASE_VERSION}")
+else()
+    execute_process(COMMAND git describe --always --dirty WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    OUTPUT_VARIABLE NX_GIT_DESCRIBE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
 if(NOT NX_GIT_DESCRIBE)
     set(NX_GIT_DESCRIBE "dev")
 endif()
