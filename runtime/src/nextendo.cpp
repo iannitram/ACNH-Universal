@@ -1,6 +1,10 @@
 // Nextendo mode, account session, DNS redirect classification, BAAS helpers.
 #include "nextendo.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include "nextendo_http.h"
 #include "ldn_net.h"
 
@@ -290,6 +294,9 @@ bool open_browser(const std::string& url) {
     return SDL_OpenURL(url.c_str());
 #elif defined(_WIN32)
     return (uintptr_t)ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+    (void)url;  // no std::system on iOS (the iPad player has no SDL URL opener here): the sign-in is not offered
+    return false;
 #else
 #if defined(__APPLE__)
     std::string cmd = "open \"" + url + "\"";
