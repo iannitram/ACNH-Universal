@@ -168,6 +168,11 @@ public class Home extends Activity {
                     "Esta pasta não tem o jogo preparado (" + GAME_LIB + "). Prepare o seu jogo com o "
                             + "ACNHRecomp-Importer (baixe no nosso Discord: discord.gg/VJW9Dtdu7a) e depois no "
                             + "computador com tools/android_install.sh.");
+        if (why.startsWith("gpu: "))
+            return t("This phone's graphics driver cannot run the game: " + why.substring(5) + ". On a Snapdragon "
+                            + "phone, the Turnip driver in the app is used; other phones need a Vulkan 1.3 driver.",
+                    "O driver gráfico deste aparelho não roda o jogo: " + why.substring(5) + ". Em aparelhos "
+                            + "Snapdragon o app usa o driver Turnip; os outros precisam de um driver Vulkan 1.3.");
         if (why.equals("restart"))
             return t("Close the app and open it again to use another folder.",
                     "Feche o app e abra de novo para usar outra pasta.");
