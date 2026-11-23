@@ -44,3 +44,4 @@ peer: gilrs (crate) | MIT or Apache-2.0 | gamepad input on desktop
 
 | Here | From (repo and commit) | License | Credit |
 |---|---|---|---|
+| crates/core atomic write | iannitram/craft-libs f3327e14ca55e6ff65ab82e629917b38a6590e3a crates/atomic | MIT OR Apache-2.0 | header comment in crates/core/src/platform.rs |

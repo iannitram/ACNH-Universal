@@ -23,7 +23,6 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -565,7 +564,6 @@ fn pair_mismatch() -> Error {
 }
 
 static PEERS_LOCK: Mutex<()> = Mutex::new(());
-static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Read remembered peers. A missing file means no peers; errors never include its contents.
 pub fn read_peers(dirs: &AppDirs) -> Result<Vec<Peer>> {
@@ -607,22 +605,7 @@ fn write_peers(dirs: &AppDirs, peers: &[Peer]) -> Result<()> {
     let bytes =
         serde_json::to_vec(peers).map_err(|_| Error::Hub("could not encode peers file".into()))?;
     fs::create_dir_all(&dirs.config)?;
-    let temp = dirs.config.join(format!(
-        ".peers-{}-{}.tmp",
-        std::process::id(),
-        TEMP_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = crate::platform::open_private_new(&temp)?;
-    let result = (|| -> io::Result<()> {
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, dirs.config.join("peers.json"))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    Ok(result?)
+    crate::platform::atomic_write(&dirs.config.join("peers.json"), &bytes)
 }
 
 /// Plaintext bytes per chunk (the final chunk may be shorter).
@@ -1008,7 +991,7 @@ fn serve_inner(t: &mut dyn Transport, peer: &Peer, builds: &Path, target: Os) ->
     }
 }
 
-// create_new + sync + rename means an interrupted write can never look like a finished
+// create_new + sync + rename (platform::atomic_write_with) means an interrupted write can never look like a finished
 // chunk. Temp files, including file assembly, stay under the private staging namespace
 // so a process crash cannot leave them in the tree later handed to bundle::install.
 fn atomic_write(
@@ -1016,27 +999,7 @@ fn atomic_write(
     temp_dir: &Path,
     write: impl FnOnce(&mut File) -> Result<()>,
 ) -> Result<()> {
-    let temp = temp_dir.join(format!(
-        ".hub-{}-{}.tmp",
-        std::process::id(),
-        TEMP_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = crate::platform::open_private_new(&temp)?;
-    let result = (|| {
-        write(&mut file)?;
-        file.sync_all()?;
-        drop(file);
-        // Windows cannot rename over an existing file. Only staging data is replaced.
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-        fs::rename(&temp, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+    crate::platform::atomic_write_with(path, temp_dir, write)
 }
 
 fn cached_chunk(path: &Path, key: &[u8], aad: &[u8], length: usize) -> Result<Option<Vec<u8>>> {
