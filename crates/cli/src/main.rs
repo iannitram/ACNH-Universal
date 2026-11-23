@@ -232,11 +232,16 @@ fn build(options: &Options) -> Result<i32> {
         })?,
         None => Os::current(),
     };
-    let out = options
-        .out
-        .clone()
-        .unwrap_or_else(|| repo_root().join("private").join("acnh"));
     let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
+    // The Mac and iPhone builds hold the recompiled game: by default they are made in the
+    // data root's `prepared/` folder, never in a git work tree.
+    let out = options.out.clone().unwrap_or_else(|| {
+        if matches!(target, Os::Mac | Os::Ios) {
+            AppDirs::new(&vars).data_root().join("prepared")
+        } else {
+            repo_root().join("private").join("acnh")
+        }
+    });
     let config_path = AppDirs::new(&vars).data_root().join("config.ini");
     let config = match std::fs::read_to_string(&config_path) {
         Ok(text) => acnh_core::config::Config::parse(&text)?,
@@ -248,6 +253,20 @@ fn build(options: &Options) -> Result<i32> {
             )))
         }
     };
+    let delivery = match prepare::delivery_subfolder(target) {
+        Some("ios") => {
+            let launcher =
+                match std::fs::read_to_string(AppDirs::new(&vars).config.join("launcher.ini")) {
+                    Ok(text) => acnh_core::config::Config::parse(&text)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Default::default()
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+            Some(prepare::delivery_folder(&launcher, &vars.home, "ios"))
+        }
+        _ => None,
+    };
     let request = Request {
         game: gamefolder::check(game)?,
         out,
@@ -258,8 +277,14 @@ fn build(options: &Options) -> Result<i32> {
             ptbr: config.enabled("mods.ptbr"),
             speedfix: config.enabled("mods.speedfix"),
         },
+        delivery,
     };
     let out = prepare::prepare(&request, &mut |stage| println!("== {}", stage.key()))?;
+    if target == Os::Ios {
+        // The one contained app is the `.ipa` in Dropbox: nothing to assemble here.
+        println!("built {} for {}", out.display(), target.key());
+        return Ok(0);
+    }
     println!("built {} for {}", out.display(), target.key());
     // The bare player becomes a self-contained one in the install folder (on the Mac, the
     // one contained app).

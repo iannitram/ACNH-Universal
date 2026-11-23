@@ -142,6 +142,7 @@ fn request(name: &str) -> Request {
         jobs: 0,
         source: None,
         fan_mods: Default::default(),
+        delivery: None,
     }
 }
 

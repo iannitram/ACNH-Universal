@@ -9,7 +9,7 @@
 # Payload/ACNH.app/game/, as real files, and makes them read-only. --no-game makes no game/ folder.
 # The out folder is required and has no default. Every refusal writes nothing to it.
 # The .ipa is staged in <out>/.ACNH-Universal-<version>.partial/ and moved into <out> when complete.
-# Under CI (CI or GITHUB_ACTIONS set) the out folder must be inside $RUNNER_TEMP, and the game folder may hold only
+# Under CI (CI or GITHUB_ACTIONS set) the out folder must be inside $RUNNER_TEMP, and the game items it copies may hold only
 # empty files.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -101,8 +101,13 @@ if [ -n "$game" ]; then
     for need in analysis/main.bin romfs.pak spirv.pak; do
         [ -f "$game/$need" ] || fail "game folder lacks $need, so it is not a prepared game: $game"
     done
-    if [ -n "$ci" ] && [ -n "$(find -L "$game" -type f -size +0c -print -quit)" ]; then
-        fail "under CI the game folder may hold only empty files, and this one has a non-empty file"
+    # Only the five names that are copied matter: the prepared folder also holds build and work folders.
+    if [ -n "$ci" ]; then
+        for item in analysis romfs.pak spirv.pak fonts aoc; do
+            if [ -e "$game/$item" ] && [ -n "$(find -L "$game/$item" -type f -size +0c -print -quit)" ]; then
+                fail "under CI the game folder may hold only empty files, and $item has a non-empty file"
+            fi
+        done
     fi
 fi
 
