@@ -4,6 +4,8 @@
 // 80148e16e60b5ca5d34ca87d3ef3360567490352, crates/core/src/hub.rs:526-533,925-932;
 // permission test from crates/core/tests/hub_pair.rs:119-148 at the same commit.
 // See NOTICE for the MIT notice.
+// The atomic write adapted from iannitram/craft-libs crates/atomic (MIT OR Apache-2.0), commit
+// f3327e14ca55e6ff65ab82e629917b38a6590e3a.
 //! Which OS this is, and the folders the launcher and the player use there. Values come from
 //! environment variables through a lookup function, so the rules are tested on every OS
 //! without touching the real environment (docs/code-map.md, `platform`). Copied from
@@ -102,7 +104,6 @@ mod hub_file_tests {
 }
 
 /// Create a new private file. Keep OS-specific permission rules in this module.
-#[cfg(feature = "hub")]
 pub(crate) fn open_private_new(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -112,6 +113,83 @@ pub(crate) fn open_private_new(path: &std::path::Path) -> std::io::Result<std::f
         options.mode(0o600);
     }
     options.open(path)
+}
+
+static TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Replace `path` with `bytes` so a crash never leaves it truncated (see [`atomic_write_with`]).
+pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    atomic_write_with(path, dir, |f| Ok(f.write_all(bytes)?))
+}
+
+/// Stage a private temp file in `temp_dir` (the same filesystem as `path`), let `write` fill it,
+/// sync it, rename it over `path` and flush the parent directory on Unix. The original stays
+/// intact and the temp file is removed if anything fails. A kill mid-write leaves only the temp
+/// file behind.
+pub fn atomic_write_with(
+    path: &std::path::Path,
+    temp_dir: &std::path::Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+    let temp = temp_dir.join(format!(
+        ".atomic-{}-{}.tmp",
+        std::process::id(),
+        TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = open_private_new(&temp)?;
+    let result = (|| -> Result<()> {
+        write(&mut file)?;
+        sync_file(&file)?;
+        drop(file);
+        rename_retrying(&temp, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            // Best effort: the rename has already committed.
+            let _ = std::fs::File::open(parent).and_then(|d| sync_file(&d));
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// `sync_all`, which is `F_FULLFSYNC` on Apple platforms. Network shares there refuse it
+/// (ENOTTY, ENOTSUP); the rename is still atomic, so that refusal is not an error.
+fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
+    match file.sync_all() {
+        Err(e) if cfg!(target_vendor = "apple") && matches!(e.raw_os_error(), Some(25 | 45)) => {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// `rename` replaces an existing file on every OS (`MoveFileEx` with REPLACE_EXISTING on
+/// Windows). Antivirus and indexers hold files briefly there, so retry sharing violations.
+fn rename_retrying(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    let (mut left, mut delay) = (if cfg!(windows) { 7 } else { 0 }, 10u64);
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e)
+                if left > 0
+                    && (e.kind() == std::io::ErrorKind::PermissionDenied
+                        || matches!(e.raw_os_error(), Some(32 | 33))) =>
+            {
+                left -= 1;
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                delay = (delay * 2).min(200);
+            }
+            other => return other,
+        }
+    }
 }
 
 /// A device family the launcher builds for (SPEC.md M1).
@@ -302,5 +380,54 @@ impl AppDirs {
             return self.data.join("logs");
         }
         self.install().join("logs")
+    }
+}
+
+#[cfg(test)]
+mod atomic_tests {
+    use super::{atomic_write, atomic_write_with};
+    use crate::error::Error;
+
+    fn names(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn creates_replaces_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        atomic_write(&path, b"one").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"one");
+        atomic_write(&path, b"two").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        assert_eq!(names(dir.path()), ["a.txt"]);
+    }
+
+    #[test]
+    fn failing_writer_keeps_original_and_removes_temp() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        atomic_write(&path, b"keep").unwrap();
+        let result = atomic_write_with(&path, dir.path(), |f| {
+            f.write_all(b"half")?;
+            Err(Error::Io("boom".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+        assert_eq!(names(dir.path()), ["a.txt"]);
+    }
+
+    #[test]
+    fn missing_parent_fails_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope").join("a.txt");
+        assert!(atomic_write(&path, b"x").is_err());
+        assert!(names(dir.path()).is_empty());
     }
 }
