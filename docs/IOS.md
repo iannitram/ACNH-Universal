@@ -22,7 +22,7 @@ The player carries save-relay through its Rust API (`crates/runtime`, module `ap
 
 - **First start.** An alert asks for the Nextcloud server, user and an app password (Nextcloud: Settings, Security). The app password is kept only in the iOS Keychain. Not now leaves save sync off and is remembered as `relay.ask = 0` in `Documents/config.ini`. save-relay's own settings are under `Library/`, not Documents, so Files does not show them.
 - **Every start.** The game boots only after the island has synced. If save-relay cannot be reached, the alert says so and offers Retry (a push still waiting from the last game is sent first). A conflict shows both islands (device, saved time, play time) and nothing plays until one is picked. A held island names the other device and plays only on Play anyway. A refused sign-in (a revoked app password) shows the sign-in alert again with the server and user filled in; there is no Not now then.
-- **Quit and background.** The island is pushed when the game quits and when the app goes to the background, inside a background task so iOS lets it finish. A push that cannot go is sent at the next start.
+- **Quit and background.** The island is pushed when the game quits and when the app goes to the background, inside a background task so iOS lets it finish (on going to the background it runs on a worker thread, so the app stays responsive). Nothing is pushed before the game has booted. A push that cannot go, or cannot read the app password, is sent first at the next start.
 
 Not verified on a device: whether a controller can answer the alerts, whether a push on going to the background can catch the game between two writes, and the sign-in again after coming back from the background (#76).
 

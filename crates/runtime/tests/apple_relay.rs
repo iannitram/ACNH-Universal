@@ -88,7 +88,35 @@ impl Remote for Gate {
     }
 }
 
+/// The credential store, which can be made unreadable (a locked Keychain).
+struct Creds {
+    inner: MemoryStore,
+    unreadable: AtomicBool,
+}
+
+impl CredentialStore for Creds {
+    fn get(&self, account: &str) -> save_relay::Result<Option<Secret>> {
+        if self.unreadable.load(Ordering::SeqCst) {
+            return Err(save_relay::Error::Credentials(
+                "the Keychain is locked".into(),
+            ));
+        }
+        self.inner.get(account)
+    }
+    fn set(&self, account: &str, secret: &Secret) -> save_relay::Result<()> {
+        self.inner.set(account, secret)
+    }
+    fn delete(&self, account: &str) -> save_relay::Result<()> {
+        self.inner.delete(account)
+    }
+    fn kind(&self) -> &'static str {
+        "test"
+    }
+}
+
 struct FakeConnector {
+    /// The next `open` panics (a bug in the adapter).
+    panic_once: AtomicBool,
     remote: Arc<MemoryRemote>,
     accepted: Mutex<String>,
     broken: Arc<AtomicBool>,
@@ -100,6 +128,9 @@ impl Connector for FakeConnector {
         dirs: &AppDirs,
         creds: &dyn CredentialStore,
     ) -> acnh_core::Result<Option<SaveRelay>> {
+        if self.panic_once.swap(false, Ordering::SeqCst) {
+            panic!("a bug in the adapter");
+        }
         let store = LocalStore::new(dirs.clone());
         let Some(config) = store
             .load_config()
@@ -219,7 +250,8 @@ struct Fx {
     root: PathBuf,
     roots: Roots,
     remote: Arc<MemoryRemote>,
-    creds: MemoryStore,
+    creds: Creds,
+    booted: AtomicBool,
     connector: FakeConnector,
     log: Mutex<Vec<String>>,
 }
@@ -238,12 +270,17 @@ impl Fx {
         Fx {
             roots: Roots::for_data_root(&data_root),
             connector: FakeConnector {
+                panic_once: AtomicBool::new(false),
                 remote: remote.clone(),
                 accepted: Mutex::new(PASSWORD.into()),
                 broken: Arc::new(AtomicBool::new(false)),
             },
             remote,
-            creds: MemoryStore::new(),
+            creds: Creds {
+                inner: MemoryStore::new(),
+                unreadable: AtomicBool::new(false),
+            },
+            booted: AtomicBool::new(false),
             log: Mutex::new(Vec::new()),
             root,
         }
@@ -265,6 +302,7 @@ impl Fx {
             creds: &self.creds,
             connector: &self.connector,
             prompt,
+            booted: &self.booted,
             log: Box::new(|line| self.log.lock().unwrap().push(line.to_string())),
         }
     }
@@ -285,6 +323,23 @@ impl Fx {
     /// Everything in the temporary folders, as text.
     fn all_text(&self) -> String {
         text_of(&self.root)
+    }
+
+    /// save-relay's history for the island: (device, current).
+    fn history(&self) -> Vec<(String, bool)> {
+        let manifest = save_relay::manifest::Manifest::from_json(&saves::relay_manifest()).unwrap();
+        let session = save_relay::sync::Session {
+            remote: &*self.remote,
+            layout: save_relay::layout::Layout::new(save_relay::cli::DEFAULT_ROOT).unwrap(),
+            device: "ipad".into(),
+            now: 0,
+        };
+        save_relay::sync::history(&session, &manifest.id)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| (e.device.clone(), e.current))
+            .collect()
     }
 
     fn log_text(&self) -> String {
@@ -591,25 +646,25 @@ fn a_conflict_shows_both_islands_and_nothing_plays_until_one_is_picked() {
             Keep::Local => "main ipad-2",
         };
         assert_eq!(read_main(&fx.saves()), expected);
-        // The side not kept is in save-relay's history: both islands are there.
-        let manifest = save_relay::manifest::Manifest::from_json(&saves::relay_manifest()).unwrap();
-        let session = save_relay::sync::Session {
-            remote: &*fx.remote,
-            layout: save_relay::layout::Layout::new(save_relay::cli::DEFAULT_ROOT).unwrap(),
-            device: "ipad".into(),
-            now: 0,
-        };
-        let history = save_relay::sync::history(&session, &manifest.id).unwrap();
-        let devices: Vec<_> = history.entries.iter().map(|e| e.device.clone()).collect();
+        // The side not kept is in save-relay's history.
+        let history = fx.history();
+        let kept_ipad = ("ipad".to_string(), true);
+        let kept_desktop = ("desktop".to_string(), true);
         match keep {
+            // The desktop's entry stays, no longer current; this iPad's island is the current one.
             Keep::Local => {
-                assert!(devices.contains(&"desktop".to_string()), "{devices:?}");
-                assert!(history
-                    .entries
-                    .iter()
-                    .any(|e| e.current && e.device == "ipad"));
+                assert!(history.contains(&kept_ipad), "{history:?}");
+                assert!(
+                    history.contains(&("desktop".to_string(), false)),
+                    "{history:?}"
+                );
             }
-            Keep::Server => assert!(devices.contains(&"desktop".to_string()), "{devices:?}"),
+            // This iPad's island is uploaded as a history entry first; the desktop's stays current.
+            Keep::Server => {
+                assert!(history.contains(&kept_desktop), "{history:?}");
+                let ipad_entries = history.iter().filter(|(d, c)| d == "ipad" && !c).count();
+                assert!(ipad_entries >= 2, "{history:?}");
+            }
         }
     }
 }
@@ -783,4 +838,133 @@ fn a_synced_quit_pushes_the_island_and_clears_the_waiting_mark() {
     let (desktop, desktop_saves) = fx.other("desktop");
     desktop.pull(&desktop_saves, None).unwrap();
     assert_eq!(read_main(&desktop_saves), "main after-play");
+}
+
+#[test]
+fn after_game_before_the_game_has_booted_changes_nothing() {
+    let fx = Fx::new("early-push");
+    fx.set_up();
+    island(&fx.saves(), "ipad-1");
+    run(&fx, |game| game.finish());
+    fx.player(&NoPrompt).after_game();
+    let (desktop, desktop_saves) = fx.other("desktop");
+    desktop.pull(&desktop_saves, None).unwrap();
+
+    // The next start: the island is held, and the held screen waits.
+    fx.booted.store(false, Ordering::SeqCst);
+    fs::write(fx.saves().join("main.dat"), "main unsynced").unwrap();
+    run(&fx, |game| {
+        let Shown::Held(device, _) = game.shown() else {
+            panic!("expected the held screen")
+        };
+        assert_eq!(device, "desktop");
+        // The app goes to the background while the held screen is up: nothing is pushed.
+        let before = fx.history();
+        fx.player(&NoPrompt).after_game();
+        assert_eq!(fx.history(), before);
+        assert!(!fx.roots.dirs().data.join("push-waiting").exists());
+        assert!(!game.returned());
+        game.reply(Reply::Held(HeldAnswer::CheckAgain));
+        // The same screen comes back, and Play anyway still boots.
+        let Shown::Held(device, _) = game.shown() else {
+            panic!("expected the held screen again")
+        };
+        assert_eq!(device, "desktop");
+        game.reply(Reply::Held(HeldAnswer::PlayAnyway));
+        game.finish();
+    });
+    assert!(fx.log_text().contains("has not booted"));
+}
+
+#[test]
+fn a_conflict_after_play_anyway_goes_through_the_conflict_screen_and_resolves() {
+    let fx = Fx::new("anyway-conflict");
+    fx.set_up();
+    island(&fx.saves(), "ipad-1");
+    run(&fx, |game| game.finish());
+    fx.player(&NoPrompt).after_game();
+    // The desktop plays and quits (pushes), then starts again: it holds the island.
+    let (desktop, desktop_saves) = fx.other("desktop");
+    desktop.pull(&desktop_saves, None).unwrap();
+    fs::write(desktop_saves.join("main.dat"), "main desktop-2").unwrap();
+    desktop.push(&desktop_saves, None).unwrap();
+    desktop.pull(&desktop_saves, None).unwrap();
+    // And the iPad changed its own island meanwhile.
+    fs::write(fx.saves().join("main.dat"), "main ipad-2").unwrap();
+
+    fx.booted.store(false, Ordering::SeqCst);
+    run(&fx, |game| {
+        let Shown::Held(..) = game.shown() else {
+            panic!("expected the held screen")
+        };
+        game.reply(Reply::Held(HeldAnswer::PlayAnyway));
+        // Play anyway does not skip the conflict: it is asked, once, and settled.
+        let Shown::Conflict(..) = game.shown() else {
+            panic!("expected the conflict screen")
+        };
+        assert!(!game.returned());
+        game.reply(Reply::Keep(Keep::Server));
+        game.finish();
+    });
+    assert_eq!(read_main(&fx.saves()), "main desktop-2");
+}
+
+#[test]
+fn a_panic_shows_the_error_screen_and_never_boots_without_syncing() {
+    let fx = Fx::new("panic");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    fx.connector.panic_once.store(true, Ordering::SeqCst);
+    run(&fx, |game| {
+        let Shown::Blocked(Blocked::Error(_)) = game.shown() else {
+            panic!("expected the error screen")
+        };
+        assert!(!game.returned());
+        assert!(!fx.booted.load(Ordering::SeqCst));
+        game.reply(Reply::Blocked(BlockedAnswer::Retry));
+        game.finish();
+    });
+    assert!(fx.booted.load(Ordering::SeqCst));
+}
+
+#[test]
+fn not_now_leaves_a_config_ini_that_does_not_parse_exactly_as_it_was() {
+    let fx = Fx::new("bad-ini");
+    island(&fx.saves(), "v1");
+    let ini = fx.roots.data_root.join("config.ini");
+    fs::write(&ini, "a line with no equals sign\nvideo.fullscreen = 1\n").unwrap();
+    run(&fx, |game| {
+        let Shown::SignIn(_) = game.shown() else {
+            panic!("expected the sign-in form")
+        };
+        game.reply(Reply::SignIn(SignInAnswer::NotNow));
+        game.finish();
+    });
+    assert_eq!(
+        fs::read_to_string(&ini).unwrap(),
+        "a line with no equals sign\nvideo.fullscreen = 1\n"
+    );
+}
+
+#[test]
+fn a_push_that_cannot_read_the_credential_is_left_waiting() {
+    let fx = Fx::new("locked");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    fx.creds.unreadable.store(true, Ordering::SeqCst);
+    fx.player(&NoPrompt).after_game();
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    assert!(!fx.log_text().contains(PASSWORD));
+}
+
+#[test]
+fn the_sign_in_answer_never_prints_its_password() {
+    let answer = SignInAnswer::Submit {
+        server: SERVER.into(),
+        user: USER.into(),
+        password: PASSWORD.into(),
+    };
+    let shown = format!("{answer:?} {:?}", Reply::SignIn(answer.clone()));
+    assert!(!shown.contains(PASSWORD), "{shown}");
 }

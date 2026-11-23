@@ -897,7 +897,8 @@ void thread_cpu_watch() {
 // save-relay inside the player (crates/runtime, apple.rs; issue #172). The Rust half pulls the island before the game
 // boots (it returns only when the game may boot) and pushes it when the game quits or the app goes to the background.
 extern "C" void acnh_relay_before_game(const char* data_root);
-extern "C" void acnh_relay_after_game(const char* data_root);
+extern "C" void acnh_relay_after_game(const char* data_root);   // synchronous: the game has quit
+extern "C" void acnh_relay_background(const char* data_root);   // returns at once: the push runs on a worker
 
 // The Rust half's log lines go into the player's log (Documents/logs/nx.log).
 extern "C" void nx_relay_log(const char* line) { nx::log("%s", line); }
@@ -906,10 +907,14 @@ static void relay_after_game() {
     if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
 }
 
-// SDL_EVENT_WILL_ENTER_BACKGROUND arrives on the main thread and the app may be suspended as soon as the watch
-// returns: the push runs inside it (acnh_relay_after_game wraps it in beginBackgroundTaskWithExpirationHandler:).
+// The app went to the background. SDL's WILL_ENTER_BACKGROUND is UIKit's resign-active, which also fires for
+// Control Center or a notification pulled over the game, so the push waits for DID_ENTER_BACKGROUND. The watch runs
+// on the main thread, which must keep its run loop: acnh_relay_background begins the background task here
+// (beginBackgroundTaskWithExpirationHandler:), pushes on a worker thread and returns at once. It does nothing until
+// acnh_relay_before_game has returned.
 static bool background_watch(void*, SDL_Event* e) {
-    if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND) relay_after_game();
+    if (e->type == SDL_EVENT_DID_ENTER_BACKGROUND)
+        if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_background(root);
     return true;
 }
 #else

@@ -23,6 +23,7 @@ use save_relay::creds::CredentialStore;
 use save_relay::local::LocalStore;
 use save_relay::platform::AppDirs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "ios")]
@@ -83,8 +84,8 @@ pub struct SignInForm {
     pub message: Option<String>,
 }
 
-/// What the person did with the sign-in form.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the person did with the sign-in form. `Debug` hides the password.
+#[derive(Clone, PartialEq, Eq)]
 pub enum SignInAnswer {
     Submit {
         server: String,
@@ -95,6 +96,21 @@ pub enum SignInAnswer {
     NotNow,
     /// Close the form (only the sign-in-again form has no Not now).
     Cancel,
+}
+
+impl std::fmt::Debug for SignInAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignInAnswer::Submit { server, user, .. } => f
+                .debug_struct("Submit")
+                .field("server", server)
+                .field("user", user)
+                .field("password", &"***")
+                .finish(),
+            SignInAnswer::NotNow => f.write_str("NotNow"),
+            SignInAnswer::Cancel => f.write_str("Cancel"),
+        }
+    }
 }
 
 /// Why the game is not booting.
@@ -229,6 +245,9 @@ pub struct Player<'a> {
     pub creds: &'a (dyn CredentialStore + std::marker::Sync),
     pub connector: &'a dyn Connector,
     pub prompt: &'a dyn Prompt,
+    /// False until `before_game` has returned; `after_game` does nothing before that (the player
+    /// is not playing yet, and its island may be unsynced).
+    pub booted: &'a AtomicBool,
     /// One line per event, never holding a password.
     pub log: Box<dyn Fn(&str) + std::marker::Sync + 'a>,
 }
@@ -261,6 +280,27 @@ impl Player<'_> {
     /// Returns only when the game may boot: after a pull has succeeded, with save sync not set
     /// up, or after Play anyway on a held island. Every other answer comes back to the prompt.
     pub fn before_game(&self) {
+        loop {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.sync_first())) {
+                Ok(()) => break,
+                Err(_) => {
+                    // Refuse until synced: a panic never boots the game. Show it and go again;
+                    // with no prompt to show it on, stop the app rather than boot.
+                    self.log("save sync stopped by a panic");
+                    let shown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.prompt
+                            .blocked(&Blocked::Error("Save sync stopped unexpectedly.".into()))
+                    }));
+                    if shown.is_err() {
+                        std::process::abort();
+                    }
+                }
+            }
+        }
+        self.booted.store(true, Ordering::SeqCst);
+    }
+
+    fn sync_first(&self) {
         let mut resolve = None;
         let mut anyway = false;
         loop {
@@ -289,14 +329,26 @@ impl Player<'_> {
     /// Push the island: when the game quits, and when the app goes to the background. A push
     /// that does not go (offline, a conflict, any error) is left waiting for the next start.
     pub fn after_game(&self) {
+        if !self.booted.load(Ordering::SeqCst) {
+            self.log("no push yet: the game has not booted");
+            return;
+        }
         let _one_at_a_time = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let relay = match self.opened() {
             Ok(Opened::Sync(relay)) => relay,
-            Ok(_) => return,
+            Ok(Opened::Off) => return,
+            // Set up, but the password cannot be read (the credential store is out of reach, or
+            // the item is gone): the push waits for the next start, which sends it first.
+            Ok(Opened::NeedsSignIn { .. }) => {
+                self.set_waiting(true);
+                self.log("the push is waiting: the app password cannot be read");
+                return;
+            }
             Err(error) => {
                 let message = self.say(&error, None);
+                self.set_waiting(true);
                 self.log(&format!(
-                    "push skipped, save sync could not be opened: {message}"
+                    "the push is waiting, save sync could not be opened: {message}"
                 ));
                 return;
             }
@@ -323,10 +375,9 @@ impl Player<'_> {
         // A push still waiting from the last game goes first; then the pull.
         let result = if waiting {
             relay.push(&dir, *resolve)
-        } else if *anyway {
-            relay.pull_anyway(&dir)
         } else {
-            relay.pull(&dir, *resolve)
+            // After Play anyway a conflict can still come: its answer goes with `anyway`.
+            relay.pull_with(&dir, *resolve, *anyway)
         };
         *resolve = None;
         match decide(&result) {
@@ -499,9 +550,23 @@ impl Player<'_> {
 
     /// `relay.ask = 0` in config.ini: Not now is remembered.
     fn remember_not_now(&self) {
-        let mut ini = self.ini();
-        ini.set("relay.ask", "0");
         let path = self.roots.config_ini();
+        // A settings file that cannot be read or parsed is left exactly as it is.
+        let mut ini = match std::fs::read_to_string(&path) {
+            Ok(text) => match Config::parse(&text) {
+                Ok(ini) => ini,
+                Err(_) => {
+                    self.log("config.ini does not parse: Not now is not remembered");
+                    return;
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(_) => {
+                self.log("config.ini cannot be read: Not now is not remembered");
+                return;
+            }
+        };
+        ini.set("relay.ask", "0");
         let partial = path.with_extension("ini.partial");
         if std::fs::create_dir_all(&self.roots.data_root).is_ok()
             && std::fs::write(&partial, ini.to_text()).is_ok()
