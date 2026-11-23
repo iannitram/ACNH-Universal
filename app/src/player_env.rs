@@ -26,8 +26,8 @@ fn own_game(launcher: &Path) -> Option<PathBuf> {
 ///
 /// - Every OS: `NX_DATA_ROOT` is the data root.
 /// - Mac: the data root and `logs/` are created; `NX_LOG` is `<data root>/logs/nx.log`;
-///   `NX_GAME_ROOT` is the app's own `Contents/Resources/game` when it holds one (a local
-///   prepare, from an older setup, may name another).
+///   `NX_GAME_ROOT` is the app's own `Contents/Resources/game` when it holds one; it wins over
+///   a local prepare on the same Mac.
 /// - Other OSes: `NX_GAME_ROOT` only when a local prepare names one, as before.
 pub fn player_setup(builds: &BuildActions, launcher: &Path) -> Result<PlayerSetup> {
     let root = builds.dirs.data_root();
@@ -95,18 +95,47 @@ mod tests {
         let data = root
             .path()
             .join("home/Library/Application Support/ACNH-Universal");
-        assert_eq!(value(&setup.env, "NX_DATA_ROOT"), data.to_str());
+        // Compare as paths: on a Windows runner the joined segments keep their own separators.
+        let path = |key| value(&setup.env, key).map(std::path::PathBuf::from);
+        assert_eq!(path("NX_DATA_ROOT"), Some(data.clone()));
+        assert_eq!(path("NX_LOG"), Some(data.join("logs/nx.log")));
         assert_eq!(
-            value(&setup.env, "NX_LOG"),
-            data.join("logs/nx.log").to_str()
-        );
-        assert_eq!(
-            value(&setup.env, "NX_GAME_ROOT"),
-            root.path()
-                .join("ACNH-Universal.app/Contents/Resources/game")
-                .to_str()
+            path("NX_GAME_ROOT"),
+            Some(
+                root.path()
+                    .join("ACNH-Universal.app/Contents/Resources/game")
+            )
         );
         assert!(data.is_dir() && data.join("logs").is_dir());
+        assert!(!setup.build_missing);
+    }
+
+    #[test]
+    fn the_contained_app_wins_over_a_local_prepare_on_the_hub() {
+        let root = tempfile::tempdir().unwrap();
+        let (builds, launcher) = setup(root.path(), true, true);
+        // The hub that prepared this app: a game folder, a prepare and an installed player.
+        std::fs::create_dir_all(&builds.dirs.config).unwrap();
+        std::fs::write(
+            builds.dirs.config.join("launcher.ini"),
+            "game_folder=/games/acnh\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(builds.dirs.data.join("prepare/analysis")).unwrap();
+        std::fs::write(builds.dirs.data.join("prepare/analysis/main.bin"), b"").unwrap();
+        let installed = acnh_core::assemble::player(Os::Mac, Path::new(""), &builds.dirs.install());
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, b"").unwrap();
+
+        let setup = player_setup(&builds, &launcher).unwrap();
+        assert_eq!(setup.program, launcher.with_file_name("acnh"));
+        assert_eq!(
+            value(&setup.env, "NX_GAME_ROOT").map(PathBuf::from),
+            Some(
+                root.path()
+                    .join("ACNH-Universal.app/Contents/Resources/game")
+            )
+        );
         assert!(!setup.build_missing);
     }
 
