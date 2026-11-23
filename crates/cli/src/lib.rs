@@ -377,7 +377,7 @@ fn build(options: &Options) -> Result<i32> {
 fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let os = cx.os;
     let vars = Vars::from_lookup(os, cx.var)?;
-    let dirs = AppDirs::new(&vars);
+    let dirs = AppDirs::for_os(os, &vars);
     let root = dirs.data_root();
 
     if let Some(id) = options.profile.as_deref() {
@@ -392,13 +392,14 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
 
     // On the Mac the player is beside this executable in the one contained app.
     let installed;
+    let mut program = None;
     let game: &dyn Game = match cx.game {
         Some(game) => game,
         None => {
             let launcher = std::env::current_exe().unwrap_or_default();
-            installed = Player {
-                program: assemble::player(os, &launcher, &dirs.install()),
-            };
+            let path = assemble::player(os, &launcher, &dirs.install());
+            program = Some(path.clone());
+            installed = Player { program: path };
             &installed
         }
     };
@@ -413,7 +414,24 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
 
     let save_dir = saves::save_dir(&root);
     let backups = saves::backups_dir(&root);
-    let env = vec![("NX_DATA_ROOT".to_owned(), root.display().to_string())];
+    let mut env = vec![("NX_DATA_ROOT".to_owned(), root.display().to_string())];
+    if os == Os::Mac {
+        // As the app does (#171): the player opens its log with fopen and makes no folder.
+        std::fs::create_dir_all(dirs.logs())?;
+        env.push((
+            "NX_LOG".to_owned(),
+            dirs.logs().join("nx.log").display().to_string(),
+        ));
+        if let Some(game_root) = program
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .map(|contents| contents.join("Resources/game"))
+            .filter(|game_root| game_root.join("analysis/main.bin").is_file())
+        {
+            env.push(("NX_GAME_ROOT".to_owned(), game_root.display().to_string()));
+        }
+    }
     let guard = Guard {
         inner: relay,
         keep: options.keep,

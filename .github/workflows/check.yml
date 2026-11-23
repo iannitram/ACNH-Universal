@@ -258,11 +258,13 @@ jobs:
             [ "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")" = 15.0 ]
             [ "$(lipo -archs "$app/ACNH")" = arm64 ]
           done
+      - name: Package the Mac app (fake app, empty decoys)
+        run: bash tests/package_mac_test.sh
       - name: Package the iOS device stub
         run: |
-          out="$(mktemp -d)"
+          out="$(mktemp -d "$RUNNER_TEMP/acnh-ios-package.XXXXXXXX")"
           trap 'rm -rf "$out"' EXIT
-          tools/package_ios.sh ci private/ios/build-iphoneos "$out"
+          tools/package_ios.sh ci private/ios/build-iphoneos --no-game "$out"
           unzip -q "$out/ACNH-Universal-ci.ipa" -d "$out/unpacked"
           app="$out/unpacked/Payload/ACNH.app"
           exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")"
@@ -272,28 +274,31 @@ jobs:
           codesign --verify --ignore-resources "$app/$exe"
           codesign -d --entitlements :- "$app/$exe" > "$out/entitlements" 2>/dev/null
           [ ! -s "$out/entitlements" ]
-          if tools/package_ios.sh ci private/ios/build-iphonesimulator "$out"; then exit 1; fi
-          if tools/package_ios.sh ci private/ios/build-iphoneos private/ios/package-test; then exit 1; fi
+          [ "$(plutil -extract UIFileSharingEnabled raw "$app/Info.plist")" = true ]
+          if tools/package_ios.sh ci private/ios/build-iphonesimulator --no-game "$out"; then exit 1; fi
+          if tools/package_ios.sh ci private/ios/build-iphoneos --no-game private/ios/package-test; then exit 1; fi
           ln -s "$PWD/private" "$out/inside"
-          if tools/package_ios.sh ci private/ios/build-iphoneos "$out/inside/package-test"; then exit 1; fi
+          if tools/package_ios.sh ci private/ios/build-iphoneos --no-game "$out/inside/package-test"; then exit 1; fi
           mkdir "$out/ACNH-Universal-directory.ipa"
-          if tools/package_ios.sh directory private/ios/build-iphoneos "$out"; then exit 1; fi
+          if tools/package_ios.sh directory private/ios/build-iphoneos --no-game "$out"; then exit 1; fi
           ln -s "$PWD/private" "$out/ACNH-Universal-link.ipa"
-          if tools/package_ios.sh link private/ios/build-iphoneos "$out"; then exit 1; fi
+          if tools/package_ios.sh link private/ios/build-iphoneos --no-game "$out"; then exit 1; fi
           git init -q "$out/repo"
-          if tools/package_ios.sh ci private/ios/build-iphoneos "$out/repo/new"; then exit 1; fi
-          if tools/package_ios.sh ci private/ios/build-iphoneos "$out/repo/.git/new"; then exit 1; fi
+          if tools/package_ios.sh ci private/ios/build-iphoneos --no-game "$out/repo/new"; then exit 1; fi
+          if tools/package_ios.sh ci private/ios/build-iphoneos --no-game "$out/repo/.git/new"; then exit 1; fi
           mkdir "$out/symlink-build"
           ln -s "$PWD/private/ios/build-iphoneos/ACNH.app" "$out/symlink-build/ACNH.app"
-          if tools/package_ios.sh ci "$out/symlink-build" "$out"; then exit 1; fi
+          if tools/package_ios.sh ci "$out/symlink-build" --no-game "$out"; then exit 1; fi
           cp -R private/ios/build-iphoneos/ACNH.app "$out/symlink-build/real.app"
           rm "$out/symlink-build/ACNH.app"
           mv "$out/symlink-build/real.app" "$out/symlink-build/ACNH.app"
           mv "$out/symlink-build/ACNH.app/Info.plist" "$out/info.plist"
           ln -s "$out/info.plist" "$out/symlink-build/ACNH.app/Info.plist"
-          if tools/package_ios.sh ci "$out/symlink-build" "$out"; then exit 1; fi
+          if tools/package_ios.sh ci "$out/symlink-build" --no-game "$out"; then exit 1; fi
           rm "$out/symlink-build/ACNH.app/Info.plist"
           mv "$out/info.plist" "$out/symlink-build/ACNH.app/Info.plist"
           mv "$out/symlink-build/ACNH.app/$exe" "$out/executable"
           ln -s "$out/executable" "$out/symlink-build/ACNH.app/$exe"
-          if tools/package_ios.sh ci "$out/symlink-build" "$out"; then exit 1; fi
+          if tools/package_ios.sh ci "$out/symlink-build" --no-game "$out"; then exit 1; fi
+      - name: Package script test (fake app, decoy game, refusals, ZIP64)
+        run: bash tests/package_ios_test.sh

@@ -32,14 +32,11 @@ fn session(picture: PathBuf) -> acnh_core::Result<Session> {
     vm.home = vars.home.clone();
 
     let backups = saves::backups_dir(&root);
-    let mut env = vec![("NX_DATA_ROOT".to_string(), root.display().to_string())];
     let builds = acnh_app::build_actions::BuildActions { dirs, os };
     let launcher = std::env::current_exe()?;
-    let (program, game_root) = builds.launch_location(&launcher);
-    if let Some(game_root) = game_root {
-        env.push(("NX_GAME_ROOT".into(), game_root.display().to_string()));
-    }
-    if !builds.installed(&program) {
+    let setup = acnh_app::player_env::player_setup(&builds, &launcher)?;
+    let (program, env) = (setup.program, setup.env);
+    if setup.build_missing {
         vm.set_build_missing(builds.game_folder().ok().flatten().is_some());
     }
     let runner = Runner {
