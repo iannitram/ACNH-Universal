@@ -177,6 +177,11 @@ bool init() {
     auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(plat::vulkan_get_instance_proc_addr());
     if (!gipa) {
         log("nvn/vk: no Vulkan loader");
+        // Nothing would ever be drawn: the game ran on unseen, its sound playing (Discord: a driver updated without a
+        // restart). Said and ended instead.
+        if (!plat::headless())
+            fatal("Vulkan, which the game draws with, could not be loaded on this computer (vulkan-1.dll / libvulkan "
+                  "not found). Update or reinstall your graphics card's driver, restart the computer, then try again.");
         return false;
     }
     for (size_t k = 0; k < g_entry_count; k++) *g_entries[k].pfn = gipa(nullptr, g_entries[k].name);
@@ -375,6 +380,11 @@ bool init() {
             p_vkGetPhysicalDeviceProperties2(g_physical, &p2);
         }
         g_oob_not_zero = drv.driverID == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
+        // The driver's own name and build ("Mesa 26.2.5 (git-...)" for Turnip): a report then says which custom
+        // driver was in use (#74), not only the GPU.
+        if (drv.driverName[0] || drv.driverInfo[0])
+            log("nvn/vk: driver %.*s, %.*s", int(sizeof drv.driverName), drv.driverName, int(sizeof drv.driverInfo),
+                drv.driverInfo);
         // Intel encodes its Windows driver version as major << 14 | minor: 101.2115 is 0x194843. The 101.2xxx branch
         // is the legacy one (Gen9, Skylake to Comet Lake); Ice Lake, Iris Xe and Arc drivers are 101.4xxx and later.
         const uint32_t dv = dprops.driverVersion, major = dv >> 14, minor = dv & 0x3fff;
@@ -548,8 +558,15 @@ bool make_surface() {
         for (VkFormat f : {VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2R10G10B10_UNORM_PACK32})
             if (want == HdrOutput::Hdr10 && g_hdr == HdrOutput::Off && pair(f, VK_COLOR_SPACE_HDR10_ST2084_EXT))
                 g_sc_format = f, g_sc_color_space = VK_COLOR_SPACE_HDR10_ST2084_EXT, g_hdr = want;
-        if (g_hdr == HdrOutput::Off) log("nvn/vk: HDR asked, but the surface offers no %s format: SDR",
-                                         want == HdrOutput::ScRgb ? "scRGB" : "HDR10");
+        // Decided on the first surface: before the game's textures are made (they need the device); shaders read
+        // earlier keep the SPIR-V they were read with (shader_spirv)
+        static bool first = true;
+        if (g_hdr == HdrOutput::Off) {
+            log("nvn/vk: HDR asked, but the surface offers no %s format: SDR%s", want == HdrOutput::ScRgb ? "scRGB" : "HDR10",
+                first ? ", and HDR off until the game restarts" : "");
+            if (first) hdr_unavailable();
+        }
+        first = false;
     }
     log("nvn/vk: surface: %u formats offered, swapchain format %d, colour space %d%s", n, int(g_sc_format),
         int(g_sc_color_space), g_hdr == HdrOutput::ScRgb ? " (HDR scRGB)" : g_hdr == HdrOutput::Hdr10 ? " (HDR10)" : "");
@@ -1303,6 +1320,13 @@ void present_image(const int32_t* crop, Record&& record) {
             VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
             VkImageSubresourceRange rr{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             p_vkCmdClearColorImage(g_cb, dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rr);
+            // The blit below writes the same image: without a barrier the two transfer writes may overlap, and
+            // AMD's clear landed over parts of the picture (#71, black stair-stepped blocks at the top on 16:10).
+            VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            p_vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0,
+                                   nullptr, 0, nullptr);
         }
         plat::set_picture_box(float(bx) / tw, float(by) / th, float(bw) / tw, float(bh) / th);  // mouse clicks (hle_hid.cpp)
         p_vkCmdBlitImage(g_cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.image,

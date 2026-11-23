@@ -36,11 +36,17 @@ bool ui_visible();
 bool ui_text_field();
 void ui_toggle();
 void ui_open_online();  // the settings screen, on its Online page: from any thread
+void ui_must_quit();    // any thread: the save was swapped under the game; the settings screen opens and only offers to quit
 // Any thread: a short message over the game for a few seconds (the screenshot key: "Screenshot saved: <file>").
 void ui_notice(const std::string& text);
 void ui_screenshot_saved(const std::string& file);
 // Touch screens (Android): one finger as the mouse, in pixels of the presented image. Returns true when the menu
 // took the touch (it is open): the game must not see it.
 bool ui_touch(float x, float y, bool down);
+// The phone's system keyboard (Android: platform_android.cpp, TextInput.java), any thread, while ui_text_field(): text
+// typed at the field's cursor (UTF-8), and the keys that edit it (each pressed and released).
+enum class TextKey { Backspace, Delete, Enter };
+void ui_text_input(const char* utf8);
+void ui_text_key(TextKey key);
 
 }  // namespace nx::ui

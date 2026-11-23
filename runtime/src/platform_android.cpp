@@ -48,10 +48,12 @@
 #include <nx/game.h>
 #include <nx/runtime.h>
 
+#include "game_clock.h"
 #include "kernel.h"
 #include "platform.h"
 #include "config.h"
 #include "platform_android.h"
+#include "ui/ui.h"
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
@@ -72,6 +74,27 @@ std::string g_root;
 std::atomic<ANativeWindow*> g_window{nullptr};
 std::atomic<uint64_t> g_window_gen{0};  // bumped for every new window
 std::atomic<bool> g_visible{false};
+
+// This thread's JNIEnv: attached for the scope when it was not already, and detached again at its end. A thread that
+// ends while attached aborts the app (ART: "Native thread exited without calling DetachCurrentThread"), which is what
+// the short-lived threads of Nextendo's sign-in and requests are.
+struct JniScope {
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    JniScope() {
+        if (!g_app) return;
+        JavaVM* vm = g_app->activity->vm;
+        if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) return;
+        env = nullptr;
+        if (vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) attached = true;
+        else env = nullptr;
+    }
+    ~JniScope() {
+        if (attached) g_app->activity->vm->DetachCurrentThread();
+    }
+    JniScope(const JniScope&) = delete;
+    JniScope& operator=(const JniScope&) = delete;
+};
 }  // namespace
 
 // ---- memory ---------------------------------------------------------------------------------------------------
@@ -149,9 +172,10 @@ void restart_app() {
     exit_process(0);
 }
 
-void open_url_in_app(const std::string& url, const char* package) {
-    JNIEnv* env = nullptr;
-    if (!g_app || g_app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
+bool open_url_in_app(const std::string& url, const char* package) {
+    JniScope jni;  // Nextendo's sign-in thread opens the browser and then ends
+    JNIEnv* env = jni.env;
+    if (!env) return false;
     jobject act = g_app->activity->clazz;
     jclass actc = env->GetObjectClass(act);
     jclass uric = env->FindClass("android/net/Uri");
@@ -171,11 +195,146 @@ void open_url_in_app(const std::string& url, const char* package) {
         env->CallVoidMethod(act, start, intent);
         if (!env->ExceptionCheck()) {
             nx::log("app: opened %s%s%s", url.c_str(), pkg ? " in " : "", pkg ? pkg : "");
-            return;
+            return true;
         }
         env->ExceptionClear();
         if (!pkg) break;
     }
+    nx::log("app: nothing opens %s", url.c_str());
+    return false;
+}
+
+bool open_sign_in(const std::string& url) {
+    {
+        JniScope jni;  // Nextendo's sign-in thread, which then waits for the redirect
+        JNIEnv* env = jni.env;
+        if (!env) return false;
+        jobject act = g_app->activity->clazz;
+        jclass actc = env->GetObjectClass(act);
+        jclass ic = env->FindClass("android/content/Intent");
+        if (!env->ExceptionCheck() && ic) {
+            jobject intent = env->NewObject(ic, env->GetMethodID(ic, "<init>", "()V"));
+            jobject pkg = env->CallObjectMethod(act, env->GetMethodID(actc, "getPackageName", "()Ljava/lang/String;"));
+            env->CallObjectMethod(intent, env->GetMethodID(ic, "setClassName", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
+                                  pkg, env->NewStringUTF("io.github.acnhrecomp.SignIn"));
+            env->CallObjectMethod(intent, env->GetMethodID(ic, "putExtra", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
+                                  env->NewStringUTF("url"), env->NewStringUTF(url.c_str()));
+            // No FLAG_ACTIVITY_NEW_TASK: the screen goes on top of the game, in its task, and closing it returns there.
+            if (!env->ExceptionCheck())
+                env->CallVoidMethod(act, env->GetMethodID(actc, "startActivity", "(Landroid/content/Intent;)V"), intent);
+            if (!env->ExceptionCheck()) {
+                nx::log("app: Nextendo's sign-in page opened in the app");
+                return true;
+            }
+        }
+        env->ExceptionClear();
+    }
+    nx::log("app: the sign-in screen did not start: the browser instead");
+    return open_url_in_app(url, nullptr);
+}
+
+// nextendo_http.cpp on Android, where there is no curl: java.net.HttpURLConnection, so Android's own TLS and its
+// certificate store check nextendo.network. Redirects are followed (same protocol); errors read the error stream.
+bool https_request(const std::string& method, const std::string& url,
+                   const std::vector<std::pair<std::string, std::string>>& headers, const std::string& body,
+                   int& status, std::string& out, std::string& error) {
+    status = 0, out.clear(), error.clear();
+    JniScope jni;
+    JNIEnv* env = jni.env;
+    if (!env) {
+        error = "no Java VM";
+        return false;
+    }
+    std::vector<jobject> refs;  // local references, released at the end (a request can run on a long-lived thread)
+    auto keep = [&](jobject o) { if (o) refs.push_back(o); return o; };
+    auto failed = [&](const char* what) {
+        if (!env->ExceptionCheck()) return false;
+        jthrowable t = env->ExceptionOccurred();
+        env->ExceptionClear();
+        error = what;
+        if (t) {
+            jclass tc = env->GetObjectClass(t);
+            if (jstring m = static_cast<jstring>(env->CallObjectMethod(t, env->GetMethodID(tc, "toString", "()Ljava/lang/String;")))) {
+                const char* c = env->GetStringUTFChars(m, nullptr);
+                if (c) error += std::string(": ") + c, env->ReleaseStringUTFChars(m, c);
+                env->DeleteLocalRef(m);
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(tc), env->DeleteLocalRef(t);
+        }
+        return true;
+    };
+    auto done = [&](bool ok) {
+        for (jobject o : refs) env->DeleteLocalRef(o);
+        return ok;
+    };
+    jclass urlc = static_cast<jclass>(keep(env->FindClass("java/net/URL")));
+    jclass connc = static_cast<jclass>(keep(env->FindClass("java/net/HttpURLConnection")));
+    jclass osc = static_cast<jclass>(keep(env->FindClass("java/io/OutputStream")));
+    jclass isc = static_cast<jclass>(keep(env->FindClass("java/io/InputStream")));
+    if (failed("Java classes") || !urlc || !connc || !osc || !isc) return done(false);
+    jobject u = keep(env->NewObject(urlc, env->GetMethodID(urlc, "<init>", "(Ljava/lang/String;)V"),
+                                    keep(env->NewStringUTF(url.c_str()))));
+    if (failed("bad URL")) return done(false);
+    jobject conn = keep(env->CallObjectMethod(u, env->GetMethodID(urlc, "openConnection", "()Ljava/net/URLConnection;")));
+    if (failed("could not open the connection") || !conn) return done(false);
+    // Every call that may throw is checked before the next one: JNI must not be called with an exception pending.
+    env->CallVoidMethod(conn, env->GetMethodID(connc, "setRequestMethod", "(Ljava/lang/String;)V"),
+                        keep(env->NewStringUTF(method.c_str())));
+    if (failed("bad method")) return done(false);
+    env->CallVoidMethod(conn, env->GetMethodID(connc, "setConnectTimeout", "(I)V"), jint(15000));  // as curl's
+    env->CallVoidMethod(conn, env->GetMethodID(connc, "setReadTimeout", "(I)V"), jint(45000));
+    env->CallVoidMethod(conn, env->GetMethodID(connc, "setInstanceFollowRedirects", "(Z)V"), jboolean(JNI_TRUE));
+    env->CallVoidMethod(conn, env->GetMethodID(connc, "setUseCaches", "(Z)V"), jboolean(JNI_FALSE));
+    if (failed("could not set up the connection")) return done(false);
+    jmethodID setp = env->GetMethodID(connc, "setRequestProperty", "(Ljava/lang/String;Ljava/lang/String;)V");
+    for (const auto& [k, v] : headers) {
+        env->CallVoidMethod(conn, setp, keep(env->NewStringUTF(k.c_str())), keep(env->NewStringUTF(v.c_str())));
+        if (failed("bad request header")) return done(false);
+    }
+    if (!body.empty()) {
+        env->CallVoidMethod(conn, env->GetMethodID(connc, "setDoOutput", "(Z)V"), jboolean(JNI_TRUE));
+        jobject os = keep(env->CallObjectMethod(conn, env->GetMethodID(connc, "getOutputStream", "()Ljava/io/OutputStream;")));
+        if (failed("could not connect") || !os) return done(false);
+        jbyteArray b = static_cast<jbyteArray>(keep(env->NewByteArray(jsize(body.size()))));
+        if (failed("out of memory") || !b) return done(false);
+        env->SetByteArrayRegion(b, 0, jsize(body.size()), reinterpret_cast<const jbyte*>(body.data()));
+        env->CallVoidMethod(os, env->GetMethodID(osc, "write", "([B)V"), b);
+        if (failed("could not send the request")) return done(false);
+        env->CallVoidMethod(os, env->GetMethodID(osc, "close", "()V"));
+        if (failed("could not send the request")) return done(false);
+    }
+    status = env->CallIntMethod(conn, env->GetMethodID(connc, "getResponseCode", "()I"));
+    if (failed("no response") || status <= 0) {  // -1: not a valid HTTP response
+        if (status <= 0 && error.empty()) error = "not a valid HTTP response";
+        status = 0;
+        return done(false);
+    }
+    jobject in = keep(env->CallObjectMethod(conn, env->GetMethodID(connc, status >= 400 ? "getErrorStream" : "getInputStream",
+                                                                    "()Ljava/io/InputStream;")));
+    if (env->ExceptionCheck()) env->ExceptionClear(), in = nullptr;  // no body (a 204, or an error without one)
+    if (in) {
+        jbyteArray buf = static_cast<jbyteArray>(keep(env->NewByteArray(16384)));
+        if (failed("out of memory") || !buf) return done(false);
+        jmethodID rd = env->GetMethodID(isc, "read", "([B)I");
+        for (;;) {
+            const jint n = env->CallIntMethod(in, rd, buf);
+            if (failed("the response was cut off")) return done(false);
+            if (n < 0) break;
+            const size_t at = out.size();
+            out.resize(at + size_t(n));
+            env->GetByteArrayRegion(buf, 0, n, reinterpret_cast<jbyte*>(out.data() + at));
+            if (out.size() > (16u << 20)) {  // the account API's answers are small
+                error = "response too large";
+                break;
+            }
+        }
+        env->CallVoidMethod(in, env->GetMethodID(isc, "close", "()V"));
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    env->CallVoidMethod(conn, env->GetMethodID(connc, "disconnect", "()V"));
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return done(error.empty());
 }
 
 void sleep_ns(int64_t ns) {
@@ -380,12 +539,24 @@ bool copy_if_changed(const std::string& src, const std::string& dst, std::string
 }
 }  // namespace
 
+// The folder whose game this process loaded (Home.java has it loaded before the game's activity starts), or "".
+std::string loaded_game_folder() {
+    std::lock_guard lk(g_game_mx);
+    return g_game_lib ? g_game_from : std::string();
+}
+
 std::string load_game(const std::string& folder, const std::string& own_dir) {
 #ifndef NX_GAME_DYNAMIC
     return "";  // linked in (NX_ANDROID_GAME_IN_APP)
 #endif
     std::lock_guard lk(g_game_mx);
-    if (g_game_lib) return g_game_from == folder ? "" : "restart";  // one game library per process
+    // One game library per process. The same folder may come spelled another way (/sdcard, /storage/emulated/0):
+    // compared as real paths, else the app asked to restart for the folder it already had.
+    auto same_folder = [](const std::string& a, const std::string& b) {
+        std::error_code ec;
+        return a == b || std::filesystem::equivalent(a, b, ec);  // same device and inode; false when one is missing
+    };
+    if (g_game_lib) return same_folder(g_game_from, folder) ? "" : "restart";
     std::string err, lib = own_dir + "/game/" + game_lib_name();
     // the game folder ACNHRecomp-Importer prepares: game/android-arm64/; one tools/android_install.sh filled: its top
     std::string src = folder + "/game/android-arm64/" + game_lib_name();
@@ -580,13 +751,22 @@ float default_render_scale() {
             props(pd, &p);
             std::string name = p.deviceName;
             int adreno = 0, mali = 0;
-            std::sscanf(name.c_str() + (name.find("Adreno") != std::string::npos ? name.find("Adreno") : name.size()),
-                        "Adreno (TM) %d", &adreno);
+            // "Adreno (TM) 740" (the phone's driver), "Turnip Adreno (TM) 740" or "Adreno 7c+ Gen 3" (Turnip's names)
+            if (size_t a = name.find("Adreno"); a != std::string::npos) {
+                const char* c = name.c_str() + a + 6;
+                while (*c == ' ') c++;
+                if (std::strncmp(c, "(TM)", 4) == 0) c += 4;
+                std::sscanf(c, "%d", &adreno);
+            }
             if (auto m = name.find("Mali-G"); m != std::string::npos) std::sscanf(name.c_str() + m, "Mali-G%d", &mali);
-            if (adreno >= 700 || mali >= 710 || name.find("Immortalis") != std::string::npos ||
-                name.find("Xclipse") != std::string::npos)
+            // Names that aren't a three-digit model: Adreno "7c+ Gen 3" / "8cx" (the compute parts, about a 6xx),
+            // read as 7 or 8; Arm's 2025 Mali-G1 (-Ultra: high end, -Premium / -Pro: mid), read as 1.
+            const bool g1 = name.find("Mali-G1-") != std::string::npos || name.find("Mali-G1 ") != std::string::npos;
+            const bool adreno_compute = adreno > 0 && adreno < 100;
+            if (adreno >= 700 || (mali >= 710 && !g1) || (g1 && name.find("Ultra") != std::string::npos) ||
+                name.find("Immortalis") != std::string::npos || name.find("Xclipse") != std::string::npos)
                 s = 1.0f;
-            else if (adreno >= 610 || mali >= 76)
+            else if (adreno >= 610 || adreno_compute || mali >= 76 || g1)
                 s = 900.0f / 1080;  // Adreno 650 at 900 rows: 27 ms of GPU a frame, 66 C; 1080 rows needed 35 ms
             nx::log("gpu: %s -> default render scale %.2f", p.deviceName, s);
         }
@@ -759,11 +939,47 @@ void* load_custom_driver(const std::string& so) {
     return nullptr;
 }
 
+// Whether a Vulkan driver finds a GPU: a throwaway instance and its physical devices. Turnip loads on an Adreno it
+// doesn't support yet (the 710, 720, 722 and 732 with Mesa 26.2.5) and then lists none: the game ran with nothing
+// drawn, sound only ("no GPU" in the log).
+bool driver_finds_gpu(void* gipa_ptr) {
+    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(gipa_ptr);
+    auto create = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));
+    if (!create) return false;
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ci.pApplicationInfo = &app;
+    VkInstance inst = VK_NULL_HANDLE;
+    if (create(&ci, nullptr, &inst) != VK_SUCCESS || !inst) return false;
+    uint32_t n = 0;
+    if (auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(inst, "vkEnumeratePhysicalDevices")))
+        enumerate(inst, &n, nullptr);
+    if (auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(gipa(inst, "vkDestroyInstance"))) destroy(inst, nullptr);
+    return n > 0;
+}
+
 void* load_vulkan() {
     std::string pick = std::getenv("NX_GPU_DRIVER") ? std::getenv("NX_GPU_DRIVER") : nx::config_get("video.gpu_driver", "auto");
     char vk[PROP_VALUE_MAX] = {};
     __system_property_get("ro.hardware.vulkan", vk);
     const std::string turnip = g_native_lib_dir + "/libvulkan_freedreno.so";
+    if (pick == "custom") {
+        // A driver the player chose (issue #47): the first .so in <game folder>/drivers/, e.g. a newer Turnip build's
+        // libvulkan_freedreno.so. Shared storage cannot hold code that runs, so it is copied into the app's own
+        // storage first and loaded from there through libadrenotools, the way the bundled Turnip is. Adreno only.
+        std::string so = custom_driver_file();
+        if (so.empty())
+            nx::log("vulkan: video.gpu_driver = custom, but %s/drivers/ has no .so: the default driver", g_root.c_str());
+        else if (std::strcmp(vk, "adreno") != 0)
+            nx::log("vulkan: a custom driver needs an Adreno GPU (this one is \"%s\"): the phone's driver", vk);
+        else if (void* gipa = load_custom_driver(so)) {
+            if (driver_finds_gpu(gipa)) return gipa;
+            nx::log("vulkan: the custom driver %s finds no GPU: the default driver", so.c_str());
+        }
+        pick = "auto";
+    }
+    // After the custom driver: one that can't be used falls back here, and an Adreno 8xx must not get the bundled Turnip
     if (pick == "auto" && std::strcmp(vk, "adreno") == 0) {
         // Adreno 8xx (Snapdragon 8 Elite and newer): the Turnip in the APK draws only coloured noise there (Adreno 830
         // and 840 players), while the phone's own driver is Vulkan 1.4 and draws the game, with framebuffer
@@ -775,19 +991,6 @@ void* load_vulkan() {
             setenv("NX_UBWC_FLAGS", "0", 0);
             setenv("NX_ZERO_COPY", "0", 0);
         }
-    }
-    if (pick == "custom") {
-        // A driver the player chose (issue #47): the first .so in <game folder>/drivers/, e.g. a newer Turnip build's
-        // libvulkan_freedreno.so. Shared storage cannot hold code that runs, so it is copied into the app's own
-        // storage first and loaded from there through libadrenotools, the way the bundled Turnip is. Adreno only.
-        std::string so = custom_driver_file();
-        if (so.empty())
-            nx::log("vulkan: video.gpu_driver = custom, but %s/drivers/ has no .so: the default driver", g_root.c_str());
-        else if (std::strcmp(vk, "adreno") != 0)
-            nx::log("vulkan: a custom driver needs an Adreno GPU (this one is \"%s\"): the phone's driver", vk);
-        else if (void* gipa = load_custom_driver(so))
-            return gipa;
-        pick = "auto";
     }
     if (pick != "system" && std::strcmp(vk, "adreno") == 0 && !g_native_lib_dir.empty() && access(turnip.c_str(), R_OK) == 0) {
         // Binning on (Turnip's default): the main pass and the whole frame took much less GPU time with it on the S20
@@ -801,11 +1004,16 @@ void* load_vulkan() {
         if (void* h = adrenotools_open_libvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, tmp.c_str(), libs.c_str(), libs.c_str(),
                                                  "libvulkan_freedreno.so", nullptr, nullptr)) {
             if (void* gipa = dlsym(h, "vkGetInstanceProcAddr")) {
-                nx::log("vulkan: Turnip (Mesa) through libadrenotools, instead of the phone's Adreno driver");
-                return gipa;
+                if (driver_finds_gpu(gipa)) {
+                    nx::log("vulkan: Turnip (Mesa) through libadrenotools, instead of the phone's Adreno driver");
+                    return gipa;
+                }
+                nx::log("vulkan: Turnip finds no GPU (Adreno %d, not supported by it yet): the phone's driver",
+                        system_adreno_model(dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL)));
             }
+        } else {
+            nx::log("vulkan: Turnip could not be loaded (%s): the phone's driver", dlerror());
         }
-        nx::log("vulkan: Turnip could not be loaded (%s): the phone's driver", dlerror());
     }
     void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
     return lib ? dlsym(lib, "vkGetInstanceProcAddr") : nullptr;
@@ -826,7 +1034,13 @@ int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface
 
 // ---- settings screen hooks (platform.h): the screen is not built for this platform yet (ui_stub.cpp) ----
 void set_fullscreen(bool) {}
-int display_refresh_hz() { return 60; }
+// The panel's current refresh rate (Display.getRefreshRate), read every second by android_main's loop (a thread
+// attached to Java for good, read_refresh_rate below): phones switch between 60, 90 and 120 Hz. It was a fixed 60, so on
+// a 120 Hz screen a 30 fps frame was shown for 2 refreshes instead of 4 (nvn_vk.cpp's repeats): 60 fps where the game
+// was light enough, interiors running twice as fast (Discord, 0.10.0). The frame's threads only load it.
+std::atomic<int> g_refresh_hz{60};
+int display_refresh_hz() { return g_refresh_hz.load(std::memory_order_relaxed); }
+void show_fatal(const char*) {}  // the app's own screens explain (Home.java reads nx.log's FATAL line)
 void set_master_volume(float) {}
 std::string controller_name() { return ""; }
 std::string controller_kind() { return ""; }
@@ -837,7 +1051,7 @@ namespace {
 std::string pick_answer_file() { return std::string(g_app ? g_app->activity->internalDataPath : "") + "/pick_result.txt"; }
 std::atomic<bool> g_picking{false};
 
-bool start_picker(const char* key, const std::string& value) {
+bool start_picker(const char* key, const std::string& value, const char* key2 = nullptr, const std::string& value2 = "") {
     JNIEnv* env = nullptr;
     if (!g_app || g_app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return false;
     jobject act = g_app->activity->clazz;
@@ -847,8 +1061,9 @@ bool start_picker(const char* key, const std::string& value) {
     jobject pkg = env->CallObjectMethod(act, env->GetMethodID(actc, "getPackageName", "()Ljava/lang/String;"));
     env->CallObjectMethod(intent, env->GetMethodID(ic, "setClassName", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
                           pkg, env->NewStringUTF("io.github.acnhrecomp.Picker"));
-    env->CallObjectMethod(intent, env->GetMethodID(ic, "putExtra", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
-                          env->NewStringUTF(key), env->NewStringUTF(value.c_str()));
+    jmethodID put = env->GetMethodID(ic, "putExtra", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;");
+    env->CallObjectMethod(intent, put, env->NewStringUTF(key), env->NewStringUTF(value.c_str()));
+    if (key2) env->CallObjectMethod(intent, put, env->NewStringUTF(key2), env->NewStringUTF(value2.c_str()));
     env->CallVoidMethod(act, env->GetMethodID(actc, "startActivity", "(Landroid/content/Intent;)V"), intent);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
@@ -871,6 +1086,58 @@ void pick_path(bool, const std::string&) {
     std::remove(pick_answer_file().c_str());
     g_picking = start_picker("out", pick_answer_file());
     if (!g_picking) empty_answer();  // no picker: an empty answer, so the screen does not wait forever
+}
+
+// A GPU driver (.so, or the .zip emulators' drivers come in) copied into the game folder's drivers/ by the picker
+// activity (Picker.java): pick_result then gives "ok:<file>", "error:<why>" or "" (cancelled).
+void import_gpu_driver() {
+    std::remove(pick_answer_file().c_str());
+    g_picking = start_picker("driver", g_root + "/drivers", "out", pick_answer_file());
+    if (!g_picking) empty_answer();
+}
+
+void wifi_multicast(bool on) {
+    static std::mutex mu;
+    static jobject lock = nullptr;  // a global reference to the WifiManager.MulticastLock while held
+    std::lock_guard lk(mu);
+    if (on == (lock != nullptr)) return;
+    JniScope jni;
+    JNIEnv* env = jni.env;
+    if (!env) return;
+    if (!on) {
+        env->CallVoidMethod(lock, env->GetMethodID(env->GetObjectClass(lock), "release", "()V"));
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteGlobalRef(lock);
+        lock = nullptr;
+        nx::log("ldn: Wi-Fi multicast lock released");
+        return;
+    }
+    jobject act = g_app->activity->clazz;
+    jclass actc = env->GetObjectClass(act);
+    jobject wifi = env->CallObjectMethod(act, env->GetMethodID(actc, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;"),
+                                         env->NewStringUTF("wifi"));
+    if (env->ExceptionCheck() || !wifi) {
+        env->ExceptionClear();
+        return;
+    }
+    jclass wc = env->GetObjectClass(wifi);
+    jobject ml = env->CallObjectMethod(wifi, env->GetMethodID(wc, "createMulticastLock",
+                                                              "(Ljava/lang/String;)Landroid/net/wifi/WifiManager$MulticastLock;"),
+                                       env->NewStringUTF("acnhrecomp-local-play"));
+    if (env->ExceptionCheck() || !ml) {
+        env->ExceptionClear();
+        return;
+    }
+    jclass mc = env->GetObjectClass(ml);
+    env->CallVoidMethod(ml, env->GetMethodID(mc, "setReferenceCounted", "(Z)V"), jboolean(JNI_FALSE));
+    env->CallVoidMethod(ml, env->GetMethodID(mc, "acquire", "()V"));
+    if (env->ExceptionCheck()) {  // no CHANGE_WIFI_MULTICAST_STATE, or no Wi-Fi: searches by broadcast may not arrive
+        env->ExceptionClear();
+        nx::log("ldn: no Wi-Fi multicast lock");
+        return;
+    }
+    lock = env->NewGlobalRef(ml);
+    nx::log("ldn: Wi-Fi multicast lock held");
 }
 
 // Android's picker activity chooses a folder. A file pick (Amiibo .bin) has no dialog here: answer empty.
@@ -898,6 +1165,23 @@ bool pick_result(std::string& path) {
 namespace {
 
 struct sigaction g_previous[32];  // the handlers before ours (debuggerd's)
+
+void crash(int sig, siginfo_t* info, void* uc);
+
+// Something else in the process that sets its own fault handler (the WebView of Nextendo's sign-in may, as Chromium
+// does) takes the faults the game needs (write_watch_fault). Ours is put back on top when the game is in front again.
+// The newcomer is not chained: it likely saved ours as its previous one, and chaining back would loop on a real crash.
+void keep_signal_handlers() {
+    for (int s : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) {
+        struct sigaction cur{};
+        if (sigaction(s, nullptr, &cur) != 0 || ((cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == crash)) continue;
+        struct sigaction sa{};
+        sa.sa_sigaction = crash;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigaction(s, &sa, nullptr);
+        nx::log("app: signal %d had another handler: the game's own is back on top", s);
+    }
+}
 
 void crash(int sig, siginfo_t* info, void* uc) {
     if ((sig == SIGSEGV || sig == SIGBUS) && nx::plat::write_watch_fault(info->si_addr)) return;  // write_watch.cpp
@@ -932,6 +1216,35 @@ void game_thread(void*) {
 }
 
 void request_immersive();  // below: runs on the UI thread
+
+// android_main's thread, attached to Java for good (as gamepad_connected): the panel's refresh rate now, 0 if unknown.
+int read_refresh_rate(android_app* app) {
+    static JNIEnv* env = nullptr;
+    if (!env && app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return 0;
+    int value = 0;
+    jobject activity = app->activity->clazz;
+    jclass ac = env->GetObjectClass(activity);
+    jmethodID wm_m = env->GetMethodID(ac, "getWindowManager", "()Landroid/view/WindowManager;");
+    jobject wm = wm_m ? env->CallObjectMethod(activity, wm_m) : nullptr;
+    if (wm && !env->ExceptionCheck()) {
+        jclass wc = env->GetObjectClass(wm);
+        jmethodID disp_m = env->GetMethodID(wc, "getDefaultDisplay", "()Landroid/view/Display;");  // minSdk 29
+        jobject disp = disp_m ? env->CallObjectMethod(wm, disp_m) : nullptr;
+        if (disp && !env->ExceptionCheck()) {
+            jclass dc = env->GetObjectClass(disp);
+            jmethodID rate_m = env->GetMethodID(dc, "getRefreshRate", "()F");
+            const float rate = rate_m ? env->CallFloatMethod(disp, rate_m) : 0.0f;
+            if (!env->ExceptionCheck() && rate >= 20.0f && rate <= 500.0f) value = int(std::lround(rate));
+            env->DeleteLocalRef(dc);
+        }
+        if (disp) env->DeleteLocalRef(disp);
+        env->DeleteLocalRef(wc);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (wm) env->DeleteLocalRef(wm);
+    env->DeleteLocalRef(ac);
+    return value;
+}
 
 // Whether a physical game controller is connected (InputDevice: a gamepad or joystick source, not virtual), through
 // JNI on android_main's thread.
@@ -987,8 +1300,10 @@ void on_cmd(android_app* app, int32_t cmd) {
         case APP_CMD_PAUSE:  // home, app switcher, screen off: the game holds (no window), so does its sound
             audio_pause(true);
             thermal_pause(true);  // and the phone gets the system's clock caps back
+            nx::game_clock_save();  // a faster clock's gained time: Android may end the app from the background
             break;
         case APP_CMD_RESUME:
+            keep_signal_handlers();  // back from Nextendo's sign-in screen, whose WebView may have set its own
             audio_pause(false);
             thermal_pause(false);
             break;
@@ -1034,18 +1349,114 @@ void hide_system_bars(JNIEnv* env, jobject activity) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
+// ---- the phone's keyboard for the settings screen's text fields (android/java/.../TextInput.java) ----------------
+// NativeActivity's own view is no text editor and never has the focus, so the system keyboard did not come up for it
+// (One UI: Discord, 0.9.0), and nothing typed reached the field. A TextInput view, added to the activity on the UI thread
+// the first time a field is edited, takes the focus and the keyboard while one is; what is typed comes back through its
+// native methods (registered here: the library is NativeActivity's, not loaded by its class loader), on the UI thread,
+// into the settings screen's input queue (ui.cpp).
+jobject g_text_view = nullptr;  // UI thread only: a global reference, dropped with its activity
+jmethodID g_text_show = nullptr, g_text_hide = nullptr;
+enum : char { kUiBars = 1, kUiKeyboardShow = 2, kUiKeyboardHide = 3 };  // the bytes of the UI thread's pipe
+
+void JNICALL text_typed(JNIEnv* env, jclass, jbyteArray utf8) {
+    const jsize n = utf8 ? env->GetArrayLength(utf8) : 0;
+    if (n <= 0) return;
+    std::string s(size_t(n), '\0');
+    env->GetByteArrayRegion(utf8, 0, n, reinterpret_cast<jbyte*>(s.data()));
+    nx::ui::ui_text_input(s.c_str());
+}
+
+void JNICALL text_key(JNIEnv*, jclass, jint code) {
+    switch (code) {
+        case AKEYCODE_DEL: nx::ui::ui_text_key(nx::ui::TextKey::Backspace); break;
+        case AKEYCODE_FORWARD_DEL: nx::ui::ui_text_key(nx::ui::TextKey::Delete); break;
+        case AKEYCODE_ENTER: nx::ui::ui_text_key(nx::ui::TextKey::Enter); break;
+        default: break;
+    }
+}
+
+// The activity's TextInput, made on first use; null when it cannot be (logged once).
+jobject text_view(JNIEnv* env, jobject activity) {
+    static bool failed = false;
+    if (g_text_view || failed) return g_text_view;
+    if (env->PushLocalFrame(16) != JNI_OK) return env->ExceptionClear(), nullptr;
+    // Each step stops at a Java exception (a JNI call with one pending is not allowed).
+    auto ok = [&](const void* p) {
+        if (env->ExceptionCheck()) return env->ExceptionClear(), false;
+        return p != nullptr;
+    };
+    jobject view = nullptr;
+    jclass actc = env->GetObjectClass(activity);
+    // The app's own classes come from the activity's class loader: FindClass on this thread sees the system's only.
+    jmethodID get_loader = env->GetMethodID(actc, "getClassLoader", "()Ljava/lang/ClassLoader;");
+    jobject loader = ok(get_loader) ? env->CallObjectMethod(activity, get_loader) : nullptr;
+    jclass loaderc = ok(loader) ? env->FindClass("java/lang/ClassLoader") : nullptr;
+    jmethodID load = ok(loaderc) ? env->GetMethodID(loaderc, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;") : nullptr;
+    jstring name = ok(load) ? env->NewStringUTF("io.github.acnhrecomp.TextInput") : nullptr;
+    auto cls = static_cast<jclass>(ok(name) ? env->CallObjectMethod(loader, load, name) : nullptr);
+    if (ok(cls)) {
+        static const JNINativeMethod methods[] = {
+            {"nativeText", "([B)V", reinterpret_cast<void*>(text_typed)},
+            {"nativeKey", "(I)V", reinterpret_cast<void*>(text_key)},
+        };
+        const bool registered = env->RegisterNatives(cls, methods, 2) == JNI_OK;
+        jmethodID ctor = ok(registered ? cls : nullptr) ? env->GetMethodID(cls, "<init>", "(Landroid/content/Context;)V") : nullptr;
+        g_text_show = ok(ctor) ? env->GetMethodID(cls, "show", "()V") : nullptr;
+        g_text_hide = ok(g_text_show) ? env->GetMethodID(cls, "hide", "()V") : nullptr;
+        jobject v = ok(g_text_hide) ? env->NewObject(cls, ctor, activity) : nullptr;
+        // 1 x 1 pixel in the corner, over NativeActivity's view (it draws nothing).
+        jclass lpc = ok(v) ? env->FindClass("android/view/ViewGroup$LayoutParams") : nullptr;
+        jmethodID lpi = ok(lpc) ? env->GetMethodID(lpc, "<init>", "(II)V") : nullptr;
+        jobject lp = ok(lpi) ? env->NewObject(lpc, lpi, jint(1), jint(1)) : nullptr;
+        jmethodID add = ok(lp) ? env->GetMethodID(actc, "addContentView",
+                                                    "(Landroid/view/View;Landroid/view/ViewGroup$LayoutParams;)V")
+                               : nullptr;
+        if (ok(add)) {
+            env->CallVoidMethod(activity, add, v, lp);
+            if (ok(v)) view = env->NewGlobalRef(v);
+        }
+    }
+    env->PopLocalFrame(nullptr);
+    if (!view) {
+        failed = true;
+        nx::log("android: no TextInput view; the settings screen's text fields get no system keyboard");
+        return nullptr;
+    }
+    g_text_view = view;
+    return view;
+}
+
+void soft_keyboard(JNIEnv* env, jobject activity, bool show) {
+    jobject v = show ? text_view(env, activity) : g_text_view;
+    if (!v) return;
+    env->CallVoidMethod(v, show ? g_text_show : g_text_hide);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    nx::log("android: system keyboard %s", show ? "asked for" : "put away");
+}
+
 int on_ui_request(int fd, int, void*) {
     char buf[16];
-    while (read(fd, buf, sizeof buf) > 0) {
-    }
-    if (g_activity) hide_system_bars(g_activity->env, g_activity->clazz);
+    ssize_t n;
+    bool bars = false;
+    char keyboard = 0;  // the last keyboard request read: show or hide
+    while ((n = read(fd, buf, sizeof buf)) > 0)
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] == kUiKeyboardShow || buf[i] == kUiKeyboardHide) keyboard = buf[i];
+            else bars = true;
+        }
+    if (!g_activity) return 1;
+    if (keyboard) soft_keyboard(g_activity->env, g_activity->clazz, keyboard == kUiKeyboardShow);
+    // The keyboard can bring the navigation bar up with it: hidden again once it has gone.
+    if (bars || keyboard == kUiKeyboardHide) hide_system_bars(g_activity->env, g_activity->clazz);
     return 1;
 }
 
-void request_immersive() {
-    char c = 1;
-    if (g_ui_pipe[1] >= 0) (void)write(g_ui_pipe[1], &c, 1);
+void ui_thread_request(char what) {
+    if (g_ui_pipe[1] >= 0) (void)write(g_ui_pipe[1], &what, 1);
 }
+
+void request_immersive() { ui_thread_request(kUiBars); }
 
 }  // namespace
 
@@ -1086,6 +1497,10 @@ static void open_home(android_app* app, const std::string& why) {
 
 extern "C" JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, void* saved, size_t size) {
     g_activity = activity;
+    if (g_text_view) {  // the last activity's: a new one gets its own when a field is edited
+        activity->env->DeleteGlobalRef(g_text_view);
+        g_text_view = nullptr;
+    }
     if (g_ui_pipe[0] < 0 && pipe2(g_ui_pipe, O_NONBLOCK | O_CLOEXEC) == 0)
         ALooper_addFd(ALooper_forThread(), g_ui_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_ui_request, nullptr);
     glue_ANativeActivity_onCreate(activity, saved, size);
@@ -1213,6 +1628,14 @@ extern "C" void android_main(android_app* app) {
     }
     // The picked folder wins over the app's own one; else the own one (adb push), else Internal storage/<title>.
     g_root = !chosen.empty() && has_data(chosen) ? chosen : has_data(own) ? own : shared;
+    // The home screen loaded the game from the folder it was given just before: that folder wins. Choosing another
+    // here (data_root.txt not written, its main.bin not readable from here, a copy in the app's own folder) only made
+    // load_game ask for a restart, which came back on every start (Discord, 0.9.0).
+    std::string passed_over;  // logged below, once the log is opened in the right folder (its first line opens it)
+    if (std::string loaded = loaded_game_folder(); !loaded.empty() && loaded != g_root) {
+        passed_over = g_root;
+        g_root = loaded;
+    }
     // config.txt's NX_* lines become environment variables (the NVN layer reads its switches with getenv), without
     // overriding a variable already set. Android defaults: handheld (720p, the lighter GPU load).
     {
@@ -1263,6 +1686,8 @@ extern "C" void android_main(android_app* app) {
 
     nx::log("%s (Switch recomp) on Android, data at %s (own folder %s: %s)", nx::game::kInfo.title, g_root.c_str(),
             own.c_str(), has_data(own) ? "has the data" : "no analysis/main.bin");
+    if (!passed_over.empty())
+        nx::log("app: the folder the home screen loaded, not %s (data_root.txt or its access disagreed)", passed_over.c_str());
     std::string why = load_game(g_root, g_cache_dir);
     if (why.empty()) why = vulkan_preflight();  // a plain message, not a black screen, when the GPU cannot
     if (!why.empty()) {
@@ -1292,6 +1717,38 @@ extern "C" void android_main(android_app* app) {
             start_thread(game_thread, nullptr, 256ull << 20);  // the guest main thread; deep host recursion
         }
         if (started) sleep_ns(2'000'000);
+        // The phone's keyboard while one of the settings screen's text fields is being edited (TextInput.java). It is
+        // asked for once the edit has lasted a moment with no finger on the screen (a drag that starts on the field
+        // scrolls the page and ends the edit: the keyboard would flash), and again after each later tap that leaves the
+        // field edited (the player may have put it away with Back; a tap elsewhere ends the edit instead).
+        {
+            constexpr uint64_t kSettleNs = 150'000'000;
+            static bool keyboard = false;
+            static uint64_t since = 0, tap_ns = 0, taps_seen = 0, taps_shown = 0;
+            const uint64_t now = monotonic_ns(), taps = ui_taps();
+            if (taps != taps_seen) taps_seen = taps, tap_ns = now;
+            if (!nx::ui::ui_text_field()) {
+                since = 0;
+                if (keyboard) keyboard = false, ui_thread_request(kUiKeyboardHide);
+            } else {
+                if (!since) since = now;
+                const bool settled = !ui_finger_down() && now - since > kSettleNs && now - tap_ns > kSettleNs;
+                if (settled && (!keyboard || taps != taps_shown)) {
+                    keyboard = true;
+                    taps_shown = taps;
+                    ui_thread_request(kUiKeyboardShow);
+                }
+            }
+        }
+        // Every second: the panel's refresh rate (display_refresh_hz: the frames' pacing).
+        static uint64_t next_refresh_poll = 0;
+        if (uint64_t now = monotonic_ns(); now >= next_refresh_poll) {
+            next_refresh_poll = now + 1'000'000'000;
+            if (const int hz = read_refresh_rate(app); hz && hz != nx::plat::g_refresh_hz.load(std::memory_order_relaxed)) {
+                nx::log("display: %d Hz", hz);
+                nx::plat::g_refresh_hz.store(hz, std::memory_order_relaxed);
+            }
+        }
         // Every 2 s: whether a game controller is connected (the touch controls hide while one is).
         static uint64_t next_pad_poll = 0;
         if (uint64_t now = monotonic_ns(); now >= next_pad_poll) {

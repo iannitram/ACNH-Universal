@@ -39,6 +39,11 @@
 #include "ui/amiibo_importer.h"
 #include "ui/ui.h"
 
+namespace nx {
+void olsc_backup_on_exit();  // hle_olsc.cpp
+void game_clock_save();     // game_clock.cpp: a faster clock's gained time into config.ini
+}
+
 namespace nx::plat {
 
 namespace {
@@ -360,6 +365,12 @@ void update_refresh_hz() {
 }
 int display_refresh_hz() { return g_refresh_hz.load(); }
 
+void show_fatal(const char* text) {
+    if (headless()) return;
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ACNHRecomp", text, nullptr);
+}
+
+
 std::atomic<float> g_volume{-1.0f};  // master volume 0..1 (-1: not read from config.ini yet; audio_cb applies it)
 
 void set_fullscreen(bool on) {
@@ -622,6 +633,8 @@ void sdl_main_loop() {
             switch (e.type) {
             case SDL_EVENT_QUIT:
                 nx::log("platform: quit requested (window closed)");
+                nx::olsc_backup_on_exit();
+                nx::game_clock_save();
                 exit_process(0);
             case SDL_EVENT_WINDOW_MINIMIZED:
             case SDL_EVENT_WINDOW_HIDDEN:
