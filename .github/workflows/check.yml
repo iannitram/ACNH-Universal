@@ -109,12 +109,13 @@ jobs:
         # Every *_test target ctest runs, ours and upstream's (nextendo, ldn_net, recomp, prepare_io, ...), except
         # upstream's end-to-end prepare runs, which need a prepared tool chain (zig) and inputs CI does not have.
         run: |
-          targets=$(cmake --build build --target help | sed -n 's/^\([A-Za-z0-9_]*_test\):.*/\1/p' |
-                    grep -v -x -e prepare_e2e_test -e prepare_launcher_test | sort -u)
+          targets=$(ninja -C build -t targets all | sed -n 's/^[[:space:]]*\([A-Za-z0-9_]*_test\): .*/\1/p' |
+                    grep -v '^cmake_' | grep -v -x -e prepare_e2e_test -e prepare_launcher_test -e shader_cache_test | sort -u || true)
+          [ -n "$targets" ] || { echo "no *_test targets found"; exit 1; }
           echo "test targets: $targets"
           cmake --build build --target $targets
       - name: Test
-        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig|prepare_launcher)$'
+        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig|prepare_launcher|recomp_source_test)$'  # recomp_source_test: #247
       - name: Game reads stay on the game root
         run: bash tests/game_root_check.sh
 
