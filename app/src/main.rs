@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use acnh_app::first_run::FirstRun;
 use acnh_app::input::{key_nav, poll_nav, DeviceEvent, Devices, Stick};
-use acnh_app::play::{Player, RelayOff, Runner, Session};
+use acnh_app::play::{Player, Runner, Session};
 use acnh_app::ui::{from_slint, to_slint};
 use acnh_app::vm::fleet::FleetVm;
 use acnh_app::vm::saves::SavesVm;
@@ -43,9 +43,9 @@ fn session(picture: PathBuf) -> acnh_core::Result<Session> {
         vm.set_build_missing(builds.game_folder().ok().flatten().is_some());
     }
     let runner = Runner {
-        // No relay is set up from the app yet (Settings): the island here is played, and
-        // nothing is pulled or pushed.
-        relay: Arc::new(RelayOff),
+        // Save sync as this machine has it set up: the real relay, `RelayOff` (the page says
+        // save sync is off and Play goes on without it), or an error that says why.
+        relay: acnh_app::relay::system(),
         game: Arc::new(Player { program }),
         save_dir,
         env,

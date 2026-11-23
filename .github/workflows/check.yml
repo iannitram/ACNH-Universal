@@ -71,6 +71,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - run: cargo test --workspace --all-features
+      - name: Save sync is linked into the app and the CLI (#164)
+        run: |
+          test -n "$(cargo tree -p acnh-app -i save-relay)"
+          test -n "$(cargo tree -p acnh-cli -i save-relay)"
       - name: Rust emitter matches Python and Unicorn (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -221,6 +225,10 @@ jobs:
         env:
           # The Mac assemble tests must use Homebrew's real libraries here, not stand-ins.
           ACNH_TEST_HOMEBREW_VULKAN: "1"
+      - name: Save sync is linked into the app and the CLI (#164)
+        run: |
+          test -n "$(cargo tree -p acnh-app -i save-relay)"
+          test -n "$(cargo tree -p acnh-cli -i save-relay)"
       - name: iOS cross-check
         run: cargo check --workspace --target aarch64-apple-ios
       - name: Homebrew headers (SDL3, Vulkan)

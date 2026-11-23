@@ -4,6 +4,7 @@ pub mod build_actions;
 pub mod first_run;
 pub mod input;
 pub mod play;
+pub mod relay;
 pub mod ui;
 pub mod vm;
 
