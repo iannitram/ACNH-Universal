@@ -41,13 +41,25 @@ case "$1" in
 esac
 [ "$#" -ge 1 ] || fail "the out folder is required: give it as the last argument (it has no default)"
 [ "$#" -eq 1 ] || usage
+[ -n "$1" ] || fail "the out folder is required: give it as the last argument (it has no default)"
 out=$(realpath_py "$1")
+case "$out/" in "$root/"*) fail "out folder must be outside the checkout: $out" ;; esac
 
 # Refusals come before anything is created, so they leave the out folder untouched.
 [ ! -e "$out" ] || [ -d "$out" ] || fail "out folder is not a folder: $out"
 existing=$out
 while [ ! -d "$existing" ]; do existing=$(dirname "$existing"); done
-git_location=$(git -C "$existing" rev-parse --is-inside-work-tree --is-inside-git-dir 2>/dev/null || true)
+# Fail closed: any git error other than "not a git repository" refuses the folder.
+if git_location=$(git -C "$existing" rev-parse --is-inside-work-tree --is-inside-git-dir 2>"${TMPDIR:-/tmp}/.package_ios_git.$$"); then
+    git_err=
+else
+    git_err=$(cat "${TMPDIR:-/tmp}/.package_ios_git.$$")
+    case "$git_err" in
+        *"not a git repository"*) git_location= ;;
+        *) rm -f "${TMPDIR:-/tmp}/.package_ios_git.$$"; fail "cannot tell whether the out folder is inside a Git work tree: $git_err" ;;
+    esac
+fi
+rm -f "${TMPDIR:-/tmp}/.package_ios_git.$$"
 if printf '%s\n' "$git_location" | grep -qx true; then
     fail "out folder is inside a Git work tree (or its metadata): choose a folder outside every checkout"
 fi

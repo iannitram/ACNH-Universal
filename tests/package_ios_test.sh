@@ -47,7 +47,8 @@ cp "$template" "$app/Info.plist"
 make_decoy() {
     local g=$1
     mkdir -p "$g/analysis" "$g/fonts" "$g/aoc/1" "$g/gen/main" "$g/build" "$g/exefs" "$g/extract/romfs" \
-        "$g/user/device_save"
+        "$g/user/device_save" "$g/spirv" "$g/shaders_extracted" "$g/mods" "$g/logs"
+    touch "$g/spirv/a.spv" "$g/shaders_extracted/a" "$g/mods/a" "$g/logs/nx.log" "$g/nx.log"
     touch "$g/analysis/main.bin" "$g/romfs.pak" "$g/spirv.pak" "$g/fonts/shared.ttf" "$g/aoc/1/data" \
         "$g/gen/main/table.cpp" "$g/build/acnh" "$g/exefs/main" "$g/extract/romfs/a" \
         "$g/user/device_save/main.dat" "$g/config.ini"
@@ -120,6 +121,12 @@ refuse "out folder outside RUNNER_TEMP under CI" "RUNNER_TEMP" "$outside" \
 
 refuse "missing out folder" "out folder is required" "" \
     env CI=1 bash "$script" missing "$build" --no-game
+
+refuse "an empty out folder argument" "out folder is required" "" \
+    bash "$script" empty "$build" --no-game ""
+
+refuse "out folder inside this checkout" "outside the checkout" "$root/private/package-ios-test-out" \
+    env -u CI -u GITHUB_ACTIONS bash "$script" inclone "$build" --no-game "$root/private/package-ios-test-out"
 
 nobin=$work/decoy-nobin
 make_decoy "$nobin"

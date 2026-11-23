@@ -264,6 +264,7 @@ jobs:
           codesign --verify --ignore-resources "$app/$exe"
           codesign -d --entitlements :- "$app/$exe" > "$out/entitlements" 2>/dev/null
           [ ! -s "$out/entitlements" ]
+          [ "$(plutil -extract UIFileSharingEnabled raw "$app/Info.plist")" = true ]
           if tools/package_ios.sh ci private/ios/build-iphonesimulator --no-game "$out"; then exit 1; fi
           if tools/package_ios.sh ci private/ios/build-iphoneos --no-game private/ios/package-test; then exit 1; fi
           ln -s "$PWD/private" "$out/inside"
