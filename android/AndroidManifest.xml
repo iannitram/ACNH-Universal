@@ -77,7 +77,7 @@
         <!-- windowSoftInputMode: the keyboard for the settings screen's text fields (TextInput.java) goes over the game,
              which keeps its window size, and comes up only when asked for -->
         <activity android:name="android.app.NativeActivity" android:exported="true"
-                  android:screenOrientation="sensorLandscape" android:resizeableActivity="false"
+                  android:screenOrientation="sensorLandscape" android:resizeableActivity="true"
                   android:windowSoftInputMode="stateAlwaysHidden|adjustNothing"
                   android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation"
                   android:theme="@style/Game">
