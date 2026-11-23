@@ -74,6 +74,7 @@ export component PadButton inherits Rectangle {
 component IslandCard inherits Rectangle {
     in property <string> title;
     in property <CardView> card;
+    in property <image> picture;
     in property <bool> focused;
 
     background: #1d3d35;
@@ -81,48 +82,59 @@ component IslandCard inherits Rectangle {
     border-width: 3px;
     border-color: root.focused ? #ffffff : #36635a;
 
-    VerticalLayout {
+    HorizontalLayout {
         padding: 18px;
-        spacing: 6px;
-        alignment: start;
+        spacing: 14px;
 
-        Text {
-            text: root.title;
-            color: #a8d8c8;
-            font-size: 15px;
+        if root.picture.width > 0: Image {
+            source: root.picture;
+            width: 72px;
+            height: 72px;
+            image-fit: contain;
         }
+        VerticalLayout {
+            spacing: 6px;
+            alignment: start;
 
-        Text {
-            text: root.card.saved;
-            color: #ffffff;
-            font-size: 22px;
-            font-weight: 700;
-            wrap: word-wrap;
-        }
+            Text {
+                text: root.title;
+                color: #a8d8c8;
+                font-size: 15px;
+            }
 
-        Text {
-            text: root.card.played;
-            color: #e4f2ed;
-            font-size: 17px;
-        }
+            Text {
+                text: root.card.saved;
+                color: #ffffff;
+                font-size: 22px;
+                font-weight: 700;
+                wrap: word-wrap;
+            }
 
-        Text {
-            text: root.card.version;
-            color: #e4f2ed;
-            font-size: 17px;
-        }
+            Text {
+                text: root.card.played;
+                color: #e4f2ed;
+                font-size: 17px;
+            }
 
-        if root.card.badges != "": Text {
-            text: root.card.badges;
-            color: #ffd166;
-            font-size: 17px;
-            font-weight: 700;
+            Text {
+                text: root.card.version;
+                color: #e4f2ed;
+                font-size: 17px;
+            }
+
+            if root.card.badges != "": Text {
+                text: root.card.badges;
+                color: #ffd166;
+                font-size: 17px;
+                font-weight: 700;
+            }
         }
     }
 }
 
 export component ContinuePage inherits Rectangle {
     in property <ContinueView> view;
+    in property <image> card-picture;
     callback clicked(PadTarget);
 
     background: #10251f;
@@ -140,6 +152,7 @@ export component ContinuePage inherits Rectangle {
 
         if !root.view.choosing: IslandCard {
             title: root.view.status;
+            picture: root.card-picture;
             card: root.view.card;
         }
 
@@ -151,6 +164,7 @@ export component ContinuePage inherits Rectangle {
 
                 IslandCard {
                     title: "This device";
+                    picture: root.card-picture;
                     card: root.view.this-card;
                     focused: root.view.focus == PadTarget.keep-this;
                 }
@@ -170,6 +184,7 @@ export component ContinuePage inherits Rectangle {
 
                 IslandCard {
                     title: "On the relay";
+                    picture: root.card-picture;
                     card: root.view.relay-card;
                     focused: root.view.focus == PadTarget.keep-relay;
                 }
