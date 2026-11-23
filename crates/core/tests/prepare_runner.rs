@@ -33,6 +33,7 @@ fn request(name: &str, target: Os) -> Request {
         source: None,
         fan_mods: Default::default(),
         delivery: None,
+        install: None,
     }
 }
 
@@ -53,6 +54,8 @@ struct Fake {
     /// The programs `probe` finds (and what they print); the others are not there.
     tools: Vec<(&'static str, &'static str)>,
     probed: Vec<String>,
+    /// The `(build, install)` folders the Mac's app was assembled from and into.
+    assembled: Vec<(PathBuf, PathBuf)>,
 }
 
 /// A script call without the `env PATH=...` a Mac that has Homebrew puts before it.
@@ -65,6 +68,17 @@ fn without_env(args: &[String]) -> &[String] {
 }
 
 impl Fake {
+    /// A Mac whose prepared folder is no git repository (the Mac target needs no other tool).
+    fn with_mac_tools() -> Fake {
+        Fake {
+            tools: vec![(
+                "git:stderr",
+                "fatal: not a git repository (or any of the parent directories): .git\n",
+            )],
+            ..Fake::default()
+        }
+    }
+
     /// A Mac with Xcode, cargo and the iOS Rust target.
     fn with_ios_tools() -> Fake {
         Fake {
@@ -99,6 +113,11 @@ impl ScriptRunner for Fake {
 
     fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
+    }
+
+    fn assemble(&mut self, build: &Path, install: &Path) -> acnh_core::Result<PathBuf> {
+        self.assembled.push((build.to_owned(), install.to_owned()));
+        Ok(install.join("ACNH-Universal.app"))
     }
 
     fn probe_stderr(&mut self, program: &str, _args: &[&str]) -> Option<(bool, String)> {
@@ -306,16 +325,6 @@ fn mobile_requests_never_fall_back_to_a_desktop_build() {
         assert!(fake.ran.is_empty());
         assert!(seen.is_empty());
     }
-}
-
-#[test]
-fn mac_skips_upstreams_native_executable() {
-    let req = request("native-mac", Os::Mac);
-    std::fs::create_dir_all(req.out.join("build")).unwrap();
-    std::fs::write(req.out.join("build/acnh"), "synthetic executable").unwrap();
-    let mut fake = Fake::default();
-    prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
-    assert!(!fake.ran.contains(&Stage::Build));
 }
 
 #[test]
@@ -1218,4 +1227,144 @@ fn the_work_tree_check_fails_closed_when_git_cannot_answer() {
         prepare_with(&req, Hub::Mac, &mut broken, Path::new("/h"), &mut |_| {}).unwrap_err();
     assert!(matches!(error, Error::Build(message) if message.contains("cannot tell")));
     assert!(broken.ran.is_empty());
+}
+
+/// A dropbox folder with `_transfers/ACNH-Universal/` in it, and the Mac request that delivers
+/// to its `mac` folder and assembles in `<out>/install`.
+fn mac_request(name: &str) -> (Request, PathBuf) {
+    let mut req = request(name, Os::Mac);
+    let dropbox = req.out.join("dropbox");
+    std::fs::create_dir_all(dropbox.join("_transfers/ACNH-Universal")).unwrap();
+    let config = Config::parse(&format!("dropbox = {}\n", dropbox.display())).unwrap();
+    let delivery = delivery_folder(&config, Path::new("/Users/user"), "mac");
+    req.delivery = Some(delivery.clone());
+    req.install = Some(req.out.join("install"));
+    (req, delivery)
+}
+
+#[test]
+fn mac_skips_upstreams_native_executable() {
+    let (req, _) = mac_request("native-mac");
+    std::fs::create_dir_all(req.out.join("build")).unwrap();
+    std::fs::write(req.out.join("build/acnh"), "synthetic executable").unwrap();
+    let mut fake = Fake::with_mac_tools();
+    prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    assert!(!fake.ran[..fake.ran.len() - 1].contains(&Stage::Build));
+}
+
+#[test]
+fn mac_runs_the_stages_the_packs_the_assembly_and_the_package_script() {
+    let (req, delivery) = mac_request("mac-order");
+    let romfs = req.out.join("game-romfs");
+    let mut req = req;
+    std::fs::create_dir_all(&romfs).unwrap();
+    std::fs::write(romfs.join("a.bin"), b"a").unwrap();
+    req.game.romfs = romfs;
+    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
+    std::fs::write(req.out.join("spirv/a.spv"), b"spv").unwrap();
+    let mut fake = Fake::with_mac_tools();
+    let mut seen = vec![];
+    let zip = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap();
+    assert_eq!(seen, STAGES.to_vec());
+    // The packs were missing, so they were made in the prepared folder.
+    assert!(req.out.join("romfs.pak").is_file());
+    assert!(req.out.join("spirv.pak").is_file());
+    let mut stages = scripted();
+    stages.push(Stage::Build);
+    assert_eq!(fake.ran, stages);
+    let install = req.out.join("install");
+    assert_eq!(fake.assembled, [(req.out.join("build"), install.clone())]);
+    assert_eq!(
+        fake.args.last().unwrap(),
+        &[
+            "tools/package_mac.sh".to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
+            install.join("ACNH-Universal.app").display().to_string(),
+            req.out.display().to_string(),
+            delivery.display().to_string(),
+        ]
+    );
+    assert_eq!(
+        zip,
+        delivery.join(format!("ACNH-Universal-{}.zip", env!("CARGO_PKG_VERSION")))
+    );
+}
+
+#[test]
+fn mac_keeps_packs_that_are_already_there() {
+    let (req, _) = mac_request("mac-packs");
+    std::fs::write(req.out.join("romfs.pak"), b"r").unwrap();
+    std::fs::write(req.out.join("spirv.pak"), b"s").unwrap();
+    let mut fake = Fake::with_mac_tools();
+    prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    assert_eq!(std::fs::read(req.out.join("romfs.pak")).unwrap(), b"r");
+    assert_eq!(std::fs::read(req.out.join("spirv.pak")).unwrap(), b"s");
+}
+
+#[test]
+fn the_mac_delivery_is_homes_dropbox_without_the_key_and_follows_it() {
+    let home = Path::new("/Users/user");
+    assert_eq!(
+        delivery_folder(&Config::default(), home, "mac"),
+        Path::new("/Users/user/Dropbox/_transfers/ACNH-Universal/mac/")
+    );
+    let keyed = Config::parse("dropbox = /Volumes/Cloud\n").unwrap();
+    assert_eq!(
+        delivery_folder(&keyed, home, "mac"),
+        Path::new("/Volumes/Cloud/_transfers/ACNH-Universal/mac/")
+    );
+}
+
+#[test]
+fn mac_without_the_transfers_folder_stops_before_the_first_stage() {
+    let (mut req, _) = mac_request("mac-no-transfers");
+    let home = Path::new("/Users/user");
+    req.delivery = Some(delivery_folder(&Config::default(), home, "mac"));
+    let mut fake = Fake::with_mac_tools();
+    let mut seen = vec![];
+    let error = prepare_with(&req, Hub::Mac, &mut fake, home, &mut |s| seen.push(s)).unwrap_err();
+    match error {
+        Error::Build(message) => {
+            assert!(message.contains("`dropbox`"), "{message}");
+            assert!(message.contains("ACNH-Universal"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(fake.ran.is_empty() && seen.is_empty() && fake.assembled.is_empty());
+}
+
+#[test]
+fn mac_needs_a_delivery_folder() {
+    let (mut req, _) = mac_request("mac-no-delivery");
+    req.delivery = None;
+    let mut fake = Fake::with_mac_tools();
+    let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap_err();
+    assert!(matches!(error, Error::Env(_)));
+    assert!(fake.ran.is_empty());
+}
+
+#[test]
+fn mac_refuses_a_prepared_folder_inside_a_git_work_tree() {
+    let (req, _) = mac_request("mac-in-git");
+    let mut fake = Fake::with_mac_tools();
+    fake.tools.push(("git", "true\n"));
+    let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap_err();
+    assert!(matches!(error, Error::Build(message) if message.contains("git work tree")));
+    assert!(fake.ran.is_empty() && fake.assembled.is_empty());
+}
+
+#[test]
+fn a_failed_package_script_is_a_build_error_after_the_assembly() {
+    let (req, _) = mac_request("mac-package-fails");
+    let mut fake = Fake::with_mac_tools();
+    fake.fail_at = Some(Stage::Build);
+    // The stages skip Build (the player is there); only the package script runs it.
+    std::fs::create_dir_all(req.out.join("build")).unwrap();
+    std::fs::write(req.out.join("build/acnh"), "x").unwrap();
+    let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap_err();
+    assert!(matches!(error, Error::Build(_)));
+    assert_eq!(fake.assembled.len(), 1);
 }

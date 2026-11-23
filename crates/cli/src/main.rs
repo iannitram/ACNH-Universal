@@ -254,7 +254,7 @@ fn build(options: &Options) -> Result<i32> {
         }
     };
     let delivery = match prepare::delivery_subfolder(target) {
-        Some("ios") => {
+        Some(subfolder @ ("ios" | "mac")) => {
             let launcher =
                 match std::fs::read_to_string(AppDirs::new(&vars).config.join("launcher.ini")) {
                     Ok(text) => acnh_core::config::Config::parse(&text)?,
@@ -263,7 +263,7 @@ fn build(options: &Options) -> Result<i32> {
                     }
                     Err(error) => return Err(error.into()),
                 };
-            Some(prepare::delivery_folder(&launcher, &vars.home, "ios"))
+            Some(prepare::delivery_folder(&launcher, &vars.home, subfolder))
         }
         _ => None,
     };
@@ -278,10 +278,12 @@ fn build(options: &Options) -> Result<i32> {
             speedfix: config.enabled("mods.speedfix"),
         },
         delivery,
+        install: (target == Os::Mac).then(|| AppDirs::new(&vars).install()),
     };
     let out = prepare::prepare(&request, &mut |stage| println!("== {}", stage.key()))?;
-    if target == Os::Ios {
-        // The one contained app is the `.ipa` in Dropbox: nothing to assemble here.
+    if matches!(target, Os::Ios | Os::Mac) {
+        // The one contained app is the `.ipa` or `.zip` in Dropbox (the Mac's app was
+        // assembled in the install folder on the way): nothing to assemble here.
         println!("built {} for {}", out.display(), target.key());
         return Ok(0);
     }

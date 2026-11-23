@@ -138,11 +138,12 @@ fn request(name: &str) -> Request {
             version: Version::V3_0_2,
         },
         out: d,
-        target: Os::Mac,
+        target: Os::Linux,
         jobs: 0,
         source: None,
         fan_mods: Default::default(),
         delivery: None,
+        install: None,
     }
 }
 
@@ -156,7 +157,7 @@ fn a_fake_build_through_the_prepare_runner_keeps_the_island() {
     let mut rebuild = || {
         prepare_with(
             &req,
-            Hub::Mac,
+            Hub::StrixHalo,
             &mut fake,
             Path::new("/home/user"),
             &mut |_| {},

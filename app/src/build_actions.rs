@@ -14,8 +14,10 @@ pub struct BuildActions {
 }
 
 impl BuildActions {
+    /// The prepared folder of this machine's own target: the Mac's `<data root>/prepared/`
+    /// (also the iPhone build's), else `<data>/prepare/`.
     fn prepare_root(&self) -> PathBuf {
-        self.dirs.data.join("prepare")
+        prepare::prepared_folder(self.os, &self.dirs)
     }
 
     fn launcher_config(&self) -> Result<Config> {
@@ -111,7 +113,10 @@ impl BuildActions {
                 ptbr: config.enabled("mods.ptbr"),
                 speedfix: config.enabled("mods.speedfix"),
             },
-            delivery: (target == Os::Ios).then(|| prepare::delivery_folder(launcher, home, "ios")),
+            delivery: prepare::delivery_subfolder(target)
+                .filter(|_| self.os == Os::Mac)
+                .map(|subfolder| prepare::delivery_folder(launcher, home, subfolder)),
+            install: (target == Os::Mac).then(|| self.dirs.install()),
         }
     }
 
@@ -130,15 +135,20 @@ impl BuildActions {
         prepare_one: &mut PrepareOne<'_>,
     ) -> Result<()> {
         if self.os == Os::Mac {
-            let ios = self.request(game, config, launcher, home, Os::Ios);
-            prepare::preflight(&ios, runner, home)
-                .map_err(|e| Error::Build(format!("prepare: {e}")))?;
+            // Both Apple targets' checks (the delivery folders, the iPhone SDK and Rust
+            // target, the prepared folder) before any stage runs.
+            for target in [Os::Mac, Os::Ios] {
+                let request = self.request(game, config, launcher, home, target);
+                prepare::preflight(&request, runner, home)
+                    .map_err(|e| Error::Build(format!("prepare: {e}")))?;
+            }
         }
         prepare_targets(self.os, report, &mut |target, progress| {
             let request = self.request(game, config, launcher, home, target);
             let out = prepare_one(&request, progress)?;
-            if target == Os::Ios {
-                // The `.ipa` is in Dropbox: nothing to assemble here.
+            if matches!(target, Os::Ios | Os::Mac) {
+                // The `.ipa` or the app's `.zip` is in Dropbox (the Mac's app was assembled
+                // in the install folder on the way): nothing to assemble here.
                 return Ok(());
             }
             if target != self.os {
@@ -364,6 +374,106 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("dropbox"), "{error}");
+        assert!(prepared.is_empty(), "{prepared:?}");
+    }
+
+    fn mac_hub(root: &Path) -> (BuildActions, Config, gamefolder::GameFolder) {
+        let vars = Vars {
+            home: root.into(),
+            data: root.join("data"),
+            config: root.join("config"),
+        };
+        let actions = BuildActions {
+            dirs: AppDirs::for_os(Os::Mac, &vars),
+            os: Os::Mac,
+        };
+        let game = gamefolder::GameFolder {
+            root: "/game".into(),
+            exefs: "/game/exefs".into(),
+            romfs: "/game/romfs".into(),
+            aoc: vec![],
+            from_importer: false,
+            version: acnh_core::version::Version::V3_0_2,
+        };
+        let launcher =
+            Config::parse(&format!("dropbox = {}\n", root.join("Dropbox").display())).unwrap();
+        std::fs::create_dir_all(root.join("Dropbox/_transfers/ACNH-Universal")).unwrap();
+        (actions, launcher, game)
+    }
+
+    #[test]
+    fn the_mac_hub_prepares_both_apple_targets_into_one_folder_with_their_deliveries() {
+        let root = tempfile::tempdir().unwrap();
+        let (actions, launcher, game) = mac_hub(root.path());
+        let mut tools = Tools(vec![
+            ("xcrun", "/sdk\n"),
+            ("cargo", "cargo 1\n"),
+            ("rustup", "aarch64-apple-ios\n"),
+        ]);
+        let mut prepared = Vec::new();
+        actions
+            .build_local(
+                &game,
+                &Config::default(),
+                &launcher,
+                root.path(),
+                &|_| {},
+                &mut tools,
+                &mut |request, _| {
+                    prepared.push((
+                        request.target,
+                        request.out.clone(),
+                        request.delivery.clone(),
+                        request.install.clone(),
+                    ));
+                    Ok(request.out.clone())
+                },
+            )
+            .unwrap();
+        let prepared_folder = actions.dirs.data_root().join("prepared");
+        let dropbox = root.path().join("Dropbox/_transfers/ACNH-Universal");
+        assert_eq!(
+            prepared,
+            [
+                (
+                    Os::Mac,
+                    prepared_folder.clone(),
+                    Some(dropbox.join("mac")),
+                    Some(actions.dirs.install())
+                ),
+                (Os::Ios, prepared_folder, Some(dropbox.join("ios")), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_mac_hub_checks_the_mac_target_before_any_target_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let (actions, launcher, game) = mac_hub(root.path());
+        // Everything for iOS is there, but the prepared folder is inside a work tree: the Mac
+        // target's own check stops the hub before it prepares anything.
+        let mut tools = Tools(vec![
+            ("xcrun", "/sdk\n"),
+            ("cargo", "cargo 1\n"),
+            ("rustup", "aarch64-apple-ios\n"),
+            ("git", "true\n"),
+        ]);
+        let mut prepared = Vec::new();
+        let error = actions
+            .build_local(
+                &game,
+                &Config::default(),
+                &launcher,
+                root.path(),
+                &|_| {},
+                &mut tools,
+                &mut |request, _| {
+                    prepared.push(request.target);
+                    Ok(request.out.clone())
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("work tree"), "{error}");
         assert!(prepared.is_empty(), "{prepared:?}");
     }
 
