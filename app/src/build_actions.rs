@@ -51,15 +51,19 @@ impl BuildActions {
     }
 
     pub fn launch_location(&self, launcher: &Path) -> (PathBuf, Option<PathBuf>) {
-        let player = assemble::player(self.os, launcher, &self.dirs.install());
-        if self.has_contained_game(&player) {
-            return (player, None);
+        let install = self.dirs.install();
+        let installed = assemble::player(self.os, Path::new(""), &install);
+        let prepare_root = self.prepare_root();
+        let local = self.game_folder().ok().flatten().is_some();
+        if local && installed.is_file() && prepare_root.join("analysis/main.bin").is_file() {
+            let root = (!self.has_contained_game(&installed)).then_some(prepare_root);
+            return (installed, root);
         }
-        let player = assemble::player(self.os, Path::new(""), &self.dirs.install());
-        let game_root = (self.game_folder().ok().flatten().is_some()
-            && !self.has_contained_game(&player))
-        .then(|| self.prepare_root());
-        (player, game_root)
+        let beside = assemble::player(self.os, launcher, &install);
+        if self.has_contained_game(&beside) {
+            return (beside, None);
+        }
+        (installed, local.then_some(prepare_root))
     }
 
     pub fn installed(&self, player: &Path) -> bool {

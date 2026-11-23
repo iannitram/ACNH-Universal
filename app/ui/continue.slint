@@ -30,6 +30,7 @@ export struct ContinueView {
     // The drift warning; "" for none.
     warning: string,
     play-anyway: bool,
+    update-available: bool,
     held: bool,
     back: bool,
     pages-enabled: bool,
@@ -244,8 +245,8 @@ export component ContinuePage inherits Rectangle {
                 }
             }
 
-            if root.view.warning != "": PadButton {
-                primary: true;
+            if root.view.update-available: PadButton {
+                primary: root.view.warning != "";
                 text: "Update";
                 focused: root.view.focus == PadTarget.update;
                 clicked => {

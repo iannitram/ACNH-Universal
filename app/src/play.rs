@@ -222,6 +222,7 @@ impl Session {
     }
 
     pub fn set_build_actions(&mut self, builds: BuildActions, launcher: PathBuf) {
+        self.vm.enable_build_actions();
         self.builds = Some((builds, launcher));
     }
 
