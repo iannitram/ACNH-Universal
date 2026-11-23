@@ -119,3 +119,62 @@ fn no_command_exits_2_with_usage() {
         "{out}{err}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn steam_add_writes_the_appimage_shortcut_with_persistent_artwork() {
+    use acnh_core::platform::{AppDirs, Os, Vars};
+    use acnh_core::{steam, vdf};
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let appimage = root.join("ACNH Universal.AppImage");
+    let mount = root.join("mount");
+    let assets = mount.join("usr/share/acnh-universal");
+    fs::create_dir_all(&assets).unwrap();
+    fs::write(&appimage, []).unwrap();
+    fs::write(assets.join("acnhrecomp.png"), b"fake icon").unwrap();
+
+    let home = root.join("user");
+    let data = root.join("data");
+    let vars = Vars::from_lookup(Os::current(), |name| match name {
+        "HOME" => Some(home.display().to_string()),
+        "XDG_DATA_HOME" => Some(data.display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let user = steam::userdata_roots(&vars)[0].join("1");
+    fs::create_dir_all(&user).unwrap();
+    let pgrep = root.join("pgrep");
+    fs::write(&pgrep, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(pgrep, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_acnh-universal"))
+        .arg("steam-add")
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", &data)
+        .env("APPIMAGE", &appimage)
+        .env("APPDIR", &mount)
+        .env("PATH", root)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    drop(fs::remove_dir_all(&mount));
+    let icon = AppDirs::new(&vars).data.join("steam-launcher-icon.png");
+    assert_eq!(fs::read(&icon).unwrap(), b"fake icon");
+    let file = user.join("config/shortcuts.vdf");
+    let expected = steam::launcher_shortcut(
+        Path::new("unused"),
+        Some(&appimage),
+        "Animal Crossing: New Horizons",
+        &icon,
+    );
+    let mut shortcuts = vec![];
+    steam::upsert(&mut shortcuts, &expected).unwrap();
+    assert_eq!(vdf::read(&fs::read(file).unwrap()).unwrap(), shortcuts);
+}

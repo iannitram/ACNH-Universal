@@ -18,13 +18,12 @@ use acnh_core::{assemble, backup, savecard, saves};
 use slint::{ComponentHandle, SharedString, Timer, TimerMode, Weak};
 
 /// The Continue page for this device: its island, its player and its folders.
-fn session() -> acnh_core::Result<Session> {
+fn session(picture: PathBuf) -> acnh_core::Result<Session> {
     let os = Os::current();
     let vars = Vars::from_lookup(os, |name| std::env::var(name).ok())?;
     let dirs = AppDirs::new(&vars);
     let root = dirs.data_root();
     let save_dir = saves::save_dir(&root);
-    let picture = acnh_core::steam::assets_dir()?.join("acnhrecomp.png");
 
     // `this_device` and `set_saved_by` take the fleet's records once the app keeps them
     // (the Fleet page); with neither, no drift is reported.
@@ -269,7 +268,7 @@ fn fullscreen(flag: bool, desktop: Option<&str>, gamepad_ui: bool) -> bool {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window = MainWindow::new()?;
     window.window().set_fullscreen(fullscreen(
-        std::env::args().any(|arg| arg == "--fullscreen"),
+        std::env::args_os().any(|arg| arg == "--fullscreen"),
         std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
         std::env::var_os("SteamGamepadUI").is_some(),
     ));
@@ -327,7 +326,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             render_first_run(&weak, &mut first);
         }
     });
-    let session = Rc::new(RefCell::new(session()?));
+    let picture = acnh_core::steam::assets_dir()?.join("acnhrecomp.png");
+    if let Ok(image) = slint::Image::load_from_path(&picture) {
+        window.set_card_picture(image);
+    }
+    let session = Rc::new(RefCell::new(session(picture)?));
     render(&window.as_weak(), &session.borrow());
 
     window.on_fleet_scroll({

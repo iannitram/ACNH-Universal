@@ -67,12 +67,14 @@ pub fn assets_dir_for(exe: &Path, appdir: Option<&Path>) -> PathBuf {
         return appdir.join("usr/share/acnh-universal");
     }
     let folder = exe.parent().unwrap_or(Path::new("."));
-    if folder.file_name().is_some_and(|n| n == "MacOS")
-        && folder
-            .parent()
-            .is_some_and(|p| p.file_name().is_some_and(|n| n == "Contents"))
+    if let Some(contents) = folder
+        .parent()
+        .filter(|parent| folder.ends_with("MacOS") && parent.ends_with("Contents"))
     {
-        return folder.parent().unwrap().join("Resources");
+        return contents.join("Resources");
+    }
+    if folder.join("acnhrecomp.png").is_file() {
+        return folder.to_path_buf();
     }
     for ancestor in folder.ancestors() {
         let assets = ancestor.join("assets");

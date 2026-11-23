@@ -33,6 +33,7 @@ component SettingsRow inherits Rectangle {
 // a key press (true when it was one of the launcher's keys).
 export component MainWindow inherits Window {
     in property <ContinueView> view;
+    in property <image> card-picture;
     in property <bool> first-run-open;
     in property <string> first-run-title;
     in property <string> first-run-choice;
@@ -82,6 +83,7 @@ export component MainWindow inherits Window {
 
         ContinuePage {
             view: root.view;
+            card-picture: root.card-picture;
             clicked(target) => {
                 root.clicked(target);
             }

@@ -340,12 +340,23 @@ fn steam_add(_options: &Options) -> Result<i32> {
         "acnh-app"
     });
     let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
-    let shortcut = steam::launcher_shortcut(
-        &exe,
-        appimage.as_deref(),
-        NAME,
-        &steam::assets_dir()?.join("acnhrecomp.png"),
-    );
+    if !appimage.as_deref().unwrap_or(&exe).is_file() {
+        return Err(Error::Steam("the launcher executable is missing".into()));
+    }
+    if steam_running() {
+        return Err(Error::Steam("close Steam first".into()));
+    }
+    let mut icon = steam::assets_dir()?.join("acnhrecomp.png");
+    if appimage.is_some() {
+        // Steam reads the icon after this AppImage mount has been removed.
+        let dir = AppDirs::new(&vars).data;
+        std::fs::create_dir_all(&dir)?;
+        let mut file = tempfile::NamedTempFile::new_in(&dir)?;
+        std::io::copy(&mut std::fs::File::open(&icon)?, &mut file)?;
+        icon = dir.join("steam-launcher-icon.png");
+        file.persist(&icon).map_err(|err| err.error)?;
+    }
+    let shortcut = steam::launcher_shortcut(&exe, appimage.as_deref(), NAME, &icon);
     let written = steam::write_shortcut(&userdata, &shortcut, &[], &steam_running)?;
     if written.is_empty() {
         return Err(Error::Steam("no Steam user folder found".into()));
