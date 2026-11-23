@@ -11,3 +11,5 @@ This repo is a copy of Nycolazs/ACNHRecomp (MIT), not a GitHub fork, built our w
 7. **A failed job** gets a comment on the issue and the issue moves up one size (Easy -> Medium -> Hard).
 8. **No game files, ever** (SPEC.md M14): nothing from a dump, firmware, keys, the recompiled code (`gen/`), shaders or any game-binary analysis in code, tests, logs, issues or releases. Keep the pre-commit hook `tools/check_no_game_data.sh` installed. No private details in code, commits or PR text: no names, e-mail addresses, home paths or machine names. Commit as the no-reply identity.
 9. **Upstream:** a solid bug report or fix offered upstream needs my word first, says it is AI-assisted, and goes as a patch file or from a throwaway public fork (this repo is private). Never post to upstream from a satellite.
+
+**Upstream and peers:** see `PEERS.md` at the repo root. When I say "upstream", I mean the repo in its Upstream section; reuse a peer's code only as that file allows.
