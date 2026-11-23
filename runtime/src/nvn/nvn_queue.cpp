@@ -37,7 +37,7 @@ void svc_frame_take(uint64_t& total, uint64_t& top_ns, uint32_t& top_imm, uint64
 uint64_t display_period_ns();
 uint64_t tick_period_ns();               // the display's measured 60 Hz tick (hle_vi.cpp)
 void set_present_interval(int interval);  // for vblank_hold (hle_vi.cpp)
-extern std::atomic<uint64_t> g_tick_calls, g_yield_calls, g_sleep_calls;
+extern std::atomic<uint64_t> g_tick_calls, g_yield_calls, g_yield_naps, g_sleep_calls;
 }
 namespace nx::nvn {
 
@@ -442,10 +442,10 @@ static void cpu_log_tick() {
             line += b;
         }
     }
-    static uint64_t pt = 0, py = 0, ps = 0;
-    uint64_t t_ = g_tick_calls, y_ = g_yield_calls, s_ = g_sleep_calls;
-    if (dt > 0) log("cpu: per second: GetSystemTick %.0f, yield %.0f, SleepThread(ns>0) %.0f", double(t_ - pt) / dt, double(y_ - py) / dt, double(s_ - ps) / dt);
-    pt = t_, py = y_, ps = s_;
+    static uint64_t pt = 0, py = 0, pn = 0, ps = 0;
+    uint64_t t_ = g_tick_calls, y_ = g_yield_calls, n_ = g_yield_naps, s_ = g_sleep_calls;
+    if (dt > 0) log("cpu: per second: GetSystemTick %.0f, yield %.0f (napped %.0f), SleepThread(ns>0) %.0f", double(t_ - pt) / dt, double(y_ - py) / dt, double(n_ - pn) / dt, double(s_ - ps) / dt);
+    pt = t_, py = y_, pn = n_, ps = s_;
     if (dt > 0) log("cpu: %.1f s wall, process %.0f%% of one core (%.2f cores);%s", dt, 100 * sum / dt, sum / dt, line.c_str());
     prev = cur;
     prev_sys = cur_sys;

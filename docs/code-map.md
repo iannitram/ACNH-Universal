@@ -149,6 +149,8 @@ On iOS the library also holds the `apple` module (`#[cfg(target_os = "ios")] pub
 
 "Stub (listed)": the group is named in `SERVICES` and `ported()` says false; no code moves until its issue. The rest of `runtime/src` outside the renderer goes with the group that calls it, or stays C++ beside the overlay when it is overlay code: `bug_report.cpp`, `frame_stats.cpp`, `discord_presence.cpp`, `cpu_profile.cpp`, `sampler.cpp`, `glyphs.cpp`, `app_icon.cpp`, and the files no group lists yet: `hle_vsock.cpp`, `hle_hid_system_nfc.cpp`, `svc_hid.cpp`, `svc_nfp.cpp`, `acnh_amiibo_hook.cpp`, `amiibo_decode.cpp`, `nfp_host.cpp`, `game_clock.cpp`, `ldn_discovery.cpp`, `ldn_link.cpp`, `ldn_upnp.cpp`, `mod_manager.cpp`, `save_profiles.cpp`, `save_storage.cpp`. Each group's issue names the ones it takes.
 
+Kernel env: `NX_YIELD_BACKOFF=start_us,cap_us` (default `2000,250`; empty or `0` = off) makes a guest thread that yields in a loop without changing x19..x28 sleep run/8 (10 us to cap) per yield; `NX_SPIN_NAPS=1` (always on for Hades) takes precedence with the older flat 0.5 ms nap.
+
 ## Faces
 
 | Path | Status | Owns | Replaces | Musts |
