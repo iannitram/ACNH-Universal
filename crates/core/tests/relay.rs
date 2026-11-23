@@ -765,7 +765,10 @@ fn hold_requires_an_explicit_override_and_status_tracks_changes() {
         rb.pull(&b_saves, Some(Keep::Local)).unwrap(),
         Sync::Held { .. }
     ));
-    assert!(matches!(rb.pull_anyway(&b_saves).unwrap(), Sync::Done(_)));
+    assert!(matches!(
+        rb.pull_anyway(&b_saves, None).unwrap(),
+        Sync::Done(_)
+    ));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -835,4 +838,32 @@ fn a_refused_sign_in_is_relay_sign_in_and_never_holds_the_password() {
     assert!(!error.to_string().contains(WRONG_PASSWORD));
 
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pull_anyway_answers_a_conflict_with_the_given_keep() {
+    let root = temp_fixture_dir("anyway-conflict");
+    let remote = Arc::new(MemoryRemote::new());
+    let a = root.join("a");
+    let b = root.join("b");
+    populate_island(&a.join("saves"), "initial");
+    let ra = SaveRelay::new(remote.clone(), create_store(&a), "a").with_clock(|| 1000);
+    let rb = SaveRelay::new(remote, create_store(&b), "b").with_clock(|| 1010);
+    ra.push(&a.join("saves"), None).unwrap();
+    rb.pull(&b.join("saves"), None).unwrap();
+    fs::write(a.join("saves/main.dat"), "from a").unwrap();
+    ra.push(&a.join("saves"), None).unwrap();
+    fs::write(b.join("saves/main.dat"), "from b").unwrap();
+
+    let first = rb.pull_anyway(&b.join("saves"), None).unwrap();
+    assert!(matches!(first, Sync::Conflict { .. }), "{first:?}");
+    let resolved = rb
+        .pull_anyway(&b.join("saves"), Some(Keep::Server))
+        .unwrap();
+    assert!(matches!(resolved, Sync::Resolved { .. }), "{resolved:?}");
+    assert_eq!(
+        fs::read_to_string(b.join("saves/main.dat")).unwrap(),
+        "from a"
+    );
+    let _ = fs::remove_dir_all(root);
 }

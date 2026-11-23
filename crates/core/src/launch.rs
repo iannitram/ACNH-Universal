@@ -52,8 +52,10 @@ pub enum Keep {
 pub trait Relay {
     fn pull(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync>;
     fn push(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync>;
-    fn pull_anyway(&self, save_dir: &Path) -> Result<Sync> {
-        self.pull(save_dir, None)
+    /// Pull although another device holds the island. `resolve` answers a conflict, as in
+    /// `pull`: a held island that also changed here is still a conflict.
+    fn pull_anyway(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
+        self.pull(save_dir, resolve)
     }
     fn status(&self, _save_dir: &Path) -> Result<RelayStatus> {
         Ok(RelayStatus::Ready)

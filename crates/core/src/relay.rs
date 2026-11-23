@@ -130,8 +130,8 @@ impl Relay for SaveRelay {
         persist_card(save_dir, &report, self.version)?;
         Ok(map_sync_with_local(report, save_dir))
     }
-    fn pull_anyway(&self, save_dir: &Path) -> Result<Sync> {
-        self.pull_with(save_dir, None, true)
+    fn pull_anyway(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
+        self.pull_with(save_dir, resolve, true)
     }
 
     fn status(&self, save_dir: &Path) -> Result<RelayStatus> {
