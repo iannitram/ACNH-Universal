@@ -41,7 +41,17 @@ case "$build" in
     /*) ;;
     *) build=$root/$build ;;
 esac
-jobs=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+# Compile jobs: the cores, as many as half the memory holds (~700 MB each, as tools/build_android.sh counts
+# them); JOBS= to choose. One job per core ran an 8 GB Mac out of memory on the recompiled game.
+if [ -n "${JOBS:-}" ]; then
+    jobs=$JOBS
+else
+    cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    mem_mb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 8589934592) / 2097152 ))
+    jobs=$(( (mem_mb - 1000) / 700 ))
+    [ "$jobs" -gt "$cores" ] && jobs=$cores
+    [ "$jobs" -lt 1 ] && jobs=1
+fi
 command -v ninja >/dev/null 2>&1 || { echo "error: ninja not found (brew install ninja)" >&2; exit 1; }
 
 vulkan=${NX_VULKAN_INCLUDE:-}

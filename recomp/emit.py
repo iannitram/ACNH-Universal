@@ -339,8 +339,10 @@ class Emitter(Sdk20Ops, ExtOps, VecLdSt, IntOps, FpOps, NeonOps, NeonWideOps):
         r = self.regop(i, ops[0])
         if i.address in jt:
             # Targets inside the function are labels; any other is a tail call (goto_or_tail).
-            cases = " ".join(f"case {B} + {t:#x}ull: {self.goto_or_tail(f, t)}" for t in jt[i.address])
-            return f"switch ({r.r()}) {{ {cases} default: nx::call(c, {r.r()}); return; }}"
+            # On the offset from the base: a case label must be a constant, and the compact layout (iOS)
+            # picks the base at run time.
+            cases = " ".join(f"case {t:#x}ull: {self.goto_or_tail(f, t)}" for t in jt[i.address])
+            return f"switch (uint64_t(({r.r()}) - {B})) {{ {cases} default: nx::call(c, {r.r()}); return; }}"
         return f"{{ nx::call(c, {r.r()}); return; }}"
 
     def i_ret(self, f, i, ops):

@@ -353,15 +353,20 @@ impl Runner for ProcessRunner {
         let (program, args) = args
             .split_first()
             .ok_or_else(|| Error::Build("the shader translator command is missing".into()))?;
+        // Tiered compilation off: on macOS 27 the .NET 10 runtime segfaulted a few hundred shaders
+        // into the batch in two of its tiering paths, JIT_Patchpoint (on-stack replacement) and
+        // JIT_ClassProfile32 (PGO instrumentation). With it off each method is compiled once,
+        // fully optimized, and neither path runs.
         let status = Command::new(program)
             .args(args)
+            .env("DOTNET_TieredCompilation", "0")
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(stderr))
             .status()
             .map_err(|error| Error::Io(format!("cannot run the shader translator: {error}")))?;
         if !status.success() {
             return Err(Error::Build(format!(
-                "the shader translator failed (log: {})",
+                "the shader translator failed ({status}; log: {})",
                 log_path.display()
             )));
         }
