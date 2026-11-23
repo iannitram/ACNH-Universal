@@ -3,6 +3,8 @@
 // (tools/android_install.sh: the recompiled code as libacnh_game.so, romfs.pak, spirv.pak, ...; docs/ANDROID.md).
 // The folder chosen is kept in <files>/data_root.txt, which platform_android.cpp reads; next time the game starts
 // right away. The launcher icon's shortcut "Change game folder" (res/xml/shortcuts.xml) asks again.
+// Or the game comes from the owner's own Dropbox (issue #230): "Download the game" signs in (DropboxAuth) and
+// GameDownload fetches it into the app's private storage, <files>/gamedata, which then is the game folder.
 package io.github.acnhrecomp;
 
 import android.app.Activity;
@@ -11,8 +13,11 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.view.Gravity;
@@ -47,6 +52,10 @@ public class Home extends Activity {
     private TextView message;
     private String waitingForAccess;  // a folder picked before the all-files permission was given
     private boolean busy;
+    private boolean askedNotifications;
+    private TextView progress;
+    private ProgressBar bar;
+    private final Handler ticks = new Handler(Looper.getMainLooper());
 
     private String t(String en, String ptBr) { return pt ? ptBr : en; }
 
@@ -55,13 +64,21 @@ public class Home extends Activity {
         super.onCreate(state);
         String error = getIntent().getStringExtra("error");
         boolean ask = getIntent().getBooleanExtra("pick", false) || error != null;
-        String saved = ask ? "" : readSaved();
-        if (!saved.isEmpty() && hasPackage(new File(saved)) && canRead(saved)) {
+        if (ask) GameDownload.finished = false;  // "Change game folder" or an error: no automatic start
+        // While a download runs the game does not start by itself: leaving the game ends the app's process, and
+        // the download with it.
+        String saved = ask || GameDownload.running ? "" : readSaved();
+        if (!saved.isEmpty() && hasPackage(new File(saved)) && canRead(saved)
+                && (!saved.equals(GameDownload.gameDir(this).getAbsolutePath()) || GameDownload.downloaded(this))) {
             check(saved, true);  // the folder of last time: straight into the game
             return;
         }
+        File downloaded = GameDownload.gameDir(this);
+        if (!ask && !GameDownload.running && GameDownload.downloaded(this)) {
+            check(downloaded.getAbsolutePath(), true);  // the game downloaded from Dropbox
+            return;
+        }
         show(error != null ? explain(error) : null);
-        if (!ask && found().isEmpty()) pick();
     }
 
     @Override
@@ -72,6 +89,96 @@ public class Home extends Activity {
             waitingForAccess = null;
             check(f, false);
         }
+        ticks.removeCallbacksAndMessages(null);
+        ticks.post(this::tick);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        ticks.removeCallbacksAndMessages(null);
+    }
+
+    // ---- the download -----------------------------------------------------------------------------------------
+
+    // The notification permission first (the download's progress shows there), then the sign-in or the download.
+    private void download() {
+        if (GameDownload.running) {
+            if (DropboxAuth.signedIn(this)) return;
+            // Still waiting on a sign-in the browser left: start a new one (it supersedes the old), same download.
+            try {
+                String url = DropboxAuth.start(this);
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+            } catch (Exception e) {
+                say(t("Dropbox sign-in could not start: ", "O login no Dropbox não começou: ") + e.getMessage(), true);
+            }
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 33 && !askedNotifications
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            askedNotifications = true;
+            requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 2);
+            return;  // onRequestPermissionsResult goes on
+        }
+        String url = null;
+        if (!DropboxAuth.signedIn(this)) {
+            try {
+                url = DropboxAuth.start(this);
+            } catch (Exception e) {
+                say(t("Dropbox sign-in could not start: ", "O login no Dropbox não começou: ") + e.getMessage(), true);
+                return;
+            }
+        }
+        // The service starts now, while the app is on screen (Android refuses it from the background); it waits for
+        // the sign-in, and keeps the app awake for the browser's return to DropboxAuth's server.
+        GameDownload.error = null;
+        GameDownload.status = t("Starting the download", "Começando o download");
+        GameDownload.running = true;
+        try {
+            GameDownload.start(this);
+        } catch (Exception e) {
+            GameDownload.running = false;
+            say(t("The download could not start: ", "O download não começou: ") + e.getMessage(), true);
+            return;
+        }
+        if (url != null) {
+            say(t("Sign in to Dropbox in the browser, allow ACNH Recomp's access, then come back here.",
+                    "Entre no Dropbox no navegador, permita o acesso do ACNH Recomp e volte aqui."), false);
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        }
+        tick();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == 2) download();  // with or without the permission: the download runs either way
+    }
+
+    // Twice a second while the screen is open: the download's progress, and the game when it is done.
+    private void tick() {
+        if (progress != null) {
+            String e = GameDownload.error;
+            if (GameDownload.running) {
+                if (message != null && DropboxAuth.signedIn(this)) message.setVisibility(View.GONE);  // the sign-in note
+                long all = GameDownload.total, have = GameDownload.done;
+                progress.setText((all > 0 ? (have * 100 / all) + "%  ·  " : "") + GameDownload.status);
+                progress.setVisibility(View.VISIBLE);
+                bar.setIndeterminate(all <= 0);
+                if (all > 0) bar.setProgress((int) (have * 1000 / all));
+                bar.setVisibility(View.VISIBLE);
+            } else if (e != null) {
+                progress.setText(e);
+                progress.setVisibility(View.VISIBLE);
+                bar.setVisibility(View.GONE);
+            } else if (GameDownload.downloaded(this) && GameDownload.finished) {
+                GameDownload.finished = false;
+                progress.setVisibility(View.GONE);
+                check(GameDownload.gameDir(this).getAbsolutePath(), false);
+                return;
+            }
+        }
+        ticks.postDelayed(this::tick, 500);
     }
 
     // ---- the screen -------------------------------------------------------------------------------------------
@@ -125,10 +232,12 @@ public class Home extends Activity {
         title.setTextColor(Color.rgb(92, 70, 50));
         box.addView(title);
         TextView text = new TextView(this);
-        text.setText(t("Choose the game folder: the one your computer prepared from your own copy of the game "
-                        + "(with libacnh_game.so, romfs.pak and spirv.pak inside).",
-                "Escolha a pasta do jogo: a que o seu computador preparou a partir da sua cópia do jogo "
-                        + "(com libacnh_game.so, romfs.pak e spirv.pak dentro)."));
+        text.setText(t("Download the game your computer prepared from your own copy into your Dropbox (about 11 GB; "
+                        + "it keeps going in the background and picks up where it stopped), or choose a game folder "
+                        + "on this device (with libacnh_game.so, romfs.pak and spirv.pak inside).",
+                "Baixe o jogo que o seu computador preparou a partir da sua cópia no seu Dropbox (cerca de 11 GB; "
+                        + "continua em segundo plano e retoma de onde parou), ou escolha uma pasta do jogo neste "
+                        + "aparelho (com libacnh_game.so, romfs.pak e spirv.pak dentro)."));
         text.setTextSize(16);
         text.setTextColor(Color.rgb(120, 100, 80));
         text.setPadding(0, dp(8), 0, dp(8));
@@ -139,6 +248,31 @@ public class Home extends Activity {
         message.setVisibility(note == null ? View.GONE : View.VISIBLE);
         if (note != null) message.setText(note);
         box.addView(message);
+
+        box.addView(button(t("Download the game from Dropbox", "Baixar o jogo do Dropbox"), Color.rgb(90, 170, 90),
+                v -> download()));
+        progress = new TextView(this);
+        progress.setTextSize(15);
+        progress.setTextColor(Color.rgb(92, 70, 50));
+        progress.setPadding(0, dp(8), 0, 0);
+        progress.setVisibility(View.GONE);
+        box.addView(progress);
+        bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(1000);
+        bar.setVisibility(View.GONE);
+        box.addView(bar, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(14)));
+        if (GameDownload.downloaded(this))
+            box.addView(button(t("Play the downloaded game", "Jogar o jogo baixado"), Color.rgb(90, 170, 90),
+                    v -> check(GameDownload.gameDir(this).getAbsolutePath(), false)));
+        if (DropboxAuth.signedIn(this))
+            box.addView(button(t("Sign out of Dropbox", "Sair do Dropbox"), Color.WHITE, v -> {
+                if (GameDownload.running) {
+                    say(t("Wait for the download to finish first.", "Espere o download terminar."), true);
+                    return;
+                }
+                DropboxAuth.signOut(this);
+                show(null);
+            }));
 
         for (final String f : found())
             box.addView(button(t("Use the game found", "Usar o jogo encontrado") + " ("
@@ -197,7 +331,9 @@ public class Home extends Activity {
         return false;
     }
 
-    private boolean canRead(String path) { return ownFolder(path) || Environment.isExternalStorageManager(); }
+    private boolean canRead(String path) {
+        return path.startsWith(getFilesDir().getAbsolutePath()) || ownFolder(path) || Environment.isExternalStorageManager();
+    }
 
     private String readSaved() {
         try {
@@ -251,6 +387,14 @@ public class Home extends Activity {
     // starts the game, or says why not.
     private void check(final String folder, final boolean quiet) {
         if (busy) return;
+        GameDownload.finished = false;
+        if (GameDownload.running) {
+            if (message == null) show(null);
+            say(t("Wait for the download to finish: leaving the game would stop it.",
+                    "Espere o download terminar: sair do jogo o interromperia."), true);
+            return;
+        }
+        ((android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE)).cancel(GameDownload.DONE_NOTE);
         if (!hasPackage(new File(folder))) {
             if (message == null) show(null);
             say(explain("missing") + "\n" + folder, true);

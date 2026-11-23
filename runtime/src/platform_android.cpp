@@ -1124,7 +1124,8 @@ extern "C" void android_main(android_app* app) {
                 own = d;
                 break;
             }
-    if (!has_data(own) && !has_all_files_access(app)) {
+    // A folder inside the app (the game downloaded into <files>/gamedata) needs no all-files access.
+    if (!has_data(chosen) && !has_data(own) && !has_all_files_access(app)) {
         request_all_files_access(app);
         while (!has_all_files_access(app)) {  // keep the app responsive until the switch is turned on
             int events;

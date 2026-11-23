@@ -67,6 +67,15 @@ carries).
 
 The first time, **ACNH Recomp** shows its home screen:
 
+- *Download the game from Dropbox*: the prepared game from your own Dropbox, into the app's private storage
+  (`<files>/gamedata`), with nothing of it outside the app (issue #230). The app signs in with save-relay's Dropbox
+  app (an App folder app: it sees only `Apps/<that app>/`), so the files wait in
+  `Apps/<that app>/acnh-universal-game/android/`, put there on the computer with
+  `tools/stage_dropbox_game.sh <work folder> private/acnh/apk/libacnh_game.so ~/Dropbox/Apps/<that app>` (it also
+  writes `manifest.json`: each file's size and SHA-256). The download runs as a foreground service with a progress
+  notification: it keeps going with the app in the background or swiped away, picks up a file where it stopped (an
+  HTTP range request), checks every file's hash, and the game starts when all are there. Never share that folder
+  or make a link to it.
 - *Use the game found*: the folder `android_install.sh` copied into the app's own folder.
 - *Choose the game folder*: any other folder with the prepared game (e.g. one copied by USB to `ACNH` on the memory
   card). The app then asks for access to all files once: Android needs it to read a folder outside the app's own.
