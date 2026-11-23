@@ -327,8 +327,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let picture = acnh_core::steam::assets_dir()?.join("acnhrecomp.png");
-    if let Ok(image) = slint::Image::load_from_path(&picture) {
-        window.set_card_picture(image);
+    if let Ok(image) = image::open(&picture) {
+        let rgba = image.into_rgba8();
+        let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+        );
+        window.set_card_picture(slint::Image::from_rgba8(pixels));
     }
     let session = Rc::new(RefCell::new(session(picture)?));
     render(&window.as_weak(), &session.borrow());
