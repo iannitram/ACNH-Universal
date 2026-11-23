@@ -8,6 +8,26 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// A control on the launcher Settings page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsFocus {
+    Ptbr,
+    Speedfix,
+    Back,
+}
+
+/// Move between Settings controls using a shared navigation action.
+pub fn move_focus(focus: SettingsFocus, nav: crate::vm::Nav) -> SettingsFocus {
+    use crate::vm::Nav;
+    use SettingsFocus::{Back, Ptbr, Speedfix};
+    match (focus, nav) {
+        (Ptbr, Nav::Down | Nav::Right) | (Back, Nav::Up | Nav::Left) => Speedfix,
+        (Speedfix, Nav::Down | Nav::Right) => Back,
+        (Speedfix, Nav::Up | Nav::Left) => Ptbr,
+        _ => focus,
+    }
+}
+
 /// The runtime's settings file, in the data root.
 pub const CONFIG_FILE: &str = "config.ini";
 

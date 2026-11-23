@@ -1,3 +1,4 @@
+import { InputHints } from "hints.slint";
 // The Continue page (docs/design/continue-screen.md): the island card, the one Play button,
 // the conflict chooser with both cards, and the drift warning. It only draws: every text and
 // flag comes from `ContinuePageVm::view()` (app/src/vm/continue_page.rs) and every click goes
@@ -35,6 +36,7 @@ export struct ContinueView {
     about-open: bool,
     settings-open: bool,
     fleet-open: bool,
+    saves-open: bool,
     focus: PadTarget,
 }
 
@@ -133,6 +135,7 @@ component IslandCard inherits Rectangle {
 }
 
 export component ContinuePage inherits Rectangle {
+    in property <int> input-device;
     in property <ContinueView> view;
     in property <image> card-picture;
     callback clicked(PadTarget);
@@ -296,6 +299,12 @@ export component ContinuePage inherits Rectangle {
                     root.clicked(PadTarget.about);
                 }
             }
+        }
+        InputHints {
+            device: root.input-device;
+            select-label: root.view.button-enabled || root.view.keep-enabled || root.view.pages-enabled || root.view.play-anyway || root.view.warning != "" ? "Select" : "";
+            back-label: root.view.back || root.view.choosing ? "Back" : "";
+            menu-label: root.view.pages-enabled ? "Settings" : "";
         }
     }
 }
