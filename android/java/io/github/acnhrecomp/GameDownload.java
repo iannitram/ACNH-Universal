@@ -50,6 +50,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class GameDownload extends Service {
     // Where the game waits, inside save-relay's Dropbox app folder.
@@ -284,33 +288,28 @@ public class GameDownload extends Service {
             throw new Fatal("Not enough free space: the game needs " + gb(need + 500_000_000L) + " more, and "
                     + gb(free) + " is free.");
 
-        for (Item it : fetch) {
-            if (Thread.interrupted()) throw new InterruptedException();
-            File f = new File(part, it.path);
-            String key = it.path + " " + it.sha;
-            if (verified.contains(key) && f.isFile() && f.length() == it.size) continue;
-            File movedTo = new File(game, it.path);
-            if (verified.contains(key) && !f.exists() && movedTo.isFile() && movedTo.length() == it.size) continue;
-            if (!it.sha.equals(started.get(it.path)))
-                try (FileOutputStream o = new FileOutputStream(startedList, true)) {
-                    o.write((it.path + " " + it.sha + "\n").getBytes(StandardCharsets.UTF_8));
-                    started.put(it.path, it.sha);
+        // Small files (the DLC's ~1,200, fonts, analysis) several at a time: each is mostly a round trip. Then
+        // the big ones one after another, each one stream at the line's full speed.
+        final Lists lists = new Lists(startedList, started, verifiedList, verified);
+        List<Item> small = new ArrayList<>(), big = new ArrayList<>();
+        for (Item it : fetch) (it.size < SMALL ? small : big).add(it);
+        ExecutorService pool = Executors.newFixedThreadPool(PARALLEL);
+        try {
+            List<Future<Void>> jobs = new ArrayList<>();
+            for (final Item it : small) jobs.add(pool.submit(() -> { fetchOne(it, part, game, lists); return null; }));
+            for (Future<Void> j : jobs) {
+                try {
+                    j.get();
+                } catch (ExecutionException e) {
+                    Throwable c = e.getCause();
+                    if (c instanceof Exception) throw (Exception) c;
+                    throw new Exception(c);
                 }
-            File parent = f.getParentFile();
-            if (parent != null && !parent.isDirectory() && !parent.mkdirs()) throw new Fatal("cannot make " + parent);
-            for (int attempt = 0; ; attempt++) {
-                download(it, f);
-                update("Checking " + it.path);
-                if (sha256(f).equals(it.sha)) break;
-                done -= f.length();
-                f.delete();
-                if (attempt >= 1) throw new Fatal(it.path + " came out damaged twice. Try again later.");
             }
-            verified.add(key);
-            try (FileOutputStream o = new FileOutputStream(verifiedList, true)) {
-                o.write((key + "\n").getBytes(StandardCharsets.UTF_8));
-            }
+        } finally {
+            pool.shutdownNow();
         }
+        for (Item it : big) fetchOne(it, part, game, lists);
 
         // Every file checks out: move them into the game folder, then the list. The player's own files stay.
         update("Finishing");
@@ -330,10 +329,60 @@ public class GameDownload extends Service {
         status = "The game is ready.";
     }
 
+    private static final long SMALL = 16L << 20;  // under 16 MB: fetched in parallel
+    private static final int PARALLEL = 6;
+
+    // started.txt and verified.txt with their in-memory copies, shared by the parallel fetches.
+    private static final class Lists {
+        final File startedList, verifiedList;
+        final Map<String, String> started;
+        final Set<String> verified;
+        Lists(File s, Map<String, String> sm, File v, Set<String> vs) { startedList = s; started = sm; verifiedList = v; verified = vs; }
+        synchronized boolean isVerified(String key) { return verified.contains(key); }
+        synchronized void start(Item it) throws Exception {
+            if (it.sha.equals(started.get(it.path))) return;
+            try (FileOutputStream o = new FileOutputStream(startedList, true)) {
+                o.write((it.path + " " + it.sha + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+            started.put(it.path, it.sha);
+        }
+        synchronized void verify(String key) throws Exception {
+            verified.add(key);
+            try (FileOutputStream o = new FileOutputStream(verifiedList, true)) {
+                o.write((key + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    private static synchronized void addDone(long n) { done += n; }
+
+    // One file: fetched (resumed), checked against its hash, recorded as verified.
+    private void fetchOne(Item it, File part, File game, Lists lists) throws Exception {
+        if (Thread.interrupted()) throw new InterruptedException();
+        File f = new File(part, it.path);
+        String key = it.path + " " + it.sha;
+        if (lists.isVerified(key) && f.isFile() && f.length() == it.size) return;
+        File movedTo = new File(game, it.path);
+        if (lists.isVerified(key) && !f.exists() && movedTo.isFile() && movedTo.length() == it.size) return;
+        lists.start(it);
+        File parent = f.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory())
+            throw new Fatal("cannot make " + parent);
+        for (int attempt = 0; ; attempt++) {
+            download(it, f);
+            if (it.size > SMALL) update("Checking " + it.path);
+            if (sha256(f).equals(it.sha)) break;
+            addDone(-f.length());
+            f.delete();
+            if (attempt >= 1) throw new Fatal(it.path + " came out damaged twice. Try again later.");
+        }
+        lists.verify(key);
+    }
+
     private void download(Item it, File f) throws Exception {
         long have = f.isFile() ? f.length() : 0;
         if (have > it.size) {
-            done -= Math.min(have, it.size);
+            addDone(-Math.min(have, it.size));
             f.delete();
             have = 0;
         }
@@ -423,7 +472,7 @@ public class GameDownload extends Service {
         return s.append("\"}").toString();
     }
 
-    private long last;
+    private volatile long last;
 
     // One request to Dropbox's download endpoint. With `into` null, returns the whole body; else appends from byte
     // `from` to `into` and returns null.
@@ -466,7 +515,7 @@ public class GameDownload extends Service {
                 int n;
                 while ((n = in.read(buf)) > 0) {
                     out.write(buf, 0, n);
-                    done += n;
+                    addDone(n);
                     long now = SystemClock.elapsedRealtime();
                     if (now - last > 1000) {
                         last = now;
