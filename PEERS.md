@@ -44,3 +44,4 @@ peer: gilrs (crate) | MIT or Apache-2.0 | gamepad input on desktop
 
 | Here | From (repo and commit) | License | Credit |
 |---|---|---|---|
+| `runtime/src/yield_backoff.h` | fedebuonco/nxrt c41d913 `runtime/yield_backoff.{c,h}` | Unlicense | header comment |

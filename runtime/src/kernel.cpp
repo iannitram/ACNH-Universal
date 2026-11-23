@@ -19,6 +19,7 @@
 
 #include "kernel_state.h"
 #include "platform.h"
+#include "yield_backoff.h"
 
 namespace nx {
 
@@ -90,12 +91,33 @@ static bool spin_naps() {
     return on;
 }
 
+// NX_YIELD_BACKOFF=start_us,cap_us (default 2000,250; empty or 0 = off): a thread yielding in a loop without changing
+// x19..x28 for start_us is polling, so each further yield sleeps run/8 (10 us..cap_us). Yield loops that make
+// progress (Wonder's job joins) change those registers and never sleep. spin_naps() wins when explicitly on.
+struct YieldCfg { bool on; uint64_t start_ns, cap_ns; };
+static const YieldCfg& yb_config() {
+    static const YieldCfg cfg = [] {
+        YieldCfg c{true, 2000 * 1000ull, 250 * 1000ull};
+        if (const char* e = std::getenv("NX_YIELD_BACKOFF")) {
+            if (!e[0] || std::strcmp(e, "0") == 0) { c.on = false; return c; }
+            char* end = nullptr;
+            unsigned long long s = std::strtoull(e, &end, 10), cap = 250;
+            if (end != e) c.start_ns = s * 1000;
+            if (end && *end == ',') cap = std::strtoull(end + 1, nullptr, 10);
+            if (cap < 10) cap = 10;
+            c.cap_ns = cap * 1000;
+        }
+        return c;
+    }();
+    return cfg;
+}
+
 // nn::os::GetSystemTick. Hades' main loop (nnMain, main+2496fc) polls it without pause until its fixed step is
 // due: on the Switch that thread owns a core, on a phone it pins a big core at 100% (80% of that thread's time was
 // clock reads) and the heat lowers everyone's clocks. A thread asking again within 20 us, 50 times in a row, is
 // spinning: let it sleep 0.5 ms (the loop keeps sub-millisecond precision against a 16.6 ms step).
 // Hades only (spin_naps()): Wonder's job loops read the tick legitimately.
-std::atomic<uint64_t> g_tick_calls{0}, g_yield_calls{0}, g_sleep_calls{0};
+std::atomic<uint64_t> g_tick_calls{0}, g_yield_calls{0}, g_yield_naps{0}, g_sleep_calls{0};
 static void hle_get_system_tick(CPU& c) {
     g_tick_calls.fetch_add(1, std::memory_order_relaxed);
     if (KThread* t = spin_naps() ? t_self : nullptr) {
@@ -482,6 +504,7 @@ static void write_meminfo(uint64_t p, const VmInfo& v) {
 static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
     if (g_trace) log("svc %#x from %s", imm, describe(pc).c_str());
     uint32_t rc = 0;
+    if (imm != 0x0B) t_self->yb_run = 0;  // any other SVC ends a run of yields
     switch (imm) {
         case 0x01: {  // SetHeapSize(size) -> addr
             uint64_t size = c.x[1];
@@ -552,6 +575,7 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
             int64_t ns = int64_t(c.x[0]);
             if (ns > 0) {
                 g_sleep_calls.fetch_add(1, std::memory_order_relaxed);
+                t_self->yb_run = 0;
                 plat::sleep_ns(ns);
                 return;
             }
@@ -562,6 +586,19 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
             g_yield_calls.fetch_add(1, std::memory_order_relaxed);
             KThread* t = t_self;
             uint64_t now = plat::monotonic_ns();
+            if (!spin_naps() && yb_config().on) {
+                if (t->yb_run == 0 || nx::yield_backoff_progress(t->yb_regs, &c.x[19])) {
+                    t->yb_run = now;
+                    std::memcpy(t->yb_regs, &c.x[19], sizeof t->yb_regs);
+                    plat::yield();
+                } else if (uint64_t ns = nx::yield_backoff_sleep_ns(now - t->yb_run, yb_config().start_ns, yb_config().cap_ns)) {
+                    g_yield_naps.fetch_add(1, std::memory_order_relaxed);
+                    plat::sleep_ns(int64_t(ns));
+                } else {
+                    plat::yield();
+                }
+                return;
+            }
             if (now - t->last_yield > 2'000'000) t->yields = 0;
             if (!spin_naps() || ++t->yields <= 32)
                 plat::yield();
