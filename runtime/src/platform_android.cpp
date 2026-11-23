@@ -637,6 +637,81 @@ int system_adreno_model(void* lib) {
     return model;
 }
 
+// Before the game starts: can this phone's Vulkan driver (the one load_vulkan picked: Turnip on Adreno, else the
+// phone's own, e.g. Mali on Google Tensor) run the renderer at all? It needs Vulkan 1.1 or later, a GPU with a
+// graphics queue, and dynamic rendering (core in 1.3, else VK_KHR_dynamic_rendering): without it the Adreno 6xx
+// drivers phones ship drew nothing of the game. "" when it can; else "gpu: <the GPU and what it lacks>", which the
+// home screen shows in place of a black screen. The idea of checking first and saying so plainly comes from the
+// sibling port Uncharted-Universal (PR 542 there; its code is not copied).
+std::string vulkan_preflight() {
+    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(vulkan_get_instance_proc_addr());
+    if (!gipa) return "gpu: no Vulkan driver could be loaded on this phone";
+    auto create = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.apiVersion = VK_API_VERSION_1_3;
+    VkInstanceCreateInfo ci{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ci.pApplicationInfo = &app;
+    VkInstance inst = VK_NULL_HANDLE;
+    if (!create || create(&ci, nullptr, &inst) != VK_SUCCESS) return "gpu: the Vulkan driver would not start";
+    auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(inst, "vkEnumeratePhysicalDevices"));
+    auto props = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(gipa(inst, "vkGetPhysicalDeviceProperties"));
+    auto features2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(gipa(inst, "vkGetPhysicalDeviceFeatures2"));
+    auto queues = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+            gipa(inst, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    auto dev_exts = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+            gipa(inst, "vkEnumerateDeviceExtensionProperties"));
+    auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(gipa(inst, "vkDestroyInstance"));
+    std::string why;
+    uint32_t n = 1;
+    VkPhysicalDevice pd = VK_NULL_HANDLE;
+    if (!enumerate || !props || enumerate(inst, &n, &pd) < 0 || !n || !pd) {
+        why = "gpu: the Vulkan driver reports no GPU";
+    } else {
+        VkPhysicalDeviceProperties p{};
+        props(pd, &p);
+        char name[160];
+        std::snprintf(name, sizeof name, "%s (Vulkan %u.%u)", p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+                      VK_API_VERSION_MINOR(p.apiVersion));
+        uint32_t nq = 0;
+        if (queues) queues(pd, &nq, nullptr);
+        std::vector<VkQueueFamilyProperties> fam(nq);
+        if (queues && nq) queues(pd, &nq, fam.data());
+        bool graphics = false;
+        for (const VkQueueFamilyProperties& f : fam) graphics = graphics || (f.queueFlags & VK_QUEUE_GRAPHICS_BIT);
+        bool dynamic = false;
+        if (p.apiVersion >= VK_API_VERSION_1_3 && features2) {
+            VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+            VkPhysicalDeviceFeatures2 f{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            f.pNext = &f13;
+            features2(pd, &f);
+            dynamic = f13.dynamicRendering == VK_TRUE;
+        } else if (features2 && dev_exts) {
+            uint32_t ne = 0;
+            dev_exts(pd, nullptr, &ne, nullptr);
+            std::vector<VkExtensionProperties> ext(ne);
+            if (ne) dev_exts(pd, nullptr, &ne, ext.data());
+            bool has = false;
+            for (const VkExtensionProperties& e : ext) has = has || !std::strcmp(e.extensionName, "VK_KHR_dynamic_rendering");
+            if (has) {
+                VkPhysicalDeviceDynamicRenderingFeatures fd{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES};
+                VkPhysicalDeviceFeatures2 f{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+                f.pNext = &fd;
+                features2(pd, &f);
+                dynamic = fd.dynamicRendering == VK_TRUE;
+            }
+        }
+        if (p.apiVersion < VK_API_VERSION_1_1)
+            why = std::string("gpu: ") + name + " is older than Vulkan 1.1";
+        else if (!graphics)
+            why = std::string("gpu: ") + name + " has no graphics queue";
+        else if (!dynamic)
+            why = std::string("gpu: ") + name + " lacks dynamic rendering (Vulkan 1.3 or VK_KHR_dynamic_rendering)";
+        nx::log("vulkan: preflight %s: %s", name, why.empty() ? "can run the game" : why.c_str());
+    }
+    if (destroy) destroy(inst, nullptr);
+    return why;
+}
+
 // The first .so file in <game folder>/drivers/ (sorted by name), "" when there is none.
 std::string custom_driver_file() {
     std::vector<std::string> found;
@@ -1124,7 +1199,8 @@ extern "C" void android_main(android_app* app) {
                 own = d;
                 break;
             }
-    if (!has_data(own) && !has_all_files_access(app)) {
+    // A folder inside the app (the game downloaded into <files>/gamedata) needs no all-files access.
+    if (!has_data(chosen) && !has_data(own) && !has_all_files_access(app)) {
         request_all_files_access(app);
         while (!has_all_files_access(app)) {  // keep the app responsive until the switch is turned on
             int events;
@@ -1187,8 +1263,10 @@ extern "C" void android_main(android_app* app) {
 
     nx::log("%s (Switch recomp) on Android, data at %s (own folder %s: %s)", nx::game::kInfo.title, g_root.c_str(),
             own.c_str(), has_data(own) ? "has the data" : "no analysis/main.bin");
-    if (std::string why = load_game(g_root, g_cache_dir); !why.empty()) {
-        nx::log("game library: %s", why.c_str());
+    std::string why = load_game(g_root, g_cache_dir);
+    if (why.empty()) why = vulkan_preflight();  // a plain message, not a black screen, when the GPU cannot
+    if (!why.empty()) {
+        nx::log("cannot start: %s", why.c_str());
         open_home(app, why);
         ANativeActivity_finish(app->activity);
         while (!app->destroyRequested) {  // the home screen lives in this process: no _exit
