@@ -2,10 +2,11 @@
 # Build the iOS player as ACNH.app from a checkout with no game data (the hand-written stub in tests/ios_stub_gen),
 # for the simulator or a device:
 #
-#   tools/build_ios.sh <iphoneos|iphonesimulator> [<gen dir>]
+#   tools/build_ios.sh <iphoneos|iphonesimulator> [<gen dir> [<build dir>]]
 #
 # It fetches and builds static SDL3 release-3.4.18 and MoltenVK v1.3.0 into private/third_party/ios/<sdk>/ (never
-# committed), then configures and builds private/ios/build-<sdk>/ACNH.app. Both CI and the Mac's real build use it.
+# committed), then configures and builds <build dir>/ACNH.app (default private/ios/build-<sdk>/; the launcher's prepare gives a
+# folder under the prepared folder, so a build that holds the recompiled code is never written inside a git work tree). Both CI and the Mac's real build use it.
 #
 # The peer cerroverb/MHGURecomp-iOS (MIT, a fork of morerokk/MHGURecomp) builds the same pieces in its
 # .github/workflows/build-ios.yml: a static libMoltenVK.a from the Khronos release, and an SDL3 iOS CMake build.
@@ -16,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$PWD
 
-usage() { echo "usage: tools/build_ios.sh <iphoneos|iphonesimulator> [<gen dir>]" >&2; exit 2; }
+usage() { echo "usage: tools/build_ios.sh <iphoneos|iphonesimulator> [<gen dir> [<build dir>]]" >&2; exit 2; }
 sdk=${1:-}
 case "$sdk" in
     iphoneos|iphonesimulator) ;;
@@ -30,7 +31,11 @@ esac
 [ -d "$gen/main" ] && [ -d "$gen/sdk" ] || { echo "error: $gen/main or $gen/sdk missing" >&2; exit 1; }
 
 third=$root/private/third_party/ios
-build=$root/private/ios/build-$sdk
+build=${3:-"$root/private/ios/build-$sdk"}
+case "$build" in
+    /*) ;;
+    *) build=$root/$build ;;
+esac
 jobs=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
 command -v ninja >/dev/null 2>&1 || { echo "error: ninja not found (brew install ninja)" >&2; exit 1; }
 
