@@ -3,7 +3,7 @@ use crate::vm::first_run::{Event, FirstRunVm, Request, Step};
 use crate::vm::settings::SettingsVm;
 use crate::vm::Nav;
 use acnh_core::platform::{AppDirs, Os, Vars};
-use acnh_core::{bundle, gamefolder, hub, prepare, profile};
+use acnh_core::{gamefolder, hub, prepare, profile};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
@@ -55,17 +55,9 @@ impl FirstRun {
             clipboard: None,
         }
     }
-    pub fn game_root(&self) -> PathBuf {
-        self.dirs.data.join("prepare")
-    }
-    pub fn prepared_player(&self) -> PathBuf {
-        acnh_core::assemble::player(Os::current(), Path::new(""), &self.dirs.install())
-    }
     pub fn needed(&self) -> bool {
-        if self.dirs.config.join("first-run-complete").is_file()
-            && self.game_root().join("analysis/main.bin").is_file()
-        {
-            return !self.prepared_player().is_file();
+        if self.dirs.config.join("first-run-complete").is_file() {
+            return false;
         }
         let launcher = std::env::current_exe().unwrap_or_default();
         let player = acnh_core::assemble::player(Os::current(), &launcher, &self.dirs.install());
@@ -203,7 +195,7 @@ impl FirstRun {
         false
     }
 }
-fn device(dirs: &AppDirs) -> acnh_core::Result<String> {
+pub(crate) fn device(dirs: &AppDirs) -> acnh_core::Result<String> {
     let path = dirs.config.join("hub-device");
     if let Ok(name) = std::fs::read_to_string(&path) {
         return Ok(name.trim().to_owned());
@@ -216,6 +208,28 @@ fn device(dirs: &AppDirs) -> acnh_core::Result<String> {
     let name = format!("device-{stamp:x}-{:x}", std::process::id());
     std::fs::write(path, &name)?;
     Ok(name)
+}
+fn save_launcher_values(dirs: &AppDirs, values: &[(&str, &str)]) -> acnh_core::Result<()> {
+    let path = dirs.config.join("launcher.ini");
+    let mut config = match std::fs::read_to_string(&path) {
+        Ok(text) => acnh_core::config::Config::parse(&text)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(e.into()),
+    };
+    for &(key, value) in values {
+        if value.contains(['\r', '\n']) {
+            return Err(acnh_core::Error::Config(format!(
+                "{key} must be a single line"
+            )));
+        }
+        config.set(key, value);
+    }
+    use std::io::Write;
+    std::fs::create_dir_all(&dirs.config)?;
+    let mut replacement = tempfile::NamedTempFile::new_in(&dirs.config)?;
+    replacement.write_all(config.to_text().as_bytes())?;
+    replacement.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 fn safe_error(error: acnh_core::Error, home: &Path) -> String {
     match error {
@@ -272,10 +286,15 @@ fn run(
         ),
         Request::Pair(addr, name, code) => Event::Paired(
             device(dirs)
-                .and_then(|id| {
-                    hub::pair_hub(addr, dirs, &id, &name, &code, Os::current()).map(|_| ())
-                })
-                .map_err(|_| "Codes did not match".into()),
+                .and_then(|id| hub::pair_hub(addr, dirs, &id, &name, &code, Os::current()))
+                .map_err(|_| "Codes did not match".to_owned())
+                .and_then(|_| {
+                    save_launcher_values(
+                        dirs,
+                        &[("hub_name", &name), ("hub_address", &addr.to_string())],
+                    )
+                    .map_err(|_| "Could not save the paired hub address".into())
+                }),
         ),
         Request::Pull(addr, name) => Event::Finished(
             (|| {
@@ -291,7 +310,11 @@ fn run(
                 {
                     return Err(acnh_core::Error::Build("download cancelled".into()));
                 }
-                bundle::install(&bundle, staged.path(), &dirs.install())?;
+                crate::build_actions::BuildActions {
+                    dirs: dirs.clone(),
+                    os: Os::current(),
+                }
+                .install_bundle(&bundle, staged.path())?;
                 hub::report_hub_build(addr, dirs, &id, &name, &bundle)?;
                 Ok(())
             })()
@@ -325,6 +348,7 @@ fn run(
                     return Err(acnh_core::Error::Build("preparation cancelled".into()));
                 }
                 prepare::assemble(Os::current(), &out.join("build"), &dirs.install())?;
+                save_launcher_values(dirs, &[("game_folder", &path.to_string_lossy())])?;
                 Ok(())
             })()
             .map_err(|e| safe_error(e, &vars.home)),
@@ -439,6 +463,23 @@ fn steam_artwork(folder: &Path) -> acnh_core::Result<Vec<(acnh_core::artwork::Ar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_values_preserve_existing_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::new(&Vars {
+            home: root.path().into(),
+            data: root.path().join("data"),
+            config: root.path().join("config"),
+        });
+        std::fs::create_dir_all(&dirs.config).unwrap();
+        std::fs::write(dirs.config.join("launcher.ini"), "other = kept\n").unwrap();
+        save_launcher_values(&dirs, &[("game_folder", "/example/game")]).unwrap();
+        let text = std::fs::read_to_string(dirs.config.join("launcher.ini")).unwrap();
+        let config = acnh_core::config::Config::parse(&text).unwrap();
+        assert_eq!(config.get("other"), Some("kept"));
+        assert_eq!(config.get("game_folder"), Some("/example/game"));
+    }
 
     #[test]
     fn steam_artwork_uses_the_size_for_each_library_slot() {

@@ -13,9 +13,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
+use crate::build_actions::BuildActions;
 use acnh_core::launch::{self, Game, Keep, Relay};
 use acnh_core::savecard;
-use acnh_core::{Error, NotBuilt, Result};
+use acnh_core::{Error, Result};
 
 use crate::vm::continue_page::{ContinuePageVm, FocusTarget, PlayEvent, Request, SyncStep};
 use crate::vm::Nav;
@@ -188,6 +189,7 @@ pub struct Runner {
 pub struct Session {
     vm: ContinuePageVm,
     runner: Runner,
+    builds: Option<(BuildActions, PathBuf)>,
     picture: PathBuf,
     sender: Sender<PlayEvent>,
     events: Receiver<PlayEvent>,
@@ -195,33 +197,67 @@ pub struct Session {
 
 impl Session {
     /// `picture` is the island card's picture (`savecard::read_card`).
-    pub fn new(mut vm: ContinuePageVm, runner: Runner, picture: PathBuf) -> Self {
+    pub fn new(vm: ContinuePageVm, runner: Runner, picture: PathBuf) -> Self {
         let (sender, events) = mpsc::channel();
-        if vm.begin_status() {
-            let status_runner = runner.clone();
-            let status_sender = sender.clone();
-            thread::spawn(move || {
-                let _ = status_sender.send(PlayEvent::Status(
-                    status_runner.relay.status(&status_runner.save_dir),
-                ));
-            });
-        }
-        Self {
+        let mut session = Self {
             vm,
             runner,
+            builds: None,
             picture,
             sender,
             events,
+        };
+        session.check_status();
+        session
+    }
+
+    fn check_status(&mut self) {
+        if self.vm.begin_status() {
+            let runner = self.runner.clone();
+            let sender = self.sender.clone();
+            thread::spawn(move || {
+                let _ = sender.send(PlayEvent::Status(runner.relay.status(&runner.save_dir)));
+            });
         }
     }
 
-    /// Use the locally prepared player and game root for subsequent launches.
-    pub fn set_prepared_player(&mut self, program: PathBuf, root: &Path) {
+    pub fn set_build_actions(&mut self, builds: BuildActions, launcher: PathBuf) {
+        self.vm.enable_build_actions();
+        self.builds = Some((builds, launcher));
+    }
+
+    /// Select the new build and its data source once first run has finished.
+    pub fn refresh_after_first_run(&mut self) {
+        match self.refresh_player() {
+            Some(true) => {
+                self.vm.on_play_event(PlayEvent::Updated(Ok(())));
+                self.check_status();
+            }
+            Some(false) => {
+                let local = self
+                    .builds
+                    .as_ref()
+                    .is_some_and(|(builds, _)| builds.game_folder().ok().flatten().is_some());
+                self.vm.set_build_missing(local);
+            }
+            None => {}
+        }
+    }
+
+    fn refresh_player(&mut self) -> Option<bool> {
+        let (builds, launcher) = self.builds.as_ref()?;
+        let (program, game_root) = builds.launch_location(launcher);
+        if !builds.installed(&program) {
+            return Some(false);
+        }
         self.runner.game = Arc::new(Player { program });
         self.runner.env.retain(|(name, _)| name != "NX_GAME_ROOT");
-        self.runner
-            .env
-            .push(("NX_GAME_ROOT".into(), root.display().to_string()));
+        if let Some(root) = game_root {
+            self.runner
+                .env
+                .push(("NX_GAME_ROOT".into(), root.display().to_string()));
+        }
+        Some(true)
     }
 
     pub fn vm(&self) -> &ContinuePageVm {
@@ -248,8 +284,21 @@ impl Session {
         let events: Vec<PlayEvent> = self.events.try_iter().collect();
         let any = !events.is_empty();
         for event in events {
+            let event = if matches!(event, PlayEvent::Updated(Ok(())))
+                && self.refresh_player() == Some(false)
+            {
+                PlayEvent::Updated(Err(Error::Build(
+                    "the installed player could not be verified".into(),
+                )))
+            } else {
+                event
+            };
             let finished = matches!(event, PlayEvent::Played(_) | PlayEvent::Synced(_));
+            let build_finished = matches!(event, PlayEvent::Updated(Ok(())));
             self.vm.on_play_event(event);
+            if build_finished {
+                self.check_status();
+            }
             if finished {
                 // The game or the relay may have written the island: show it as it is now.
                 if let Ok(card) = savecard::read_card(&self.runner.save_dir, &self.picture) {
@@ -317,13 +366,23 @@ impl Session {
                     );
                 });
             }
-            // The update flow is joined to the app with the Fleet page; until then the page
-            // says so instead of waiting.
-            Request::Update => self
-                .vm
-                .on_play_event(PlayEvent::Updated(Err(Error::NotBuilt(NotBuilt(
-                    "update from the Continue page",
-                ))))),
+            Request::Build | Request::Update => {
+                let builds = self.builds.clone();
+                thread::spawn(move || {
+                    let result = match builds {
+                        Some((builds, _)) => {
+                            let progress = |stage| report(PlayEvent::BuildProgress(stage));
+                            if request == Request::Update {
+                                builds.update(&progress)
+                            } else {
+                                builds.build(&progress)
+                            }
+                        }
+                        None => Err(Error::Build("Build setup is unavailable".into())),
+                    };
+                    report(PlayEvent::Updated(result));
+                });
+            }
         }
     }
 }
@@ -781,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn update_from_the_page_says_it_is_not_built_instead_of_waiting() {
+    fn update_without_build_configuration_reports_an_error() {
         let log = Log::default();
         let mut session = session(&log, None);
         session.vm.this_device = None;
@@ -790,10 +849,12 @@ mod tests {
         };
         session.vm.focus = FocusTarget::Update;
         assert!(session.click(FocusTarget::Update));
-        assert!(matches!(
-            session.vm().state(),
-            ContinueState::UpdateFailed(_)
-        ));
+        let started = Instant::now();
+        while !matches!(session.vm().state(), ContinueState::UpdateFailed(_)) {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            session.pump();
+            thread::sleep(Duration::from_millis(2));
+        }
         assert!(lines(&log).is_empty());
     }
 }

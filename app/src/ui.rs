@@ -64,6 +64,7 @@ pub fn to_slint(view: &PageView) -> ContinueView {
         keep_enabled: view.keep_enabled,
         warning: view.warning.as_str().into(),
         play_anyway: view.play_anyway,
+        update_available: view.update_available,
         held: view.held,
         back: view.back,
         pages_enabled: view.pages_enabled,
