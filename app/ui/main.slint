@@ -76,6 +76,9 @@ export component MainWindow inherits Window {
     in property <bool> saves-has-previous;
     in property <bool> saves-has-next;
     callback saves-scroll(int);
+    in property <string> saves-relay;
+    in property <bool> saves-sync-enabled;
+    callback saves-sync-now();
     in property <bool> ptbr;
     in property <bool> speedfix;
     in property <SettingsControl> settings-focus: SettingsControl.ptbr;
@@ -203,9 +206,12 @@ export component MainWindow inherits Window {
             position: root.saves-position;
             has-previous: root.saves-has-previous;
             has-next: root.saves-has-next;
+            relay: root.saves-relay;
+            sync-enabled: root.saves-sync-enabled;
             back => { root.pointer-used(); root.clicked(PadTarget.back); }
             previous => { root.pointer-used(); root.saves-scroll(-1); }
             next => { root.pointer-used(); root.saves-scroll(1); }
+            sync-now => { root.pointer-used(); root.saves-sync-now(); }
         }
 
         // The About overlay: opened by the About entry on the Continue page, closed by Back.

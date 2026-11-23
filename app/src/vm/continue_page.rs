@@ -215,6 +215,12 @@ pub enum Request {
     Build,
     /// Bring this device's build up to date (`update`).
     Update,
+    /// Send the waiting push (this device's island the relay does not have yet), then check
+    /// the status. Nothing starts the game: Retry and the open-time push both use it.
+    Retry,
+    /// Sync now from the Saves page: the status, then the waiting push, then the one pull or
+    /// push the status calls for.
+    SyncNow,
 }
 
 /// What a running job tells the page, in the order it happens.
@@ -293,6 +299,10 @@ pub struct PageView {
     pub settings_open: bool,
     pub fleet_open: bool,
     pub saves_open: bool,
+    /// The Saves page's relay line (off, last sync, waiting push, unavailable or error).
+    pub saves_relay: String,
+    /// Sync now is enabled on the Saves page.
+    pub sync_now: bool,
     pub focus: FocusTarget,
 }
 
@@ -350,6 +360,9 @@ pub struct ContinuePageVm {
     pub home: PathBuf,
     /// The step the relay reported the conflict at.
     conflict_step: SyncStep,
+    /// A Retry or Sync now is running: its transfer reports go to the page, and the status it
+    /// ends with decides the page.
+    status_job: bool,
     request: Option<Request>,
     build_request: Request,
     build_configured: bool,
@@ -399,6 +412,7 @@ impl ContinuePageVm {
             auto_resolve: true,
             home: PathBuf::new(),
             conflict_step: SyncStep::Pull,
+            status_job: false,
             request: None,
             build_request: Request::Build,
             build_configured: false,
@@ -453,7 +467,7 @@ impl ContinuePageVm {
             ContinueState::LocalNewer => "Newer here",
             ContinueState::PushFailed(_) => "Not synced yet",
             ContinueState::NoIsland => "No island yet",
-            ContinueState::RelayUnavailable => "Waiting to sync",
+            ContinueState::RelayUnavailable => "Not synced yet",
             ContinueState::SyncOff => "Save sync is off",
             ContinueState::Conflict => "Unresolved conflict",
             ContinueState::Held { .. } => "Open on another device",
@@ -650,6 +664,10 @@ impl ContinuePageVm {
                 self.fleet_open = false;
                 self.saves_open = false;
             }
+            // The Saves page's one action is Sync now.
+            if nav == Nav::Accept && self.saves_open {
+                return self.sync_now();
+            }
             return false;
         }
         match nav {
@@ -801,6 +819,13 @@ impl ContinuePageVm {
 
     /// Accept on the one Play button outside the chooser and the drift warning.
     fn accept_play(&mut self) -> bool {
+        // Save sync is set up and the relay cannot be reached: the one button sends the waiting
+        // push and checks again. It never starts the game (2.06a).
+        if self.state == ContinueState::RelayUnavailable {
+            self.status_message = None;
+            self.start_retry();
+            return true;
+        }
         if matches!(
             self.state,
             ContinueState::BuildMissing | ContinueState::UpdateFailed(_)
@@ -846,6 +871,67 @@ impl ContinuePageVm {
         self.play_action = Some(PlayAction::Syncing);
         self.request = Some(Request::Play);
         true
+    }
+
+    /// The waiting push (and then the status): used at open and by Retry. Play is not enabled
+    /// until it has succeeded.
+    fn start_retry(&mut self) {
+        self.state = ContinueState::Syncing(SyncStep::Push);
+        self.play_action = Some(PlayAction::Syncing);
+        self.focus = FocusTarget::Play;
+        self.status_job = true;
+        self.request = Some(Request::Retry);
+    }
+
+    fn sync_now_enabled(&self) -> bool {
+        self.saves_open
+            && self.conflict.is_none()
+            && matches!(
+                self.state,
+                ContinueState::Ready
+                    | ContinueState::NoIsland
+                    | ContinueState::RelayNewer
+                    | ContinueState::LocalNewer
+                    | ContinueState::PushFailed(_)
+                    | ContinueState::RelayUnavailable
+                    | ContinueState::RelayError(_)
+            )
+    }
+
+    /// Sync now on the Saves page (Accept there). Returns true if it started.
+    pub fn sync_now(&mut self) -> bool {
+        if !self.sync_now_enabled() {
+            return false;
+        }
+        self.status_message = None;
+        self.state = ContinueState::Syncing(SyncStep::Pull);
+        self.play_action = Some(PlayAction::Syncing);
+        self.status_job = true;
+        self.request = Some(Request::SyncNow);
+        true
+    }
+
+    /// The relay line on the Saves page, in words.
+    fn saves_relay_line(&self) -> String {
+        match &self.state {
+            ContinueState::SyncOff => "Save sync is off. Turn it on in Settings.".to_string(),
+            ContinueState::RelayUnavailable => {
+                "Save-relay could not be reached. Sync now tries again.".to_string()
+            }
+            ContinueState::RelayError(reason) => format!("Save sync error: {reason}"),
+            ContinueState::PushFailed(_) | ContinueState::LocalNewer => {
+                "Waiting to send: this device's island is not on the relay yet.".to_string()
+            }
+            ContinueState::RelayNewer => "Newer on another device. Sync now gets it.".to_string(),
+            ContinueState::NoIsland => "No island yet, so nothing to sync.".to_string(),
+            ContinueState::CheckingStatus | ContinueState::Syncing(_) => {
+                "Checking save sync.".to_string()
+            }
+            _ => match &self.local_card {
+                Some(card) => format!("Last sync: {}", card_lines(card, String::new()).saved),
+                None => String::new(),
+            },
+        }
     }
 
     fn set_phase(&mut self, phase: ConflictPhase) {
@@ -958,21 +1044,26 @@ impl ContinuePageVm {
                 self.relay_card = Some(relay_card.clone());
                 self.auto_resolve = false;
                 self.conflict_step = step;
+                // The chooser is on the Continue page: a Sync now from Saves hands it over.
+                self.saves_open = false;
+                self.status_job = false;
                 self.status_message = None;
                 self.set_conflict(this_card, relay_card);
             }
             PlayEvent::Held { device, since } => {
                 self.conflict = None;
+                self.saves_open = false;
+                self.status_job = false;
                 self.state = ContinueState::Held { device, since };
                 self.focus = FocusTarget::Play;
                 self.play_action = Some(PlayAction::Play);
             }
             PlayEvent::Status(result) => {
-                // An initial status must not interrupt a job or a pending conflict.
-                if matches!(
-                    self.state,
-                    ContinueState::Ready | ContinueState::NoIsland | ContinueState::CheckingStatus
-                ) {
+                self.status_job = false;
+                // The page's own check, or the end of a job that ends with one (Retry, Sync
+                // now): neither may interrupt a play or a pending conflict.
+                let at_launch = self.state == ContinueState::CheckingStatus;
+                if self.accepts_status() {
                     match result {
                         Ok(RelayStatus::Held { device, since }) => {
                             self.on_play_event(PlayEvent::Held { device, since })
@@ -982,6 +1073,8 @@ impl ContinuePageVm {
                             self.state = ContinueState::RelayNewer;
                             self.play_action = Some(PlayAction::Play);
                         }
+                        // A push the relay does not have yet goes first, before any pull or Play.
+                        Ok(RelayStatus::LocalNewer) if at_launch => self.start_retry(),
                         Ok(RelayStatus::LocalNewer) => {
                             self.state = ContinueState::LocalNewer;
                             self.play_action = Some(PlayAction::Play);
@@ -1005,6 +1098,9 @@ impl ContinuePageVm {
                                 ContinueState::NoIsland
                             };
                             self.play_action = Some(PlayAction::Play);
+                            if !at_launch {
+                                self.status_message = Some("Save sync is up to date.".to_string());
+                            }
                         }
                         Err(error) => {
                             let reason = self.reason(&error);
@@ -1049,6 +1145,10 @@ impl ContinuePageVm {
                 }
             }
             PlayEvent::Synced(result) => {
+                // A transfer of Retry or Sync now: the status that follows decides the page.
+                if self.status_job {
+                    return;
+                }
                 let outcome = match result {
                     Ok(Sync::Done(_) | Sync::Resolved { .. }) => Ok(()),
                     Ok(Sync::Off | Sync::Offline) => Err("the relay did not answer".to_string()),
@@ -1095,6 +1195,19 @@ impl ContinuePageVm {
                 }
             }
         }
+    }
+
+    /// Whether a relay status may change the page now: the page's own check, a waiting push,
+    /// a sync now, or a push that was sent after the game. Never during a play or a conflict.
+    fn accepts_status(&self) -> bool {
+        matches!(
+            self.state,
+            ContinueState::Ready
+                | ContinueState::NoIsland
+                | ContinueState::CheckingStatus
+                | ContinueState::Syncing(_)
+                | ContinueState::Saving
+        )
     }
 
     /// Enter a failed state: its reason is shown and the one button reads Retry.
@@ -1203,6 +1316,8 @@ impl ContinuePageVm {
             settings_open: self.settings_open,
             fleet_open: self.fleet_open,
             saves_open: self.saves_open,
+            saves_relay: self.saves_relay_line(),
+            sync_now: self.sync_now_enabled(),
             focus: self.focus,
         }
     }
@@ -1900,5 +2015,140 @@ mod tests {
         })));
         assert!(vm.click(FocusTarget::PlayAnyway));
         assert_eq!(vm.take_request(), Some(Request::PlayAnyway));
+    }
+
+    // 2.06a: no offline play. A waiting push goes first at open, Retry never starts a game, and
+    // the Saves page says the relay state in words with Sync now.
+
+    fn with_status(status: Result<RelayStatus>) -> ContinuePageVm {
+        let mut vm = ContinuePageVm::new(Some(fake_card(100, "amd-handheld", 1000, "3.0.2")), None);
+        vm.begin_status();
+        vm.on_play_event(PlayEvent::Status(status));
+        vm
+    }
+
+    #[test]
+    fn a_waiting_push_at_open_is_sent_before_play_is_enabled() {
+        let mut vm = with_status(Ok(RelayStatus::LocalNewer));
+        assert_eq!(vm.state(), &ContinueState::Syncing(SyncStep::Push));
+        assert!(!vm.view().button_enabled);
+        assert_eq!(vm.take_request(), Some(Request::Retry));
+
+        // The push and the status after it: now Play is enabled.
+        vm.on_play_event(PlayEvent::Status(Ok(RelayStatus::Ready)));
+        assert_eq!(vm.state(), &ContinueState::Ready);
+        assert!(vm.view().button_enabled);
+        assert_eq!(vm.take_request(), None);
+    }
+
+    #[test]
+    fn retry_while_the_relay_is_unreachable_never_asks_for_play() {
+        let mut vm = with_status(Ok(RelayStatus::Unavailable));
+        assert_eq!(vm.state(), &ContinueState::RelayUnavailable);
+        assert_eq!(vm.view().button, "Retry");
+        assert_eq!(vm.view().status, "Not synced yet");
+        assert!(vm.view().message.contains("could not be reached"));
+
+        assert!(vm.handle(Nav::Accept));
+        assert_eq!(vm.take_request(), Some(Request::Retry));
+        assert_ne!(vm.take_request(), Some(Request::Play));
+    }
+
+    #[test]
+    fn the_saves_page_says_the_relay_state_in_words() {
+        assert!(with_status(Ok(RelayStatus::Off))
+            .view()
+            .saves_relay
+            .contains("Save sync is off"));
+        assert!(with_status(Ok(RelayStatus::Unavailable))
+            .view()
+            .saves_relay
+            .contains("could not be reached"));
+        assert!(
+            with_status(Err(Error::Saves("the credential store is locked".into())))
+                .view()
+                .saves_relay
+                .contains("credential store is locked")
+        );
+        assert!(with_status(Ok(RelayStatus::Ready))
+            .view()
+            .saves_relay
+            .starts_with("Last sync: amd-handheld"));
+        let newer = with_status(Ok(RelayStatus::RelayNewer(fake_card(
+            2000,
+            "strix-tablet",
+            7200,
+            "3.0.2",
+        ))));
+        assert!(newer.view().saves_relay.contains("Newer on another device"));
+
+        // A waiting push: the game quit and the push could not reach the relay.
+        let mut waiting = with_status(Ok(RelayStatus::Ready));
+        waiting.on_play_event(PlayEvent::Played(Ok(Played {
+            pulled: done(),
+            exit_code: 0,
+            pushed: Sync::Offline,
+        })));
+        assert!(waiting.view().saves_relay.contains("Waiting to send"));
+    }
+
+    #[test]
+    fn accept_on_the_saves_page_is_sync_now_and_only_when_it_can_run() {
+        let mut vm = ContinuePageVm::new(Some(fake_card(100, "amd-handheld", 1000, "3.0.2")), None);
+        vm.handle(Nav::Down);
+        assert_eq!(vm.focus(), FocusTarget::Saves);
+        assert!(!vm.handle(Nav::Accept));
+        assert!(vm.view().saves_open);
+        assert!(vm.view().sync_now);
+        assert!(vm.handle(Nav::Accept));
+        assert_eq!(vm.take_request(), Some(Request::SyncNow));
+
+        // Off: there is nothing to sync, so Sync now does not start.
+        let mut off = with_status(Ok(RelayStatus::Off));
+        off.handle(Nav::Down);
+        off.handle(Nav::Accept);
+        assert!(!off.view().sync_now);
+        assert!(!off.handle(Nav::Accept));
+        assert_eq!(off.take_request(), None);
+    }
+
+    #[test]
+    fn a_device_with_no_island_that_pulls_one_with_sync_now_is_ready() {
+        let mut vm = ContinuePageVm::new(None, None);
+        assert_eq!(vm.state(), &ContinueState::NoIsland);
+        vm.handle(Nav::Down);
+        assert!(!vm.handle(Nav::Accept));
+        assert!(vm.sync_now());
+        assert_eq!(vm.take_request(), Some(Request::SyncNow));
+
+        // The pull's transfer report, then the island is read again (as `Session::pump` does),
+        // then the status that follows the pull.
+        vm.on_play_event(PlayEvent::Synced(Ok(done())));
+        vm.set_local_card(Some(fake_card(2000, "strix-tablet", 7200, "3.0.2")));
+        assert_eq!(vm.state(), &ContinueState::Syncing(SyncStep::Pull));
+        vm.on_play_event(PlayEvent::Status(Ok(RelayStatus::Ready)));
+        assert_eq!(vm.state(), &ContinueState::Ready);
+        assert_eq!(
+            vm.local_card().map(|card| card.device.as_str()),
+            Some("strix-tablet")
+        );
+        // The Saves page is still open over the page: Play waits until it is closed.
+        assert!(!vm.view().button_enabled);
+        vm.handle(Nav::Back);
+        assert!(vm.view().button_enabled);
+    }
+
+    #[test]
+    fn a_transfer_report_during_sync_now_does_not_decide_the_page() {
+        let mut vm = ContinuePageVm::new(Some(fake_card(100, "amd-handheld", 1000, "3.0.2")), None);
+        vm.handle(Nav::Down);
+        vm.handle(Nav::Accept);
+        assert!(vm.sync_now());
+        vm.take_request();
+        // A failed transfer report is ignored: the status after it says what happened.
+        vm.on_play_event(PlayEvent::Synced(Err(Error::Saves("disk full".into()))));
+        assert_eq!(vm.state(), &ContinueState::Syncing(SyncStep::Pull));
+        vm.on_play_event(PlayEvent::Status(Ok(RelayStatus::Unavailable)));
+        assert_eq!(vm.state(), &ContinueState::RelayUnavailable);
     }
 }

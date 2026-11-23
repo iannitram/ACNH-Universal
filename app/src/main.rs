@@ -68,6 +68,8 @@ fn render(window: &Weak<MainWindow>, session: &Session) {
             window.set_settings_error(SharedString::default());
         }
         let view = session.vm().view();
+        window.set_saves_relay(view.saves_relay.as_str().into());
+        window.set_saves_sync_enabled(view.sync_now);
         if view.saves_open {
             if !window.get_view().saves_open {
                 window.set_saves_offset(0);
@@ -180,6 +182,12 @@ fn move_settings_focus(focus: SettingsControl, nav: Nav, relay: RelayRows) -> Se
 
 fn navigate(window: &Weak<MainWindow>, session: &mut Session, relay: &mut RelaySettings, nav: Nav) {
     if let Some(window) = window.upgrade().filter(|_| session.vm().saves_open()) {
+        // Accept presses the highlighted button: Sync now when it can run, otherwise Back.
+        if nav == Nav::Accept {
+            let sync = session.vm().view().sync_now;
+            session.nav(if sync { Nav::Accept } else { Nav::Back });
+            return;
+        }
         let offset = window.get_saves_offset().max(0) as usize;
         let rows = if window.get_saves_has_next() {
             offset + 4
@@ -481,6 +489,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window.set_saves_offset(window.get_saves_offset().saturating_add(delta).max(0));
                 render(&weak, &session.borrow());
             }
+        }
+    });
+
+    window.on_saves_sync_now({
+        let weak = window.as_weak();
+        let session = Rc::clone(&session);
+        move || {
+            let mut session = session.borrow_mut();
+            session.sync_now();
+            render(&weak, &session);
         }
     });
 

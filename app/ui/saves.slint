@@ -10,8 +10,11 @@ export component SavesPage inherits Rectangle {
     in property <string> position;
     in property <bool> has-previous;
     in property <bool> has-next;
+    in property <string> relay;
+    in property <bool> sync-enabled;
     callback previous();
     callback next();
+    callback sync-now();
     callback back();
 
     background: #172821;
@@ -21,6 +24,7 @@ export component SavesPage inherits Rectangle {
 
         Text { text: "Saves"; color: white; font-size: 28px; }
         Text { text: root.island; color: #d2dfd5; wrap: word-wrap; }
+        if root.relay != "": Text { text: root.relay; color: #d2dfd5; wrap: word-wrap; }
         Text { text: "Backups"; color: white; font-size: 18px; }
         if root.message != "": Text { text: root.message; color: #f7d681; }
         for name in root.backups: Rectangle {
@@ -49,8 +53,14 @@ export component SavesPage inherits Rectangle {
                 clicked => { root.next(); }
             }
             PadButton {
+                text: "Sync now";
+                enabled: root.sync-enabled;
+                focused: root.sync-enabled;
+                clicked => { root.sync-now(); }
+            }
+            PadButton {
                 text: "Back";
-                focused: true;
+                focused: !root.sync-enabled;
                 clicked => { root.back(); }
             }
         }

@@ -64,8 +64,11 @@ pub struct Request {
     /// Snapshot of the two opt-in settings for the whole prepare.
     pub fan_mods: FanMods,
     /// Where a target's final deliverable goes (`delivery_folder`): `<dropbox>/_transfers/
-    /// ACNH-Universal/<ios|mac>/`. The `ios` target needs it; the others ignore it.
+    /// ACNH-Universal/<ios|mac>/`. The `ios` and `mac` targets need it; the others ignore it.
     pub delivery: Option<PathBuf>,
+    /// The folder the `mac` target assembles its app in (`<data>/install`); the other targets
+    /// ignore it.
+    pub install: Option<PathBuf>,
 }
 
 /// The folders of a delivery under the Dropbox folder: `_transfers/ACNH-Universal/<target>/`.
@@ -133,14 +136,41 @@ fn package_ios_args(version: &str, build: &Path, game: &Path, delivery: &Path) -
     ]
 }
 
-/// The version the `.ipa` is named with: the engine's.
-fn ios_version() -> &'static str {
+/// The arguments of `tools/package_mac.sh`: the contained app is the assembled `app`, with
+/// the prepared folder `game` inside it.
+fn package_mac_args(version: &str, app: &Path, game: &Path, delivery: &Path) -> Vec<String> {
+    vec![
+        "tools/package_mac.sh".to_owned(),
+        version.to_owned(),
+        app.display().to_string(),
+        game.display().to_string(),
+        delivery.display().to_string(),
+    ]
+}
+
+/// The version the Apple packages are named with: the engine's.
+fn package_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// The `.zip` a Mac prepare makes in `delivery` (`package_mac.sh` names it).
+fn zip_path(delivery: &Path) -> PathBuf {
+    delivery.join(format!("ACNH-Universal-{}.zip", package_version()))
+}
+
+/// The prepared folder of `os`'s own target in `dirs`: on the Mac `<data root>/prepared/`
+/// (one folder for both Apple targets), elsewhere `<data>/prepare/`.
+pub fn prepared_folder(os: Os, dirs: &AppDirs) -> PathBuf {
+    if os == Os::Mac {
+        dirs.data_root().join("prepared")
+    } else {
+        dirs.data.join("prepare")
+    }
 }
 
 /// The `.ipa` an iOS prepare makes in `delivery` (`package_ios.sh` names it).
 fn ipa_path(delivery: &Path) -> PathBuf {
-    delivery.join(format!("ACNH-Universal-{}.ipa", ios_version()))
+    delivery.join(format!("ACNH-Universal-{}.ipa", package_version()))
 }
 
 /// A build tool a hub is missing, and how to install it. Required pieces stop a prepare
@@ -247,6 +277,12 @@ pub trait ScriptRunner {
     /// Where the game-stage script leaves work for Rust after mod extraction.
     fn set_message_paths(&mut self, _game_romfs: &Path, _out: &Path) {}
 
+    /// Assemble the Mac's contained app from `build` in `install` (1.22b): the app's path. A
+    /// test runner stands in for the machine's tools.
+    fn assemble(&mut self, build: &Path, install: &Path) -> Result<PathBuf> {
+        assemble(Os::Mac, build, install)
+    }
+
     /// Run `program` with `args` and say whether it succeeded and what it wrote to standard
     /// error; `None` when it cannot be started. The pre-flight asks it only to tell a folder
     /// that is not a git repository from a git that failed.
@@ -322,20 +358,27 @@ fn cargo_dir(runner: &mut dyn ScriptRunner, home: &Path) -> Option<PathBuf> {
     probe_tool(runner, home, "cargo", &["--version"]).and_then(|(_, dir)| dir)
 }
 
-/// The checks before a prepare starts, which stop it before its first stage: for the `ios`
-/// target, the delivery folder (`check_delivery`), Xcode's `iphoneos` SDK (the command-line
-/// tools alone do not have it), `cargo`, the `aarch64-apple-ios` Rust target, and a prepared
-/// folder outside any git work tree (the iPhone build holds the recompiled code). Other
-/// targets have none here. `Error::Build` naming what is missing; the tools are found with
-/// `runner.probe`.
+/// The checks before a prepare starts, which stop it before its first stage. The `mac` target:
+/// the delivery folder (`check_delivery`) and a prepared folder outside any git work tree. The
+/// `ios` target: the same, and Xcode's `iphoneos` SDK (the command-line tools alone do not
+/// have it), `cargo` and the `aarch64-apple-ios` Rust target. Other targets have none here.
+/// `Error::Build` naming what is missing; the tools are found with `runner.probe`.
 pub fn preflight(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Result<()> {
-    if req.target != Os::Ios {
+    if !matches!(req.target, Os::Ios | Os::Mac) {
         return Ok(());
     }
     let delivery = req.delivery.as_deref().ok_or_else(|| {
         Error::Env("the delivery folder is not set (the `dropbox` key in launcher.ini)".into())
     })?;
     check_delivery(delivery, home)?;
+    if req.target == Os::Ios {
+        check_ios_tools(runner, home)?;
+    }
+    check_outside_git(req, runner, home)
+}
+
+/// The iPhone build's tools: Xcode's SDK, `cargo` and the Rust target.
+fn check_ios_tools(runner: &mut dyn ScriptRunner, home: &Path) -> Result<()> {
     let sdk = runner.probe("xcrun", &["--sdk", "iphoneos", "--show-sdk-path"]);
     if !sdk.is_some_and(|path| !path.trim().is_empty()) {
         return Err(Error::Build(
@@ -359,6 +402,12 @@ pub fn preflight(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> R
                 .to_owned(),
         ));
     }
+    Ok(())
+}
+
+/// Stop unless the prepared folder is outside every git work tree: it holds the recompiled
+/// game.
+fn check_outside_git(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Result<()> {
     // The nearest folder that exists, as `git -C` needs one; a relative `out` is taken from
     // the working folder.
     let out = absolute(&req.out)?;
@@ -377,7 +426,7 @@ pub fn preflight(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> R
     ];
     match runner.probe("git", &git) {
         Some(answer) if answer.trim() == "true" => Err(Error::Build(format!(
-            "the prepared folder {} is inside a git work tree: the iPhone build holds the \
+            "the prepared folder {} is inside a git work tree: the Apple builds hold the \
              recompiled game and must not be made there. Use a folder outside it.",
             redact(&out.display().to_string(), home)
         ))),
@@ -387,7 +436,7 @@ pub fn preflight(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> R
             Some((false, error)) if error.contains("not a git repository") => Ok(()),
             _ => Err(Error::Build(format!(
                 "cannot tell whether {} is inside a git work tree (is git installed?): the \
-                 iPhone build holds the recompiled game and must not be made in one",
+                 Apple builds hold the recompiled game and must not be made in one",
                 redact(&out.display().to_string(), home)
             ))),
         },
@@ -835,7 +884,8 @@ fn app_commit() -> Option<&'static str> {
 /// target this hub does not serve (`recipe::serves`), or one upstream's script does not build
 /// (Android), is `Error::Unsupported`. For the `ios` target (Mac hub, `Request::delivery`
 /// set) it runs `preflight`, the shared stages, the iPhone build and the packaging, and
-/// returns the `.ipa`'s path in the delivery folder instead of `Request::out`.
+/// returns the `.ipa`'s path in the delivery folder instead of `Request::out`. The `mac` target
+/// (`Request::install` too) does the same with the contained app and returns the `.zip`'s path.
 pub fn prepare(req: &Request, progress: &mut dyn FnMut(Stage)) -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -933,7 +983,7 @@ fn run_stages(
     }
     // The steps and the work-tree check name the same, absolute folder.
     let absolute_req;
-    let req = if req.target == Os::Ios {
+    let req = if matches!(req.target, Os::Ios | Os::Mac) {
         absolute_req = Request {
             out: absolute(&req.out)?,
             ..req.clone()
@@ -1012,10 +1062,11 @@ fn run_stages(
             .map_err(|log| build_error(stage, &log, home))?;
     }
     std::fs::write(record, flags)?;
-    if req.target == Os::Ios {
-        return ios_deliver(req, runner, home);
+    match req.target {
+        Os::Ios => ios_deliver(req, runner, home),
+        Os::Mac => mac_deliver(req, runner, home),
+        _ => Ok(req.out.clone()),
     }
-    Ok(req.out.clone())
 }
 
 /// What the `ios` target does after the shared stages (which made the Mac player there too,
@@ -1052,7 +1103,7 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
     }
     for args in [
         build_args,
-        package_ios_args(ios_version(), &build, &req.out, delivery),
+        package_ios_args(package_version(), &build, &req.out, delivery),
     ] {
         runner
             .run(Stage::Build, &args)
@@ -1062,6 +1113,37 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
             .map_err(|log| build_error(Stage::Build, &log, home))?;
     }
     Ok(ipa_path(delivery))
+}
+
+/// What the `mac` target does after the shared stages: the two packs when they are missing,
+/// 1.22b's assembly of the contained app in the install folder, and `package_mac.sh`, which
+/// puts the prepared game inside it and zips it into the delivery folder, whose zip's path it
+/// returns.
+fn mac_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Result<PathBuf> {
+    let delivery = req
+        .delivery
+        .as_deref()
+        .ok_or_else(|| Error::Env("the delivery folder is not set".into()))?;
+    let install = req
+        .install
+        .as_deref()
+        .ok_or_else(|| Error::Env("the install folder is not set".into()))?;
+    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
+        pack_stage(req)?;
+    }
+    let app = runner
+        .assemble(&req.out.join("build"), install)
+        .map_err(|e| build_error(Stage::Build, &[e.to_string()], home))?;
+    runner
+        .run(
+            Stage::Build,
+            &package_mac_args(package_version(), &app, &req.out, delivery),
+        )
+        .map_err(|log| build_error(Stage::Build, &log, home))?;
+    runner
+        .finish()
+        .map_err(|log| build_error(Stage::Build, &log, home))?;
+    Ok(zip_path(delivery))
 }
 
 /// The build tools `os` needs before its first stage, searched for in `path` (and, on the Mac,

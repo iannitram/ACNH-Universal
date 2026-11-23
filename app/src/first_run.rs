@@ -409,17 +409,30 @@ fn run(
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
                     Err(e) => return Err(e.into()),
                 };
+                let target = Os::current();
+                // The Mac's one contained app goes to Dropbox, as the hub's Prepare does.
+                let delivery = if target == Os::Mac {
+                    let launcher = match std::fs::read_to_string(dirs.config.join("launcher.ini")) {
+                        Ok(text) => acnh_core::config::Config::parse(&text)?,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+                        Err(e) => return Err(e.into()),
+                    };
+                    Some(prepare::delivery_folder(&launcher, &vars.home, "mac"))
+                } else {
+                    None
+                };
                 let request = prepare::Request {
                     game: gamefolder::check(&path)?,
-                    out: dirs.data.join("prepare"),
-                    target: Os::current(),
+                    out: prepare::prepared_folder(target, dirs),
+                    target,
                     jobs: 0,
                     source: None,
                     fan_mods: prepare::FanMods {
                         ptbr: config.enabled("mods.ptbr"),
                         speedfix: config.enabled("mods.speedfix"),
                     },
-                    delivery: None,
+                    delivery,
+                    install: (target == Os::Mac).then(|| dirs.install()),
                 };
                 let out = prepare::prepare(&request, &mut |stage| {
                     let _ = sender.send((generation, Event::Stage(stage)));
@@ -430,7 +443,9 @@ fn run(
                 {
                     return Err(acnh_core::Error::Build("preparation cancelled".into()));
                 }
-                prepare::assemble(Os::current(), &out.join("build"), &dirs.install())?;
+                if target != Os::Mac {
+                    prepare::assemble(target, &out.join("build"), &dirs.install())?;
+                }
                 save_launcher_values(dirs, &[("game_folder", &path.to_string_lossy())])?;
                 Ok(())
             })()

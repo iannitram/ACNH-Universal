@@ -121,10 +121,14 @@ impl Drop for Folders {
     }
 }
 
-/// Pump, as the window's timer does, until the page leaves its first status check.
+/// Pump, as the window's timer does, until the page leaves its first status check and any
+/// waiting push that the check sent (2.06a).
 fn settled(session: &mut Session) -> ContinueState {
     let started = Instant::now();
-    while session.vm().state() == &ContinueState::CheckingStatus {
+    while matches!(
+        session.vm().state(),
+        ContinueState::CheckingStatus | ContinueState::Syncing(_)
+    ) {
         assert!(
             started.elapsed() < Duration::from_secs(20),
             "still checking"

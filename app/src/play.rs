@@ -169,6 +169,74 @@ pub fn sync(
     }
 }
 
+/// `Request::Retry`: the waiting push first, then the status the page shows. A push that cannot
+/// reach the relay ends as `Unavailable`; nothing here starts the game.
+pub fn retry(relay: &dyn Relay, save_dir: &Path, report: &dyn Fn(PlayEvent)) {
+    let pushed = relay.push(save_dir, None);
+    after_transfer(relay, save_dir, SyncStep::Push, pushed, report);
+}
+
+/// What a transfer step (a push or a pull) reports: a conflict or a hold as it is at Play; any
+/// other outcome as `Synced`, which makes the page read the island again, then the status the
+/// page shows. An unreachable relay is `Unavailable`; a failure is the error.
+fn after_transfer(
+    relay: &dyn Relay,
+    save_dir: &Path,
+    step: SyncStep,
+    result: Result<launch::Sync>,
+    report: &dyn Fn(PlayEvent),
+) {
+    match result {
+        Ok(launch::Sync::Conflict { server, local, .. }) => report(PlayEvent::Conflict {
+            step,
+            server,
+            local,
+        }),
+        Ok(launch::Sync::Held { device, since }) => report(PlayEvent::Held { device, since }),
+        Ok(launch::Sync::Offline) => {
+            report(PlayEvent::Synced(Ok(launch::Sync::Offline)));
+            report(PlayEvent::Status(Ok(launch::RelayStatus::Unavailable)));
+        }
+        Ok(done) => {
+            report(PlayEvent::Synced(Ok(done)));
+            report(PlayEvent::Status(relay.status(save_dir)));
+        }
+        Err(error) => report(PlayEvent::Status(Err(error))),
+    }
+}
+
+/// `Request::SyncNow`: the status first; a waiting push is sent before anything else, then the
+/// one pull or push the relay calls for. A conflict or a hold goes to the page as it does at
+/// Play.
+pub fn sync_now(relay: &dyn Relay, save_dir: &Path, report: &dyn Fn(PlayEvent)) {
+    let status = match relay.status(save_dir) {
+        Ok(status) => status,
+        Err(error) => return report(PlayEvent::Status(Err(error))),
+    };
+    match status {
+        launch::RelayStatus::LocalNewer => {
+            report(PlayEvent::Step(SyncStep::Push));
+            let pushed = relay.push(save_dir, None);
+            after_transfer(relay, save_dir, SyncStep::Push, pushed, report);
+        }
+        launch::RelayStatus::RelayNewer(_) => {
+            report(PlayEvent::Step(SyncStep::Pull));
+            match relay.pull(save_dir, None) {
+                // A pull marks this device as playing on the relay (save-relay's launch intent).
+                // Nothing was played, so an exit push with nothing to send clears that mark;
+                // without it every other device would see this island as held.
+                Ok(pulled @ (launch::Sync::Done(_) | launch::Sync::Resolved { .. })) => {
+                    report(PlayEvent::Synced(Ok(pulled)));
+                    let exit = relay.push(save_dir, None);
+                    after_transfer(relay, save_dir, SyncStep::Push, exit, report);
+                }
+                other => after_transfer(relay, save_dir, SyncStep::Pull, other, report),
+            }
+        }
+        other => report(PlayEvent::Status(Ok(other))),
+    }
+}
+
 /// Copies the island on this device into Backups before it is replaced.
 pub type Backup = dyn Fn(&Path) -> Result<()> + Send + Sync;
 
@@ -283,6 +351,13 @@ impl Session {
         committed
     }
 
+    /// Sync now from the Saves page. True if it started.
+    pub fn sync_now(&mut self) -> bool {
+        let committed = self.vm.sync_now();
+        self.dispatch();
+        committed
+    }
+
     /// Take in what the jobs reported since the last call. True when there was anything, so
     /// the page is drawn again.
     pub fn pump(&mut self) -> bool {
@@ -342,6 +417,12 @@ impl Session {
                 thread::spawn(move || {
                     report(PlayEvent::Status(runner.relay.status(&runner.save_dir)))
                 });
+            }
+            Request::Retry => {
+                thread::spawn(move || retry(&*runner.relay, &runner.save_dir, &report));
+            }
+            Request::SyncNow => {
+                thread::spawn(move || sync_now(&*runner.relay, &runner.save_dir, &report));
             }
             Request::PlayAnyway => {
                 thread::spawn(move || {
