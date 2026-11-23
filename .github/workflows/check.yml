@@ -250,6 +250,8 @@ jobs:
             [ "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")" = 15.0 ]
             [ "$(lipo -archs "$app/ACNH")" = arm64 ]
           done
+      - name: Package the Mac app (fake app, empty decoys)
+        run: bash tests/package_mac_test.sh
       - name: Package the iOS device stub
         run: |
           out="$(mktemp -d)"
