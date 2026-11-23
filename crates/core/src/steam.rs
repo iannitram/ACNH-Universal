@@ -1,5 +1,4 @@
-//! The Steam shortcut that starts the game from Game Mode (SPEC.md M2): a non-Steam game entry
-//! in `shortcuts.vdf` whose target is `acnh-universal play`, so save sync wraps every start.
+//! The Steam shortcut opens the launcher Continue screen in Game Mode (SPEC.md M2).
 //! Steam rewrites the file when it quits, so the launcher writes it only while Steam is
 //! closed (`write_shortcut`). Copied from iannitram/totk-universal's `steam` (MIT) by its
 //! issues.
@@ -59,6 +58,49 @@ impl Shortcut {
     /// `shortcut_app_id(&self.quoted_exe(), &self.name)`.
     pub fn app_id(&self) -> u32 {
         shortcut_app_id(&self.quoted_exe(), &self.name)
+    }
+}
+
+/// Locate the launcher assets from an executable and optional AppImage mount directory.
+pub fn assets_dir_for(exe: &Path, appdir: Option<&Path>) -> PathBuf {
+    if let Some(appdir) = appdir {
+        return appdir.join("usr/share/acnh-universal");
+    }
+    let folder = exe.parent().unwrap_or(Path::new("."));
+    if let Some(contents) = folder
+        .parent()
+        .filter(|parent| folder.ends_with("MacOS") && parent.ends_with("Contents"))
+    {
+        return contents.join("Resources");
+    }
+    if folder.join("acnhrecomp.png").is_file() {
+        return folder.to_path_buf();
+    }
+    for ancestor in folder.ancestors() {
+        let assets = ancestor.join("assets");
+        if assets.join("acnhrecomp.png").is_file() {
+            return assets;
+        }
+    }
+    folder.to_path_buf()
+}
+
+/// Locate assets independently of the process working directory.
+pub fn assets_dir() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+    Ok(assets_dir_for(&exe, appdir.as_deref()))
+}
+
+/// Build the launcher entry. The executable is the app, or the outer AppImage when set.
+pub fn launcher_shortcut(exe: &Path, appimage: Option<&Path>, name: &str, icon: &Path) -> Shortcut {
+    let exe = appimage.unwrap_or(exe);
+    Shortcut {
+        name: name.into(),
+        exe: exe.display().to_string(),
+        start_dir: exe.parent().unwrap_or(Path::new(".")).display().to_string(),
+        launch_options: "--fullscreen".into(),
+        icon: icon.display().to_string(),
     }
 }
 
@@ -190,4 +232,60 @@ pub fn write_shortcut(
         written.push(file);
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::*;
+
+    #[test]
+    fn appimage_shortcut_uses_outer_path_and_fullscreen() {
+        let image = Path::new("/home/user/Applications/ACNH.AppImage");
+        let shortcut = launcher_shortcut(
+            Path::new("/tmp/mount/usr/bin/acnh-app"),
+            Some(image),
+            "ACNH",
+            Path::new("icon.png"),
+        );
+        assert_eq!(
+            shortcut.quoted_exe(),
+            "\"/home/user/Applications/ACNH.AppImage\""
+        );
+        assert_eq!(shortcut.start_dir, "/home/user/Applications");
+        assert_eq!(shortcut.launch_options, "--fullscreen");
+        assert_eq!(
+            shortcut.app_id(),
+            shortcut_app_id(&shortcut.quoted_exe(), "ACNH")
+        );
+        let mut doc = vec![];
+        upsert(&mut doc, &shortcut).unwrap();
+        assert_eq!(
+            doc[0].1,
+            Value::Map(vec![("0".into(), shortcut_entry(&shortcut))])
+        );
+    }
+
+    #[test]
+    fn assets_follow_packaging_layouts() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        assert_eq!(
+            assets_dir_for(&root.join("usr/bin/acnh-app"), Some(root)),
+            root.join("usr/share/acnh-universal")
+        );
+        assert_eq!(
+            assets_dir_for(&root.join("Game.app/Contents/MacOS/acnh-app"), None),
+            root.join("Game.app/Contents/Resources")
+        );
+        assert_eq!(
+            assets_dir_for(&root.join("windows/acnh-app.exe"), None),
+            root.join("windows")
+        );
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("assets/acnhrecomp.png"), []).unwrap();
+        assert_eq!(
+            assets_dir_for(&root.join("target/debug/acnh-app"), None),
+            root.join("assets")
+        );
+    }
 }

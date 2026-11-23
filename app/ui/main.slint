@@ -37,6 +37,7 @@ export component MainWindow inherits Window {
     in property <ContinueView> view;
     in property <int> input-device;
     callback pointer-used();
+    in property <image> card-picture;
     in property <bool> first-run-open;
     in property <string> first-run-title;
     in property <string> first-run-choice;
@@ -99,6 +100,7 @@ export component MainWindow inherits Window {
         ContinuePage {
             view: root.view;
             input-device: root.input-device;
+            card-picture: root.card-picture;
             clicked(target) => {
                 root.pointer-used();
                 root.clicked(target);
