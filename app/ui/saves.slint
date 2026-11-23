@@ -1,0 +1,63 @@
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { InputHints } from "hints.slint";
+import { PadButton } from "continue.slint";
+
+export component SavesPage inherits Rectangle {
+    in property <int> input-device;
+    in property <string> island;
+    in property <[string]> backups;
+    in property <string> message;
+    in property <string> position;
+    in property <bool> has-previous;
+    in property <bool> has-next;
+    callback previous();
+    callback next();
+    callback back();
+
+    background: #172821;
+    VerticalBox {
+        padding: 24px;
+        spacing: 10px;
+
+        Text { text: "Saves"; color: white; font-size: 28px; }
+        Text { text: root.island; color: #d2dfd5; wrap: word-wrap; }
+        Text { text: "Backups"; color: white; font-size: 18px; }
+        if root.message != "": Text { text: root.message; color: #f7d681; }
+        for name in root.backups: Rectangle {
+            min-height: 40px;
+            border-radius: 6px;
+            background: #253c32;
+            Text {
+                x: 12px;
+                text: name;
+                color: white;
+                vertical-alignment: center;
+            }
+        }
+        if root.position != "": Text { text: root.position; color: #b8cfc1; }
+        Rectangle { vertical-stretch: 1; }
+        HorizontalBox {
+            spacing: 8px;
+            PadButton {
+                text: "Previous backups";
+                enabled: root.has-previous;
+                clicked => { root.previous(); }
+            }
+            PadButton {
+                text: "Next backups";
+                enabled: root.has-next;
+                clicked => { root.next(); }
+            }
+            PadButton {
+                text: "Back";
+                focused: true;
+                clicked => { root.back(); }
+            }
+        }
+        InputHints {
+            device: root.input-device;
+            move-label: root.has-previous || root.has-next ? "More backups" : "";
+            select-label: "";
+        }
+    }
+}

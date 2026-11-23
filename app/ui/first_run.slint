@@ -1,5 +1,7 @@
+import { InputHints } from "hints.slint";
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 export component FirstRunPage inherits Rectangle {
+    in property <int> input-device;
     in property <string> title;
     in property <string> choice;
     in property <string> position;
@@ -62,6 +64,12 @@ export component FirstRunPage inherits Rectangle {
                 Text { text: item; color: white; font-size: 20px; horizontal-alignment: center; vertical-alignment: center; }
                 TouchArea { clicked => { if index == 0 { root.previous(); } else if index == 1 { root.next(); } else if index == 2 { root.accept(); } else { root.back(); } } }
             }
+        }
+        InputHints {
+            device: root.input-device;
+            move-label: root.busy ? "" : "Move";
+            select-label: root.busy ? "" : "Select";
+            back-label: root.busy ? (root.cancel-available ? "Cancel" : "") : "Back";
         }
     }
 }

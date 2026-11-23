@@ -70,6 +70,7 @@ pub fn to_slint(view: &PageView) -> ContinueView {
         about_open: view.about_open,
         settings_open: view.settings_open,
         fleet_open: view.fleet_open,
+        saves_open: view.saves_open,
         focus: pad_target(view.focus),
     }
 }

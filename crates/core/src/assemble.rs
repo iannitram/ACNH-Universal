@@ -578,10 +578,9 @@ fn bundle_from_checkout(plan: &Plan, contents: &Path) -> Result<()> {
         copy(&built, &macos.join(name))?;
     }
     let assets = plan.source.join("assets");
-    copy(
-        &assets.join("acnhrecomp.icns"),
-        &resources.join("acnhrecomp.icns"),
-    )?;
+    for name in ["acnhrecomp.icns", "acnhrecomp.png"] {
+        copy(&assets.join(name), &resources.join(name))?;
+    }
     let template = assets.join("mac").join("Info.plist.in");
     let plist = fs::read_to_string(&template)
         .map_err(|error| Error::Build(format!("cannot read {}: {error}", template.display())))?;

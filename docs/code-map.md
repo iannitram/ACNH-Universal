@@ -37,7 +37,7 @@ flowchart TD
       App["app/: Rust + Slint<br/>Continue, first run, Saves, Settings, Fleet, About"]
       CLI["crates/cli: acnh-universal check | build | play | steam-add | hub | fleet"]
     end
-    Steam["Steam Game Mode shortcut + artwork"] -->|"runs acnh-universal play"| CLI
+    Steam["Steam Game Mode shortcut + artwork"] -->|"opens the app full screen"| CLI
     App --> Core
     CLI --> Core
     subgraph Core["crates/core: acnh_core"]
@@ -93,7 +93,7 @@ flowchart TD
 | `fleet` | present | `DeviceRecord` (device, os, version, build id, last sync, free space), `Drift`, `drift`, `warning`, `to_line`/`from_line` | | M11 |
 | `hub` | partial (feature `hub`) | `is_home_network`; `announce` and `discover` (mDNS `_acnh-universal._tcp` on the home network, #62); `Transport`, `TcpTransport`, `MemoryTransport`; `PairingSession`, `pair`/`pair_in` (six-digit SPAKE2, expiry and attempt limits, and key replacement, #63), `read_peers`/`remove_peer`; `serve`/`pull` (sealed, resumable build bundles and bounded-memory verification, #64); `serve_prepared`/`pull_prepared` (separate paired protocol for the Android library, packs, shared fonts, glyph archives and RomFS mod overlays, verified and installed under the private data root's `game/`, #65). `hub/service.rs` routes TCP requests, binds pairing to the client and target, and stores authenticated `DeviceRecord`s in `fleet.txt` (#66). Build pulls preserve the last reported save-sync time and free space. Desktop and Android launcher wiring are follow-ups. [Peer scan](peers.md) | | M9, M11, M18 |
 | `vdf` | present | Steam binary KeyValues `Value`, `write`, `read` (depth limit `MAX_DEPTH` = 64) | | M2 |
-| `steam` | present | `crc32`, `shortcut_app_id`, `rungameid`, `Shortcut::quoted_exe`, `Shortcut::app_id`, `userdata_roots`, `shortcut_entry`, `upsert`, and `write_shortcut` (Steam closed, backup kept). Full-screen Continue entry is #165 | the desktop and Start-menu shortcuts of `launcher/desktop.cpp` and `tools/install_mac_shortcut.sh` (the Steam entry is new) | M2 |
+| `steam` | present | `crc32`, `shortcut_app_id`, `rungameid`, `Shortcut::quoted_exe`, `Shortcut::app_id`, `userdata_roots`, `shortcut_entry`, `upsert`, and `write_shortcut` (Steam closed, backup kept). `launcher_shortcut` opens full-screen Continue | the desktop and Start-menu shortcuts of `launcher/desktop.cpp` and `tools/install_mac_shortcut.sh` (the Steam entry is new) | M2 |
 | `artwork` | present | `Art` (grid, wide grid, hero, logo, icon), `file_name`, `size`, `grid_dir`, `paths`; made from the game folder's icon, else `assets/acnhrecomp.png`; nothing downloaded | | M2 |
 | `relay` | present (feature `relay`) | the save-relay adapter: links its library, maps outcomes to `launch::Sync`; `open` reads save-relay's own setup and opens its remote, `setup_nextcloud`/`start_sign_in`/`finish_sign_in` set it up (browser or Game Mode code flow), `forget` removes the config and secret | | M6 |
 
@@ -146,14 +146,14 @@ Built as a static library linked into the player while C++ remains; each Rust gr
 
 | Path | Status | Owns | Replaces | Musts |
 |---|---|---|---|---|
-| `crates/cli` (`acnh-universal`) | present | `check`, `build`, `play`, `steam-add`, `hub serve\|pair\|pull\|report`, `fleet`; `hub --help` shows the arguments; `--json` prints the error `code()`; the Steam shortcut runs `play` | `tools/setup_acnh.py`'s command line, `tools/launcher.sh` | M1, M2, M6, M11 |
+| `crates/cli` (`acnh-universal`) | present | `check`, `build`, `play`, `steam-add`, `hub serve\|pair\|pull\|report`, `fleet`; `hub --help` shows the arguments; `--json` prints the error `code()`; the Steam shortcut opens the app | `tools/setup_acnh.py`'s command line, `tools/launcher.sh` | M1, M2, M6, M11 |
 | `app/` (`acnh-app`) | partial | Desktop Slint launcher links `acnh_core`. Continue launches the player. The navigation row opens About, fan-mod Settings and the local Fleet page (#41). Guided first run opens for an unprepared desktop (#39). Relay and Android integration remain on the roadmap | `launcher/` (SDL3 + ImGui: `main.cpp`, `desktop.cpp`, `pages.cpp`, `pipeline.cpp`, `files.cpp`) | M2, M4, M9-M11, M13 |
 | `app/src/first_run.rs` | present on desktop | Runs local Prepare and assembly off the UI thread, or receives a verified player bundle and returns to local Prepare. Applies device defaults and writes the optional Linux Steam shortcut with artwork. Android private-data integration is tracked in #80 and #192. | | M1, M2, M10, M11 |
 | `app/src/play.rs` | present | Continue action, player process and save-sync results including conflict choices | | M6, M10 |
 | `app/src/ui.rs` | present | Converts Continue view state and focus targets between Rust and Slint | | M10 |
 | `app/src/vm/` | partial | `continue_page`, `saves`, `settings`, and `about` exist. Settings stores the pt-BR and SpeedFix opt-ins in `config.ini` (#85), and Prepare snapshots them for each build. `fleet` reads the local hub’s authenticated records, presents versions, builds, save-sync and free-space fields, and labels the comparison device. `first_run` manages folder validation, hub discovery and pairing, progress, and device setup | | M8, M10, M11 |
-| `app/src/input.rs` | partial | Maps gilrs events and keyboard text to desktop `Nav`. Per-controller glyphs and Android input are follow-ups | | M9, M10 |
-| `app/ui/` | partial | Slint window, Continue, About, Fleet, guided first run and the controller-accessible fan-mod Settings overlay | `launcher/pages.cpp` | M10 |
+| `app/src/input.rs` | partial | Maps gilrs events and keyboard text to desktop `Nav`. Identifies controller layouts by device ID, tracks hot-plug and last-used input, and repeats stick and D-pad navigation. Android input integration is #173 | | M9, M10 |
+| `app/ui/` | partial | Slint window, Continue, About, Fleet, read-only Saves, guided first run and fan-mod Settings. Shared input hints select original SVGs for the active controller | `launcher/pages.cpp` | M10 |
 | `docs/design/continue-screen.md` | present | the Continue screen brief, shared with totk-universal | | M10 |
 
 ## Upstream code that stays (C++ or Java, behind a C ABI)

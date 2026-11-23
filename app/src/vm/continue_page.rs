@@ -196,17 +196,6 @@ const PAGE_ROW: [(FocusTarget, &str); 4] = [
     (FocusTarget::About, "About"),
 ];
 
-/// Controller / input layout for glyph display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputDevice {
-    Xbox,
-    PlayStation,
-    SteamDeck,
-    Switch,
-    Keyboard,
-    Touch,
-}
-
 /// What a press asks the driver to run; taken with `ContinuePageVm::take_request`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
@@ -296,6 +285,7 @@ pub struct PageView {
     pub about_open: bool,
     pub settings_open: bool,
     pub fleet_open: bool,
+    pub saves_open: bool,
     pub focus: FocusTarget,
 }
 
@@ -338,7 +328,7 @@ pub struct ContinuePageVm {
     about_open: bool,
     settings_open: bool,
     fleet_open: bool,
-    pub glyph_set: InputDevice,
+    saves_open: bool,
     pub last_error: Option<String>,
     pub status_message: Option<String>,
     pub warning_text: Option<String>,
@@ -367,6 +357,10 @@ impl ContinuePageVm {
         self.settings_open
     }
 
+    pub fn saves_open(&self) -> bool {
+        self.saves_open
+    }
+
     pub fn fleet_open(&self) -> bool {
         self.fleet_open
     }
@@ -387,7 +381,7 @@ impl ContinuePageVm {
             about_open: false,
             settings_open: false,
             fleet_open: false,
-            glyph_set: InputDevice::SteamDeck,
+            saves_open: false,
             last_error: None,
             status_message: None,
             warning_text: None,
@@ -427,10 +421,6 @@ impl ContinuePageVm {
 
     pub fn focus(&self) -> FocusTarget {
         self.focus
-    }
-
-    pub fn glyph_set(&self) -> InputDevice {
-        self.glyph_set
     }
 
     pub fn status_message(&self) -> Option<&str> {
@@ -554,7 +544,7 @@ impl ContinuePageVm {
         if self.busy() {
             return false;
         }
-        if self.about_open || self.settings_open || self.fleet_open {
+        if self.about_open || self.settings_open || self.fleet_open || self.saves_open {
             // Only Back works under the About overlay.
             return target == FocusTarget::Back;
         }
@@ -608,11 +598,12 @@ impl ContinuePageVm {
         if self.busy() {
             return false;
         }
-        if self.about_open || self.settings_open || self.fleet_open {
+        if self.about_open || self.settings_open || self.fleet_open || self.saves_open {
             if nav == Nav::Back {
                 self.about_open = false;
                 self.settings_open = false;
                 self.fleet_open = false;
+                self.saves_open = false;
             }
             return false;
         }
@@ -732,6 +723,9 @@ impl ContinuePageVm {
             (Some(_), Nav::Up) => self.focus = FocusTarget::Play,
             (Some(at), Nav::Left) if at > 0 => self.focus = PAGE_ROW[at - 1].0,
             (Some(at), Nav::Right) if at + 1 < PAGE_ROW.len() => self.focus = PAGE_ROW[at + 1].0,
+            (Some(at), Nav::Accept) if PAGE_ROW[at].0 == FocusTarget::Saves => {
+                self.saves_open = true;
+            }
             (Some(at), Nav::Accept) if PAGE_ROW[at].0 == FocusTarget::Fleet => {
                 self.fleet_open = true;
             }
@@ -1121,6 +1115,7 @@ impl ContinuePageVm {
             about_open: self.about_open,
             settings_open: self.settings_open,
             fleet_open: self.fleet_open,
+            saves_open: self.saves_open,
             focus: self.focus,
         }
     }
@@ -1641,7 +1636,8 @@ mod tests {
             vm.conflict().map(|conflict| conflict.phase.clone()),
             Some(ConflictPhase::Pending)
         );
-        assert_eq!(vm.view().message, "Saves is coming soon.");
+        assert!(vm.view().saves_open);
+        vm.handle(Nav::Back);
         vm.handle(Nav::Up);
         assert_eq!(vm.focus(), FocusTarget::Play);
         // Back while the conflict is pending does nothing.

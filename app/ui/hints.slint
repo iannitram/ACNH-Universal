@@ -1,0 +1,63 @@
+// Device values are InputDevice's stable representation in app/src/vm.rs.
+component InputHint inherits HorizontalLayout {
+    in property <int> device;
+    in property <int> action;
+    in property <string> description;
+    spacing: 5px;
+
+    property <[image]> images: [
+        @image-url("glyphs/generic-dpad.svg"), @image-url("glyphs/generic-south.svg"), @image-url("glyphs/generic-east.svg"), @image-url("glyphs/generic-menu.svg"),
+        @image-url("glyphs/xbox-dpad.svg"), @image-url("glyphs/xbox-south.svg"), @image-url("glyphs/xbox-east.svg"), @image-url("glyphs/xbox-menu.svg"),
+        @image-url("glyphs/playstation-dpad.svg"), @image-url("glyphs/playstation-south.svg"), @image-url("glyphs/playstation-east.svg"), @image-url("glyphs/playstation-menu.svg"),
+        @image-url("glyphs/switch-dpad.svg"), @image-url("glyphs/switch-south.svg"), @image-url("glyphs/switch-east.svg"), @image-url("glyphs/switch-menu.svg"),
+        @image-url("glyphs/deck-dpad.svg"), @image-url("glyphs/deck-south.svg"), @image-url("glyphs/deck-east.svg"), @image-url("glyphs/deck-menu.svg"),
+    ];
+
+    if root.device >= 2: Image {
+        source: root.images[(root.device - 2) * 4 + root.action];
+        width: 22px;
+        height: 22px;
+    }
+    if root.device == 0: Text {
+        text: ["Arrows", "Enter", "Esc", "F1"][root.action];
+        color: #f7d681;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.description;
+        color: #d2dfd5;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+}
+
+export component InputHints inherits HorizontalLayout {
+    in property <int> device;
+    in property <string> move-label: "Move";
+    in property <string> select-label: "Select";
+    in property <string> back-label: "Back";
+    in property <string> menu-label;
+    spacing: 15px;
+    min-height: 24px;
+
+    if root.device == 1: Text {
+        text: "Tap a control";
+        color: #d2dfd5;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+    if root.device != 1 && root.move-label != "": InputHint {
+        device: root.device; action: 0; description: root.move-label;
+    }
+    if root.device != 1 && root.select-label != "": InputHint {
+        device: root.device; action: 1; description: root.select-label;
+    }
+    if root.device != 1 && root.back-label != "": InputHint {
+        device: root.device; action: 2; description: root.back-label;
+    }
+    if root.device != 1 && root.menu-label != "": InputHint {
+        device: root.device; action: 3; description: root.menu-label;
+    }
+    Rectangle { horizontal-stretch: 1; }
+}

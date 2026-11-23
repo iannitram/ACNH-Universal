@@ -428,10 +428,12 @@ fn mac_plan(dir: &Path, make: &Make, real_homebrew: Option<&Path>, from_bundle: 
             plist.replace("@VERSION@", "1.0.0").as_bytes(),
         );
         put(&contents.join("Resources/acnhrecomp.icns"), b"icon");
+        put(&contents.join("Resources/acnhrecomp.png"), b"picture");
         contents.join("MacOS")
     } else {
         put(&plan.source.join("assets/mac/Info.plist.in"), &template);
         put(&plan.source.join("assets/acnhrecomp.icns"), b"icon");
+        put(&plan.source.join("assets/acnhrecomp.png"), b"picture");
         dir.join("target/release")
     };
     make(&folder.join("acnh-app"), &[]);
@@ -487,6 +489,7 @@ fn check_app(plan: &Plan, made: &Path) -> String {
         "Contents/Info.plist",
         "Contents/Resources/MoltenVK_icd.json",
         "Contents/Resources/acnhrecomp.icns",
+        "Contents/Resources/acnhrecomp.png",
     ]);
     expected.sort();
     assert_eq!(files, expected);
