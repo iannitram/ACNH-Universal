@@ -7,7 +7,7 @@ import { AboutPage, CreditEntry, FixEntry } from "about.slint";
 import { ContinuePage, ContinueView, CardView, PadTarget } from "continue.slint";
 
 export { ContinueView, CardView, PadTarget, CreditEntry, FixEntry, FleetEntry }
-export enum SettingsControl { ptbr, speedfix, back }
+export enum SettingsControl { ptbr, speedfix, relay-sign-in, relay-off, back }
 
 component SettingsRow inherits Rectangle {
     in property <string> label;
@@ -39,6 +39,11 @@ export component MainWindow inherits Window {
     callback pointer-used();
     in property <image> card-picture;
     in property <bool> first-run-open;
+    in property <string> first-run-heading: "Guided setup";
+    in property <int> first-run-columns: 6;
+    in property <bool> first-run-editor;
+    // Settings opened the save sync pages (they draw with the first run's page).
+    in property <bool> relay-flow-open;
     in property <string> first-run-title;
     in property <string> first-run-choice;
     in property <string> first-run-position;
@@ -78,6 +83,13 @@ export component MainWindow inherits Window {
     in property <bool> speedfix;
     in property <SettingsControl> settings-focus: SettingsControl.ptbr;
     in property <string> settings-error;
+    in property <bool> settings-relay-available;
+    in property <string> settings-relay-summary;
+    in property <string> settings-relay-sign-in;
+    in property <bool> settings-relay-has-off;
+    in property <string> settings-relay-off;
+    in property <string> settings-relay-message;
+    callback settings-relay-activate(SettingsControl);
     callback fleet-scroll(int);
     callback set-ptbr(bool);
     callback set-speedfix(bool);
@@ -113,8 +125,8 @@ export component MainWindow inherits Window {
         if root.view.settings-open: Rectangle {
             background: #172821;
             VerticalBox {
-                padding: 24px;
-                spacing: 16px;
+                padding: 16px;
+                spacing: 8px;
                 Text { text: "Settings"; color: white; font-size: 28px; }
                 Text { text: "Prepare again to apply these changes to your build."; color: white; }
                 SettingsRow {
@@ -130,6 +142,18 @@ export component MainWindow inherits Window {
                     activate => { root.pointer-used(); root.set-speedfix(!root.speedfix); }
                 }
                 if root.settings-error != "": Text { text: root.settings-error; color: #f7d681; }
+                if root.settings-relay-available: Text { text: root.settings-relay-summary; color: white; wrap: word-wrap; }
+                if root.settings-relay-available: SettingsRow {
+                    label: root.settings-relay-sign-in;
+                    selected: root.settings-focus == SettingsControl.relay-sign-in;
+                    activate => { root.pointer-used(); root.settings-relay-activate(SettingsControl.relay-sign-in); }
+                }
+                if root.settings-relay-available && root.settings-relay-has-off: SettingsRow {
+                    label: root.settings-relay-off;
+                    selected: root.settings-focus == SettingsControl.relay-off;
+                    activate => { root.pointer-used(); root.settings-relay-activate(SettingsControl.relay-off); }
+                }
+                if root.settings-relay-message != "": Text { text: root.settings-relay-message; color: #f7d681; wrap: word-wrap; }
                 SettingsRow {
                     label: "Back";
                     selected: root.settings-focus == SettingsControl.back;
@@ -139,8 +163,11 @@ export component MainWindow inherits Window {
             }
         }
 
-        if root.first-run-open: FirstRunPage {
+        if root.first-run-open || root.relay-flow-open: FirstRunPage {
             input-device: root.input-device;
+            heading: root.first-run-heading;
+            columns: root.first-run-columns;
+            editor: root.first-run-editor;
             title: root.first-run-title;
             choice: root.first-run-choice;
             position: root.first-run-position;

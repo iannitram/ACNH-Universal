@@ -13,18 +13,127 @@ use std::{
 pub enum SettingsFocus {
     Ptbr,
     Speedfix,
+    /// "Sign in again", or "Set up save sync" when save sync is off.
+    RelaySignIn,
+    /// "Turn off save sync", only while save sync is set up.
+    RelayOff,
     Back,
+}
+
+/// Which save sync controls the page has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayRows {
+    /// This build has no save sync setup.
+    Hidden,
+    /// Save sync is off: only the setup row.
+    SignIn,
+    /// Save sync is set up: sign in again and turn off.
+    SignInAndOff,
+}
+
+/// The controls in focus order.
+pub fn settings_rows(relay: RelayRows) -> Vec<SettingsFocus> {
+    use SettingsFocus::{Back, Ptbr, RelayOff, RelaySignIn, Speedfix};
+    match relay {
+        RelayRows::Hidden => vec![Ptbr, Speedfix, Back],
+        RelayRows::SignIn => vec![Ptbr, Speedfix, RelaySignIn, Back],
+        RelayRows::SignInAndOff => vec![Ptbr, Speedfix, RelaySignIn, RelayOff, Back],
+    }
+}
+
+/// Move among `rows` with a navigation action; the ends hold.
+pub fn move_in(rows: &[SettingsFocus], focus: SettingsFocus, nav: crate::vm::Nav) -> SettingsFocus {
+    use crate::vm::Nav;
+    let Some(at) = rows.iter().position(|row| *row == focus) else {
+        return rows.first().copied().unwrap_or(focus);
+    };
+    match nav {
+        Nav::Down | Nav::Right => rows[(at + 1).min(rows.len() - 1)],
+        Nav::Up | Nav::Left => rows[at.saturating_sub(1)],
+        _ => focus,
+    }
 }
 
 /// Move between Settings controls using a shared navigation action.
 pub fn move_focus(focus: SettingsFocus, nav: crate::vm::Nav) -> SettingsFocus {
-    use crate::vm::Nav;
-    use SettingsFocus::{Back, Ptbr, Speedfix};
-    match (focus, nav) {
-        (Ptbr, Nav::Down | Nav::Right) | (Back, Nav::Up | Nav::Left) => Speedfix,
-        (Speedfix, Nav::Down | Nav::Right) => Back,
-        (Speedfix, Nav::Up | Nav::Left) => Ptbr,
-        _ => focus,
+    move_in(&settings_rows(RelayRows::Hidden), focus, nav)
+}
+
+/// The save sync rows of Settings: what is set up, and the actions on it. The account comes
+/// from `RelaySetup::account`; Sign in again opens the same pages as the first run's step 5.
+#[derive(Debug, Clone)]
+pub struct SettingsRelay {
+    pub available: bool,
+    pub account: Option<crate::vm::relay_setup::Account>,
+    /// "Turn off save sync" was pressed once and waits for a second press.
+    pub confirming_off: bool,
+    /// The sign-in pages, while they are open.
+    pub flow: Option<crate::vm::relay_setup::RelaySetupVm>,
+    pub message: String,
+}
+
+impl SettingsRelay {
+    pub fn new(available: bool, account: Option<crate::vm::relay_setup::Account>) -> SettingsRelay {
+        SettingsRelay {
+            available,
+            account,
+            confirming_off: false,
+            flow: None,
+            message: String::new(),
+        }
+    }
+
+    pub fn rows(&self) -> RelayRows {
+        match (self.available, &self.account) {
+            (false, _) => RelayRows::Hidden,
+            (true, None) => RelayRows::SignIn,
+            (true, Some(_)) => RelayRows::SignInAndOff,
+        }
+    }
+
+    /// The row's text: the service and account, or that save sync is off.
+    pub fn summary(&self) -> String {
+        match &self.account {
+            Some(account) => format!("Save sync: {}", account.summary()),
+            None => "Save sync is off. This device plays without syncing.".into(),
+        }
+    }
+
+    pub fn sign_in_label(&self) -> &'static str {
+        if self.account.is_some() {
+            "Sign in again"
+        } else {
+            "Set up save sync"
+        }
+    }
+
+    pub fn turn_off_label(&self) -> &'static str {
+        if self.confirming_off {
+            "Press again to turn off save sync"
+        } else {
+            "Turn off save sync"
+        }
+    }
+
+    /// Open the sign-in pages (Cancel instead of Skip).
+    pub fn open_sign_in(&mut self) {
+        self.confirming_off = false;
+        self.message.clear();
+        self.flow = Some(crate::vm::relay_setup::RelaySetupVm::new(false));
+    }
+
+    /// How the pages were left: set up shows the new account; Cancel and Back change nothing.
+    pub fn flow_outcome(&mut self, outcome: crate::vm::relay_setup::Outcome) {
+        use crate::vm::relay_setup::Outcome;
+        match outcome {
+            Outcome::Open => {}
+            Outcome::Done(account) => {
+                self.message = format!("Save sync is on: {}.", account.summary());
+                self.account = Some(account);
+                self.flow = None;
+            }
+            Outcome::Skipped | Outcome::Back => self.flow = None,
+        }
     }
 }
 

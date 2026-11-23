@@ -2,6 +2,12 @@ import { InputHints } from "hints.slint";
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 export component FirstRunPage inherits Rectangle {
     in property <int> input-device;
+    // "Guided setup" in the first run, "Save sync" when Settings opens the same pages.
+    in property <string> heading: "Guided setup";
+    // Keys across one row of the open keypad (the address pad's six, the keyboard's ten).
+    in property <int> columns: 6;
+    // The on-screen keyboard is open: its prompts say Press key and Leave editor.
+    in property <bool> editor;
     in property <string> title;
     in property <string> choice;
     in property <string> position;
@@ -21,7 +27,7 @@ export component FirstRunPage inherits Rectangle {
     VerticalBox {
         padding: 32px;
         spacing: 18px;
-        Text { text: "Guided setup"; color: white; font-size: 30px; }
+        Text { text: root.heading; color: white; font-size: 30px; }
         Text { text: root.title; color: white; font-size: 24px; wrap: word-wrap; }
         if root.message != "": Text { text: root.message; color: #f7d681; wrap: word-wrap; }
         Text { text: root.busy ? "Working…" : root.position; color: #f7d681; font-size: 20px; }
@@ -40,12 +46,12 @@ export component FirstRunPage inherits Rectangle {
             TouchArea { clicked => { root.accept(); } }
         }
         if root.keypad: Rectangle {
-            min-height: Math.ceil(root.choices.length / 6) * 42px;
+            min-height: Math.ceil(root.choices.length / root.columns) * 42px;
             for text[index] in root.choices: Rectangle {
-                width: (parent.width - 30px) / 6;
+                width: (parent.width - (root.columns - 1) * 6px) / root.columns;
                 height: 36px;
-                x: Math.mod(index, 6) * (self.width + 6px);
-                y: Math.floor(index / 6) * 42px;
+                x: Math.mod(index, root.columns) * (self.width + 6px);
+                y: Math.floor(index / root.columns) * 42px;
                 border-width: 2px;
                 border-color: index == root.focus-index ? #f7d681 : transparent;
                 border-radius: 6px;
@@ -68,8 +74,8 @@ export component FirstRunPage inherits Rectangle {
         InputHints {
             device: root.input-device;
             move-label: root.busy ? "" : "Move";
-            select-label: root.busy ? "" : "Select";
-            back-label: root.busy ? (root.cancel-available ? "Cancel" : "") : "Back";
+            select-label: root.busy ? "" : root.editor ? (root.input-device == 0 ? "Done" : "Press key") : "Select";
+            back-label: root.busy ? (root.cancel-available ? "Cancel" : "") : root.editor ? "Leave editor" : "Back";
         }
     }
 }

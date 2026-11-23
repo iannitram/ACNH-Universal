@@ -4,8 +4,11 @@ pub mod about;
 pub mod continue_page;
 pub mod first_run;
 pub mod fleet;
+pub mod hints;
+pub mod relay_setup;
 pub mod saves;
 pub mod settings;
+pub mod text_entry;
 pub use about::AboutVm;
 pub use continue_page::ContinuePageVm;
 
@@ -173,6 +176,117 @@ mod tests {
             }
             first.handle(Nav::Left);
             assert_eq!(first.focus, count.saturating_sub(2));
+        }
+
+        // The save sync step in each phase, an open keyboard included, through the one focus
+        // accessor the page draws from: Right reaches every choice or key in turn, and Back
+        // always leaves the step.
+        use super::relay_setup::{Event as RelayEvent, Prompt};
+        let at_relay = || {
+            let mut vm = FirstRunVm::new(std::path::PathBuf::new());
+            vm.relay_available = true;
+            vm.step = Step::GetBuild;
+            vm.event(super::first_run::Event::Finished(Ok(())));
+            assert_eq!(vm.step, Step::Relay);
+            vm
+        };
+        let prompt = Prompt {
+            url: "https://example.test".into(),
+            code: None,
+            needs_code: true,
+            browser: false,
+        };
+        type Make = Box<dyn Fn() -> FirstRunVm>;
+        let phases: Vec<(&str, Make)> = vec![
+            ("choose", Box::new(at_relay)),
+            (
+                "form",
+                Box::new(move || {
+                    let mut vm = at_relay();
+                    vm.handle(Nav::Accept);
+                    vm
+                }),
+            ),
+            (
+                "keyboard",
+                Box::new(move || {
+                    let mut vm = at_relay();
+                    vm.handle(Nav::Accept);
+                    vm.handle(Nav::Accept);
+                    assert!(vm.keypad_open());
+                    vm
+                }),
+            ),
+            (
+                "waiting",
+                Box::new({
+                    let prompt = prompt.clone();
+                    move || {
+                        let mut vm = at_relay();
+                        vm.activate(2);
+                        vm.relay.take_request();
+                        vm.relay
+                            .event(RelayEvent::SignInStarted(Ok(prompt.clone())));
+                        vm
+                    }
+                }),
+            ),
+            (
+                "failed",
+                Box::new(move || {
+                    let mut vm = at_relay();
+                    vm.activate(1);
+                    vm.relay.take_request();
+                    vm.relay.event(RelayEvent::SignInStarted(Err("no".into())));
+                    vm
+                }),
+            ),
+        ];
+        for (name, make) in &phases {
+            let mut vm = make();
+            let count = vm.options().len();
+            assert!(count > 0, "{name}");
+            for _ in 0..count {
+                vm.handle(Nav::Left);
+            }
+            assert_eq!(vm.focus_index(), 0, "{name}");
+            for expected in 1..count {
+                vm.handle(Nav::Right);
+                assert_eq!(vm.focus_index(), expected, "{name}");
+            }
+            let mut vm = make();
+            for _ in 0..3 {
+                vm.handle(Nav::Back);
+                if vm.step != Step::Relay {
+                    break;
+                }
+            }
+            assert_eq!(vm.step, Step::FindGame, "{name}: Back must leave");
+        }
+
+        // Settings with each set of save sync rows: Down visits every row, ending on Back,
+        // and Up returns to the first.
+        use super::settings::{move_in, settings_rows, RelayRows};
+        for relay in [
+            RelayRows::Hidden,
+            RelayRows::SignIn,
+            RelayRows::SignInAndOff,
+        ] {
+            let rows = settings_rows(relay);
+            let mut at = rows[0];
+            let mut seen = vec![at];
+            for _ in 0..rows.len() {
+                at = move_in(&rows, at, Nav::Down);
+                if seen.last() != Some(&at) {
+                    seen.push(at);
+                }
+            }
+            assert_eq!(seen, rows);
+            assert_eq!(*rows.last().unwrap(), SettingsFocus::Back);
+            for _ in 0..rows.len() {
+                at = move_in(&rows, at, Nav::Up);
+            }
+            assert_eq!(at, rows[0]);
         }
     }
 

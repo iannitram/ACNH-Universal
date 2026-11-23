@@ -1,4 +1,5 @@
 //! Runs first-run requests off the window thread.
+use crate::relay_setup::{PageView, RelayRunner, RelaySettings, RelaySetup};
 use crate::vm::first_run::{Event, FirstRunVm, Request, Step};
 use crate::vm::settings::SettingsVm;
 use crate::vm::Nav;
@@ -23,11 +24,43 @@ pub struct FirstRun {
     active: Option<Request>,
     cancelled: Arc<AtomicU8>,
     cancelling_build: bool,
+    relay: RelayRunner,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     clipboard: Option<arboard::Clipboard>,
 }
+/// A physical keyboard key for whichever text field is open: the first run's save sync step
+/// while the first run is up, else Settings' sign-in pages. True when a field took the key;
+/// false leaves it to the controller map. This runs before the controller map, so letters
+/// and digits reach the field.
+pub fn route_text(
+    first: &mut FirstRun,
+    first_open: bool,
+    relay: &mut RelaySettings,
+    text: &str,
+) -> bool {
+    if first_open {
+        first.text_key(text)
+    } else {
+        relay.text_key(text)
+    }
+}
+
+/// Save sync setup as this machine has it.
+pub fn system_relay_setup() -> Arc<dyn RelaySetup> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if let Some(setup) = crate::relay_setup::SystemSetup::system() {
+        return Arc::new(setup);
+    }
+    Arc::new(crate::relay_setup::Unavailable)
+}
+
 impl FirstRun {
     pub fn new(vars: Vars) -> Self {
+        Self::with_relay(vars, system_relay_setup())
+    }
+
+    /// The first run with save sync setup given (a fake in tests).
+    pub fn with_relay(vars: Vars, setup: Arc<dyn RelaySetup>) -> Self {
         let dirs = AppDirs::new(&vars);
         let (sender, receiver) = mpsc::channel();
         let mut vm = FirstRunVm::new(vars.home.clone());
@@ -37,6 +70,8 @@ impl FirstRun {
             .iter()
             .position(|item| item.id == detected.id)
             .unwrap_or(vm.profile);
+        vm.relay_available = setup.available();
+        vm.relay_set_up = setup.account().is_some();
         vm.steam_applicable = Os::current() == Os::Linux
             && acnh_core::steam::userdata_roots(&vars)
                 .iter()
@@ -51,6 +86,7 @@ impl FirstRun {
             active: None,
             cancelled: Arc::new(AtomicU8::new(0)),
             cancelling_build: false,
+            relay: RelayRunner::new(setup),
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             clipboard: None,
         }
@@ -123,9 +159,22 @@ impl FirstRun {
         self.vm.activate(index);
         self.dispatch();
     }
+    /// A key typed on a physical keyboard while a text field is open.
+    pub fn text_key(&mut self, text: &str) -> bool {
+        if self.vm.step != Step::Relay || !crate::relay_setup::text_key(&mut self.vm.relay, text) {
+            return false;
+        }
+        self.dispatch();
+        true
+    }
     pub fn pump(&mut self) -> bool {
+        let relay = self.relay.pump(&mut self.vm.relay);
+        let relay_any = relay.is_some();
+        if let Some(outcome) = relay {
+            self.vm.relay_outcome(outcome);
+        }
         let events: Vec<_> = self.receiver.try_iter().collect();
-        let any = !events.is_empty();
+        let any = !events.is_empty() || relay_any;
         for (generation, event) in events {
             if generation != self.generation {
                 continue;
@@ -151,10 +200,43 @@ impl FirstRun {
         self.dispatch();
         any
     }
+    /// What the guided page draws for the step the first run is on. The save sync step shows
+    /// its own focus (a key of the keyboard while it is open) and its own message.
+    pub fn page(&self) -> PageView {
+        let relay = self.vm.step == Step::Relay;
+        let progress = if self.vm.step == Step::GetBuild {
+            self.vm
+                .stage
+                .and_then(|stage| acnh_core::recipe::STAGES.iter().position(|s| *s == stage))
+                .map(|n| (n * 100 / 7) as i32)
+                .unwrap_or(0)
+        } else {
+            -1
+        };
+        PageView {
+            heading: "Guided setup".into(),
+            title: format!("Step {} of 6\n{}", self.vm.step_number(), self.vm.title()),
+            options: self.vm.options(),
+            focus: self.vm.focus_index(),
+            busy: self.vm.busy,
+            message: if relay {
+                self.vm.relay.message.clone()
+            } else {
+                self.vm.message.clone()
+            },
+            cancel_available: self.can_cancel() || (relay && self.vm.relay.busy()),
+            keypad: self.vm.keypad_open(),
+            columns: self.vm.columns(),
+            editor: relay && self.vm.relay.keyboard_open(),
+            progress,
+        }
+    }
+
     pub fn done(&self) -> bool {
         self.vm.step == Step::Done
     }
     fn dispatch(&mut self) {
+        self.relay.dispatch(&mut self.vm.relay);
         let Some(request) = self.vm.take_request() else {
             return;
         };

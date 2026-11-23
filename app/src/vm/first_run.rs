@@ -1,4 +1,5 @@
 //! Guided setup state, independent of Slint and the operating system.
+use crate::vm::relay_setup::{self, RelaySetupVm};
 use crate::vm::Nav;
 use acnh_core::hub::Found;
 use acnh_core::profile;
@@ -18,6 +19,8 @@ pub enum Step {
     Pair,
     GetBuild,
     BuildFailed(String),
+    /// Step 5: set up save sync or skip it (`vm::relay_setup`).
+    Relay,
     DeviceAndSteam,
     ChooseProfile,
     SteamFailed(String),
@@ -75,6 +78,11 @@ pub struct FirstRunVm {
     pub busy: bool,
     pub message: String,
     pub steam_applicable: bool,
+    /// Save sync can be set up on this build, and is not set up yet: step 5 is shown.
+    pub relay_available: bool,
+    pub relay_set_up: bool,
+    /// The relay step's pages.
+    pub relay: RelaySetupVm,
     pub profile: usize,
     pulling: bool,
     request: Option<Request>,
@@ -106,6 +114,9 @@ impl FirstRunVm {
             busy: false,
             message: String::new(),
             steam_applicable: cfg!(target_os = "linux"),
+            relay_available: false,
+            relay_set_up: false,
+            relay: RelaySetupVm::new(true),
             profile: profile::builtin().len() - 1,
             pulling: false,
             request: None,
@@ -144,6 +155,7 @@ impl FirstRunVm {
             | Step::EnterAddress => 2,
             Step::Pair => 3,
             Step::GetBuild | Step::BuildFailed(_) => 4,
+            Step::Relay => 5,
             Step::DeviceAndSteam | Step::ChooseProfile | Step::SteamFailed(_) | Step::Done => 6,
         }
     }
@@ -185,6 +197,7 @@ impl FirstRunVm {
                 format!("Preparing version {}\n{list}", self.version)
             }
             Step::BuildFailed(reason) => reason.lines().next().unwrap_or("Build failed").into(),
+            Step::Relay => self.relay.title(),
             Step::DeviceAndSteam => {
                 format!("Device profile: {}", profile::builtin()[self.profile].name)
             }
@@ -194,6 +207,9 @@ impl FirstRunVm {
         }
     }
     pub fn options(&self) -> Vec<String> {
+        if self.step == Step::Relay {
+            return self.relay.options();
+        }
         if self.busy {
             return vec![];
         }
@@ -256,10 +272,16 @@ impl FirstRunVm {
                 .map(|item| item.name.into())
                 .collect(),
             Step::SteamFailed(_) => vec!["Try again".into(), "Skip".into()],
+            Step::Relay => self.relay.options(),
             Step::Done => vec!["Continue".into()],
         }
     }
     pub fn handle(&mut self, nav: Nav) {
+        if self.step == Step::Relay {
+            let outcome = self.relay.handle(nav);
+            self.relay_outcome(outcome);
+            return;
+        }
         if self.busy {
             return;
         }
@@ -276,6 +298,11 @@ impl FirstRunVm {
         }
     }
     pub fn activate(&mut self, index: usize) {
+        if self.step == Step::Relay {
+            let outcome = self.relay.activate(index);
+            self.relay_outcome(outcome);
+            return;
+        }
         if self.busy || index >= self.options().len() {
             return;
         }
@@ -389,7 +416,43 @@ impl FirstRunVm {
         });
     }
 
+    /// How the relay step was left: set up or skipped goes on to the device and Steam, Back
+    /// goes to the step before it.
+    pub fn relay_outcome(&mut self, outcome: relay_setup::Outcome) {
+        match outcome {
+            relay_setup::Outcome::Open => {}
+            relay_setup::Outcome::Done(_) => {
+                self.relay_set_up = true;
+                self.go(Step::DeviceAndSteam);
+            }
+            relay_setup::Outcome::Skipped => self.go(Step::DeviceAndSteam),
+            relay_setup::Outcome::Back => self.go(Step::FindGame),
+        }
+    }
+
+    /// The one focus of the page: the relay step keeps its own (a key while the keyboard is
+    /// open), every other step uses `focus`.
+    pub fn focus_index(&self) -> usize {
+        if self.step == Step::Relay {
+            self.relay.focus_index()
+        } else {
+            self.focus
+        }
+    }
+
+    /// Keys across one row of the open keypad.
+    pub fn columns(&self) -> usize {
+        if self.step == Step::Relay {
+            crate::vm::text_entry::COLUMNS
+        } else {
+            6
+        }
+    }
+
     pub fn keypad_open(&self) -> bool {
+        if self.step == Step::Relay {
+            return self.relay.keyboard_open();
+        }
         !self.busy
             && (self.step == Step::Pair
                 || (self.step == Step::EnterAddress && !self.address_unreachable))
@@ -521,7 +584,14 @@ impl FirstRunVm {
                     "Player received. Prepare the game on this device to finish setup.".into();
                 self.go(Step::FindGame);
             }
-            Event::Finished(Ok(())) => self.go(Step::DeviceAndSteam),
+            Event::Finished(Ok(())) => {
+                if self.relay_available && !self.relay_set_up {
+                    self.relay.reset();
+                    self.go(Step::Relay);
+                } else {
+                    self.go(Step::DeviceAndSteam);
+                }
+            }
             Event::Finished(Err(reason)) => self.go(Step::BuildFailed(reason)),
             Event::FinishedSetup { result: Ok(()), .. } => self.go(Step::Done),
             Event::FinishedSetup {
@@ -588,6 +658,72 @@ mod tests {
         assert!(vm.keypad_open());
         assert_eq!(vm.host, "127.0.0.1");
     }
+    fn after_build(relay_available: bool, relay_set_up: bool) -> FirstRunVm {
+        let mut vm = vm();
+        vm.relay_available = relay_available;
+        vm.relay_set_up = relay_set_up;
+        vm.step = Step::GetBuild;
+        vm.event(Event::Finished(Ok(())));
+        vm
+    }
+
+    #[test]
+    fn the_relay_step_comes_after_the_build_and_before_add_to_steam() {
+        let mut vm = after_build(true, false);
+        assert_eq!(vm.step, Step::Relay);
+        assert_eq!(vm.step_number(), 5);
+        assert_eq!(
+            vm.options(),
+            ["Nextcloud", "Google Drive", "Dropbox", "Skip"]
+        );
+        assert!(!vm.keypad_open());
+        // Skip goes on to the device and Steam with save sync off.
+        vm.handle(Nav::Down);
+        vm.handle(Nav::Down);
+        vm.handle(Nav::Down);
+        assert_eq!(vm.relay.options()[vm.relay.focus], "Skip");
+        vm.handle(Nav::Accept);
+        assert_eq!(vm.step, Step::DeviceAndSteam);
+        assert_eq!(vm.step_number(), 6);
+        assert!(!vm.relay_set_up, "skipped: save sync stays off");
+        assert!(vm.options().contains(&"Done".to_string()));
+    }
+
+    #[test]
+    fn the_relay_step_is_skipped_when_set_up_or_not_available() {
+        assert_eq!(after_build(true, true).step, Step::DeviceAndSteam);
+        assert_eq!(after_build(false, false).step, Step::DeviceAndSteam);
+    }
+
+    #[test]
+    fn back_from_the_relay_step_goes_to_the_step_before_it() {
+        let mut vm = after_build(true, false);
+        vm.handle(Nav::Back);
+        assert_eq!(vm.step, Step::FindGame);
+        // From the Nextcloud form, Back goes to the choice first, then out.
+        let mut vm = after_build(true, false);
+        vm.handle(Nav::Accept);
+        assert_eq!(vm.title().split(':').next(), Some("Nextcloud"));
+        vm.handle(Nav::Back);
+        assert_eq!(vm.step, Step::Relay);
+        assert_eq!(vm.relay.options()[0], "Nextcloud");
+        vm.handle(Nav::Back);
+        assert_eq!(vm.step, Step::FindGame);
+    }
+
+    #[test]
+    fn a_finished_setup_goes_on_and_remembers_the_account() {
+        let mut vm = after_build(true, false);
+        let account = relay_setup::Account {
+            service: relay_setup::Service::Nextcloud,
+            name: "alex".into(),
+            address: Some("https://cloud.test".into()),
+        };
+        vm.relay_outcome(relay_setup::Outcome::Done(account));
+        assert_eq!(vm.step, Step::DeviceAndSteam);
+        assert!(vm.relay_set_up);
+    }
+
     #[test]
     fn local_path_names_errors_and_builds_after_check() {
         let mut vm = vm();
