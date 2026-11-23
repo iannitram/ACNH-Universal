@@ -271,10 +271,9 @@ public class GameDownload extends Service {
             File old = new File(game, it.path);
             boolean moved = verified.contains(it.path + " " + it.sha) && !new File(part, it.path).exists();
             if ((it.sha.equals(installed.get(it.path)) || moved) && old.isFile() && old.length() == it.size) {
-                if (!moved) {
-                    have += it.size;
-                    continue;
-                }
+                have += it.size;  // on disk already: needs no space and no fetch
+                if (moved) fetch.add(it);  // moved by a run that stopped mid-move: the move loop and the list still run
+                continue;
             }
             fetch.add(it);
             File f = new File(part, it.path);
