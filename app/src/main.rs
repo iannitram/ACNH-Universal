@@ -9,6 +9,7 @@ use acnh_app::input::{key_nav, poll_nav, DeviceEvent, Devices, Stick};
 use acnh_app::play::{Player, RelayOff, Runner, Session};
 use acnh_app::ui::{from_slint, to_slint};
 use acnh_app::vm::fleet::FleetVm;
+use acnh_app::vm::saves::SavesVm;
 use acnh_app::vm::settings::{move_focus, SettingsFocus, SettingsVm};
 use acnh_app::vm::{AboutVm, ContinuePageVm, Nav};
 use acnh_app::MainWindow;
@@ -72,6 +73,44 @@ fn render(window: &Weak<MainWindow>, session: &Session) {
             window.set_settings_error(SharedString::default());
         }
         let view = session.vm().view();
+        if view.saves_open {
+            if !window.get_view().saves_open {
+                window.set_saves_offset(0);
+            }
+            if let Ok(vars) = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok()) {
+                let saves = SavesVm::new(AppDirs::new(&vars).data_root());
+                window.set_saves_island(saves.island_card().text.into());
+                let (backups, message) = match saves.backups() {
+                    Ok(backups) if backups.is_empty() => (backups, "No backups yet."),
+                    Ok(backups) => (backups, ""),
+                    Err(_) => (Vec::new(), "Could not read backups."),
+                };
+                let offset = (window.get_saves_offset().max(0) as usize)
+                    .min(backups.len().saturating_sub(3));
+                window.set_saves_offset(offset as i32);
+                window.set_saves_has_previous(offset > 0);
+                window.set_saves_has_next(offset + 3 < backups.len());
+                window.set_saves_position(if backups.len() > 3 {
+                    format!(
+                        "Showing {}–{} of {}",
+                        offset + 1,
+                        (offset + 3).min(backups.len()),
+                        backups.len()
+                    )
+                    .into()
+                } else {
+                    "".into()
+                });
+                let rows: Vec<SharedString> = backups
+                    .into_iter()
+                    .skip(offset)
+                    .take(3)
+                    .map(Into::into)
+                    .collect();
+                window.set_saves_backups(slint::ModelRc::new(slint::VecModel::from(rows)));
+                window.set_saves_message(message.into());
+            }
+        }
         if view.fleet_open {
             if !window.get_view().fleet_open {
                 window.set_fleet_offset(0);
@@ -134,6 +173,20 @@ fn move_settings_focus(focus: SettingsControl, nav: Nav) -> SettingsControl {
 }
 
 fn navigate(window: &Weak<MainWindow>, session: &mut Session, nav: Nav) {
+    if let Some(window) = window.upgrade().filter(|_| session.vm().saves_open()) {
+        let offset = window.get_saves_offset().max(0) as usize;
+        let rows = if window.get_saves_has_next() {
+            offset + 4
+        } else {
+            offset + 3
+        };
+        let (offset, close) = acnh_app::vm::saves::navigate(offset, rows, nav);
+        window.set_saves_offset(offset as i32);
+        if close {
+            session.nav(Nav::Back);
+        }
+        return;
+    }
     if let Some(window) = window.upgrade().filter(|_| session.vm().fleet_open()) {
         // The row count is reflected by the existing previous/next flags.
         let offset = window.get_fleet_offset().max(0) as usize;
@@ -337,6 +390,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let session = Rc::new(RefCell::new(session()?));
     render(&window.as_weak(), &session.borrow());
+
+    window.on_saves_scroll({
+        let weak = window.as_weak();
+        let session = Rc::clone(&session);
+        move |delta| {
+            if let Some(window) = weak.upgrade() {
+                window.set_saves_offset(window.get_saves_offset().saturating_add(delta).max(0));
+                render(&weak, &session.borrow());
+            }
+        }
+    });
 
     window.on_fleet_scroll({
         let weak = window.as_weak();

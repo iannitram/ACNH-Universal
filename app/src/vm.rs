@@ -118,8 +118,15 @@ mod tests {
         use super::settings::{move_focus, SettingsFocus};
 
         let mut page = ContinuePageVm::new(None, None);
+        page.handle(Nav::Down);
+        assert_eq!(page.focus(), FocusTarget::Saves);
+        page.handle(Nav::Accept);
+        assert!(page.saves_open());
+        assert_eq!(super::saves::navigate(0, 5, Nav::Down), (1, false));
+        assert_eq!(super::saves::navigate(1, 5, Nav::Back), (1, true));
+        page.handle(Nav::Back);
+        assert!(!page.saves_open());
         for (nav, target) in [
-            (Nav::Down, FocusTarget::Saves),
             (Nav::Right, FocusTarget::Settings),
             (Nav::Right, FocusTarget::Fleet),
             (Nav::Right, FocusTarget::About),

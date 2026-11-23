@@ -323,6 +323,62 @@ mod tests {
     }
 
     #[test]
+    fn bundled_sdl_mappings_expose_south_and_east() {
+        // gilrs 0.11.2, SDL_GameControllerDB/gamecontrollerdb.txt, Linux entries.
+        // The database describes the raw button associated with SDL a (south) and b (east).
+        // Legion Go and paired Joy-Con have no desktop entry there; their actual mapping
+        // still needs verification on hardware. A mapping cannot prove raw physical position.
+        for (mapping, bottom, right) in [
+            (
+                "03000000de2800000512000010010000,Valve Steam Deck,a:b3,b:b4",
+                "b3",
+                "b4",
+            ),
+            (
+                "030000005e040000ea02000008040000,Microsoft Xbox One,a:b0,b:b1",
+                "b0",
+                "b1",
+            ),
+            (
+                "030000004c050000e60c000011010000,PS5 Controller,a:b1,b:b2",
+                "b1",
+                "b2",
+            ),
+            (
+                "030000004c050000cc09000000010000,PS4 Controller,a:b1,b:b2",
+                "b1",
+                "b2",
+            ),
+            (
+                "030000007e0500000920000000026803,Nintendo Switch Pro Controller,a:b1,b:b0",
+                "b1",
+                "b0",
+            ),
+            (
+                "03000000c82d00000660000011010000,8BitDo Pro 2,a:b1,b:b0",
+                "b1",
+                "b0",
+            ),
+        ] {
+            let mapped = |raw| {
+                mapping.split(',').find_map(|field| {
+                    let (name, code) = field.split_once(':')?;
+                    if code != raw {
+                        return None;
+                    }
+                    match name {
+                        "a" => Some(Button::South),
+                        "b" => Some(Button::East),
+                        _ => None,
+                    }
+                })
+            };
+            assert_eq!(mapped(bottom).and_then(button_nav), Some(Nav::Accept));
+            assert_eq!(mapped(right).and_then(button_nav), Some(Nav::Back));
+        }
+    }
+
+    #[test]
     fn known_pad_layouts() {
         for (vendor, product, name, expected) in [
             (0x28de, 0x1205, "Valve Steam Deck", InputDevice::SteamDeck),
