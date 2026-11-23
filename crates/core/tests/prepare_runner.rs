@@ -55,6 +55,15 @@ struct Fake {
     probed: Vec<String>,
 }
 
+/// A script call without the `env PATH=...` a Mac that has Homebrew puts before it.
+fn without_env(args: &[String]) -> &[String] {
+    if args.first().is_some_and(|program| program == "env") {
+        &args[2..]
+    } else {
+        args
+    }
+}
+
 impl Fake {
     /// A Mac with Xcode, cargo and the iOS Rust target.
     fn with_ios_tools() -> Fake {
@@ -63,6 +72,11 @@ impl Fake {
                 ("xcrun", "/Applications/Xcode.app/iPhoneOS.sdk\n"),
                 ("cargo", "cargo 1.90.0\n"),
                 ("rustup", "aarch64-apple-darwin\naarch64-apple-ios\n"),
+                // `git` fails (it is not found in the fake), saying the folder is no repository.
+                (
+                    "git:stderr",
+                    "fatal: not a git repository (or any of the parent directories): .git\n",
+                ),
             ],
             ..Fake::default()
         }
@@ -85,6 +99,13 @@ impl ScriptRunner for Fake {
 
     fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
+    }
+
+    fn probe_stderr(&mut self, program: &str, _args: &[&str]) -> Option<(bool, String)> {
+        self.tools
+            .iter()
+            .find(|(name, _)| *name == format!("{program}:stderr"))
+            .map(|(_, error)| (false, (*error).to_owned()))
     }
 
     fn probe(&mut self, program: &str, args: &[&str]) -> Option<String> {
@@ -947,7 +968,7 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
     let n = fake.args.len();
     let build = req.out.join("build-ios");
     assert_eq!(
-        fake.args[n - 2],
+        without_env(&fake.args[n - 2]),
         [
             "tools/build_ios.sh".to_owned(),
             "iphoneos".to_owned(),
@@ -1133,7 +1154,9 @@ fn cargo_found_only_under_the_cargo_home_bin_is_put_first_on_the_build_path() {
     // With cargo on the PATH the script is called as it is.
     let mut plain = Fake::with_ios_tools();
     prepare_with(&req, Hub::Mac, &mut plain, Path::new("/h"), &mut |_| {}).unwrap();
-    assert_eq!(plain.args[plain.args.len() - 2][0], "tools/build_ios.sh");
+    let plain_build = &plain.args[plain.args.len() - 2];
+    assert!(!plain_build.iter().any(|arg| arg.contains("/h/.cargo/bin")));
+    assert_eq!(without_env(plain_build)[0], "tools/build_ios.sh");
 }
 
 #[test]
@@ -1149,4 +1172,50 @@ fn ios_refuses_a_prepared_folder_inside_a_git_work_tree() {
     assert!(matches!(error, Error::Build(message) if message.contains("git work tree")));
     assert!(fake.ran.is_empty() && seen.is_empty());
     assert!(fake.probed.iter().any(|p| p.starts_with("git -C ")));
+}
+
+#[test]
+fn a_relative_out_is_made_absolute_before_the_work_tree_check_and_the_steps() {
+    let (mut req, _) = ios_request("ios-relative");
+    req.out = PathBuf::from("relative-prepared");
+    let mut fake = Fake::with_ios_tools();
+    // The check is told the absolute folder, and says it is a work tree.
+    fake.tools.push(("git", "true\n"));
+    let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap_err();
+    assert!(matches!(error, Error::Build(message) if message.contains("git work tree")));
+    let git = fake
+        .probed
+        .iter()
+        .find(|p| p.starts_with("git -C "))
+        .unwrap();
+    let folder = git.split_whitespace().nth(2).unwrap();
+    assert!(Path::new(folder).is_absolute(), "{git}");
+    // Outside a work tree the steps name the absolute folder too.
+    let mut fake = Fake::with_ios_tools();
+    prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    let build = without_env(&fake.args[fake.args.len() - 2]);
+    assert!(Path::new(&build[2]).is_absolute(), "{build:?}");
+    assert!(Path::new(&build[3]).is_absolute(), "{build:?}");
+}
+
+#[test]
+fn the_work_tree_check_fails_closed_when_git_cannot_answer() {
+    let (req, _) = ios_request("ios-git-fails");
+    // Git is missing: neither answer nor a word that this is no repository.
+    let mut missing = Fake::with_ios_tools();
+    missing.tools.retain(|(name, _)| *name != "git:stderr");
+    let error =
+        prepare_with(&req, Hub::Mac, &mut missing, Path::new("/h"), &mut |_| {}).unwrap_err();
+    assert!(matches!(error, Error::Build(message) if message.contains("cannot tell")));
+    assert!(missing.ran.is_empty());
+    // Git fails for another reason.
+    let mut broken = Fake::with_ios_tools();
+    broken.tools.retain(|(name, _)| *name != "git:stderr");
+    broken
+        .tools
+        .push(("git:stderr", "fatal: detected dubious ownership\n"));
+    let error =
+        prepare_with(&req, Hub::Mac, &mut broken, Path::new("/h"), &mut |_| {}).unwrap_err();
+    assert!(matches!(error, Error::Build(message) if message.contains("cannot tell")));
+    assert!(broken.ran.is_empty());
 }

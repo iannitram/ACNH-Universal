@@ -247,6 +247,22 @@ pub trait ScriptRunner {
     /// Where the game-stage script leaves work for Rust after mod extraction.
     fn set_message_paths(&mut self, _game_romfs: &Path, _out: &Path) {}
 
+    /// Run `program` with `args` and say whether it succeeded and what it wrote to standard
+    /// error; `None` when it cannot be started. The pre-flight asks it only to tell a folder
+    /// that is not a git repository from a git that failed.
+    fn probe_stderr(&mut self, program: &str, args: &[&str]) -> Option<(bool, String)> {
+        let output = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .output()
+            .ok()?;
+        Some((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+
     /// Run `program` with `args` for its output, as the pre-flight checks of the `ios` target
     /// do (`xcrun`, `cargo`, `rustup`): `Some(stdout)` when it ran and succeeded, else `None`.
     /// A test runner stands in for the machine's tools.
@@ -262,6 +278,12 @@ pub trait ScriptRunner {
             .success()
             .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
     }
+}
+
+/// `path` made absolute against the working folder (it need not exist).
+fn absolute(path: &Path) -> Result<PathBuf> {
+    std::path::absolute(path)
+        .map_err(|e| Error::Io(format!("cannot make {} absolute: {e}", path.display())))
 }
 
 /// The folders a Finder-launched app's minimal `PATH` misses: cargo's, then Homebrew's.
@@ -337,31 +359,39 @@ pub fn preflight(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> R
                 .to_owned(),
         ));
     }
-    // The nearest folder that exists, as `git -C` needs one.
-    let mut existing = req.out.as_path();
+    // The nearest folder that exists, as `git -C` needs one; a relative `out` is taken from
+    // the working folder.
+    let out = absolute(&req.out)?;
+    let mut existing = out.as_path();
     while !existing.is_dir() {
         match existing.parent() {
             Some(parent) => existing = parent,
             None => break,
         }
     }
-    let inside = runner.probe(
-        "git",
-        &[
-            "-C",
-            &existing.display().to_string(),
-            "rev-parse",
-            "--is-inside-work-tree",
-        ],
-    );
-    if inside.is_some_and(|answer| answer.trim() == "true") {
-        return Err(Error::Build(format!(
+    let git = [
+        "-C",
+        &existing.display().to_string(),
+        "rev-parse",
+        "--is-inside-work-tree",
+    ];
+    match runner.probe("git", &git) {
+        Some(answer) if answer.trim() == "true" => Err(Error::Build(format!(
             "the prepared folder {} is inside a git work tree: the iPhone build holds the \
              recompiled game and must not be made there. Use a folder outside it.",
-            redact(&req.out.display().to_string(), home)
-        )));
+            redact(&out.display().to_string(), home)
+        ))),
+        Some(_) => Ok(()),
+        // Git failed: only its own word that this is no repository lets the build go on.
+        None => match runner.probe_stderr("git", &git) {
+            Some((false, error)) if error.contains("not a git repository") => Ok(()),
+            _ => Err(Error::Build(format!(
+                "cannot tell whether {} is inside a git work tree (is git installed?): the \
+                 iPhone build holds the recompiled game and must not be made in one",
+                redact(&out.display().to_string(), home)
+            ))),
+        },
     }
-    Ok(())
 }
 
 /// The real runner: upstream's command as a child process in the repo root, started once
@@ -803,7 +833,9 @@ fn app_commit() -> Option<&'static str> {
 /// with the last 20 lines of its log, run
 /// through `redact`. Missing required tools are `Error::Build` before the first stage. A
 /// target this hub does not serve (`recipe::serves`), or one upstream's script does not build
-/// (Android, iOS), is `Error::Unsupported`.
+/// (Android), is `Error::Unsupported`. For the `ios` target (Mac hub, `Request::delivery`
+/// set) it runs `preflight`, the shared stages, the iPhone build and the packaging, and
+/// returns the `.ipa`'s path in the delivery folder instead of `Request::out`.
 pub fn prepare(req: &Request, progress: &mut dyn FnMut(Stage)) -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -899,6 +931,17 @@ fn run_stages(
         }
         return Err(Error::Build(message));
     }
+    // The steps and the work-tree check name the same, absolute folder.
+    let absolute_req;
+    let req = if req.target == Os::Ios {
+        absolute_req = Request {
+            out: absolute(&req.out)?,
+            ..req.clone()
+        };
+        &absolute_req
+    } else {
+        req
+    };
     preflight(req, runner, home)?;
     runner.set_message_paths(&req.game.romfs, &req.out);
     // Recover a mod left by a previous child, even when every stage is cached.
@@ -989,10 +1032,18 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
     }
     let build = req.out.join("build-ios");
     let mut build_args = build_ios_args(&req.out.join("gen"), &build);
-    if let Some(dir) = cargo_dir(runner, home) {
-        // A Finder-launched app's PATH has no cargo: the build script finds it first here.
+    // A Finder-launched app's PATH has only launchd's folders: the build script finds cargo
+    // and Homebrew's tools (cmake, ninja) first in these.
+    let mut dirs: Vec<PathBuf> = cargo_dir(runner, home).into_iter().collect();
+    dirs.extend(
+        ["/opt/homebrew/bin", "/usr/local/bin"]
+            .map(PathBuf::from)
+            .into_iter()
+            .filter(|dir| dir.is_dir()),
+    );
+    if !dirs.is_empty() {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let path = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path)))
+        let path = std::env::join_paths(dirs.into_iter().chain(std::env::split_paths(&path)))
             .map_err(|e| Error::Build(format!("cannot make the PATH: {e}")))?;
         build_args.splice(
             0..0,
