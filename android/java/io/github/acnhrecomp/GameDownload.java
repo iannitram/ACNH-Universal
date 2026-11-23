@@ -51,9 +51,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 
 public class GameDownload extends Service {
     // Where the game waits, inside save-relay's Dropbox app folder.
@@ -121,6 +122,7 @@ public class GameDownload extends Service {
     @Override
     public void onTimeout(int startId, int fgsType) {
         synchronized (GameDownload.class) { if (worker != null) worker.interrupt(); }
+        cancelAll();
         error = "The download paused (Android's daily limit for downloads in the background). Open the app to go on.";
         running = false;
         release();
@@ -131,6 +133,7 @@ public class GameDownload extends Service {
     @Override
     public void onDestroy() {
         synchronized (GameDownload.class) { if (worker != null) worker.interrupt(); }
+        cancelAll();
         release();
         super.onDestroy();
     }
@@ -161,6 +164,7 @@ public class GameDownload extends Service {
     }
 
     private void update(String text) {
+        if (stale()) return;
         status = text;
         getSystemService(NotificationManager.class).notify(NOTE, note(text, done, total));
     }
@@ -227,6 +231,9 @@ public class GameDownload extends Service {
     }
 
     private void run() throws Exception {
+        final int gen;
+        synchronized (GameDownload.class) { gen = ++generation; }
+        runOf.set(gen);
         awaitSignIn();
         File part = partialDir(this), game = gameDir(this);
         if (!part.isDirectory() && !part.mkdirs()) throw new Fatal("cannot make " + part);
@@ -294,20 +301,33 @@ public class GameDownload extends Service {
         List<Item> small = new ArrayList<>(), big = new ArrayList<>();
         for (Item it : fetch) (it.size < SMALL ? small : big).add(it);
         ExecutorService pool = Executors.newFixedThreadPool(PARALLEL);
+        boolean ok = false;
         try {
-            List<Future<Void>> jobs = new ArrayList<>();
-            for (final Item it : small) jobs.add(pool.submit(() -> { fetchOne(it, part, game, lists); return null; }));
-            for (Future<Void> j : jobs) {
+            ExecutorCompletionService<Void> jobs = new ExecutorCompletionService<>(pool);
+            for (final Item it : small)
+                jobs.submit(() -> {
+                    runOf.set(gen);
+                    fetchOne(it, part, game, lists);
+                    return null;
+                });
+            for (int i = 0; i < small.size(); i++) {
                 try {
-                    j.get();
+                    jobs.take().get();  // the first failure, whichever file it was, at once
                 } catch (ExecutionException e) {
                     Throwable c = e.getCause();
                     if (c instanceof Exception) throw (Exception) c;
                     throw new Exception(c);
                 }
             }
+            ok = true;
         } finally {
+            if (!ok) cancelAll();  // the other fetches stop now, not after their next read times out
             pool.shutdownNow();
+            try {
+                pool.awaitTermination(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
         for (Item it : big) fetchOne(it, part, game, lists);
 
@@ -354,7 +374,30 @@ public class GameDownload extends Service {
         }
     }
 
-    private static synchronized void addDone(long n) { done += n; }
+    // Each run has a generation; a thread of an older run (a fetch still blocked in a read when its run ended)
+    // finds its generation out of date and stops without touching the counter, the files or the notification.
+    private static volatile int generation;
+    private static final ThreadLocal<Integer> runOf = new ThreadLocal<>();
+    private static final Set<HttpURLConnection> open = java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<HttpURLConnection, Boolean>());
+
+    private static boolean stale() {
+        Integer g = runOf.get();
+        return g != null && g != generation;
+    }
+
+    // Ends every fetch of the current run at once: a blocked read in HttpURLConnection ignores interrupts but
+    // throws when its connection is closed.
+    static synchronized void cancelAll() {
+        generation++;
+        for (HttpURLConnection c : open) {
+            try { c.disconnect(); } catch (Exception ignored) {}
+        }
+        open.clear();
+    }
+
+    private static synchronized void addDone(long n) {
+        if (!stale()) done += n;
+    }
 
     // One file: fetched (resumed), checked against its hash, recorded as verified.
     private void fetchOne(Item it, File part, File game, Lists lists) throws Exception {
@@ -478,7 +521,9 @@ public class GameDownload extends Service {
     // `from` to `into` and returns null.
     private byte[] fetch(String path, long from, File into, boolean retried) throws Exception {
         awaitUnmetered();
+        if (stale()) throw new InterruptedException();
         HttpURLConnection c = (HttpURLConnection) new URL("https://content.dropboxapi.com/2/files/download").openConnection();
+        open.add(c);
         c.setConnectTimeout(20000);
         c.setReadTimeout(60000);
         c.setRequestMethod("POST");
@@ -510,10 +555,12 @@ public class GameDownload extends Service {
             }
             if (into == null) return DropboxAuth.readAll(c.getInputStream());
             if (from > 0 && code != 206) throw new IOException("Dropbox did not resume the file");
-            byte[] buf = new byte[1 << 20];
+            long length = c.getContentLengthLong();  // -1 when not sent: the full buffer
+            byte[] buf = new byte[(int) (length <= 0 ? 1 << 20 : Math.min(1 << 20, Math.max(8192, length)))];
             try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(into, true)) {
                 int n;
                 while ((n = in.read(buf)) > 0) {
+                    if (stale()) throw new InterruptedException();
                     out.write(buf, 0, n);
                     addDone(n);
                     long now = SystemClock.elapsedRealtime();
@@ -526,13 +573,14 @@ public class GameDownload extends Service {
             }
             return null;
         } finally {
+            open.remove(c);
             c.disconnect();
         }
     }
 
     private String sha256(File f) throws Exception {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
-        byte[] buf = new byte[1 << 20];
+        byte[] buf = new byte[(int) Math.min(1 << 20, Math.max(8192, f.length()))];
         try (FileInputStream in = new FileInputStream(f)) {
             int n;
             while ((n = in.read(buf)) > 0) {
