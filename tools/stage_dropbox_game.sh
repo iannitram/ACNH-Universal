@@ -13,6 +13,7 @@ set -euo pipefail
 SRC=$1 LIB=$2 DEST=$3/acnh-universal-game/android
 for f in analysis/main.bin romfs.pak spirv.pak; do [ -f "$SRC/$f" ] || { echo "missing $SRC/$f"; exit 1; }; done
 [ -f "$LIB" ] || { echo "missing $LIB"; exit 1; }
+rm -rf "$DEST.new"  # leftovers of an interrupted run would land in the manifest
 mkdir -p "$DEST.new"
 # On APFS a clone (cp -c) costs no space until either copy changes.
 copy() { cp -c "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
@@ -25,12 +26,14 @@ for d in analysis fonts aoc; do
     copy "$SRC/$f" "$DEST.new/$f"
   done
 done
-# The manifest last, so a half-copied folder is never mistaken for a finished one.
+# The manifest last, so a half-copied folder is never mistaken for a finished one (on this computer: the Dropbox
+# client may still upload it before the big files; the app then says the files are not there yet).
+TMP=$(mktemp)
 (
   cd "$DEST.new"
   echo '{"version":1,"files":['
   first=1
-  find . -type f ! -name manifest.json ! -name .DS_Store | sed 's|^\./||' | sort | while read -r f; do
+  find . -type f ! -name 'manifest.json*' ! -name .DS_Store | sed 's|^\./||' | sort | while read -r f; do
     size=$(stat -f %z "$f" 2>/dev/null || stat -c %s "$f")
     sha=$(shasum -a 256 "$f" | cut -d' ' -f1)
     [ $first = 1 ] || echo ','
@@ -38,8 +41,9 @@ done
     printf '{"path":"%s","size":%s,"sha256":"%s"}' "$f" "$size" "$sha"
   done
   echo ']}'
-) > "$DEST.new/manifest.json.tmp"
-mv "$DEST.new/manifest.json.tmp" "$DEST.new/manifest.json"
+) > "$TMP"
+mv "$TMP" "$DEST.new/manifest.json"
+chmod 644 "$DEST.new/manifest.json"
 rm -rf "$DEST.old"
 [ -d "$DEST" ] && mv "$DEST" "$DEST.old"
 mv "$DEST.new" "$DEST"

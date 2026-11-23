@@ -52,7 +52,7 @@ public class Home extends Activity {
     private TextView message;
     private String waitingForAccess;  // a folder picked before the all-files permission was given
     private boolean busy;
-    private boolean signingIn;  // the browser is open on Dropbox's sign-in
+    private boolean askedNotifications;
     private TextView progress;
     private final Handler ticks = new Handler(Looper.getMainLooper());
 
@@ -63,14 +63,14 @@ public class Home extends Activity {
         super.onCreate(state);
         String error = getIntent().getStringExtra("error");
         boolean ask = getIntent().getBooleanExtra("pick", false) || error != null;
-        File downloaded = GameDownload.gameDir(this);
-        if (!ask && hasPackage(downloaded)) {
-            check(downloaded.getAbsolutePath(), true);  // the game downloaded from Dropbox
-            return;
-        }
         String saved = ask ? "" : readSaved();
         if (!saved.isEmpty() && hasPackage(new File(saved)) && canRead(saved)) {
             check(saved, true);  // the folder of last time: straight into the game
+            return;
+        }
+        File downloaded = GameDownload.gameDir(this);
+        if (!ask && !GameDownload.running && hasPackage(downloaded)) {
+            check(downloaded.getAbsolutePath(), true);  // the game downloaded from Dropbox
             return;
         }
         show(error != null ? explain(error) : null);
@@ -84,10 +84,6 @@ public class Home extends Activity {
             waitingForAccess = null;
             check(f, false);
         }
-        if (signingIn && DropboxAuth.signedIn(this)) {
-            signingIn = false;
-            startDownload();
-        }
         ticks.removeCallbacksAndMessages(null);
         ticks.post(this::tick);
     }
@@ -100,37 +96,48 @@ public class Home extends Activity {
 
     // ---- the download -----------------------------------------------------------------------------------------
 
+    // The notification permission first (the download's progress shows there), then the sign-in or the download.
     private void download() {
         if (GameDownload.running) return;
-        if (Build.VERSION.SDK_INT >= 33
-                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+        if (Build.VERSION.SDK_INT >= 33 && !askedNotifications
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            askedNotifications = true;
             requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 2);
-        if (DropboxAuth.signedIn(this)) {
-            startDownload();
-            return;
+            return;  // onRequestPermissionsResult goes on
         }
-        try {
-            String url = DropboxAuth.start(this, err -> runOnUiThread(() -> {
-                if (err != null) {
-                    signingIn = false;
-                    say(t("Dropbox sign-in: ", "Login no Dropbox: ") + err, true);
-                }
-            }));
-            signingIn = true;
-            say(t("Sign in to Dropbox in the browser, allow ACNH Recomp's access, then come back here.",
-                    "Entre no Dropbox no navegador, permita o acesso do ACNH Recomp e volte aqui."), false);
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-        } catch (Exception e) {
-            say(t("Dropbox sign-in could not start: ", "O login no Dropbox não começou: ") + e.getMessage(), true);
+        String url = null;
+        if (!DropboxAuth.signedIn(this)) {
+            try {
+                url = DropboxAuth.start(this);
+            } catch (Exception e) {
+                say(t("Dropbox sign-in could not start: ", "O login no Dropbox não começou: ") + e.getMessage(), true);
+                return;
+            }
         }
-    }
-
-    private void startDownload() {
+        // The service starts now, while the app is on screen (Android refuses it from the background); it waits for
+        // the sign-in, and keeps the app awake for the browser's return to DropboxAuth's server.
         GameDownload.error = null;
         GameDownload.status = t("Starting the download", "Começando o download");
         GameDownload.running = true;
-        GameDownload.start(this);
+        try {
+            GameDownload.start(this);
+        } catch (Exception e) {
+            GameDownload.running = false;
+            say(t("The download could not start: ", "O download não começou: ") + e.getMessage(), true);
+            return;
+        }
+        if (url != null) {
+            say(t("Sign in to Dropbox in the browser, allow ACNH Recomp's access, then come back here.",
+                    "Entre no Dropbox no navegador, permita o acesso do ACNH Recomp e volte aqui."), false);
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        }
         tick();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == 2) download();  // with or without the permission: the download runs either way
     }
 
     // Twice a second while the screen is open: the download's progress, and the game when it is done.
@@ -349,6 +356,7 @@ public class Home extends Activity {
     // starts the game, or says why not.
     private void check(final String folder, final boolean quiet) {
         if (busy) return;
+        GameDownload.finished = false;
         if (!hasPackage(new File(folder))) {
             if (message == null) show(null);
             say(explain("missing") + "\n" + folder, true);

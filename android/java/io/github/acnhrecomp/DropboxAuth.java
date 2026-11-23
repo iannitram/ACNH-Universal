@@ -51,18 +51,22 @@ final class DropboxAuth {
         }
     }
 
-    // What the sign-in started: the browser's address, and a thread waiting on the redirect.
-    interface Done { void done(String error); }  // error null: signed in
-
     private static ServerSocket waiting;
+    private static int generation;
+    private static String failed;  // why the current sign-in failed, or null
 
-    // Starts the loopback server and returns the address to open in the browser. `done` runs on the server's thread
-    // when Dropbox comes back (or with an error).
-    static synchronized String start(final Context ctx, final Done done) throws Exception {
+    // Why the latest sign-in failed (GameDownload waits on it), or null while it runs or when it worked.
+    static synchronized String failure() { return failed; }
+
+    // Starts the loopback server and returns the address to open in the browser. A newer start supersedes an older
+    // one, whose outcome is then ignored.
+    static synchronized String start(final Context ctx) throws Exception {
         if (waiting != null) {
             try { waiting.close(); } catch (Exception ignored) {}
             waiting = null;
         }
+        failed = null;
+        final int gen = ++generation;
         SecureRandom rnd = new SecureRandom();
         byte[] v = new byte[48], s = new byte[16];
         rnd.nextBytes(v);
@@ -73,6 +77,7 @@ final class DropboxAuth {
         server.setSoTimeout(10 * 60 * 1000);  // ten minutes to sign in
         waiting = server;
         final Context app = ctx.getApplicationContext();
+        appContext = app;
         new Thread(() -> {
             String error;
             try {
@@ -81,9 +86,13 @@ final class DropboxAuth {
                 error = e.getMessage() == null ? e.toString() : e.getMessage();
             } finally {
                 try { server.close(); } catch (Exception ignored) {}
-                synchronized (DropboxAuth.class) { if (waiting == server) waiting = null; }
+                synchronized (DropboxAuth.class) {
+                    if (waiting == server) waiting = null;
+                }
             }
-            done.done(error);
+            synchronized (DropboxAuth.class) {
+                if (gen == generation && !signedIn(app)) failed = error == null ? "no sign-in came back" : error;
+            }
         }, "dropbox-sign-in").start();
         return "https://www.dropbox.com/oauth2/authorize?client_id=" + APP_KEY + "&response_type=code"
                 + "&code_challenge=" + challenge + "&code_challenge_method=S256&token_access_type=offline"
@@ -96,7 +105,11 @@ final class DropboxAuth {
         while (true) {
             try (Socket s = server.accept()) {
                 s.setSoTimeout(15000);
-                String line = firstLine(s.getInputStream());
+                InputStream in = s.getInputStream();
+                String line = firstLine(in);
+                // Read the rest of the request (to the blank line): closing with it unread resets the connection,
+                // and the browser would show an error instead of the page below.
+                for (String h = firstLine(in); !h.isEmpty(); h = firstLine(in)) {}
                 String query = "";
                 int q = line.indexOf('?'), sp = line.lastIndexOf(' ');
                 if (line.startsWith("GET ") && q > 0) query = line.substring(q + 1, sp > q ? sp : line.length());
@@ -161,6 +174,8 @@ final class DropboxAuth {
         out.flush();
     }
 
+    private static Context appContext;
+
     private static JSONObject token(String form) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL("https://api.dropboxapi.com/oauth2/token").openConnection();
         c.setConnectTimeout(20000);
@@ -173,7 +188,14 @@ final class DropboxAuth {
         InputStream in = code < 400 ? c.getInputStream() : c.getErrorStream();
         String body = in == null ? "" : new String(readAll(in), StandardCharsets.UTF_8);
         c.disconnect();
-        if (code != 200) throw new Exception("Dropbox answered " + code + (body.isEmpty() ? "" : ": " + body));
+        if (code == 400 || code == 401) {
+            if (body.contains("invalid_grant") && form.startsWith("grant_type=refresh_token")) {
+                prefs(appContext).edit().clear().apply();
+                throw new GameDownload.Fatal("Dropbox no longer accepts this device's sign-in. Sign in again.");
+            }
+            throw new GameDownload.Fatal("Dropbox refused the sign-in (" + code + (body.isEmpty() ? "" : ": " + body) + ")");
+        }
+        if (code != 200) throw new java.io.IOException("Dropbox answered " + code);
         return new JSONObject(body);
     }
 
@@ -188,6 +210,7 @@ final class DropboxAuth {
 
     // A current access token, refreshed when it is within five minutes of expiring (or when `force`).
     static synchronized String access(Context c, boolean force) throws Exception {
+        appContext = c.getApplicationContext();
         SharedPreferences p = prefs(c);
         String refresh = p.getString("refresh", "");
         if (refresh.isEmpty()) throw new Exception("not signed in to Dropbox");
