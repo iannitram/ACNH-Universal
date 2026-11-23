@@ -55,13 +55,15 @@ impl BuildActions {
         let installed = assemble::player(self.os, Path::new(""), &install);
         let prepare_root = self.prepare_root();
         let local = self.game_folder().ok().flatten().is_some();
-        if local && installed.is_file() && prepare_root.join("analysis/main.bin").is_file() {
-            let root = (!self.has_contained_game(&installed)).then_some(prepare_root);
-            return (installed, root);
-        }
+        // The one contained Mac app (#171) plays its own player and game, even on the hub
+        // that prepared it, where a local prepare and an installed player also exist.
         let beside = assemble::player(self.os, launcher, &install);
         if self.has_contained_game(&beside) {
             return (beside, None);
+        }
+        if local && installed.is_file() && prepare_root.join("analysis/main.bin").is_file() {
+            let root = (!self.has_contained_game(&installed)).then_some(prepare_root);
+            return (installed, root);
         }
         (installed, local.then_some(prepare_root))
     }
