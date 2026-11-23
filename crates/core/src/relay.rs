@@ -122,13 +122,14 @@ impl Relay for SaveRelay {
         persist_card(save_dir, &report, self.version)?;
         Ok(map_sync_with_local(report, save_dir))
     }
-    fn pull_anyway(&self, save_dir: &Path) -> Result<Sync> {
+    fn pull_anyway(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
         let game = Game {
             manifest: self.parse_manifest()?,
             saves_dir: save_dir.to_path_buf(),
         };
         let session = self.session(Layout::new(&self.root).map_err(map_err)?);
-        let report = sync::pull(&session, &game, &self.store, None, true).map_err(map_err)?;
+        let report = sync::pull(&session, &game, &self.store, map_resolve(resolve), true)
+            .map_err(map_err)?;
         persist_card(save_dir, &report, self.version)?;
         Ok(map_sync_with_local(report, save_dir))
     }

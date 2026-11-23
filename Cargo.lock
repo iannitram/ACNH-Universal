@@ -37,6 +37,7 @@ name = "acnh-cli"
 version = "0.0.0"
 dependencies = [
  "acnh-core",
+ "save-relay",
  "tempfile",
 ]
 
