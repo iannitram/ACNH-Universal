@@ -163,7 +163,7 @@ pub struct Runner {
 pub struct Session {
     vm: ContinuePageVm,
     runner: Runner,
-    builds: Option<BuildActions>,
+    builds: Option<(BuildActions, PathBuf)>,
     picture: PathBuf,
     sender: Sender<PlayEvent>,
     events: Receiver<PlayEvent>,
@@ -183,22 +183,39 @@ impl Session {
         }
     }
 
-    pub fn set_build_actions(&mut self, builds: BuildActions, player: &Path) {
-        if !builds.installed(player) {
-            self.vm
-                .set_build_missing(builds.game_folder().ok().flatten().is_some());
-        }
-        self.builds = Some(builds);
+    pub fn set_build_actions(&mut self, builds: BuildActions, launcher: PathBuf) {
+        self.builds = Some((builds, launcher));
     }
 
-    /// Use the locally prepared player and game root for subsequent launches.
-    pub fn set_prepared_player(&mut self, program: PathBuf, root: &Path) {
+    /// Select the new build and its data source once first run has finished.
+    pub fn refresh_after_first_run(&mut self) {
+        match self.refresh_player() {
+            Some(true) => self.vm.on_play_event(PlayEvent::Updated(Ok(()))),
+            Some(false) => {
+                let local = self
+                    .builds
+                    .as_ref()
+                    .is_some_and(|(builds, _)| builds.game_folder().ok().flatten().is_some());
+                self.vm.set_build_missing(local);
+            }
+            None => {}
+        }
+    }
+
+    fn refresh_player(&mut self) -> Option<bool> {
+        let (builds, launcher) = self.builds.as_ref()?;
+        let (program, game_root) = builds.launch_location(launcher);
+        if !builds.installed(&program) {
+            return Some(false);
+        }
         self.runner.game = Arc::new(Player { program });
-        self.vm.on_play_event(PlayEvent::Updated(Ok(())));
         self.runner.env.retain(|(name, _)| name != "NX_GAME_ROOT");
-        self.runner
-            .env
-            .push(("NX_GAME_ROOT".into(), root.display().to_string()));
+        if let Some(root) = game_root {
+            self.runner
+                .env
+                .push(("NX_GAME_ROOT".into(), root.display().to_string()));
+        }
+        Some(true)
     }
 
     pub fn vm(&self) -> &ContinuePageVm {
@@ -225,26 +242,15 @@ impl Session {
         let events: Vec<PlayEvent> = self.events.try_iter().collect();
         let any = !events.is_empty();
         for event in events {
-            if matches!(event, PlayEvent::Updated(Ok(()))) {
-                if let Some(builds) = &self.builds {
-                    let local = builds.game_folder().ok().flatten().is_some();
-                    let launcher = if local {
-                        PathBuf::new()
-                    } else {
-                        std::env::current_exe().unwrap_or_default()
-                    };
-                    let program =
-                        acnh_core::assemble::player(builds.os, &launcher, &builds.dirs.install());
-                    self.runner.game = Arc::new(Player { program });
-                    if local {
-                        self.runner.env.retain(|(key, _)| key != "NX_GAME_ROOT");
-                        self.runner.env.push((
-                            "NX_GAME_ROOT".into(),
-                            builds.dirs.data.join("prepare").display().to_string(),
-                        ));
-                    }
-                }
-            }
+            let event = if matches!(event, PlayEvent::Updated(Ok(())))
+                && self.refresh_player() == Some(false)
+            {
+                PlayEvent::Updated(Err(Error::Build(
+                    "the installed player could not be verified".into(),
+                )))
+            } else {
+                event
+            };
             let finished = matches!(event, PlayEvent::Played(_) | PlayEvent::Synced(_));
             self.vm.on_play_event(event);
             if finished {
@@ -297,7 +303,7 @@ impl Session {
                 let builds = self.builds.clone();
                 thread::spawn(move || {
                     let result = match builds {
-                        Some(builds) => {
+                        Some((builds, _)) => {
                             let progress = |stage| report(PlayEvent::BuildProgress(stage));
                             if request == Request::Update {
                                 builds.update(&progress)

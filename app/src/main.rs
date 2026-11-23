@@ -14,7 +14,7 @@ use acnh_app::vm::{AboutVm, ContinuePageVm, Nav};
 use acnh_app::MainWindow;
 use acnh_app::{CreditEntry, FixEntry, FleetEntry, SettingsControl};
 use acnh_core::platform::{AppDirs, Os, Vars};
-use acnh_core::{assemble, backup, savecard, saves};
+use acnh_core::{backup, savecard, saves};
 use slint::{ComponentHandle, SharedString, Timer, TimerMode, Weak};
 
 /// The picture on the island card.
@@ -36,17 +36,15 @@ fn session() -> acnh_core::Result<Session> {
 
     let backups = saves::backups_dir(&root);
     let mut env = vec![("NX_DATA_ROOT".to_string(), root.display().to_string())];
-    let prepared = dirs.data.join("prepare");
-    let completed_here = dirs.config.join("first-run-complete").is_file()
-        && prepared.join("analysis/main.bin").is_file();
-    let launcher = if completed_here {
-        env.push(("NX_GAME_ROOT".into(), prepared.display().to_string()));
-        PathBuf::new()
-    } else {
-        std::env::current_exe().unwrap_or_default()
-    };
-    let program = assemble::player(os, &launcher, &dirs.install());
-    let player_path = program.clone();
+    let builds = acnh_app::build_actions::BuildActions { dirs, os };
+    let launcher = std::env::current_exe()?;
+    let (program, game_root) = builds.launch_location(&launcher);
+    if let Some(game_root) = game_root {
+        env.push(("NX_GAME_ROOT".into(), game_root.display().to_string()));
+    }
+    if !builds.installed(&program) {
+        vm.set_build_missing(builds.game_folder().ok().flatten().is_some());
+    }
     let runner = Runner {
         // No relay is set up from the app yet (Settings): the island here is played, and
         // nothing is pulled or pushed.
@@ -64,10 +62,7 @@ fn session() -> acnh_core::Result<Session> {
         }),
     };
     let mut session = Session::new(vm, runner, picture);
-    session.set_build_actions(
-        acnh_app::build_actions::BuildActions { dirs, os },
-        &player_path,
-    );
+    session.set_build_actions(builds, launcher);
     Ok(session)
 }
 
@@ -434,8 +429,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut session = session.borrow_mut();
         let now_open = weak.upgrade().is_some_and(|w| w.get_first_run_open());
         if was_first_open && !now_open {
-            let first = first.borrow();
-            session.set_prepared_player(first.prepared_player(), &first.game_root());
+            session.refresh_after_first_run();
         }
         was_first_open = now_open;
         if !first_open {

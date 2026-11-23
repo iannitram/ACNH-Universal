@@ -3,7 +3,7 @@ use crate::vm::first_run::{Event, FirstRunVm, Request, Step};
 use crate::vm::settings::SettingsVm;
 use crate::vm::Nav;
 use acnh_core::platform::{AppDirs, Os, Vars};
-use acnh_core::{bundle, gamefolder, hub, prepare, profile};
+use acnh_core::{gamefolder, hub, prepare, profile};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
@@ -54,12 +54,6 @@ impl FirstRun {
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             clipboard: None,
         }
-    }
-    pub fn game_root(&self) -> PathBuf {
-        self.dirs.data.join("prepare")
-    }
-    pub fn prepared_player(&self) -> PathBuf {
-        acnh_core::assemble::player(Os::current(), Path::new(""), &self.dirs.install())
     }
     pub fn needed(&self) -> bool {
         if self.dirs.config.join("first-run-complete").is_file() {
@@ -223,10 +217,18 @@ fn save_launcher_values(dirs: &AppDirs, values: &[(&str, &str)]) -> acnh_core::R
         Err(e) => return Err(e.into()),
     };
     for &(key, value) in values {
+        if value.contains(['\r', '\n']) {
+            return Err(acnh_core::Error::Config(format!(
+                "{key} must be a single line"
+            )));
+        }
         config.set(key, value);
     }
+    use std::io::Write;
     std::fs::create_dir_all(&dirs.config)?;
-    std::fs::write(path, config.to_text())?;
+    let mut replacement = tempfile::NamedTempFile::new_in(&dirs.config)?;
+    replacement.write_all(config.to_text().as_bytes())?;
+    replacement.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 fn safe_error(error: acnh_core::Error, home: &Path) -> String {
@@ -284,14 +286,15 @@ fn run(
         ),
         Request::Pair(addr, name, code) => Event::Paired(
             device(dirs)
-                .and_then(|id| {
-                    hub::pair_hub(addr, dirs, &id, &name, &code, Os::current())?;
+                .and_then(|id| hub::pair_hub(addr, dirs, &id, &name, &code, Os::current()))
+                .map_err(|_| "Codes did not match".to_owned())
+                .and_then(|_| {
                     save_launcher_values(
                         dirs,
                         &[("hub_name", &name), ("hub_address", &addr.to_string())],
                     )
-                })
-                .map_err(|_| "Codes did not match".into()),
+                    .map_err(|_| "Could not save the paired hub address".into())
+                }),
         ),
         Request::Pull(addr, name) => Event::Finished(
             (|| {
@@ -307,12 +310,11 @@ fn run(
                 {
                     return Err(acnh_core::Error::Build("download cancelled".into()));
                 }
-                bundle::install(&bundle, staged.path(), &dirs.install())?;
-                std::fs::create_dir_all(&dirs.config)?;
-                std::fs::write(
-                    dirs.config.join("installed-bundle.txt"),
-                    bundle::to_text(&bundle),
-                )?;
+                crate::build_actions::BuildActions {
+                    dirs: dirs.clone(),
+                    os: Os::current(),
+                }
+                .install_bundle(&bundle, staged.path())?;
                 hub::report_hub_build(addr, dirs, &id, &name, &bundle)?;
                 Ok(())
             })()

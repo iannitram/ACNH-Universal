@@ -14,23 +14,63 @@ pub struct BuildActions {
 }
 
 impl BuildActions {
-    pub fn game_folder(&self) -> Result<Option<PathBuf>> {
-        let path = self.dirs.config.join("launcher.ini");
-        match std::fs::read_to_string(path) {
-            Ok(text) => Ok(Config::parse(&text)?
-                .get("game_folder")
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
+    fn prepare_root(&self) -> PathBuf {
+        self.dirs.data.join("prepare")
+    }
+
+    fn launcher_config(&self) -> Result<Config> {
+        match std::fs::read_to_string(self.dirs.config.join("launcher.ini")) {
+            Ok(text) => Config::parse(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(error) => Err(error.into()),
         }
     }
+
+    pub fn game_folder(&self) -> Result<Option<PathBuf>> {
+        if let Some(path) = self.launcher_config()?.get("game_folder") {
+            return Ok((!path.is_empty()).then(|| PathBuf::from(path)));
+        }
+        // Older guided setups recorded the source during Prepare but did not
+        // copy it to launcher.ini. An explicit empty setting still selects a client.
+        match std::fs::read_to_string(self.prepare_root().join("game_source.txt")) {
+            Ok(path) => {
+                let path = path.trim_end_matches(['\r', '\n']);
+                Ok(Path::new(path).is_absolute().then(|| PathBuf::from(path)))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn has_contained_game(&self, player: &Path) -> bool {
+        self.os == Os::Mac
+            && player
+                .parent()
+                .and_then(Path::parent)
+                .is_some_and(|contents| contents.join("Resources/game/analysis/main.bin").is_file())
+    }
+
+    pub fn launch_location(&self, launcher: &Path) -> (PathBuf, Option<PathBuf>) {
+        let player = assemble::player(self.os, launcher, &self.dirs.install());
+        if self.has_contained_game(&player) {
+            return (player, None);
+        }
+        let player = assemble::player(self.os, Path::new(""), &self.dirs.install());
+        let game_root = (self.game_folder().ok().flatten().is_some()
+            && !self.has_contained_game(&player))
+        .then(|| self.prepare_root());
+        (player, game_root)
+    }
+
     pub fn installed(&self, player: &Path) -> bool {
         if !player.is_file() {
             return false;
         }
-        if self.game_folder().ok().flatten().is_some() {
+        if self.has_contained_game(player) {
             return true;
+        }
+        if self.game_folder().ok().flatten().is_some() {
+            return self.prepare_root().join("analysis/main.bin").is_file();
         }
         std::fs::read_to_string(self.dirs.config.join("installed-bundle.txt"))
             .ok()
@@ -40,6 +80,7 @@ impl BuildActions {
                     && bundle::verify(&manifest, &self.dirs.install()).is_ok()
             })
     }
+
     pub fn build(&self, report: &dyn Fn(String)) -> Result<()> {
         if let Some(folder) = self.game_folder()? {
             let game = gamefolder::check(&folder)?;
@@ -52,7 +93,7 @@ impl BuildActions {
                 let request = prepare::Request {
                     game: game.clone(),
                     out: if target == self.os {
-                        self.dirs.data.join("prepare")
+                        self.prepare_root()
                     } else {
                         self.dirs.data.join("prepare-targets").join(target.key())
                     },
@@ -77,22 +118,24 @@ impl BuildActions {
         } else {
             report("Finding paired hub".into());
             let peers = hub::read_peers(&self.dirs)?;
-            let configured = std::fs::read_to_string(self.dirs.config.join("launcher.ini"))
-                .ok()
-                .and_then(|text| Config::parse(&text).ok())
-                .and_then(|config| {
-                    let name = config.get("hub_name")?.to_owned();
-                    let address = config.get("hub_address")?.parse().ok()?;
-                    peers
-                        .iter()
-                        .any(|p| p.device == name)
-                        .then_some((name, address))
-                });
+            let config = self.launcher_config()?;
+            let selected_hub = config
+                .get("hub_name")
+                .filter(|name| peers.iter().any(|peer| peer.device == *name));
+            let configured = selected_hub.and_then(|name| {
+                config
+                    .get("hub_address")?
+                    .parse()
+                    .ok()
+                    .map(|address| (name.to_owned(), address))
+            });
             let discovered = hub::discover(3000)
                 .unwrap_or_default()
                 .into_iter()
                 .find(|found| {
-                    found.targets.contains(&self.os) && peers.iter().any(|p| p.device == found.hub)
+                    found.targets.contains(&self.os)
+                        && peers.iter().any(|peer| peer.device == found.hub)
+                        && selected_hub.is_none_or(|name| name == found.hub)
                 })
                 .map(|found| (found.hub, std::net::SocketAddr::new(found.addr, found.port)));
             let (name, address) = discovered
@@ -111,14 +154,21 @@ impl BuildActions {
             .prefix(".continue-")
             .tempdir_in(&self.dirs.data)?;
         let manifest = pull(staged.path())?;
-        bundle::install(&manifest, staged.path(), &self.dirs.install())?;
+        self.install_bundle(&manifest, staged.path())
+    }
+
+    pub(crate) fn install_bundle(&self, manifest: &bundle::Bundle, staged: &Path) -> Result<()> {
+        use std::io::Write;
         std::fs::create_dir_all(&self.dirs.config)?;
-        std::fs::write(
-            self.dirs.config.join("installed-bundle.txt"),
-            bundle::to_text(&manifest),
-        )?;
+        let mut record = tempfile::NamedTempFile::new_in(&self.dirs.config)?;
+        record.write_all(bundle::to_text(manifest).as_bytes())?;
+        bundle::install(manifest, staged, &self.dirs.install())?;
+        record
+            .persist(self.dirs.config.join("installed-bundle.txt"))
+            .map_err(|error| error.error)?;
         Ok(())
     }
+
     pub fn update(&self, report: &dyn Fn(String)) -> Result<()> {
         self.update_with(&mut || self.build(report))
     }
@@ -266,6 +316,39 @@ mod tests {
             );
         }
         assert!(actions.installed(&actions.dirs.install().join("acnh")));
+    }
+
+    #[test]
+    fn older_local_prepare_still_uses_its_installed_player_and_source() {
+        let root = tempfile::tempdir().unwrap();
+        let vars = Vars {
+            home: root.path().into(),
+            data: root.path().join("data"),
+            config: root.path().join("config"),
+        };
+        let actions = BuildActions {
+            dirs: AppDirs::new(&vars),
+            os: Os::Mac,
+        };
+        let prepared = actions.prepare_root();
+        let original = root.path().join("original");
+        std::fs::create_dir_all(prepared.join("analysis")).unwrap();
+        std::fs::write(prepared.join("game_source.txt"), original.to_str().unwrap()).unwrap();
+        std::fs::write(prepared.join("analysis/main.bin"), []).unwrap();
+        let launcher = root.path().join("release.app/Contents/MacOS/acnh-app");
+        let expected = assemble::player(Os::Mac, Path::new(""), &actions.dirs.install());
+        std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        std::fs::write(&expected, b"fake installed player").unwrap();
+
+        assert_eq!(
+            actions.game_folder().unwrap().as_deref(),
+            Some(original.as_path())
+        );
+        assert_eq!(
+            actions.launch_location(&launcher),
+            (expected.clone(), Some(prepared))
+        );
+        assert!(actions.installed(&expected));
     }
 
     #[test]
