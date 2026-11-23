@@ -1,4 +1,5 @@
 //! Runs first-run requests off the window thread.
+use crate::relay_setup::{RelayRunner, RelaySetup};
 use crate::vm::first_run::{Event, FirstRunVm, Request, Step};
 use crate::vm::settings::SettingsVm;
 use crate::vm::Nav;
@@ -23,11 +24,26 @@ pub struct FirstRun {
     active: Option<Request>,
     cancelled: Arc<AtomicU8>,
     cancelling_build: bool,
+    relay: RelayRunner,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     clipboard: Option<arboard::Clipboard>,
 }
+/// Save sync setup as this machine has it.
+pub fn system_relay_setup() -> Arc<dyn RelaySetup> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if let Some(setup) = crate::relay_setup::SystemSetup::system() {
+        return Arc::new(setup);
+    }
+    Arc::new(crate::relay_setup::Unavailable)
+}
+
 impl FirstRun {
     pub fn new(vars: Vars) -> Self {
+        Self::with_relay(vars, system_relay_setup())
+    }
+
+    /// The first run with save sync setup given (a fake in tests).
+    pub fn with_relay(vars: Vars, setup: Arc<dyn RelaySetup>) -> Self {
         let dirs = AppDirs::new(&vars);
         let (sender, receiver) = mpsc::channel();
         let mut vm = FirstRunVm::new(vars.home.clone());
@@ -37,6 +53,8 @@ impl FirstRun {
             .iter()
             .position(|item| item.id == detected.id)
             .unwrap_or(vm.profile);
+        vm.relay_available = setup.available();
+        vm.relay_set_up = setup.account().is_some();
         vm.steam_applicable = Os::current() == Os::Linux
             && acnh_core::steam::userdata_roots(&vars)
                 .iter()
@@ -51,6 +69,7 @@ impl FirstRun {
             active: None,
             cancelled: Arc::new(AtomicU8::new(0)),
             cancelling_build: false,
+            relay: RelayRunner::new(setup),
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             clipboard: None,
         }
@@ -123,9 +142,22 @@ impl FirstRun {
         self.vm.activate(index);
         self.dispatch();
     }
+    /// A key typed on a physical keyboard while a text field is open.
+    pub fn text_key(&mut self, text: &str) -> bool {
+        if self.vm.step != Step::Relay || !crate::relay_setup::text_key(&mut self.vm.relay, text) {
+            return false;
+        }
+        self.dispatch();
+        true
+    }
     pub fn pump(&mut self) -> bool {
+        let relay = self.relay.pump(&mut self.vm.relay);
+        let relay_any = relay.is_some();
+        if let Some(outcome) = relay {
+            self.vm.relay_outcome(outcome);
+        }
         let events: Vec<_> = self.receiver.try_iter().collect();
-        let any = !events.is_empty();
+        let any = !events.is_empty() || relay_any;
         for (generation, event) in events {
             if generation != self.generation {
                 continue;
@@ -155,6 +187,7 @@ impl FirstRun {
         self.vm.step == Step::Done
     }
     fn dispatch(&mut self) {
+        self.relay.dispatch(&mut self.vm.relay);
         let Some(request) = self.vm.take_request() else {
             return;
         };

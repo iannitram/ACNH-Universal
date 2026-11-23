@@ -4,8 +4,11 @@ pub mod about;
 pub mod continue_page;
 pub mod first_run;
 pub mod fleet;
+pub mod hints;
+pub mod relay_setup;
 pub mod saves;
 pub mod settings;
+pub mod text_entry;
 pub use about::AboutVm;
 pub use continue_page::ContinuePageVm;
 

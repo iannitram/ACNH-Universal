@@ -4,13 +4,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use acnh_app::first_run::FirstRun;
+use acnh_app::first_run::{system_relay_setup, FirstRun};
 use acnh_app::input::{key_nav, poll_nav, DeviceEvent, Devices, Stick};
 use acnh_app::play::{Player, Runner, Session};
+use acnh_app::relay_setup::RelaySettings;
 use acnh_app::ui::{from_slint, to_slint};
 use acnh_app::vm::fleet::FleetVm;
+use acnh_app::vm::relay_setup::RelaySetupVm;
 use acnh_app::vm::saves::SavesVm;
-use acnh_app::vm::settings::{move_focus, SettingsFocus, SettingsVm};
+use acnh_app::vm::settings::{move_in, settings_rows, RelayRows, SettingsFocus, SettingsVm};
 use acnh_app::vm::{AboutVm, ContinuePageVm, Nav};
 use acnh_app::MainWindow;
 use acnh_app::{CreditEntry, FixEntry, FleetEntry, SettingsControl};
@@ -153,20 +155,31 @@ fn render(window: &Weak<MainWindow>, session: &Session) {
     }
 }
 
-fn move_settings_focus(focus: SettingsControl, nav: Nav) -> SettingsControl {
-    let focus = match focus {
+fn to_focus(control: SettingsControl) -> SettingsFocus {
+    match control {
         SettingsControl::Ptbr => SettingsFocus::Ptbr,
         SettingsControl::Speedfix => SettingsFocus::Speedfix,
+        SettingsControl::RelaySignIn => SettingsFocus::RelaySignIn,
+        SettingsControl::RelayOff => SettingsFocus::RelayOff,
         SettingsControl::Back => SettingsFocus::Back,
-    };
-    match move_focus(focus, nav) {
+    }
+}
+
+fn to_control(focus: SettingsFocus) -> SettingsControl {
+    match focus {
         SettingsFocus::Ptbr => SettingsControl::Ptbr,
         SettingsFocus::Speedfix => SettingsControl::Speedfix,
+        SettingsFocus::RelaySignIn => SettingsControl::RelaySignIn,
+        SettingsFocus::RelayOff => SettingsControl::RelayOff,
         SettingsFocus::Back => SettingsControl::Back,
     }
 }
 
-fn navigate(window: &Weak<MainWindow>, session: &mut Session, nav: Nav) {
+fn move_settings_focus(focus: SettingsControl, nav: Nav, relay: RelayRows) -> SettingsControl {
+    to_control(move_in(&settings_rows(relay), to_focus(focus), nav))
+}
+
+fn navigate(window: &Weak<MainWindow>, session: &mut Session, relay: &mut RelaySettings, nav: Nav) {
     if let Some(window) = window.upgrade().filter(|_| session.vm().saves_open()) {
         let offset = window.get_saves_offset().max(0) as usize;
         let rows = if window.get_saves_has_next() {
@@ -200,11 +213,18 @@ fn navigate(window: &Weak<MainWindow>, session: &mut Session, nav: Nav) {
         session.nav(nav);
         return;
     };
+    if relay.flow_open() {
+        // The save sync pages are on top of Settings: they take every key.
+        relay.nav(nav);
+        return;
+    }
     let focus = window.get_settings_focus();
     if nav == Nav::Accept {
         match focus {
             SettingsControl::Ptbr => window.invoke_set_ptbr(!window.get_ptbr()),
             SettingsControl::Speedfix => window.invoke_set_speedfix(!window.get_speedfix()),
+            SettingsControl::RelaySignIn => relay.press_sign_in(),
+            SettingsControl::RelayOff => relay.press_turn_off(),
             SettingsControl::Back => {
                 session.nav(Nav::Back);
             }
@@ -212,7 +232,8 @@ fn navigate(window: &Weak<MainWindow>, session: &mut Session, nav: Nav) {
     } else if nav == Nav::Back {
         session.nav(nav);
     } else {
-        window.set_settings_focus(move_settings_focus(focus, nav));
+        relay.cancel_confirm();
+        window.set_settings_focus(move_settings_focus(focus, nav, relay.vm.rows()));
     }
 }
 
@@ -220,7 +241,7 @@ fn save_fan_mod(window: &MainWindow, settings: &SettingsVm, control: SettingsCon
     let key = match control {
         SettingsControl::Ptbr => "mods.ptbr",
         SettingsControl::Speedfix => "mods.speedfix",
-        SettingsControl::Back => return,
+        SettingsControl::RelaySignIn | SettingsControl::RelayOff | SettingsControl::Back => return,
     };
     let saved = settings
         .set_value(key, if value { "1" } else { "0" })
@@ -253,28 +274,9 @@ fn render_first_run(window: &Weak<MainWindow>, first: &mut FirstRun) {
         }
     }
     let options = first.vm.options();
-    window.set_first_run_title(
-        format!("Step {} of 6\n{}", first.vm.step_number(), first.vm.title()).into(),
-    );
-    window.set_first_run_choice(
-        options
-            .get(first.vm.focus)
-            .map(String::as_str)
-            .unwrap_or("")
-            .into(),
-    );
-    window.set_first_run_position(if options.is_empty() {
-        "".into()
-    } else {
-        format!("{} of {}", first.vm.focus + 1, options.len()).into()
-    });
-    window.set_first_run_busy(first.vm.busy);
-    window.set_first_run_message(first.vm.message.as_str().into());
-    window.set_first_run_cancel_available(first.can_cancel());
-    window.set_first_run_keypad(first.vm.keypad_open());
-    window.set_first_run_focus_index(first.vm.focus as i32);
-    let choices: Vec<SharedString> = options.into_iter().map(Into::into).collect();
-    window.set_first_run_choices(slint::ModelRc::new(slint::VecModel::from(choices)));
+    let title = format!("Step {} of 6\n{}", first.vm.step_number(), first.vm.title());
+    let relay_working =
+        first.vm.step == acnh_app::vm::first_run::Step::Relay && first.vm.relay.busy();
     let progress = if first.vm.step == acnh_app::vm::first_run::Step::GetBuild {
         first
             .vm
@@ -285,7 +287,96 @@ fn render_first_run(window: &Weak<MainWindow>, first: &mut FirstRun) {
     } else {
         -1
     };
-    window.set_first_run_progress(progress);
+    draw_page(
+        &window,
+        Page {
+            heading: "Guided setup",
+            title: &title,
+            options,
+            focus: first.vm.focus,
+            busy: first.vm.busy,
+            message: &first.vm.message,
+            cancel_available: first.can_cancel() || relay_working,
+            keypad: first.vm.keypad_open(),
+            columns: first.vm.columns(),
+            editor: first.vm.step == acnh_app::vm::first_run::Step::Relay
+                && first.vm.relay.keyboard_open(),
+            progress,
+        },
+    );
+}
+
+/// What the guided page shows: the first run's steps and Settings' save sync pages both.
+struct Page<'a> {
+    heading: &'a str,
+    title: &'a str,
+    options: Vec<String>,
+    focus: usize,
+    busy: bool,
+    message: &'a str,
+    cancel_available: bool,
+    keypad: bool,
+    columns: usize,
+    editor: bool,
+    progress: i32,
+}
+
+fn draw_page(window: &MainWindow, page: Page) {
+    window.set_first_run_heading(page.heading.into());
+    window.set_first_run_title(page.title.into());
+    window.set_first_run_choice(
+        page.options
+            .get(page.focus)
+            .map(String::as_str)
+            .unwrap_or("")
+            .into(),
+    );
+    window.set_first_run_position(if page.options.is_empty() {
+        "".into()
+    } else {
+        format!("{} of {}", page.focus + 1, page.options.len()).into()
+    });
+    window.set_first_run_busy(page.busy);
+    window.set_first_run_message(page.message.into());
+    window.set_first_run_cancel_available(page.cancel_available);
+    window.set_first_run_keypad(page.keypad);
+    window.set_first_run_columns(page.columns as i32);
+    window.set_first_run_editor(page.editor);
+    window.set_first_run_focus_index(page.focus as i32);
+    let choices: Vec<SharedString> = page.options.into_iter().map(Into::into).collect();
+    window.set_first_run_choices(slint::ModelRc::new(slint::VecModel::from(choices)));
+    window.set_first_run_progress(page.progress);
+}
+
+/// Show Settings' save sync rows, and its sign-in pages while they are open.
+fn show_relay_settings(window: &MainWindow, relay: &RelaySettings) {
+    let vm = &relay.vm;
+    window.set_settings_relay_available(vm.available);
+    window.set_settings_relay_summary(vm.summary().into());
+    window.set_settings_relay_sign_in(vm.sign_in_label().into());
+    window.set_settings_relay_has_off(vm.account.is_some());
+    window.set_settings_relay_off(vm.turn_off_label().into());
+    window.set_settings_relay_message(vm.message.as_str().into());
+    let flow: Option<&RelaySetupVm> = vm.flow.as_ref().filter(|_| !window.get_first_run_open());
+    window.set_relay_flow_open(flow.is_some());
+    if let Some(flow) = flow {
+        draw_page(
+            window,
+            Page {
+                heading: "Save sync",
+                title: &flow.title(),
+                options: flow.options(),
+                focus: flow.focus,
+                busy: false,
+                message: &flow.message,
+                cancel_available: flow.busy(),
+                keypad: flow.keyboard_open(),
+                columns: acnh_app::vm::text_entry::COLUMNS,
+                editor: flow.keyboard_open(),
+                progress: -1,
+            },
+        );
+    }
 }
 
 fn set_about(window: &MainWindow) {
@@ -364,13 +455,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+    let relay = Rc::new(RefCell::new(RelaySettings::new(system_relay_setup())));
+    window.on_settings_relay_activate({
+        let relay = Rc::clone(&relay);
+        let weak = window.as_weak();
+        move |control| {
+            let mut relay = relay.borrow_mut();
+            match control {
+                SettingsControl::RelaySignIn => relay.press_sign_in(),
+                SettingsControl::RelayOff => relay.press_turn_off(),
+                _ => {}
+            }
+            if let Some(window) = weak.upgrade() {
+                window.set_settings_focus(control);
+                show_relay_settings(&window, &relay);
+            }
+        }
+    });
     let first = Rc::new(RefCell::new(FirstRun::new(vars.clone())));
     window.set_first_run_open(first.borrow().needed());
     render_first_run(&window.as_weak(), &mut first.borrow_mut());
     window.on_first_run_choose({
         let first = Rc::clone(&first);
+        let relay = Rc::clone(&relay);
         let weak = window.as_weak();
         move |index| {
+            if weak.upgrade().is_some_and(|w| !w.get_first_run_open()) {
+                let mut relay = relay.borrow_mut();
+                relay.click(index as usize);
+                if let Some(window) = weak.upgrade() {
+                    show_relay_settings(&window, &relay);
+                }
+                return;
+            }
             let mut first = first.borrow_mut();
             first.click(index as usize);
             render_first_run(&weak, &mut first);
@@ -378,6 +495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     window.on_first_run_nav({
         let first = Rc::clone(&first);
+        let relay = Rc::clone(&relay);
         let weak = window.as_weak();
         move |index| {
             let nav = match index {
@@ -386,6 +504,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 2 => Nav::Accept,
                 _ => Nav::Back,
             };
+            if weak.upgrade().is_some_and(|w| !w.get_first_run_open()) {
+                let mut relay = relay.borrow_mut();
+                relay.nav(nav);
+                if let Some(window) = weak.upgrade() {
+                    show_relay_settings(&window, &relay);
+                }
+                return;
+            }
             let mut first = first.borrow_mut();
             first.nav(nav);
             render_first_run(&weak, &mut first);
@@ -432,7 +558,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         move |target| {
             if weak
                 .upgrade()
-                .is_some_and(|window| window.get_first_run_open())
+                .is_some_and(|window| window.get_first_run_open() || window.get_relay_flow_open())
             {
                 return;
             }
@@ -446,6 +572,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let devices = Rc::clone(&devices);
         let weak = window.as_weak();
         let first = Rc::clone(&first);
+        let relay = Rc::clone(&relay);
         let session = Rc::clone(&session);
         move |text: SharedString| {
             devices.borrow_mut().apply(DeviceEvent::Keyboard);
@@ -454,6 +581,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if weak.upgrade().is_some_and(|w| w.get_first_run_open()) {
                 let mut first = first.borrow_mut();
+                // In a text field Space, Backspace, Enter and Esc are the field's keys.
+                if first.text_key(&text) {
+                    render_first_run(&weak, &mut first);
+                    return true;
+                }
                 if first.vm.step == acnh_app::vm::first_run::Step::Pair && !first.vm.busy {
                     if text.starts_with(char::from(slint::platform::Key::Backspace)) {
                         first.vm.activate(10);
@@ -493,7 +625,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return true;
             }
             let mut session = session.borrow_mut();
-            navigate(&weak, &mut session, nav);
+            let mut relay = relay.borrow_mut();
+            if relay.flow_open() && relay.text_key(&text) {
+                if let Some(window) = weak.upgrade() {
+                    show_relay_settings(&window, &relay);
+                }
+                return true;
+            }
+            navigate(&weak, &mut session, &mut relay, nav);
+            if let Some(window) = weak.upgrade() {
+                show_relay_settings(&window, &relay);
+            }
             render(&weak, &session);
             true
         }
@@ -505,6 +647,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer = Timer::default();
     let weak = window.as_weak();
     let mut was_first_open = window.get_first_run_open();
+    let mut was_settings_open = false;
     let mut fleet_tick = 0_u32;
     timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
         let navs = match gilrs.as_mut() {
@@ -530,11 +673,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session.refresh_after_first_run();
         }
         was_first_open = now_open;
+        let mut relay = relay.borrow_mut();
         if !first_open {
             for nav in &navs {
-                navigate(&weak, &mut session, *nav);
+                navigate(&weak, &mut session, &mut relay, *nav);
             }
         }
+        let settings_open = session.vm().settings_open();
+        if settings_open && !was_settings_open {
+            relay.refresh();
+        }
+        let relay_changed = relay.pump();
+        if (settings_open != was_settings_open
+            || relay_changed
+            || (!navs.is_empty() && !first_open))
+            && (settings_open || relay.flow_open() || was_settings_open)
+        {
+            if let Some(window) = weak.upgrade() {
+                show_relay_settings(&window, &relay);
+            }
+        }
+        was_settings_open = settings_open;
         fleet_tick = fleet_tick.wrapping_add(1);
         let refresh_fleet = fleet_tick.is_multiple_of(60)
             && weak
@@ -566,10 +725,33 @@ mod tests {
     fn settings_focus_reaches_both_switches_and_back() {
         use SettingsControl::{Back, Ptbr, Speedfix};
 
-        assert_eq!(move_settings_focus(Ptbr, Nav::Down), Speedfix);
-        assert_eq!(move_settings_focus(Speedfix, Nav::Down), Back);
-        assert_eq!(move_settings_focus(Back, Nav::Down), Back);
-        assert_eq!(move_settings_focus(Back, Nav::Up), Speedfix);
-        assert_eq!(move_settings_focus(Speedfix, Nav::Up), Ptbr);
+        let none = RelayRows::Hidden;
+        assert_eq!(move_settings_focus(Ptbr, Nav::Down, none), Speedfix);
+        assert_eq!(move_settings_focus(Speedfix, Nav::Down, none), Back);
+        assert_eq!(move_settings_focus(Back, Nav::Down, none), Back);
+        assert_eq!(move_settings_focus(Back, Nav::Up, none), Speedfix);
+        assert_eq!(move_settings_focus(Speedfix, Nav::Up, none), Ptbr);
+    }
+
+    #[test]
+    fn settings_focus_reaches_the_save_sync_rows() {
+        use SettingsControl::{Back, RelayOff, RelaySignIn, Speedfix};
+
+        let set_up = RelayRows::SignInAndOff;
+        assert_eq!(
+            move_settings_focus(Speedfix, Nav::Down, set_up),
+            RelaySignIn
+        );
+        assert_eq!(
+            move_settings_focus(RelaySignIn, Nav::Down, set_up),
+            RelayOff
+        );
+        assert_eq!(move_settings_focus(RelayOff, Nav::Down, set_up), Back);
+        assert_eq!(move_settings_focus(Back, Nav::Up, set_up), RelayOff);
+        // Save sync off has no Turn off row.
+        assert_eq!(
+            move_settings_focus(RelaySignIn, Nav::Down, RelayRows::SignIn),
+            Back
+        );
     }
 }
