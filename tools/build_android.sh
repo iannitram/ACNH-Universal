@@ -12,6 +12,9 @@
 #
 # usage: tools/build_android.sh [--install] [--jobs N] [--no-game]
 #   --no-game: the app only, without the game set up here (what a release carries)
+#   --no-phone-prepare: leave out the on-phone Prepare's tools (zig, the shader tool, which builds only on Linux); the
+#   app then says on its Prepare screen that this build does not carry them. For an APK whose game comes prepared
+#   from a computer (a hub, or the in-app Dropbox download, issue #230).
 #   the Vulkan headers: private/third_party/Vulkan-Headers-1.4.357 (tools/setup_acnh.sh; the NDK's are older than
 #   what the runtime calls)
 #   needs: Android SDK with ndk;28.2.13676358, build-tools;35.0.0, platforms;android-35 (ANDROID_SDK_ROOT, default
@@ -52,6 +55,7 @@ while [ $# -gt 0 ]; do
     --install) INSTALL=1 ;;
     --jobs) JOBS=$2; shift ;;
     --no-game) GAMELIB=0 ;;
+    --no-phone-prepare) PHONE_PREPARE=0 ;;
     *) echo "unknown option $1"; exit 1 ;;
   esac
   shift
@@ -60,6 +64,7 @@ done
 
 # The preparation's tools (prepare/README.md "The tools it runs"), made once.
 TOOLS=${PREPARE_TOOLS:-private/android-tools}
+if [ "${PHONE_PREPARE:-1}" = 1 ]; then
 if [ ! -f "$TOOLS/zig/zig" ] || [ ! -f "$TOOLS/zig/sizes.txt" ]; then
   echo "== zig for the phone (tools/fetch_zig.py aarch64-linux --android)"
   python3 tools/fetch_zig.py aarch64-linux "$TOOLS/zig" --android ||
@@ -86,6 +91,7 @@ if [ ! -f "$TOOLS/zig-lib.zip" ] || [ "$TOOLS/zig/sizes.txt" -nt "$TOOLS/zig-lib
   (cd "$TOOLS/zig" && zip -q -9 ../zig-lib.zip.tmp sizes.txt)
   mv "$TOOLS/zig-lib.zip.tmp" "$TOOLS/zig-lib.zip"
 fi
+fi  # PHONE_PREPARE
 GEN=$PWD/private/$GAME/gen
 if [ $GAMELIB = 0 ]; then
   BUILD=private/$GAME/build-android-app
@@ -120,8 +126,10 @@ rm -rf "$OUT"; mkdir -p "$OUT/lib/arm64-v8a"
 "$STRIP" --strip-unneeded -o "$OUT/lib/arm64-v8a/lib${GAME}_prepare.so" "$BUILD/lib${GAME}_prepare.so"
 cp "$NDK/toolchains/llvm/prebuilt/$HOST/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$OUT/lib/arm64-v8a/"
 # The preparation's tools, run from the app's native library folder (extractNativeLibs in the manifest)
-cp "$TOOLS/zig/zig" "$OUT/lib/arm64-v8a/libzig.so"
-cp "$TOOLS/shaders/spirv_harness" "$OUT/lib/arm64-v8a/libspirv_harness.so"
+if [ "${PHONE_PREPARE:-1}" = 1 ]; then
+  cp "$TOOLS/zig/zig" "$OUT/lib/arm64-v8a/libzig.so"
+  cp "$TOOLS/shaders/spirv_harness" "$OUT/lib/arm64-v8a/libspirv_harness.so"
+fi
 # The game's code, for the game folder (push_android.sh): beside the APK, not in it.
 [[ " $TARGETS " == *" ${GAME}_game "* ]] && "$STRIP" --strip-unneeded -o "$OUT/lib${GAME}_game.so" "$BUILD/lib${GAME}_game.so"
 # Home.java: javac, then d8 to classes.dex.
@@ -157,8 +165,10 @@ cp third_party/capstone/LICENSE.TXT "$OUT/assets/licenses/LICENSE-capstone.txt"
 cp third_party/capstone/LICENSE_LLVM.TXT "$OUT/assets/licenses/LICENSE-capstone-llvm.txt"
 cp prepare/recomp/acnh/SPEEDFIX.md "$OUT/assets/licenses/SPEEDFIX.txt"
 # zig's licence (MIT; LLVM's and the libraries' own are in its lib folder) and that folder, unpacked on the phone
-cp "$TOOLS/zig/LICENSE" "$OUT/assets/licenses/LICENSE-zig.txt"
-cp "$TOOLS/zig-lib.zip" "$OUT/assets/zig-lib.zip"
+if [ "${PHONE_PREPARE:-1}" = 1 ]; then
+  cp "$TOOLS/zig/LICENSE" "$OUT/assets/licenses/LICENSE-zig.txt"
+  cp "$TOOLS/zig-lib.zip" "$OUT/assets/zig-lib.zip"
+fi
 (cd "$OUT" && zip -q -r base.apk lib classes.dex && zip -q -r -0 base.apk assets)
 "$BT/zipalign" -f -P 16 4 "$OUT/base.apk" "$OUT/aligned.apk"
 KEY=private/android-debug.keystore
