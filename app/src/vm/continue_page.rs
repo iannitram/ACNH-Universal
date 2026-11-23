@@ -360,6 +360,9 @@ pub struct ContinuePageVm {
     pub home: PathBuf,
     /// The step the relay reported the conflict at.
     conflict_step: SyncStep,
+    /// A Retry or Sync now is running: its transfer reports go to the page, and the status it
+    /// ends with decides the page.
+    status_job: bool,
     request: Option<Request>,
     build_request: Request,
     build_configured: bool,
@@ -409,6 +412,7 @@ impl ContinuePageVm {
             auto_resolve: true,
             home: PathBuf::new(),
             conflict_step: SyncStep::Pull,
+            status_job: false,
             request: None,
             build_request: Request::Build,
             build_configured: false,
@@ -868,6 +872,7 @@ impl ContinuePageVm {
         self.state = ContinueState::Syncing(SyncStep::Push);
         self.play_action = Some(PlayAction::Syncing);
         self.focus = FocusTarget::Play;
+        self.status_job = true;
         self.request = Some(Request::Retry);
     }
 
@@ -894,6 +899,7 @@ impl ContinuePageVm {
         self.status_message = None;
         self.state = ContinueState::Syncing(SyncStep::Pull);
         self.play_action = Some(PlayAction::Syncing);
+        self.status_job = true;
         self.request = Some(Request::SyncNow);
         true
     }
@@ -1033,17 +1039,20 @@ impl ContinuePageVm {
                 self.conflict_step = step;
                 // The chooser is on the Continue page: a Sync now from Saves hands it over.
                 self.saves_open = false;
+                self.status_job = false;
                 self.status_message = None;
                 self.set_conflict(this_card, relay_card);
             }
             PlayEvent::Held { device, since } => {
                 self.conflict = None;
                 self.saves_open = false;
+                self.status_job = false;
                 self.state = ContinueState::Held { device, since };
                 self.focus = FocusTarget::Play;
                 self.play_action = Some(PlayAction::Play);
             }
             PlayEvent::Status(result) => {
+                self.status_job = false;
                 // The page's own check, or the end of a job that ends with one (Retry, Sync
                 // now): neither may interrupt a play or a pending conflict.
                 let at_launch = self.state == ContinueState::CheckingStatus;
@@ -1129,6 +1138,10 @@ impl ContinuePageVm {
                 }
             }
             PlayEvent::Synced(result) => {
+                // A transfer of Retry or Sync now: the status that follows decides the page.
+                if self.status_job {
+                    return;
+                }
                 let outcome = match result {
                     Ok(Sync::Done(_) | Sync::Resolved { .. }) => Ok(()),
                     Ok(Sync::Off | Sync::Offline) => Err("the relay did not answer".to_string()),
@@ -2090,5 +2103,45 @@ mod tests {
         assert!(!off.view().sync_now);
         assert!(!off.handle(Nav::Accept));
         assert_eq!(off.take_request(), None);
+    }
+
+    #[test]
+    fn a_device_with_no_island_that_pulls_one_with_sync_now_is_ready() {
+        let mut vm = ContinuePageVm::new(None, None);
+        assert_eq!(vm.state(), &ContinueState::NoIsland);
+        vm.handle(Nav::Down);
+        assert!(!vm.handle(Nav::Accept));
+        assert!(vm.sync_now());
+        assert_eq!(vm.take_request(), Some(Request::SyncNow));
+
+        // The pull's transfer report, then the island is read again (as `Session::pump` does),
+        // then the status that follows the pull.
+        vm.on_play_event(PlayEvent::Synced(Ok(done())));
+        vm.set_local_card(Some(fake_card(2000, "strix-tablet", 7200, "3.0.2")));
+        assert_eq!(vm.state(), &ContinueState::Syncing(SyncStep::Pull));
+        vm.on_play_event(PlayEvent::Status(Ok(RelayStatus::Ready)));
+        assert_eq!(vm.state(), &ContinueState::Ready);
+        assert_eq!(
+            vm.local_card().map(|card| card.device.as_str()),
+            Some("strix-tablet")
+        );
+        // The Saves page is still open over the page: Play waits until it is closed.
+        assert!(!vm.view().button_enabled);
+        vm.handle(Nav::Back);
+        assert!(vm.view().button_enabled);
+    }
+
+    #[test]
+    fn a_transfer_report_during_sync_now_does_not_decide_the_page() {
+        let mut vm = ContinuePageVm::new(Some(fake_card(100, "amd-handheld", 1000, "3.0.2")), None);
+        vm.handle(Nav::Down);
+        vm.handle(Nav::Accept);
+        assert!(vm.sync_now());
+        vm.take_request();
+        // A failed transfer report is ignored: the status after it says what happened.
+        vm.on_play_event(PlayEvent::Synced(Err(Error::Saves("disk full".into()))));
+        assert_eq!(vm.state(), &ContinueState::Syncing(SyncStep::Pull));
+        vm.on_play_event(PlayEvent::Status(Ok(RelayStatus::Unavailable)));
+        assert_eq!(vm.state(), &ContinueState::RelayUnavailable);
     }
 }

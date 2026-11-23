@@ -16,7 +16,7 @@ use acnh_app::play::{RelayOff, Runner, Session};
 use acnh_app::relay::{opened_each_step, SharedRelay};
 use acnh_app::vm::continue_page::{ConflictPhase, ContinueState, FocusTarget};
 use acnh_app::vm::{ContinuePageVm, Nav};
-use acnh_core::launch::{Game, Relay};
+use acnh_core::launch::{Game, Relay, RelayStatus};
 use acnh_core::relay::SaveRelay;
 use acnh_core::savecard::SaveCard;
 use acnh_core::Result;
@@ -411,6 +411,17 @@ fn sync_now_pulls_the_newer_island_once() {
     assert!(session.sync_now());
     assert_eq!(settle(&mut session).last(), Some(&ContinueState::Ready));
     assert_eq!(here.island(), "from the tablet");
+    // The card the page shows is the pulled island's, read again after the pull.
+    assert_eq!(
+        session.vm().local_card().map(|card| card.device.as_str()),
+        Some("strix-tablet")
+    );
+    // The pull marked this device as playing; the exit push cleared it, so the other device
+    // sees the island as ready, not held.
+    assert_eq!(
+        other.relay(&fx.remote).status(&other.saves),
+        Ok(RelayStatus::Ready)
+    );
 }
 
 #[test]
