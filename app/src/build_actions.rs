@@ -85,6 +85,71 @@ impl BuildActions {
             })
     }
 
+    /// The request to prepare `target` here. The Mac hub's two targets make the same game
+    /// data, in one folder.
+    fn request(
+        &self,
+        game: &gamefolder::GameFolder,
+        config: &Config,
+        launcher: &Config,
+        home: &Path,
+        target: Os,
+    ) -> prepare::Request {
+        prepare::Request {
+            game: game.clone(),
+            out: if target == self.os || (self.os == Os::Mac && target == Os::Ios) {
+                self.prepare_root()
+            } else {
+                self.dirs.data.join("prepare-targets").join(target.key())
+            },
+            target,
+            jobs: 0,
+            source: None,
+            fan_mods: prepare::FanMods {
+                ptbr: config.enabled("mods.ptbr"),
+                speedfix: config.enabled("mods.speedfix"),
+            },
+            delivery: (target == Os::Ios).then(|| prepare::delivery_folder(launcher, home, "ios")),
+        }
+    }
+
+    /// Prepare every target of this hub. On the Mac hub the iPhone build's checks run first,
+    /// so a missing Dropbox folder, SDK or Rust target stops everything before the Mac target
+    /// starts. `prepare_one` is `prepare::prepare` (the seam the tests use).
+    #[allow(clippy::too_many_arguments)]
+    fn build_local(
+        &self,
+        game: &gamefolder::GameFolder,
+        config: &Config,
+        launcher: &Config,
+        home: &Path,
+        report: &dyn Fn(String),
+        runner: &mut dyn prepare::ScriptRunner,
+        prepare_one: &mut PrepareOne<'_>,
+    ) -> Result<()> {
+        if self.os == Os::Mac {
+            let ios = self.request(game, config, launcher, home, Os::Ios);
+            prepare::preflight(&ios, runner, home)
+                .map_err(|e| Error::Build(format!("prepare: {e}")))?;
+        }
+        prepare_targets(self.os, report, &mut |target, progress| {
+            let request = self.request(game, config, launcher, home, target);
+            let out = prepare_one(&request, progress)?;
+            if target == Os::Ios {
+                // The `.ipa` is in Dropbox: nothing to assemble here.
+                return Ok(());
+            }
+            if target != self.os {
+                return Err(Error::Unsupported(format!(
+                    "no delivery for {} yet",
+                    target.key()
+                )));
+            }
+            assemble::assemble(target, &out.join("build"), &self.dirs.install())?;
+            Ok(())
+        })
+    }
+
     pub fn build(&self, report: &dyn Fn(String)) -> Result<()> {
         if let Some(folder) = self.game_folder()? {
             let game = gamefolder::check(&folder)?;
@@ -97,39 +162,15 @@ impl BuildActions {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_default();
-            prepare_targets(self.os, report, &mut |target, progress| {
-                let request = prepare::Request {
-                    game: game.clone(),
-                    // The Mac hub's two targets make the same game data, in one folder.
-                    out: if target == self.os || (self.os == Os::Mac && target == Os::Ios) {
-                        self.prepare_root()
-                    } else {
-                        self.dirs.data.join("prepare-targets").join(target.key())
-                    },
-                    target,
-                    jobs: 0,
-                    source: None,
-                    fan_mods: prepare::FanMods {
-                        ptbr: config.enabled("mods.ptbr"),
-                        speedfix: config.enabled("mods.speedfix"),
-                    },
-                    delivery: (target == Os::Ios)
-                        .then(|| prepare::delivery_folder(&launcher, &home, "ios")),
-                };
-                let out = prepare::prepare(&request, progress)?;
-                if target == Os::Ios {
-                    // The `.ipa` is in Dropbox: nothing to assemble here.
-                    return Ok(());
-                }
-                if target != self.os {
-                    return Err(Error::Unsupported(format!(
-                        "no delivery for {} yet",
-                        target.key()
-                    )));
-                }
-                assemble::assemble(target, &out.join("build"), &self.dirs.install())?;
-                Ok(())
-            })?;
+            self.build_local(
+                &game,
+                &config,
+                &launcher,
+                &home,
+                report,
+                &mut prepare::ProcessRunner::new(PathBuf::new(), 0),
+                &mut prepare::prepare,
+            )?;
         } else {
             report("Finding paired hub".into());
             let peers = hub::read_peers(&self.dirs)?;
@@ -209,6 +250,9 @@ impl BuildActions {
     }
 }
 
+type PrepareOne<'a> =
+    dyn FnMut(&prepare::Request, &mut dyn FnMut(recipe::Stage)) -> Result<PathBuf> + 'a;
+
 type PrepareTarget<'a> = dyn FnMut(Os, &mut dyn FnMut(recipe::Stage)) -> Result<()> + 'a;
 
 fn prepare_targets(os: Os, report: &dyn Fn(String), run: &mut PrepareTarget<'_>) -> Result<()> {
@@ -256,6 +300,69 @@ mod tests {
         let mut expected: Vec<String> = recipe::STAGES.iter().map(|s| s.key().into()).collect();
         expected.push("ios is not supported yet; skipped".into());
         assert_eq!(*messages.borrow(), expected);
+    }
+
+    struct Tools(Vec<(&'static str, &'static str)>);
+
+    impl prepare::ScriptRunner for Tools {
+        fn run(
+            &mut self,
+            _stage: recipe::Stage,
+            _args: &[String],
+        ) -> std::result::Result<(), Vec<String>> {
+            Ok(())
+        }
+
+        fn probe(&mut self, program: &str, _args: &[&str]) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(name, _)| *name == program)
+                .map(|(_, out)| (*out).to_owned())
+        }
+    }
+
+    #[test]
+    fn a_missing_delivery_folder_stops_the_mac_hub_before_the_mac_target() {
+        let root = tempfile::tempdir().unwrap();
+        let vars = Vars {
+            home: root.path().into(),
+            data: root.path().join("data"),
+            config: root.path().join("config"),
+        };
+        let actions = BuildActions {
+            dirs: AppDirs::new(&vars),
+            os: Os::Mac,
+        };
+        let game = gamefolder::GameFolder {
+            root: "/game".into(),
+            exefs: "/game/exefs".into(),
+            romfs: "/game/romfs".into(),
+            aoc: vec![],
+            from_importer: false,
+            version: acnh_core::version::Version::V3_0_2,
+        };
+        let mut tools = Tools(vec![
+            ("xcrun", "/sdk\n"),
+            ("cargo", "cargo 1\n"),
+            ("rustup", "aarch64-apple-ios\n"),
+        ]);
+        let mut prepared = Vec::new();
+        let error = actions
+            .build_local(
+                &game,
+                &Config::default(),
+                &Config::default(),
+                root.path(),
+                &|_| {},
+                &mut tools,
+                &mut |request, _| {
+                    prepared.push(request.target);
+                    Ok(request.out.clone())
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("dropbox"), "{error}");
+        assert!(prepared.is_empty(), "{prepared:?}");
     }
 
     #[test]

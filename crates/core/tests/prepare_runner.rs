@@ -961,6 +961,8 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
             "tools/package_ios.sh".to_owned(),
             env!("CARGO_PKG_VERSION").to_owned(),
             build.display().to_string(),
+            "--game".to_owned(),
+            req.out.display().to_string(),
             delivery.display().to_string(),
         ]
     );
@@ -981,10 +983,9 @@ fn ios_without_the_transfers_folder_stops_before_the_first_stage() {
     match error {
         Error::Build(message) => {
             assert!(message.contains("`dropbox`"), "{message}");
-            assert!(
-                message.contains("~/Dropbox/_transfers/ACNH-Universal"),
-                "{message}"
-            );
+            // The home folder is `~` and the separators are the platform's.
+            assert!(message.starts_with("the folder ~"), "{message}");
+            assert!(message.contains("ACNH-Universal"), "{message}");
         }
         other => panic!("{other:?}"),
     }
@@ -1091,6 +1092,12 @@ fn ios_real_scripts_make_an_ipa_on_the_stub_gen() {
     std::fs::create_dir_all(delivery.parent().unwrap()).unwrap();
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join(".fan-mod-settings"), "false false\n").unwrap();
+    // No game is prepared here: empty files stand in for what the packaging script reads
+    // (it allows only empty files under CI).
+    std::fs::create_dir_all(out.join("analysis")).unwrap();
+    for file in ["analysis/main.bin", "romfs.pak", "spirv.pak"] {
+        std::fs::write(out.join(file), b"").unwrap();
+    }
     // The stub gen folder stands in for the recompiled code.
     let status = std::process::Command::new("cp")
         .arg("-R")
@@ -1106,4 +1113,40 @@ fn ios_real_scripts_make_an_ipa_on_the_stub_gen() {
     let ipa = prepare_with(&req, Hub::Mac, &mut runner, Path::new("/h"), &mut |_| {}).unwrap();
     assert!(ipa.is_file(), "{} was not made", ipa.display());
     assert!(ipa.starts_with(&delivery));
+}
+
+#[cfg(unix)]
+#[test]
+fn cargo_found_only_under_the_cargo_home_bin_is_put_first_on_the_build_path() {
+    let (req, _) = ios_request("ios-cargo-home");
+    let mut fake = Fake::with_ios_tools();
+    fake.tools
+        .retain(|(name, _)| !matches!(*name, "cargo" | "rustup"));
+    fake.tools.push(("/h/.cargo/bin/cargo", "cargo 1.90.0\n"));
+    fake.tools
+        .push(("/h/.cargo/bin/rustup", "aarch64-apple-ios\n"));
+    prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    let build = &fake.args[fake.args.len() - 2];
+    assert_eq!(build[0], "env");
+    assert!(build[1].starts_with("PATH=/h/.cargo/bin:"), "{}", build[1]);
+    assert_eq!(build[2], "tools/build_ios.sh");
+    // With cargo on the PATH the script is called as it is.
+    let mut plain = Fake::with_ios_tools();
+    prepare_with(&req, Hub::Mac, &mut plain, Path::new("/h"), &mut |_| {}).unwrap();
+    assert_eq!(plain.args[plain.args.len() - 2][0], "tools/build_ios.sh");
+}
+
+#[test]
+fn ios_refuses_a_prepared_folder_inside_a_git_work_tree() {
+    let (req, _) = ios_request("ios-in-git");
+    let mut fake = Fake::with_ios_tools();
+    fake.tools.push(("git", "true\n"));
+    let mut seen = vec![];
+    let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap_err();
+    assert!(matches!(error, Error::Build(message) if message.contains("git work tree")));
+    assert!(fake.ran.is_empty() && seen.is_empty());
+    assert!(fake.probed.iter().any(|p| p.starts_with("git -C ")));
 }

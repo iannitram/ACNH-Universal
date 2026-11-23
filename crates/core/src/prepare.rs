@@ -120,12 +120,15 @@ fn build_ios_args(gen: &Path, build: &Path) -> Vec<String> {
     ]
 }
 
-/// The arguments of `tools/package_ios.sh`, in one place so a later step can add the game.
-fn package_ios_args(version: &str, build: &Path, delivery: &Path) -> Vec<String> {
+/// The arguments of `tools/package_ios.sh`: the game inside the `.ipa` comes from the
+/// prepared folder `game`.
+fn package_ios_args(version: &str, build: &Path, game: &Path, delivery: &Path) -> Vec<String> {
     vec![
         "tools/package_ios.sh".to_owned(),
         version.to_owned(),
         build.display().to_string(),
+        "--game".to_owned(),
+        game.display().to_string(),
         delivery.display().to_string(),
     ]
 }
@@ -261,10 +264,56 @@ pub trait ScriptRunner {
     }
 }
 
-/// What the `ios` target needs before its first stage, found with `runner.probe`: Xcode's
-/// `iphoneos` SDK (the command-line tools alone do not have it), `cargo`, and the
-/// `aarch64-apple-ios` Rust target. `Error::Build` naming what is missing.
-fn ios_preflight(runner: &mut dyn ScriptRunner) -> Result<()> {
+/// The folders a Finder-launched app's minimal `PATH` misses: cargo's, then Homebrew's.
+fn tool_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME").filter(|v| !v.is_empty()) {
+        dirs.push(PathBuf::from(cargo_home).join("bin"));
+    }
+    dirs.push(home.join(".cargo/bin"));
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs
+}
+
+/// `program` as `runner.probe` finds it: on the `PATH`, else in one of `tool_dirs`. The
+/// output, and the folder when it was not on the `PATH`.
+fn probe_tool(
+    runner: &mut dyn ScriptRunner,
+    home: &Path,
+    program: &str,
+    args: &[&str],
+) -> Option<(String, Option<PathBuf>)> {
+    if let Some(output) = runner.probe(program, args) {
+        return Some((output, None));
+    }
+    tool_dirs(home).into_iter().find_map(|dir| {
+        let found = dir.join(program);
+        runner
+            .probe(&found.display().to_string(), args)
+            .map(|output| (output, Some(dir)))
+    })
+}
+
+/// The folder `cargo` is in when the `PATH` does not have it (to put first on the `PATH` of
+/// the build script, which calls cargo).
+fn cargo_dir(runner: &mut dyn ScriptRunner, home: &Path) -> Option<PathBuf> {
+    probe_tool(runner, home, "cargo", &["--version"]).and_then(|(_, dir)| dir)
+}
+
+/// The checks before a prepare starts, which stop it before its first stage: for the `ios`
+/// target, the delivery folder (`check_delivery`), Xcode's `iphoneos` SDK (the command-line
+/// tools alone do not have it), `cargo`, the `aarch64-apple-ios` Rust target, and a prepared
+/// folder outside any git work tree (the iPhone build holds the recompiled code). Other
+/// targets have none here. `Error::Build` naming what is missing; the tools are found with
+/// `runner.probe`.
+pub fn preflight(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Result<()> {
+    if req.target != Os::Ios {
+        return Ok(());
+    }
+    let delivery = req.delivery.as_deref().ok_or_else(|| {
+        Error::Env("the delivery folder is not set (the `dropbox` key in launcher.ini)".into())
+    })?;
+    check_delivery(delivery, home)?;
     let sdk = runner.probe("xcrun", &["--sdk", "iphoneos", "--show-sdk-path"]);
     if !sdk.is_some_and(|path| !path.trim().is_empty()) {
         return Err(Error::Build(
@@ -274,19 +323,43 @@ fn ios_preflight(runner: &mut dyn ScriptRunner) -> Result<()> {
                 .to_owned(),
         ));
     }
-    if runner.probe("cargo", &["--version"]).is_none() {
+    if probe_tool(runner, home, "cargo", &["--version"]).is_none() {
         return Err(Error::Build(
-            "building for iPhone and iPad needs cargo on the PATH: install Rust from rustup.rs"
-                .to_owned(),
+            "building for iPhone and iPad needs cargo: install Rust from rustup.rs".to_owned(),
         ));
     }
-    let targets = runner.probe("rustup", &["target", "list", "--installed"]);
-    if !targets.is_some_and(|list| list.lines().any(|line| line.trim() == "aarch64-apple-ios")) {
+    let targets = probe_tool(runner, home, "rustup", &["target", "list", "--installed"]);
+    if !targets.is_some_and(|(list, _)| list.lines().any(|line| line.trim() == "aarch64-apple-ios"))
+    {
         return Err(Error::Build(
             "the Rust target for iPhone and iPad is not installed: run \
              `rustup target add aarch64-apple-ios`"
                 .to_owned(),
         ));
+    }
+    // The nearest folder that exists, as `git -C` needs one.
+    let mut existing = req.out.as_path();
+    while !existing.is_dir() {
+        match existing.parent() {
+            Some(parent) => existing = parent,
+            None => break,
+        }
+    }
+    let inside = runner.probe(
+        "git",
+        &[
+            "-C",
+            &existing.display().to_string(),
+            "rev-parse",
+            "--is-inside-work-tree",
+        ],
+    );
+    if inside.is_some_and(|answer| answer.trim() == "true") {
+        return Err(Error::Build(format!(
+            "the prepared folder {} is inside a git work tree: the iPhone build holds the \
+             recompiled game and must not be made there. Use a folder outside it.",
+            redact(&req.out.display().to_string(), home)
+        )));
     }
     Ok(())
 }
@@ -826,13 +899,7 @@ fn run_stages(
         }
         return Err(Error::Build(message));
     }
-    if req.target == Os::Ios {
-        let delivery = req.delivery.as_deref().ok_or_else(|| {
-            Error::Env("the delivery folder is not set (the `dropbox` key in launcher.ini)".into())
-        })?;
-        check_delivery(delivery, home)?;
-        ios_preflight(runner)?;
-    }
+    preflight(req, runner, home)?;
     runner.set_message_paths(&req.game.romfs, &req.out);
     // Recover a mod left by a previous child, even when every stage is cached.
     // Its font comes from that run's linked RomFS if the caller selected a new source.
@@ -921,9 +988,20 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
         pack_stage(req)?;
     }
     let build = req.out.join("build-ios");
+    let mut build_args = build_ios_args(&req.out.join("gen"), &build);
+    if let Some(dir) = cargo_dir(runner, home) {
+        // A Finder-launched app's PATH has no cargo: the build script finds it first here.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path)))
+            .map_err(|e| Error::Build(format!("cannot make the PATH: {e}")))?;
+        build_args.splice(
+            0..0,
+            ["env".to_owned(), format!("PATH={}", path.to_string_lossy())],
+        );
+    }
     for args in [
-        build_ios_args(&req.out.join("gen"), &build),
-        package_ios_args(ios_version(), &build, delivery),
+        build_args,
+        package_ios_args(ios_version(), &build, &req.out, delivery),
     ] {
         runner
             .run(Stage::Build, &args)

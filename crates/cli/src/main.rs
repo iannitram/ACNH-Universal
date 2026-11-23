@@ -232,11 +232,16 @@ fn build(options: &Options) -> Result<i32> {
         })?,
         None => Os::current(),
     };
-    let out = options
-        .out
-        .clone()
-        .unwrap_or_else(|| repo_root().join("private").join("acnh"));
     let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
+    // The Mac and iPhone builds hold the recompiled game: by default they are made in the
+    // data root's `prepared/` folder, never in a git work tree.
+    let out = options.out.clone().unwrap_or_else(|| {
+        if matches!(target, Os::Mac | Os::Ios) {
+            AppDirs::new(&vars).data_root().join("prepared")
+        } else {
+            repo_root().join("private").join("acnh")
+        }
+    });
     let config_path = AppDirs::new(&vars).data_root().join("config.ini");
     let config = match std::fs::read_to_string(&config_path) {
         Ok(text) => acnh_core::config::Config::parse(&text)?,
