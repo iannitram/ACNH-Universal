@@ -39,6 +39,9 @@ pub enum Error {
     Hub(String),
     /// The configured relay could not be reached before play.
     RelayUnreachable,
+    /// The save sync server refused the user name or app password (HTTP 401 or 403). The
+    /// message never holds the password.
+    RelaySignIn,
     /// A local file operation failed.
     Io(String),
 }
@@ -61,6 +64,7 @@ impl Error {
             Error::Build(_) => "build",
             Error::Hub(_) => "hub",
             Error::RelayUnreachable => "relay_unreachable",
+            Error::RelaySignIn => "relay_sign_in",
             Error::Io(_) => "io",
         }
     }
@@ -88,6 +92,10 @@ impl fmt::Display for Error {
             Error::RelayUnreachable => write!(
                 f,
                 "save-relay could not be reached and the game was not started."
+            ),
+            Error::RelaySignIn => write!(
+                f,
+                "The save sync server refused the user name or app password: sign in again."
             ),
             Error::Io(m) => write!(f, "{m}"),
         }

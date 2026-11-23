@@ -16,6 +16,7 @@ fn codes_are_stable() {
         (Error::Saves("x".into()), "saves"),
         (Error::Build("x".into()), "build"),
         (Error::Hub("x".into()), "hub"),
+        (Error::RelaySignIn, "relay_sign_in"),
         (Error::Io("x".into()), "io"),
     ];
     for (err, code) in cases {

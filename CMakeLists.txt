@@ -466,6 +466,12 @@ elseif(IOS)
     if(NOT EXISTS "${NX_IOS_MOLTENVK}")
         message(FATAL_ERROR "MoltenVK not found at ${NX_IOS_MOLTENVK}: run tools/build_ios.sh <sdk>")
     endif()
+    # save-relay in the player (issue #172): the Rust runtime library, built by tools/build_ios.sh
+    # (cargo build -p acnh-runtime --release --target aarch64-apple-ios[-sim]), exports acnh_relay_before_game and
+    # acnh_relay_after_game (platform_mac.cpp calls them); the generic block below links it.
+    if(NOT NX_RUNTIME_ARCHIVE)
+        message(FATAL_ERROR "NX_RUNTIME_ARCHIVE is not set: run tools/build_ios.sh <sdk> (it builds libacnh_runtime.a)")
+    endif()
     add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp
                    runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp)
     set_target_properties(${NX_GAME} PROPERTIES
@@ -478,7 +484,8 @@ elseif(IOS)
         "$<LINK_LIBRARY:WHOLE_ARCHIVE,${NX_IOS_MOLTENVK}>"
         "-framework Metal" "-framework MetalKit" "-framework QuartzCore" "-framework CoreGraphics"
         "-framework CoreFoundation" "-framework Foundation" "-framework UIKit" "-framework IOSurface"
-        "-framework CoreVideo" "-framework GameController" "-framework AVFoundation")
+        "-framework CoreVideo" "-framework GameController" "-framework AVFoundation"
+        "-framework Security")  # Security: the Keychain holds the save sync app password (crates/runtime, apple_ios.rs)
     # iOS code signing refuses to load a library copied into Documents (runtime/src/game_folder.cpp): the game's
     # code is linked in, as the macOS default.
     target_link_libraries(${NX_GAME} PRIVATE ${NX_GAME_LIBS})
@@ -613,12 +620,15 @@ endif()
 set(NX_RUNTIME_ARCHIVE "" CACHE FILEPATH "Rust runtime static library")
 set(NX_RUNTIME_INCLUDE "" CACHE PATH "Directory containing cbindgen's acnh_runtime.h")
 if(NX_RUNTIME_ARCHIVE OR NX_RUNTIME_INCLUDE)
-    if(NOT EXISTS "${NX_RUNTIME_ARCHIVE}" OR NOT EXISTS "${NX_RUNTIME_INCLUDE}/acnh_runtime.h")
+    # The header is optional on iOS, whose player declares the two relay functions itself (platform_mac.cpp).
+    if(NOT EXISTS "${NX_RUNTIME_ARCHIVE}" OR (NOT IOS AND NOT EXISTS "${NX_RUNTIME_INCLUDE}/acnh_runtime.h"))
         message(FATAL_ERROR "NX_RUNTIME_ARCHIVE and NX_RUNTIME_INCLUDE must name built runtime artifacts")
     endif()
     add_library(acnh_runtime STATIC IMPORTED)
-    set_target_properties(acnh_runtime PROPERTIES IMPORTED_LOCATION "${NX_RUNTIME_ARCHIVE}"
-                          INTERFACE_INCLUDE_DIRECTORIES "${NX_RUNTIME_INCLUDE}")
+    set_target_properties(acnh_runtime PROPERTIES IMPORTED_LOCATION "${NX_RUNTIME_ARCHIVE}")
+    if(NX_RUNTIME_INCLUDE)
+        set_target_properties(acnh_runtime PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${NX_RUNTIME_INCLUDE}")
+    endif()
     target_link_libraries(${NX_GAME} PRIVATE acnh_runtime)
     if(UNIX)
         find_package(Threads REQUIRED)

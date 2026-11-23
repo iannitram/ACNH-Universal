@@ -195,6 +195,7 @@ fn map_resolve(keep: Option<Keep>) -> Option<Resolve> {
 fn map_err(err: save_relay::Error) -> Error {
     match err {
         save_relay::Error::Io(msg) => Error::Io(msg),
+        save_relay::Error::AuthFailed => Error::RelaySignIn,
         other => Error::Saves(other.to_string()),
     }
 }

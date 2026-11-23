@@ -11,7 +11,12 @@
 # .github/workflows/build-ios.yml: a static libMoltenVK.a from the Khronos release, and an SDL3 iOS CMake build.
 # This script follows that shape; no code is copied. MoltenVK is Apache-2.0, SDL3 zlib.
 #
-# Needs: Xcode, CMake, Ninja and the Vulkan headers (brew install vulkan-headers); NX_VULKAN_INCLUDE overrides.
+# It also builds the Rust runtime library (save-relay in the player, issue #172): cargo build -p acnh-runtime --release
+# --target aarch64-apple-ios (aarch64-apple-ios-sim for the simulator), and fails unless the SDL3 it built has the
+# GameController joystick driver (SDL_JOYSTICK_MFI), which the pads need.
+#
+# Needs: Xcode, CMake, Ninja, Rust with the iOS target (rustup target add aarch64-apple-ios) and the Vulkan headers
+# (brew install vulkan-headers); NX_VULKAN_INCLUDE overrides.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$PWD
@@ -73,6 +78,13 @@ if [ ! -f "$sdl_prefix/lib/cmake/SDL3/SDL3Config.cmake" ]; then
     cmake --install "$sdl_build"
 fi
 
+# Controllers on the iPad come through SDL3's GameController driver: refuse an SDL3 built without it.
+sdl_config=$(find "$sdl_build" "$sdl_prefix" -name SDL_build_config.h -print 2>/dev/null | head -n 1)
+if [ -z "$sdl_config" ] || ! grep -Eq '^[[:space:]]*#[[:space:]]*define[[:space:]]+SDL_JOYSTICK_MFI[[:space:]]+1' "$sdl_config"; then
+    echo "error: the iOS SDL3 build does not define SDL_JOYSTICK_MFI (${sdl_config:-no SDL_build_config.h found}); controllers would not work" >&2
+    exit 1
+fi
+
 # ---- MoltenVK (static libMoltenVK.a from KhronosGroup's all-platform release) -----------------------------------
 # MoltenVK-ios.tar has only the device slice (ios-arm64); the simulator slice is in MoltenVK-all.tar, so take both
 # from that one. The xcframework's static/ directory holds ios-arm64/libMoltenVK.a (device) and
@@ -101,6 +113,20 @@ fi
 mkdir -p "$mv_prefix/lib"
 cp "$mv_lib" "$mv_prefix/lib/libMoltenVK.a"
 
+# ---- the Rust runtime library (save-relay in the player) --------------------------------------------------------
+command -v cargo >/dev/null 2>&1 || { echo "error: cargo not found (install Rust: https://rustup.rs)" >&2; exit 1; }
+if [ "$sdk" = iphonesimulator ]; then rust_target=aarch64-apple-ios-sim; else rust_target=aarch64-apple-ios; fi
+if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed | grep -qx "$rust_target"; then
+    echo "error: the Rust target $rust_target is missing: rustup target add $rust_target" >&2
+    exit 1
+fi
+IPHONEOS_DEPLOYMENT_TARGET=15.0 cargo build -p acnh-runtime --release --target "$rust_target"
+cargo_target=${CARGO_TARGET_DIR:-$root/target}
+case "$cargo_target" in /*) ;; *) cargo_target=$root/$cargo_target ;; esac
+runtime_lib=$cargo_target/$rust_target/release/libacnh_runtime.a
+[ -f "$runtime_lib" ] || { echo "error: $runtime_lib was not built" >&2; exit 1; }
+runtime_header=$(find "$cargo_target/$rust_target/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
+
 # ---- the app ----------------------------------------------------------------------------------------------------
 cmake -S "$root" -B "$build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
@@ -108,6 +134,7 @@ cmake -S "$root" -B "$build" -G Ninja \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
     -DNX_GAME=acnh -DNX_GEN_DIR="$gen" -DNX_LAUNCHER=OFF -DNX_GAME_FROM_FOLDER=OFF \
     -DNX_VULKAN_INCLUDE="$vulkan" -DNX_IOS_MOLTENVK="$mv_prefix/lib/libMoltenVK.a" \
+    -DNX_RUNTIME_ARCHIVE="$runtime_lib" ${runtime_header:+-DNX_RUNTIME_INCLUDE="$(dirname "$runtime_header")"} \
     -DCMAKE_PREFIX_PATH="$sdl_prefix" -DSDL3_DIR="$sdl_prefix/lib/cmake/SDL3"
 cmake --build "$build" --target acnh --parallel "$jobs"
 
