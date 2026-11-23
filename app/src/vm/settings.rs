@@ -220,7 +220,7 @@ fn write_config(path: &Path, config: &Config) -> Result<()> {
         fs::create_dir_all(parent)
             .map_err(|error| Error::Io(format!("cannot create {}: {error}", parent.display())))?;
     }
-    fs::write(path, config.to_text())
+    acnh_core::platform::atomic_write(path, config.to_text().as_bytes())
         .map_err(|error| Error::Io(format!("cannot write {}: {error}", path.display())))
 }
 

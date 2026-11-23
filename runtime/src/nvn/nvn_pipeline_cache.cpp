@@ -1,10 +1,14 @@
-// A VkPipelineCache kept on disk (<data root>/pipelines_<vendor>_<device>.bin), and the cost of what the replay
+// A VkPipelineCache kept on disk (<data root>/pipelines_<vendor>_<device>_<uuid>.bin), and the cost of what the replay
 // creates on the fly. Pipelines are compiled the first time a draw needs them, inside the replay: the course's
-// stutters when new objects come in (16-42 ms replays on the RTX 3050). The driver checks the cache header itself
-// (vendor, device, driver build): a stale file is ignored. Saved every 600 presents when it grew.
+// stutters when new objects come in (16-42 ms replays on the RTX 3050). The blob's header is checked
+// here before the driver sees it (nvn_pipeline_cache_blob.h; idea from Timqt/d2r-android nvn_vulkan_pipeline_cache.inc,
+// MIT), and the file name carries the start of pipelineCacheUUID, so a file of an old driver is never opened. Saved
+// every 600 presents when it grew, to a .tmp file that is synced and then renamed over the old one.
 // NX_PIPELINE_CACHE=0: no cache (bisecting, or to measure first-run stutter).
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <vector>
 
 #include <atomic>
@@ -12,7 +16,14 @@
 #include <thread>
 #include <unordered_set>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "nvn_pipeline.h"
+#include "nvn_pipeline_cache_blob.h"
 #include "nvn_vk.h"
 #include "platform.h"
 
@@ -41,16 +52,31 @@ VkPipelineCache pipeline_cache() {
     if (const char* e = std::getenv("NX_PIPELINE_CACHE"); e && e[0] == '0') return VK_NULL_HANDLE;
     VkPhysicalDeviceProperties p{};
     p_vkGetPhysicalDeviceProperties(vk_physical(), &p);
+    uint32_t uuid4;
+    std::memcpy(&uuid4, p.pipelineCacheUUID, 4);
     char name[64];
-    std::snprintf(name, sizeof name, "/pipelines_%04x_%04x.bin", p.vendorID, p.deviceID);
+    std::snprintf(name, sizeof name, "/pipelines_%04x_%04x_%08x.bin", p.vendorID, p.deviceID, uuid4);
     g_path = plat::data_root() + name;
     std::vector<uint8_t> data;
     if (FILE* f = plat::fopen_utf8(g_path, "rb")) {
         plat::fseek64(f, 0, SEEK_END);
         int64_t n = plat::ftell64(f);
         plat::fseek64(f, 0, SEEK_SET);
-        if (n > 0) data.resize(size_t(n)), data.resize(std::fread(data.data(), 1, data.size(), f));
+        if (n > 0 && size_t(n) <= kPipelineCacheMaxBytes)
+            data.resize(size_t(n)), data.resize(std::fread(data.data(), 1, data.size(), f));
+        else if (n > 0)
+            log("pipeline cache: stale/corrupt header, starting empty (%lld bytes is over the cap)", (long long)n);
         std::fclose(f);
+    }
+    if (!data.empty() && !pipeline_cache_blob_valid(data.data(), data.size(), p.vendorID, p.deviceID, p.pipelineCacheUUID)) {
+        log("pipeline cache: stale/corrupt header, starting empty");
+        data.clear();
+    }
+    {  // the file of the name before the UUID was added is never read again
+        char old[64];
+        std::snprintf(old, sizeof old, "/pipelines_%04x_%04x.bin", p.vendorID, p.deviceID);
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::u8path(plat::data_root() + old), ec);
     }
     VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     ci.initialDataSize = data.size();
@@ -78,9 +104,20 @@ void pipeline_cache_save() {
                 std::string tmp = g_path + ".tmp";
                 if (FILE* f = plat::fopen_utf8(tmp, "wb")) {
                     bool ok = std::fwrite(data.data(), 1, n, f) == n;
+                    ok = std::fflush(f) == 0 && ok;
+#ifdef _WIN32
+                    ok = _commit(_fileno(f)) == 0 && ok;
+#else
+                    ok = fsync(fileno(f)) == 0 && ok;
+#endif
                     ok = std::fclose(f) == 0 && ok;
-                    std::remove(g_path.c_str());
-                    if (ok && std::rename(tmp.c_str(), g_path.c_str()) == 0) g_saved_size = n;
+                    if (ok) {  // rename replaces the old file in one step, on Windows too: no moment without a cache
+                        std::error_code ec;
+                        std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(g_path), ec);
+                        ok = !ec;
+                    }
+                    if (ok) g_saved_size = n;
+                    else std::remove(tmp.c_str());
                 }
             }
         }

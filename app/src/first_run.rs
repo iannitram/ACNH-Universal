@@ -288,7 +288,7 @@ pub(crate) fn device(dirs: &AppDirs) -> acnh_core::Result<String> {
         .unwrap_or_default()
         .as_nanos();
     let name = format!("device-{stamp:x}-{:x}", std::process::id());
-    std::fs::write(path, &name)?;
+    acnh_core::platform::atomic_write(&path, name.as_bytes())?;
     Ok(name)
 }
 fn save_launcher_values(dirs: &AppDirs, values: &[(&str, &str)]) -> acnh_core::Result<()> {
@@ -306,12 +306,8 @@ fn save_launcher_values(dirs: &AppDirs, values: &[(&str, &str)]) -> acnh_core::R
         }
         config.set(key, value);
     }
-    use std::io::Write;
     std::fs::create_dir_all(&dirs.config)?;
-    let mut replacement = tempfile::NamedTempFile::new_in(&dirs.config)?;
-    replacement.write_all(config.to_text().as_bytes())?;
-    replacement.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    acnh_core::platform::atomic_write(&path, config.to_text().as_bytes())
 }
 fn safe_error(error: acnh_core::Error, home: &Path) -> String {
     match error {

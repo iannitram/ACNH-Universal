@@ -38,7 +38,8 @@ void start_memory_guard() {
     const uint64_t start = footprint();
     const uint64_t available = os_proc_available_memory();
     const uint64_t margin = 256ull << 20;
-    uint64_t limit = start + (available > margin ? available - margin : 0);
+    // 0 means the process has no such limit (the iOS Simulator, Mac Catalyst): guard like the Mac does (8 GB).
+    uint64_t limit = available == 0 ? 8ull << 30 : start + (available > margin ? available - margin : 0);
     double gb = e ? std::atof(e) : 0.0;
     if (gb > 0) limit = uint64_t(gb * double(1ull << 30));
     else gb = double(limit) / double(1ull << 30);
