@@ -57,6 +57,7 @@ public class GameDownload extends Service {
     static final String DIR = "gamedata";
     private static final String CHANNEL = "download";
     private static final int NOTE = 1;
+    static final int DONE_NOTE = 2;  // the "ready" or "stopped" note, which outlives the service
     private static final int TRIES = 30;  // network errors in a row before it stops
 
     // What the home screen draws while it is open (read on its own thread; written here).
@@ -75,6 +76,11 @@ public class GameDownload extends Service {
     }
 
     static File gameDir(Context c) { return new File(c.getFilesDir(), DIR); }
+
+    // The downloaded game is complete only with its file list, which the download writes last.
+    static boolean downloaded(Context c) {
+        return new File(gameDir(c), "manifest.json").isFile() && new File(gameDir(c), "analysis/main.bin").isFile();
+    }
     static File partialDir(Context c) { return new File(c.getFilesDir(), DIR + ".partial"); }
 
     // Starts the service from the foreground (the home screen). Throws when Android refuses.
@@ -129,8 +135,12 @@ public class GameDownload extends Service {
         try { if (wake != null && wake.isHeld()) wake.release(); } catch (Exception ignored) {}
     }
 
+    // The app's launcher intent: brings the existing task (Home, or the game when it runs) to the front instead of
+    // stacking a new Home on a running game.
     private PendingIntent openHome() {
-        Intent open = new Intent(this, Home.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        if (open == null) open = new Intent(this, Home.class);
+        open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
         return PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
@@ -179,7 +189,7 @@ public class GameDownload extends Service {
                 .setStyle(new Notification.BigTextStyle().bigText(fail == null ? "Open the app to play." : fail))
                 .setAutoCancel(true)
                 .setContentIntent(openHome());
-        getSystemService(NotificationManager.class).notify(NOTE, b.build());
+        getSystemService(NotificationManager.class).notify(DONE_NOTE, b.build());
         stopSelf();
     }
 
@@ -229,6 +239,14 @@ public class GameDownload extends Service {
             } catch (Exception ignored) {
                 // an unreadable list: fetch everything again
             }
+        // Which version each partial file belongs to: one left from an older list is started over.
+        File startedList = new File(part, "started.txt");
+        Map<String, String> started = new HashMap<>();
+        if (startedList.isFile())
+            for (String l : new String(Files.readAllBytes(startedList.toPath()), StandardCharsets.UTF_8).split("\n")) {
+                int sp = l.lastIndexOf(' ');
+                if (sp > 0) started.put(l.substring(0, sp), l.substring(sp + 1).trim());
+            }
         File verifiedList = new File(part, "verified.txt");
         Set<String> verified = new HashSet<>();
         if (verifiedList.isFile())
@@ -240,12 +258,16 @@ public class GameDownload extends Service {
         for (Item it : items) {
             all += it.size;
             File old = new File(game, it.path);
-            if (it.sha.equals(installed.get(it.path)) && old.isFile() && old.length() == it.size) {
-                have += it.size;
-                continue;
+            boolean moved = verified.contains(it.path + " " + it.sha) && !new File(part, it.path).exists();
+            if ((it.sha.equals(installed.get(it.path)) || moved) && old.isFile() && old.length() == it.size) {
+                if (!moved) {
+                    have += it.size;
+                    continue;
+                }
             }
             fetch.add(it);
             File f = new File(part, it.path);
+            if (f.exists() && !it.sha.equals(started.get(it.path))) f.delete();
             long len = f.isFile() ? Math.min(f.length(), it.size) : 0;
             have += len;
             need += it.size - len;
@@ -267,6 +289,13 @@ public class GameDownload extends Service {
             File f = new File(part, it.path);
             String key = it.path + " " + it.sha;
             if (verified.contains(key) && f.isFile() && f.length() == it.size) continue;
+            File movedTo = new File(game, it.path);
+            if (verified.contains(key) && !f.exists() && movedTo.isFile() && movedTo.length() == it.size) continue;
+            if (!it.sha.equals(started.get(it.path)))
+                try (FileOutputStream o = new FileOutputStream(startedList, true)) {
+                    o.write((it.path + " " + it.sha + "\n").getBytes(StandardCharsets.UTF_8));
+                    started.put(it.path, it.sha);
+                }
             File parent = f.getParentFile();
             if (parent != null && !parent.isDirectory() && !parent.mkdirs()) throw new Fatal("cannot make " + parent);
             for (int attempt = 0; ; attempt++) {
@@ -289,6 +318,7 @@ public class GameDownload extends Service {
         new File(game, "manifest.json").delete();  // a half-updated folder is never taken for a finished one
         for (Item it : fetch) {
             File from = new File(part, it.path), to = new File(game, it.path);
+            if (!from.exists() && to.isFile() && to.length() == it.size) continue;  // moved by an earlier run
             File parent = to.getParentFile();
             if (parent != null && !parent.isDirectory() && !parent.mkdirs()) throw new Fatal("cannot make " + parent);
             if (to.exists() && !to.delete()) throw new Fatal("cannot replace " + to);
@@ -307,6 +337,10 @@ public class GameDownload extends Service {
             f.delete();
             have = 0;
         }
+        if (it.size == 0) {
+            if (!f.exists() && !f.createNewFile()) throw new Fatal("cannot make " + f);
+            return;
+        }
         int errors = 0;
         while (have < it.size) {
             if (Thread.interrupted()) throw new InterruptedException();
@@ -316,6 +350,7 @@ public class GameDownload extends Service {
             } catch (InterruptedException | Fatal e) {
                 throw e;
             } catch (Exception e) {
+                if (f.isFile() && f.length() > have) errors = 0;  // it was getting somewhere: a dropped connection
                 if (++errors >= TRIES) throw new Fatal("The download keeps failing (" + e.getMessage() + "). Open the app to try again.");
                 update("Waiting for the network (" + e.getMessage() + ")");
                 Thread.sleep(Math.min(60_000L, 2000L * errors));
@@ -346,12 +381,35 @@ public class GameDownload extends Service {
         while (true) {
             Network n = cm.getActiveNetwork();
             NetworkCapabilities caps = n == null ? null : cm.getNetworkCapabilities(n);
-            if (caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
-                return;
+            if (caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) && unmetered(caps)) return;
+            // A VPN reports itself; what counts is the network under it: Wi-Fi or Ethernet that is not metered.
+            if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+                for (Network other : cm.getAllNetworks()) {
+                    NetworkCapabilities o = cm.getNetworkCapabilities(other);
+                    if (o != null && !o.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && unmetered(o)
+                            && (o.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || o.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+                            && !anyCellular(cm))
+                        return;
+                }
             update(n == null ? "Waiting for the network" : "Waiting for Wi-Fi (the download never uses mobile data)");
             Thread.sleep(5000);
         }
+    }
+
+    private static boolean unmetered(NetworkCapabilities c) {
+        return c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                || (android.os.Build.VERSION.SDK_INT >= 30 && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_TEMPORARILY_NOT_METERED));
+    }
+
+    // True when the device's default route under a VPN could be mobile data (no Wi-Fi or Ethernet up).
+    private static boolean anyCellular(ConnectivityManager cm) {
+        for (Network other : cm.getAllNetworks()) {
+            NetworkCapabilities o = cm.getNetworkCapabilities(other);
+            if (o != null && (o.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || o.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+                    && o.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+                return false;
+        }
+        return true;
     }
 
     // Dropbox-API-Arg must be ASCII: anything else as \\uXXXX.

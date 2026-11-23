@@ -19,9 +19,11 @@ mkdir -p "$DEST.new"
 copy() { cp -c "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
 copy "$LIB" "$DEST.new/libacnh_game.so"
 for f in romfs.pak spirv.pak; do copy "$SRC/$f" "$DEST.new/$f"; done
+# mods/ (the pt-BR translation, the SpeedFix) is not staged: the APK carries them (tools/bundle_mods.sh).
 for d in analysis fonts aoc; do
   [ -d "$SRC/$d" ] || continue
-  (cd "$SRC" && find "$d" -type f ! -name .DS_Store) | while read -r f; do
+  # -L: Prepare links aoc/ (the DLC) to the game folder
+  (cd "$SRC" && find -L "$d" -type f ! -name .DS_Store) | while read -r f; do
     mkdir -p "$DEST.new/$(dirname "$f")"
     copy "$SRC/$f" "$DEST.new/$f"
   done

@@ -63,13 +63,17 @@ public class Home extends Activity {
         super.onCreate(state);
         String error = getIntent().getStringExtra("error");
         boolean ask = getIntent().getBooleanExtra("pick", false) || error != null;
-        String saved = ask ? "" : readSaved();
-        if (!saved.isEmpty() && hasPackage(new File(saved)) && canRead(saved)) {
+        if (ask) GameDownload.finished = false;  // "Change game folder" or an error: no automatic start
+        // While a download runs the game does not start by itself: leaving the game ends the app's process, and
+        // the download with it.
+        String saved = ask || GameDownload.running ? "" : readSaved();
+        if (!saved.isEmpty() && hasPackage(new File(saved)) && canRead(saved)
+                && (!saved.equals(GameDownload.gameDir(this).getAbsolutePath()) || GameDownload.downloaded(this))) {
             check(saved, true);  // the folder of last time: straight into the game
             return;
         }
         File downloaded = GameDownload.gameDir(this);
-        if (!ask && !GameDownload.running && hasPackage(downloaded)) {
+        if (!ask && !GameDownload.running && GameDownload.downloaded(this)) {
             check(downloaded.getAbsolutePath(), true);  // the game downloaded from Dropbox
             return;
         }
@@ -98,7 +102,17 @@ public class Home extends Activity {
 
     // The notification permission first (the download's progress shows there), then the sign-in or the download.
     private void download() {
-        if (GameDownload.running) return;
+        if (GameDownload.running) {
+            if (DropboxAuth.signedIn(this)) return;
+            // Still waiting on a sign-in the browser left: start a new one (it supersedes the old), same download.
+            try {
+                String url = DropboxAuth.start(this);
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+            } catch (Exception e) {
+                say(t("Dropbox sign-in could not start: ", "O login no Dropbox não começou: ") + e.getMessage(), true);
+            }
+            return;
+        }
         if (Build.VERSION.SDK_INT >= 33 && !askedNotifications
                 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             askedNotifications = true;
@@ -151,7 +165,7 @@ public class Home extends Activity {
             } else if (e != null) {
                 progress.setText(e);
                 progress.setVisibility(View.VISIBLE);
-            } else if (hasPackage(GameDownload.gameDir(this)) && GameDownload.finished) {
+            } else if (GameDownload.downloaded(this) && GameDownload.finished) {
                 GameDownload.finished = false;
                 progress.setVisibility(View.GONE);
                 check(GameDownload.gameDir(this).getAbsolutePath(), false);
@@ -237,8 +251,15 @@ public class Home extends Activity {
         progress.setPadding(0, dp(8), 0, 0);
         progress.setVisibility(View.GONE);
         box.addView(progress);
+        if (GameDownload.downloaded(this))
+            box.addView(button(t("Play the downloaded game", "Jogar o jogo baixado"), Color.rgb(90, 170, 90),
+                    v -> check(GameDownload.gameDir(this).getAbsolutePath(), false)));
         if (DropboxAuth.signedIn(this))
             box.addView(button(t("Sign out of Dropbox", "Sair do Dropbox"), Color.WHITE, v -> {
+                if (GameDownload.running) {
+                    say(t("Wait for the download to finish first.", "Espere o download terminar."), true);
+                    return;
+                }
                 DropboxAuth.signOut(this);
                 show(null);
             }));
@@ -357,6 +378,13 @@ public class Home extends Activity {
     private void check(final String folder, final boolean quiet) {
         if (busy) return;
         GameDownload.finished = false;
+        if (GameDownload.running) {
+            if (message == null) show(null);
+            say(t("Wait for the download to finish: leaving the game would stop it.",
+                    "Espere o download terminar: sair do jogo o interromperia."), true);
+            return;
+        }
+        ((android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE)).cancel(GameDownload.DONE_NOTE);
         if (!hasPackage(new File(folder))) {
             if (message == null) show(null);
             say(explain("missing") + "\n" + folder, true);

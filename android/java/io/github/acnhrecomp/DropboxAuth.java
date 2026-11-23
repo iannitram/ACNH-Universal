@@ -74,7 +74,7 @@ final class DropboxAuth {
         final String verifier = b64(v), state = b64(s);
         String challenge = b64(MessageDigest.getInstance("SHA-256").digest(verifier.getBytes(StandardCharsets.US_ASCII)));
         final ServerSocket server = new ServerSocket(PORT, 4, InetAddress.getByName("127.0.0.1"));
-        server.setSoTimeout(10 * 60 * 1000);  // ten minutes to sign in
+        server.setSoTimeout(15 * 60 * 1000);  // fifteen minutes to sign in
         waiting = server;
         final Context app = ctx.getApplicationContext();
         appContext = app;
@@ -103,8 +103,9 @@ final class DropboxAuth {
     // Answers requests until one carries the code (or an error) for this sign-in.
     private static String serve(Context app, ServerSocket server, String verifier, String state) throws Exception {
         while (true) {
-            try (Socket s = server.accept()) {
-                s.setSoTimeout(15000);
+            Socket s = server.accept();
+            try {
+                s.setSoTimeout(5000);
                 InputStream in = s.getInputStream();
                 String line = firstLine(in);
                 // Read the rest of the request (to the blank line): closing with it unread resets the connection,
@@ -114,13 +115,10 @@ final class DropboxAuth {
                 int q = line.indexOf('?'), sp = line.lastIndexOf(' ');
                 if (line.startsWith("GET ") && q > 0) query = line.substring(q + 1, sp > q ? sp : line.length());
                 String code = param(query, "code"), err = param(query, "error"), got = param(query, "state");
-                if (code == null && err == null) {  // a favicon or a stray request
-                    reply(s.getOutputStream(), 404, "");
+                if ((code == null && err == null) || !state.equals(got)) {
+                    // a favicon, a stray request, or an older sign-in's page reloaded: not this sign-in's answer
+                    reply(s.getOutputStream(), 404, page("Not this sign-in. Go back to ACNH Recomp."));
                     continue;
-                }
-                if (!state.equals(got)) {
-                    reply(s.getOutputStream(), 400, page("This sign-in is out of date. Go back to ACNH Recomp and try again."));
-                    return "the sign-in was out of date";
                 }
                 if (err != null) {
                     reply(s.getOutputStream(), 200, page("Dropbox sign-in was cancelled. Go back to ACNH Recomp."));
@@ -138,9 +136,13 @@ final class DropboxAuth {
                     error = e.getMessage() == null ? e.toString() : e.getMessage();
                 }
                 reply(s.getOutputStream(), 200, page(error == null
-                        ? "Signed in to Dropbox. Go back to ACNH Recomp: the download starts there."
+                        ? "Signed in to Dropbox. Go back to ACNH Recomp: the download is running there."
                         : "Dropbox sign-in failed: " + error));
                 return error;
+            } catch (java.net.SocketTimeoutException | java.net.SocketException e) {
+                // one bad connection (a preconnect that never sends): wait for the next
+            } finally {
+                try { s.close(); } catch (Exception ignored) {}
             }
         }
     }
@@ -213,7 +215,7 @@ final class DropboxAuth {
         appContext = c.getApplicationContext();
         SharedPreferences p = prefs(c);
         String refresh = p.getString("refresh", "");
-        if (refresh.isEmpty()) throw new Exception("not signed in to Dropbox");
+        if (refresh.isEmpty()) throw new GameDownload.Fatal("Not signed in to Dropbox. Tap Download to sign in.");
         String access = p.getString("access", "");
         if (!force && !access.isEmpty() && p.getLong("expires", 0) - System.currentTimeMillis() > 5 * 60 * 1000) return access;
         JSONObject t = token("grant_type=refresh_token&refresh_token=" + enc(refresh) + "&client_id=" + APP_KEY);
