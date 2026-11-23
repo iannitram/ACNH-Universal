@@ -245,6 +245,7 @@ fn late_setup_and_a_fully_cached_retry_consume_pending_reflow() {
         jobs: 0,
         source: None,
         fan_mods: Default::default(),
+        delivery: None,
     };
     for name in [
         ".prepare-tools.json",

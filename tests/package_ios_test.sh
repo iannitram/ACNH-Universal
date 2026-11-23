@@ -104,6 +104,17 @@ bash "$root/tools/check_release_files.sh" < "$work/outside.list" > /dev/null || 
 unzip -tq "$ipa2" > /dev/null || die "--game archive fails unzip -t"
 say "--game copies exactly analysis/, romfs.pak, spirv.pak, fonts/ and aoc/, read-only"
 
+# A non-empty file outside the five copied names (the prepared folder holds build and work folders) is not checked.
+extra=$work/decoy-extra
+make_decoy "$extra"
+mkdir -p "$extra/build-ios"
+printf 'x' > "$extra/build-ios/x"
+printf 'x' > "$extra/gen/main/table.cpp"
+printf 'x' > "$extra/.fan-mod-settings"
+env CI=1 bash "$script" extra "$build" --game "$extra" "$work/out-extra" > /dev/null
+[ -f "$work/out-extra/ACNH-Universal-extra.ipa" ] || die "a non-empty file outside the five names stopped the packaging"
+say "under CI only the five copied names are checked for empty files"
+
 # 3. Refusals: each writes nothing to the out folder and says why.
 bad=$work/decoy-bad
 make_decoy "$bad"
