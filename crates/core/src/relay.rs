@@ -374,6 +374,43 @@ pub fn finish_sign_in(
     transport: Arc<dyn Transport>,
     answer: &str,
 ) -> Result<()> {
+    finish_sign_in_cancellable(service, dirs, creds, transport, answer, &|| false)
+}
+
+/// A transport that stops answering once the person backed out, so a device-flow poll that keeps
+/// getting `authorization_pending` ends at its next request.
+struct Cancelling<'a> {
+    inner: &'a dyn Transport,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
+impl Transport for Cancelling<'_> {
+    fn send(
+        &self,
+        request: &save_relay::http::Request,
+    ) -> save_relay::Result<save_relay::http::Response> {
+        if (self.cancelled)() {
+            return Err(save_relay::Error::SignInFailed(CANCELLED.into()));
+        }
+        self.inner.send(request)
+    }
+}
+
+/// What a sign-in that was backed out of says.
+pub const CANCELLED: &str = "the sign-in was cancelled";
+
+/// `finish_sign_in`, ending early when `cancelled` turns true: the device-flow poll sleeps in
+/// short slices and checks it, every request checks it, and it is checked again before
+/// anything is written. A cancelled sign-in writes no config and no token, and deletes only its
+/// own pending code secret.
+pub fn finish_sign_in_cancellable(
+    service: Service,
+    dirs: &AppDirs,
+    creds: &dyn CredentialStore,
+    transport: Arc<dyn Transport>,
+    answer: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
     if !service.uses_oauth() {
         return Err(Error::Saves(
             "Nextcloud is set up with an app password, not a sign-in".into(),
@@ -387,6 +424,9 @@ pub fn finish_sign_in(
 
     if let Some(pending) = take_platform_sign_in(service)? {
         let client = platform_client(service, &clients);
+        if cancelled() {
+            return Err(Error::Saves(format!("sign-in failed: {CANCELLED}")));
+        }
         let tokens = match oauth::finish_platform_sign_in(
             provider,
             client,
@@ -406,6 +446,9 @@ pub fn finish_sign_in(
                 return Err(map_err(error));
             }
         };
+        if cancelled() {
+            return Err(Error::Saves(format!("sign-in failed: {CANCELLED}")));
+        }
         return finish_setup(
             service,
             tokens,
@@ -436,7 +479,25 @@ pub fn finish_sign_in(
         None
     };
     let client = code_client(service, &clients);
-    let finished = oauth::finish_code(provider, client, &pending, typed, &*transport, clock);
+    let guarded = Cancelling {
+        inner: &*transport,
+        cancelled,
+    };
+    let finished = oauth::finish_code_with_sleep(
+        provider,
+        client,
+        &pending,
+        typed,
+        &guarded,
+        clock,
+        &|secs| {
+            // Short slices, so backing out is noticed within a moment.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+            while std::time::Instant::now() < until && !cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        },
+    );
     if matches!(
         finished,
         Ok(_) | Err(save_relay::Error::ReauthNeeded(_) | save_relay::Error::SignInFailed(_))
@@ -444,6 +505,9 @@ pub fn finish_sign_in(
         creds.delete(&account).map_err(map_err)?;
     }
     let tokens = finished.map_err(map_err)?;
+    if cancelled() {
+        return Err(Error::Saves(format!("sign-in failed: {CANCELLED}")));
+    }
     let kind = if service == Service::Gdrive {
         "device"
     } else {

@@ -23,7 +23,15 @@ pub trait RelaySetup: Send + Sync {
         user: &str,
         app_password: &str,
     ) -> Result<Account, String>;
-    fn start_sign_in(&self, service: Service) -> Result<Prompt, String>;
+    /// Start a Google Drive or Dropbox sign-in. `cancelled` turns true when the person backed
+    /// out before it returned: nothing may be kept then (no listener, no pending state).
+    fn start_sign_in(
+        &self,
+        service: Service,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Prompt, String>;
+    /// The person backed out of a sign-in: let go of whatever it holds (the loopback port).
+    fn cancel_sign_in(&self);
     /// Wait for the sign-in that `start_sign_in` began. `answer` is the code Dropbox shows in
     /// Game Mode, else empty. `cancelled` turns true when the person backed out.
     fn finish_sign_in(
@@ -77,9 +85,10 @@ impl RelaySetup for Unavailable {
     fn setup_nextcloud(&self, _: &str, _: &str, _: &str) -> Result<Account, String> {
         Err("Save sync is not available here.".into())
     }
-    fn start_sign_in(&self, _: Service) -> Result<Prompt, String> {
+    fn start_sign_in(&self, _: Service, _: &dyn Fn() -> bool) -> Result<Prompt, String> {
         Err("Save sync is not available here.".into())
     }
+    fn cancel_sign_in(&self) {}
     fn finish_sign_in(&self, _: Service, _: &str, _: &dyn Fn() -> bool) -> Result<Account, String> {
         Err("Save sync is not available here.".into())
     }
@@ -126,6 +135,7 @@ impl RelayRunner {
         self.generation += 1;
         self.cancel.store(true, Ordering::SeqCst);
         if request == Request::Cancel {
+            self.setup.cancel_sign_in();
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -133,29 +143,22 @@ impl RelayRunner {
         let generation = self.generation;
         let setup = Arc::clone(&self.setup);
         let sender = self.sender.clone();
-        let had_account = setup.account().is_some();
         thread::spawn(move || {
-            let event = match request {
-                Request::Nextcloud {
-                    server,
-                    user,
-                    password,
-                } => Event::Connected(setup.setup_nextcloud(&server, &user, &password)),
-                Request::StartSignIn(service) => Event::SignInStarted(setup.start_sign_in(service)),
-                Request::FinishSignIn(service, answer) => {
-                    Event::SignedIn(
+            let event =
+                match request {
+                    Request::Nextcloud {
+                        server,
+                        user,
+                        password,
+                    } => Event::Connected(setup.setup_nextcloud(&server, &user, &password)),
+                    Request::StartSignIn(service) => Event::SignInStarted(
+                        setup.start_sign_in(service, &|| cancel.load(Ordering::SeqCst)),
+                    ),
+                    Request::FinishSignIn(service, answer) => Event::SignedIn(
                         setup.finish_sign_in(service, &answer, &|| cancel.load(Ordering::SeqCst)),
-                    )
-                }
-                Request::Cancel => return,
-            };
-            let set_up = matches!(&event, Event::Connected(Ok(_)) | Event::SignedIn(Ok(_)));
-            if set_up && cancel.load(Ordering::SeqCst) && !had_account {
-                // Backed out, but the work finished anyway: leave save sync off, as the
-                // person chose.
-                let _ = setup.forget();
-                return;
-            }
+                    ),
+                    Request::Cancel => return,
+                };
             let _ = sender.send((generation, event));
         });
     }
@@ -306,6 +309,8 @@ mod system {
             "Could not reach the server. Check the address and your connection.".into()
         } else if text.contains("credential store") {
             "The system password store could not be used.".into()
+        } else if text.contains(acnh_core::relay::CANCELLED) {
+            "The sign-in was cancelled.".into()
         } else if let Some((_, rest)) = text.split_once("sign-in failed: ") {
             format!("The sign-in did not finish: {rest}")
         } else {
@@ -346,7 +351,11 @@ You can close this tab and go back to ACNH Universal.</p>";
                 .ok_or_else(|| "Save sync could not be set up.".into())
         }
 
-        fn start_sign_in(&self, service: Service) -> Result<Prompt, String> {
+        fn start_sign_in(
+            &self,
+            service: Service,
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<Prompt, String> {
             let (creds, transport) = (self.open)();
             let game_mode = (self.game_mode)();
             // The browser comes back to this app on a loopback address: listen before opening.
@@ -364,6 +373,10 @@ You can close this tab and go back to ACNH Universal.</p>";
                 transport,
             )
             .map_err(|error| plain_error(&error))?;
+            if cancelled() {
+                // Backed out while this ran: the listener is dropped here, not kept.
+                return Err("The sign-in was cancelled.".into());
+            }
             let browser = !game_mode && (self.open_browser)(&prompt.url);
             *self
                 .listener
@@ -375,6 +388,12 @@ You can close this tab and go back to ACNH Universal.</p>";
                 needs_code: game_mode && service == Service::Dropbox,
                 browser,
             })
+        }
+
+        fn cancel_sign_in(&self) {
+            if let Ok(mut listener) = self.listener.lock() {
+                *listener = None;
+            }
         }
 
         fn finish_sign_in(
@@ -396,12 +415,13 @@ You can close this tab and go back to ACNH Universal.</p>";
             if cancelled() {
                 return Err("The sign-in was cancelled.".into());
             }
-            acnh_core::relay::finish_sign_in(
+            acnh_core::relay::finish_sign_in_cancellable(
                 relay_service(service),
                 &self.dirs,
                 &*creds,
                 transport,
                 &answer,
+                cancelled,
             )
             .map_err(|error| plain_error(&error))?;
             self.account_of()
@@ -465,25 +485,70 @@ You can close this tab and go back to ACNH Universal.</p>";
     }
 }
 
+/// What the guided page draws: the first run's steps and Settings' save sync pages both. The
+/// window only copies this onto the page, so every choice of what to show is tested here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageView {
+    pub heading: String,
+    pub title: String,
+    pub options: Vec<String>,
+    /// Which of `options` has focus (a key of the keyboard while it is open).
+    pub focus: usize,
+    pub busy: bool,
+    pub message: String,
+    pub cancel_available: bool,
+    pub keypad: bool,
+    pub columns: usize,
+    pub editor: bool,
+    pub progress: i32,
+}
+
+/// The save sync pages as Settings draws them.
+pub fn flow_page(flow: &RelaySetupVm) -> PageView {
+    PageView {
+        heading: "Save sync".into(),
+        title: flow.title(),
+        options: flow.options(),
+        focus: flow.focus_index(),
+        busy: false,
+        message: flow.message.clone(),
+        cancel_available: flow.busy(),
+        keypad: flow.keyboard_open(),
+        columns: crate::vm::text_entry::COLUMNS,
+        editor: flow.keyboard_open(),
+        progress: -1,
+    }
+}
+
 /// The save sync rows of Settings with the work they start: Sign in again opens the setup
-/// pages, Turn off save sync forgets the account.
+/// pages, Turn off save sync forgets the account (on a thread of its own, since the credential
+/// store may be slow).
 pub struct RelaySettings {
     pub vm: crate::vm::settings::SettingsRelay,
     runner: RelayRunner,
+    forgetting: bool,
+    forget_sender: Sender<Result<(), String>>,
+    forget_receiver: Receiver<Result<(), String>>,
+    changed: bool,
 }
 
 impl RelaySettings {
     pub fn new(setup: Arc<dyn RelaySetup>) -> Self {
         let vm = crate::vm::settings::SettingsRelay::new(setup.available(), setup.account());
+        let (forget_sender, forget_receiver) = mpsc::channel();
         Self {
             vm,
             runner: RelayRunner::new(setup),
+            forgetting: false,
+            forget_sender,
+            forget_receiver,
+            changed: false,
         }
     }
 
     /// Read the account again (a setup outside the app is seen on the next visit).
     pub fn refresh(&mut self) {
-        if self.vm.flow.is_none() {
+        if self.vm.flow.is_none() && !self.forgetting {
             self.vm.account = self.runner.setup().account();
         }
         self.vm.confirming_off = false;
@@ -493,14 +558,27 @@ impl RelaySettings {
         self.vm.flow.is_some()
     }
 
+    /// The sign-in pages as drawn, while they are open.
+    pub fn page(&self) -> Option<PageView> {
+        self.vm.flow.as_ref().map(flow_page)
+    }
+
+    /// Whether the account was set up, changed or turned off since the last call: the Continue
+    /// page checks save sync again.
+    pub fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
+    }
+
     pub fn press_sign_in(&mut self) {
-        self.vm.open_sign_in();
+        if !self.forgetting {
+            self.vm.open_sign_in();
+        }
     }
 
     /// The first press asks, the second turns save sync off: `relay::forget`, after which this
-    /// device plays without syncing.
+    /// device plays without syncing. The answer comes back through `pump`.
     pub fn press_turn_off(&mut self) {
-        if self.vm.account.is_none() {
+        if self.vm.account.is_none() || self.forgetting {
             return;
         }
         if !self.vm.confirming_off {
@@ -508,17 +586,25 @@ impl RelaySettings {
             return;
         }
         self.vm.confirming_off = false;
-        match self.runner.setup().forget() {
-            Ok(()) => {
-                self.vm.account = None;
-                self.vm.message = "Save sync is off. This device plays without syncing.".into();
-            }
-            Err(reason) => self.vm.message = reason,
-        }
+        self.forgetting = true;
+        self.vm.message = "Turning off save sync…".into();
+        let setup = Arc::clone(self.runner.setup());
+        let sender = self.forget_sender.clone();
+        thread::spawn(move || {
+            let _ = sender.send(setup.forget());
+        });
     }
 
     pub fn cancel_confirm(&mut self) {
         self.vm.confirming_off = false;
+    }
+
+    fn apply(&mut self, outcome: Outcome) {
+        let was = self.vm.account.clone();
+        self.vm.flow_outcome(outcome);
+        if self.vm.account != was {
+            self.changed = true;
+        }
     }
 
     fn step(&mut self, act: impl FnOnce(&mut RelaySetupVm) -> Outcome) {
@@ -527,7 +613,7 @@ impl RelaySettings {
         };
         let outcome = act(flow);
         self.runner.dispatch(flow);
-        self.vm.flow_outcome(outcome);
+        self.apply(outcome);
     }
 
     pub fn nav(&mut self, nav: crate::vm::Nav) {
@@ -549,13 +635,26 @@ impl RelaySettings {
 
     /// Take in what finished; true when the page changed.
     pub fn pump(&mut self) -> bool {
+        let mut changed = false;
+        if let Ok(result) = self.forget_receiver.try_recv() {
+            self.forgetting = false;
+            changed = true;
+            match result {
+                Ok(()) => {
+                    self.vm.account = None;
+                    self.changed = true;
+                    self.vm.message = "Save sync is off. This device plays without syncing.".into();
+                }
+                Err(reason) => self.vm.message = reason,
+            }
+        }
         let Some(flow) = self.vm.flow.as_mut() else {
-            return false;
+            return changed;
         };
         let Some(outcome) = self.runner.pump(flow) else {
-            return false;
+            return changed;
         };
-        self.vm.flow_outcome(outcome);
+        self.apply(outcome);
         true
     }
 }
@@ -647,9 +746,17 @@ pub mod fake {
             Ok(account)
         }
 
-        fn start_sign_in(&self, service: Service) -> Result<Prompt, String> {
+        fn start_sign_in(
+            &self,
+            service: Service,
+            _cancelled: &dyn Fn() -> bool,
+        ) -> Result<Prompt, String> {
             self.note(format!("start {}", service.label()));
             Ok(self.prompt.clone())
+        }
+
+        fn cancel_sign_in(&self) {
+            self.note("cancel".into());
         }
 
         fn finish_sign_in(

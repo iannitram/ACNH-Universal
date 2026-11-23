@@ -477,7 +477,14 @@ impl ContinuePageVm {
     }
 
     pub fn begin_status(&mut self) -> bool {
-        if matches!(self.state, ContinueState::Ready | ContinueState::NoIsland) {
+        if matches!(
+            self.state,
+            ContinueState::Ready
+                | ContinueState::NoIsland
+                | ContinueState::SyncOff
+                | ContinueState::RelayNewer
+                | ContinueState::LocalNewer
+        ) {
             self.state = ContinueState::CheckingStatus;
             true
         } else {

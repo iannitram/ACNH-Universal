@@ -14,23 +14,15 @@ pub enum HintAction {
     Menu = 3,
 }
 
-/// The glyph file for a prompt, or `None` where the prompt is words (a keyboard) or "Tap".
-pub fn glyph(device: InputDevice, action: HintAction) -> Option<String> {
-    let set = match device {
-        InputDevice::Keyboard | InputDevice::Touch => return None,
-        InputDevice::Generic => "generic",
-        InputDevice::Xbox => "xbox",
-        InputDevice::PlayStation => "playstation",
-        InputDevice::Switch => "switch",
-        InputDevice::SteamDeck => "deck",
-    };
-    let kind = match action {
-        HintAction::Move => "dpad",
-        HintAction::Select => "south",
-        HintAction::Back => "east",
-        HintAction::Menu => "menu",
-    };
-    Some(format!("{set}-{kind}.svg"))
+/// Which picture of `ui/hints.slint`'s table a prompt is drawn with, or `None` where the prompt
+/// is words (a keyboard) or "Tap a control". The Slint table is the one the window reads; this
+/// is the row and column it picks with (`(device - 2) * 4 + action`), and the tests look the
+/// file up in that table itself.
+pub fn glyph_index(device: InputDevice, action: HintAction) -> Option<usize> {
+    match device {
+        InputDevice::Keyboard | InputDevice::Touch => None,
+        other => Some((other as usize - 2) * 4 + action as usize),
+    }
 }
 
 /// The prompts of a page and what each does, for the page's current state. `editor` is the
@@ -60,6 +52,19 @@ pub fn relay_prompts(editor: bool, device: InputDevice) -> Vec<(HintAction, &'st
 mod tests {
     use super::*;
     use crate::input::{DeviceEvent, Devices};
+
+    /// The images `ui/hints.slint` draws from, in its own order.
+    fn ui_table() -> Vec<String> {
+        include_str!("../../ui/hints.slint")
+            .split("@image-url(\"glyphs/")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap().to_owned())
+            .collect()
+    }
+
+    fn glyph(device: InputDevice, action: HintAction) -> Option<String> {
+        glyph_index(device, action).map(|index| ui_table()[index].clone())
+    }
 
     fn pad(id: usize, vendor: u16, product: u16, name: &str) -> DeviceEvent {
         DeviceEvent::Connected {
@@ -117,39 +122,32 @@ mod tests {
         assert_eq!(editor[2].1, "Leave editor");
         assert_eq!(relay_prompts(true, InputDevice::Keyboard)[1].1, "Done");
         assert_eq!(relay_prompts(false, InputDevice::Xbox)[2].1, "Back");
-    }
-
-    /// `ui/hints.slint` draws image `(device - 2) * 4 + action`: its table must hold the file
-    /// this module names, for every set and every action, and the page's words must match.
-    #[test]
-    fn the_slint_glyph_table_matches_this_one() {
-        let slint = include_str!("../../ui/hints.slint");
-        let names: Vec<&str> = slint
-            .split("@image-url(\"glyphs/")
-            .skip(1)
-            .map(|rest| rest.split('"').next().unwrap())
-            .collect();
-        assert_eq!(names.len(), 20);
-        for device in [
-            InputDevice::Generic,
-            InputDevice::Xbox,
-            InputDevice::PlayStation,
-            InputDevice::Switch,
-            InputDevice::SteamDeck,
-        ] {
-            for action in [
-                HintAction::Move,
-                HintAction::Select,
-                HintAction::Back,
-                HintAction::Menu,
-            ] {
-                let index = (device as usize - 2) * 4 + action as usize;
-                assert_eq!(names[index], glyph(device, action).unwrap());
-            }
-        }
         let page = include_str!("../../ui/first_run.slint");
         for words in ["Press key", "Leave editor", "Done"] {
             assert!(page.contains(words), "{words}");
+        }
+    }
+
+    /// Every set and action of the window's own table names its own set's picture.
+    #[test]
+    fn every_entry_of_the_window_table_is_the_right_set_and_action() {
+        let table = ui_table();
+        assert_eq!(table.len(), 20);
+        for (device, set) in [
+            (InputDevice::Generic, "generic"),
+            (InputDevice::Xbox, "xbox"),
+            (InputDevice::PlayStation, "playstation"),
+            (InputDevice::Switch, "switch"),
+            (InputDevice::SteamDeck, "deck"),
+        ] {
+            for (action, kind) in [
+                (HintAction::Move, "dpad"),
+                (HintAction::Select, "south"),
+                (HintAction::Back, "east"),
+                (HintAction::Menu, "menu"),
+            ] {
+                assert_eq!(glyph(device, action).unwrap(), format!("{set}-{kind}.svg"));
+            }
         }
     }
 }

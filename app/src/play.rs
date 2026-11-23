@@ -211,6 +211,11 @@ impl Session {
         session
     }
 
+    /// Check save sync again (Settings set it up, signed in again or turned it off).
+    pub fn recheck_status(&mut self) {
+        self.check_status();
+    }
+
     fn check_status(&mut self) {
         if self.vm.begin_status() {
             let runner = self.runner.clone();

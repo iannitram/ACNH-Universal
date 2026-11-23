@@ -205,7 +205,7 @@ impl TextEntry {
                 } else {
                     Layer::Upper
                 };
-                self.focus = self.focus.min(self.keys().len() - 1);
+                self.focus_on(Key::Shift);
             }
             Key::Layers => {
                 self.layer = if self.layer == Layer::Symbols {
@@ -213,12 +213,20 @@ impl TextEntry {
                 } else {
                     Layer::Symbols
                 };
-                self.focus = self.focus.min(self.keys().len() - 1);
+                self.focus_on(Key::Layers);
             }
             Key::Done => return Outcome::Done,
             Key::Cancel => return Outcome::Leave,
         }
         Outcome::Editing
+    }
+
+    /// Keep focus on `key` after the layer changed (the keys moved): a second Accept switches
+    /// back instead of landing on another key.
+    fn focus_on(&mut self, key: Key) {
+        if let Some(at) = self.keys().iter().position(|k| *k == key) {
+            self.focus = at;
+        }
     }
 
     /// A typed character (a physical keyboard, or a key of the grid). Control characters are
@@ -307,6 +315,26 @@ mod tests {
         let delete = entry.keys().iter().position(|k| *k == Key::Delete).unwrap();
         entry.press(delete);
         assert_eq!(entry.clone().take(), "alexQ:");
+    }
+
+    #[test]
+    fn focus_stays_on_the_layout_key_so_a_second_press_switches_back() {
+        let mut entry = TextEntry::new("User", "keep", false);
+        let layers = entry.keys().iter().position(|k| *k == Key::Layers).unwrap();
+        entry.handle(Nav::Up);
+        entry.focus = layers;
+        assert_eq!(entry.handle(Nav::Accept), Outcome::Editing);
+        assert_eq!(entry.layer(), Layer::Symbols);
+        assert_eq!(entry.keys()[entry.focus()], Key::Layers);
+        assert_eq!(entry.handle(Nav::Accept), Outcome::Editing);
+        assert_eq!(entry.layer(), Layer::Lower);
+        assert_eq!(entry.keys()[entry.focus()], Key::Layers);
+        let shift = entry.keys().iter().position(|k| *k == Key::Shift).unwrap();
+        entry.focus = shift;
+        entry.handle(Nav::Accept);
+        assert_eq!(entry.keys()[entry.focus()], Key::Shift);
+        assert_eq!(entry.handle(Nav::Accept), Outcome::Editing);
+        assert_eq!(entry.clone().take(), "keep");
     }
 
     #[test]

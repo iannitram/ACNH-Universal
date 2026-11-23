@@ -4,13 +4,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use acnh_app::first_run::{system_relay_setup, FirstRun};
+use acnh_app::first_run::{route_text, system_relay_setup, FirstRun};
 use acnh_app::input::{key_nav, poll_nav, DeviceEvent, Devices, Stick};
 use acnh_app::play::{Player, Runner, Session};
-use acnh_app::relay_setup::RelaySettings;
+use acnh_app::relay_setup::{PageView, RelaySettings};
 use acnh_app::ui::{from_slint, to_slint};
 use acnh_app::vm::fleet::FleetVm;
-use acnh_app::vm::relay_setup::RelaySetupVm;
 use acnh_app::vm::saves::SavesVm;
 use acnh_app::vm::settings::{move_in, settings_rows, RelayRows, SettingsFocus, SettingsVm};
 use acnh_app::vm::{AboutVm, ContinuePageVm, Nav};
@@ -273,57 +272,12 @@ fn render_first_run(window: &Weak<MainWindow>, first: &mut FirstRun) {
             Err(_) => first.vm.message = "Could not save setup state.".into(),
         }
     }
-    let options = first.vm.options();
-    let title = format!("Step {} of 6\n{}", first.vm.step_number(), first.vm.title());
-    let relay_working =
-        first.vm.step == acnh_app::vm::first_run::Step::Relay && first.vm.relay.busy();
-    let progress = if first.vm.step == acnh_app::vm::first_run::Step::GetBuild {
-        first
-            .vm
-            .stage
-            .and_then(|stage| acnh_core::recipe::STAGES.iter().position(|s| *s == stage))
-            .map(|n| (n * 100 / 7) as i32)
-            .unwrap_or(0)
-    } else {
-        -1
-    };
-    draw_page(
-        &window,
-        Page {
-            heading: "Guided setup",
-            title: &title,
-            options,
-            focus: first.vm.focus,
-            busy: first.vm.busy,
-            message: &first.vm.message,
-            cancel_available: first.can_cancel() || relay_working,
-            keypad: first.vm.keypad_open(),
-            columns: first.vm.columns(),
-            editor: first.vm.step == acnh_app::vm::first_run::Step::Relay
-                && first.vm.relay.keyboard_open(),
-            progress,
-        },
-    );
+    draw_page(&window, first.page());
 }
 
-/// What the guided page shows: the first run's steps and Settings' save sync pages both.
-struct Page<'a> {
-    heading: &'a str,
-    title: &'a str,
-    options: Vec<String>,
-    focus: usize,
-    busy: bool,
-    message: &'a str,
-    cancel_available: bool,
-    keypad: bool,
-    columns: usize,
-    editor: bool,
-    progress: i32,
-}
-
-fn draw_page(window: &MainWindow, page: Page) {
-    window.set_first_run_heading(page.heading.into());
-    window.set_first_run_title(page.title.into());
+fn draw_page(window: &MainWindow, page: PageView) {
+    window.set_first_run_heading(page.heading.as_str().into());
+    window.set_first_run_title(page.title.as_str().into());
     window.set_first_run_choice(
         page.options
             .get(page.focus)
@@ -337,7 +291,7 @@ fn draw_page(window: &MainWindow, page: Page) {
         format!("{} of {}", page.focus + 1, page.options.len()).into()
     });
     window.set_first_run_busy(page.busy);
-    window.set_first_run_message(page.message.into());
+    window.set_first_run_message(page.message.as_str().into());
     window.set_first_run_cancel_available(page.cancel_available);
     window.set_first_run_keypad(page.keypad);
     window.set_first_run_columns(page.columns as i32);
@@ -357,25 +311,14 @@ fn show_relay_settings(window: &MainWindow, relay: &RelaySettings) {
     window.set_settings_relay_has_off(vm.account.is_some());
     window.set_settings_relay_off(vm.turn_off_label().into());
     window.set_settings_relay_message(vm.message.as_str().into());
-    let flow: Option<&RelaySetupVm> = vm.flow.as_ref().filter(|_| !window.get_first_run_open());
-    window.set_relay_flow_open(flow.is_some());
-    if let Some(flow) = flow {
-        draw_page(
-            window,
-            Page {
-                heading: "Save sync",
-                title: &flow.title(),
-                options: flow.options(),
-                focus: flow.focus,
-                busy: false,
-                message: &flow.message,
-                cancel_available: flow.busy(),
-                keypad: flow.keyboard_open(),
-                columns: acnh_app::vm::text_entry::COLUMNS,
-                editor: flow.keyboard_open(),
-                progress: -1,
-            },
-        );
+    // A row that went away (Turn off save sync) must not keep the focus.
+    if vm.account.is_none() && window.get_settings_focus() == SettingsControl::RelayOff {
+        window.set_settings_focus(SettingsControl::RelaySignIn);
+    }
+    let page = relay.page().filter(|_| !window.get_first_run_open());
+    window.set_relay_flow_open(page.is_some());
+    if let Some(page) = page {
+        draw_page(window, page);
     }
 }
 
@@ -579,13 +522,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(window) = weak.upgrade() {
                 window.set_input_device(devices.borrow().current() as i32);
             }
-            if weak.upgrade().is_some_and(|w| w.get_first_run_open()) {
+            // A text field takes its keys first: letters and digits, Space, Backspace, Enter
+            // and Esc, before the controller map sees them.
+            let first_open = weak.upgrade().is_some_and(|w| w.get_first_run_open());
+            {
                 let mut first = first.borrow_mut();
-                // In a text field Space, Backspace, Enter and Esc are the field's keys.
-                if first.text_key(&text) {
-                    render_first_run(&weak, &mut first);
+                let mut relay = relay.borrow_mut();
+                if route_text(&mut first, first_open, &mut relay, &text) {
+                    if first_open {
+                        render_first_run(&weak, &mut first);
+                    } else if let Some(window) = weak.upgrade() {
+                        show_relay_settings(&window, &relay);
+                    }
                     return true;
                 }
+            }
+            if first_open {
+                let mut first = first.borrow_mut();
                 if first.vm.step == acnh_app::vm::first_run::Step::Pair && !first.vm.busy {
                     if text.starts_with(char::from(slint::platform::Key::Backspace)) {
                         first.vm.activate(10);
@@ -626,12 +579,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let mut session = session.borrow_mut();
             let mut relay = relay.borrow_mut();
-            if relay.flow_open() && relay.text_key(&text) {
-                if let Some(window) = weak.upgrade() {
-                    show_relay_settings(&window, &relay);
-                }
-                return true;
-            }
             navigate(&weak, &mut session, &mut relay, nav);
             if let Some(window) = weak.upgrade() {
                 show_relay_settings(&window, &relay);
@@ -684,6 +631,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             relay.refresh();
         }
         let relay_changed = relay.pump();
+        if relay.take_changed() {
+            // Settings set save sync up or turned it off: Continue checks it again.
+            session.recheck_status();
+        }
         if (settings_open != was_settings_open
             || relay_changed
             || (!navs.is_empty() && !first_open))

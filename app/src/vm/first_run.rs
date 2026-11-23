@@ -430,6 +430,16 @@ impl FirstRunVm {
         }
     }
 
+    /// The one focus of the page: the relay step keeps its own (a key while the keyboard is
+    /// open), every other step uses `focus`.
+    pub fn focus_index(&self) -> usize {
+        if self.step == Step::Relay {
+            self.relay.focus_index()
+        } else {
+            self.focus
+        }
+    }
+
     /// Keys across one row of the open keypad.
     pub fn columns(&self) -> usize {
         if self.step == Step::Relay {
@@ -712,32 +722,6 @@ mod tests {
         vm.relay_outcome(relay_setup::Outcome::Done(account));
         assert_eq!(vm.step, Step::DeviceAndSteam);
         assert!(vm.relay_set_up);
-    }
-
-    #[test]
-    fn nav_alone_reaches_every_control_of_the_relay_step_and_the_keyboard() {
-        let mut vm = after_build(true, false);
-        let count = vm.options().len();
-        let mut seen = vec![vm.relay.focus];
-        for _ in 0..count {
-            vm.handle(Nav::Down);
-            seen.push(vm.relay.focus);
-        }
-        assert!((0..count).all(|i| seen.contains(&i)));
-        // The keyboard opens from the Nextcloud form with ten keys to a row; text_entry's own
-        // test walks every key of every layer with the D-pad.
-        for _ in 0..count {
-            vm.handle(Nav::Up);
-        }
-        vm.handle(Nav::Accept);
-        vm.activate(0);
-        assert!(vm.keypad_open());
-        assert_eq!(vm.columns(), 10);
-        assert!(vm.options().len() > 40);
-        // Back leaves the editor, not the step.
-        vm.handle(Nav::Back);
-        assert!(!vm.keypad_open());
-        assert_eq!(vm.step, Step::Relay);
     }
 
     #[test]

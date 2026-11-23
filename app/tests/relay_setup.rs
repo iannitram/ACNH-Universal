@@ -6,7 +6,7 @@
 #[path = "../../crates/cli/tests/support/fake_dav.rs"]
 mod fake_dav;
 
-use acnh_app::first_run::FirstRun;
+use acnh_app::first_run::{route_text, FirstRun};
 use acnh_app::play::{Runner, Session};
 use acnh_app::relay::{choose, opened_each_step, SharedRelay};
 use acnh_app::relay_setup::fake::FakeSetup;
@@ -32,6 +32,19 @@ use std::time::{Duration, Instant};
 
 const PASSWORD: &str = "app-password";
 const WRONG: &str = "Wr0ng-Passw0rd";
+
+/// Pump Settings until Turn off save sync has been answered.
+fn settle_off(settings: &mut RelaySettings) {
+    let started = Instant::now();
+    while settings.vm.account.is_some() {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "turn off never finished"
+        );
+        settings.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
 
 fn vars() -> Vars {
     let root = PathBuf::from("/fake");
@@ -367,8 +380,10 @@ fn settings_shows_the_account_signs_in_again_and_turns_off() {
     settings.press_turn_off();
     assert!(settings.vm.confirming_off);
     assert!(settings.vm.account.is_some());
+    settings.take_changed();
     settings.press_turn_off();
-    assert!(settings.vm.account.is_none());
+    settle_off(&mut settings);
+    assert!(settings.take_changed(), "Continue checks save sync again");
     assert!(fake.account().is_none());
     assert_eq!(
         settings.vm.summary(),
@@ -539,7 +554,7 @@ fn turn_off_brings_open_back_to_none_and_the_next_play_starts_the_game_without_s
     );
     settings.press_turn_off();
     settings.press_turn_off();
-    assert!(settings.vm.account.is_none());
+    settle_off(&mut settings);
 
     let transport: Arc<dyn Transport> = machine.dav.clone();
     assert!(
@@ -600,4 +615,160 @@ fn turn_off_brings_open_back_to_none_and_the_next_play_starts_the_game_without_s
 fn the_service_names_are_the_ones_the_brief_uses() {
     let labels: Vec<_> = Service::ALL.iter().map(|s| s.label()).collect();
     assert_eq!(labels, ["Nextcloud", "Google Drive", "Dropbox"]);
+}
+
+#[test]
+fn the_relay_step_draws_its_own_focus_and_messages() {
+    let fake = FakeSetup::new(PASSWORD, google_prompt());
+    let mut first = first_run_at_the_relay_step(fake);
+    assert_eq!(first.page().focus, 0);
+    first.nav(Nav::Down);
+    assert_eq!(first.page().focus, 1, "the choice that has focus");
+    assert_eq!(first.page().focus, first.vm.relay.focus);
+    first.nav(Nav::Up);
+    first.nav(Nav::Accept); // Nextcloud
+    fill_row(&mut first, 0, "cloud.test");
+    fill_row(&mut first, 1, "alex");
+    fill_row(&mut first, 2, WRONG);
+    connect(&mut first);
+    until(&mut first, "answered", |f| !f.page().message.is_empty());
+    let page = first.page();
+    assert_eq!(
+        page.message,
+        "The server did not accept that user name and app password."
+    );
+    assert_eq!(page.focus, 2, "back on the password row");
+    assert!(page.options[0].contains("https://"), "{:?}", page.options);
+    assert!(!page.busy && !page.keypad && !page.editor);
+
+    // The open keyboard draws the key that has focus, not the form row behind it.
+    first.nav(Nav::Accept);
+    let page = first.page();
+    assert!(page.keypad && page.editor);
+    assert_eq!(page.columns, COLUMNS);
+    let on_done = page.focus;
+    assert_ne!(on_done, 2);
+    first.nav(Nav::Left);
+    assert_eq!(first.page().focus, on_done - 1);
+    // Back leaves the editor and the form row has focus again.
+    first.nav(Nav::Back);
+    assert!(!first.page().keypad);
+    assert_eq!(first.page().focus, first.vm.relay.focus);
+    assert!(first.page().title.starts_with("Step 5 of 6"));
+}
+
+#[test]
+fn a_waiting_sign_in_draws_cancel_and_a_failure_draws_its_reason() {
+    let fake = FakeSetup::new(PASSWORD, google_prompt());
+    let mut first = first_run_at_the_relay_step(fake.clone());
+    first.click(1);
+    until(&mut first, "waiting", |f| {
+        f.vm.relay.phase == Phase::Waiting
+    });
+    let page = first.page();
+    assert_eq!(page.options, ["Cancel"]);
+    assert!(page.title.contains("ABCD-EFGH"));
+}
+
+#[test]
+fn letters_typed_in_the_settings_editor_reach_it() {
+    let fake = FakeSetup::new(PASSWORD, google_prompt());
+    let mut first = FirstRun::with_relay(vars(), fake.clone());
+    let mut settings = RelaySettings::new(fake);
+    settings.press_sign_in();
+    // Not in a field yet: the controller map keeps its keys.
+    assert!(!route_text(&mut first, false, &mut settings, "a"));
+    settings.nav(Nav::Accept); // Nextcloud
+    settings.nav(Nav::Down);
+    settings.nav(Nav::Accept); // User name
+    for key in ["a", "l", "e", "x", "1", " ", "\u{8}"] {
+        assert!(route_text(&mut first, false, &mut settings, key), "{key:?}");
+    }
+    assert!(route_text(&mut first, false, &mut settings, "\n"));
+    let page = settings.page().unwrap();
+    assert_eq!(page.options[1], "User name: alex1");
+    settings.nav(Nav::Accept);
+    assert!(route_text(&mut first, false, &mut settings, "\u{1b}"));
+    assert!(!settings.page().unwrap().keypad);
+}
+
+#[test]
+fn backing_out_of_a_desktop_sign_in_lets_go_of_the_loopback_port() {
+    let machine = Machine::new();
+    let (creds, dav, dirs) = (
+        machine.creds.clone(),
+        machine.dav.clone(),
+        machine.dirs.clone(),
+    );
+    let setup = SystemSetup::with(
+        dirs,
+        Arc::new(move || {
+            (
+                Box::new(Shared(creds.clone())) as Box<dyn CredentialStore>,
+                dav.clone() as Arc<dyn Transport>,
+            )
+        }),
+        Arc::new(|| false),
+        Arc::new(|_| false),
+        "desktop".into(),
+    );
+    let never = || false;
+    let prompt = setup.start_sign_in(Service::GoogleDrive, &never).unwrap();
+    assert!(prompt.code.is_none() && !prompt.needs_code);
+    // Back while it waits: the port is free for the next try.
+    setup.cancel_sign_in();
+    setup.start_sign_in(Service::Dropbox, &never).unwrap();
+    setup.cancel_sign_in();
+    // Back while it was still starting: the answer is refused and the port is not kept.
+    let error = setup
+        .start_sign_in(Service::GoogleDrive, &|| true)
+        .unwrap_err();
+    assert!(error.contains("cancelled"), "{error}");
+    setup.start_sign_in(Service::GoogleDrive, &never).unwrap();
+    setup.cancel_sign_in();
+}
+
+#[test]
+fn continue_checks_save_sync_again_after_settings_changes_it() {
+    let machine = Machine::new();
+    let setup = machine.setup();
+    let played = Arc::new(AtomicBool::new(false));
+    let card = SaveCard {
+        saved_unix: 1000,
+        device: "desktop".into(),
+        play_seconds: 60,
+        version: "3.0.2".into(),
+        picture: PathBuf::new(),
+    };
+    let runner = Runner {
+        relay: machine.relay(),
+        game: Arc::new(Quits(played)),
+        save_dir: machine.root.join("saves"),
+        env: Vec::new(),
+        backup: Arc::new(|_: &Path| Ok(())),
+    };
+    let mut session = Session::new(
+        ContinuePageVm::new(Some(card), None),
+        runner,
+        PathBuf::new(),
+    );
+    let settle = |session: &mut Session| {
+        let started = Instant::now();
+        while session.vm().state() == &ContinueState::CheckingStatus {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "still checking"
+            );
+            session.pump();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    settle(&mut session);
+    assert_eq!(session.vm().state(), &ContinueState::SyncOff);
+    setup
+        .setup_nextcloud("https://cloud.test", "alex", PASSWORD)
+        .unwrap();
+    session.recheck_status();
+    settle(&mut session);
+    assert_ne!(session.vm().state(), &ContinueState::SyncOff);
 }

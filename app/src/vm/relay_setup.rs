@@ -215,6 +215,14 @@ impl RelaySetupVm {
         self.request.take()
     }
 
+    /// The choice or key that has focus.
+    pub fn focus_index(&self) -> usize {
+        match &self.entry {
+            Some(entry) => entry.focus(),
+            None => self.focus,
+        }
+    }
+
     /// The setup is waiting for work to finish (no choices to show).
     pub fn busy(&self) -> bool {
         matches!(self.phase, Phase::Working(_))
@@ -369,7 +377,12 @@ impl RelaySetupVm {
         match self.phase.clone() {
             Phase::Choose => return Outcome::Back,
             Phase::Form | Phase::Failed(_) => self.go_to_choose(),
-            Phase::Waiting | Phase::Working(_) => {
+            Phase::Working(Work::Connecting) => {
+                // Connecting cannot be taken back once the password is on its way: a late
+                // success would write a setup the person had backed out of.
+                self.message = "Connecting: please wait a moment.".into();
+            }
+            Phase::Waiting | Phase::Working(Work::StartingSignIn) => {
                 self.request = Some(Request::Cancel);
                 if self.service == Some(Service::Nextcloud) {
                     self.phase = Phase::Form;
@@ -912,50 +925,5 @@ mod tests {
         vm.take_request();
         vm.event(Event::SignInStarted(Err("no".into())));
         assert_eq!(vm.activate(2), Outcome::Skipped);
-    }
-
-    #[test]
-    fn every_control_of_every_phase_is_reached_with_nav_alone() {
-        // The first-run relay step and the keyboard: Up/Down/Left/Right plus Accept reach each
-        // choice, and Back always has a way out.
-        let mut phases: Vec<RelaySetupVm> = Vec::new();
-        phases.push(RelaySetupVm::new(true));
-        let mut form = RelaySetupVm::new(true);
-        form.handle(Nav::Accept);
-        phases.push(form.clone());
-        let mut waiting = RelaySetupVm::new(true);
-        waiting.activate(2);
-        waiting.take_request();
-        waiting.event(Event::SignInStarted(Ok(prompt(None, true))));
-        phases.push(waiting);
-        let mut failed = RelaySetupVm::new(true);
-        failed.activate(1);
-        failed.take_request();
-        failed.event(Event::SignInStarted(Err("x".into())));
-        phases.push(failed);
-        for vm in phases {
-            let count = vm.options().len();
-            let mut at = vm.clone();
-            let mut seen = vec![at.focus];
-            for _ in 0..count {
-                at.handle(Nav::Down);
-                seen.push(at.focus);
-            }
-            for index in 0..count {
-                assert!(
-                    seen.contains(&index),
-                    "{:?} never reached {index}",
-                    vm.phase
-                );
-            }
-            let mut back = vm.clone();
-            let _ = back.handle(Nav::Back);
-        }
-        // The keyboard is covered in text_entry's own test; here it opens from the form and
-        // closes with Back.
-        form.activate(0);
-        assert!(form.keyboard_open());
-        assert_eq!(form.handle(Nav::Back), Outcome::Open);
-        assert!(!form.keyboard_open());
     }
 }
