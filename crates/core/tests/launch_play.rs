@@ -1,6 +1,17 @@
 // Tests for launch::play (issue 1.24; SPEC.md M6, M10): pull, run, push with fakes.
 use acnh_core::launch::{play, Game, Keep, Played, Relay, Sync};
+use acnh_core::savecard::SaveCard;
 use acnh_core::{Error, Result};
+
+fn card(device: &str) -> SaveCard {
+    SaveCard {
+        saved_unix: 0,
+        device: device.into(),
+        play_seconds: 0,
+        version: String::new(),
+        picture: PathBuf::new(),
+    }
+}
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -133,8 +144,9 @@ fn pull_conflict_calls_choose_once_with_both_cards_and_pulls_with_answer() {
     let local_card = "local-sidecar-or-card";
     let relay = FakeRelay::new(Rc::clone(&history))
         .with_pull(Ok(Sync::Conflict {
-            server: server_card.into(),
-            local: local_card.into(),
+            server: card(server_card),
+            local: card(local_card),
+            backup: None,
         }))
         .with_pull(Ok(Sync::Done("pulled server card".into())))
         .with_push(Ok(Sync::Done("pushed".into())));
@@ -152,8 +164,9 @@ fn pull_conflict_calls_choose_once_with_both_cards_and_pulls_with_answer() {
     assert_eq!(
         *choices.borrow(),
         vec![Sync::Conflict {
-            server: server_card.into(),
-            local: local_card.into(),
+            server: card(server_card),
+            local: card(local_card),
+            backup: None,
         }]
     );
     assert_eq!(played.pulled, Sync::Done("pulled server card".into()));
@@ -178,42 +191,28 @@ fn pull_conflict_calls_choose_once_with_both_cards_and_pulls_with_answer() {
 }
 
 #[test]
-fn offline_still_runs_the_game() {
+fn offline_refuses_to_start_and_off_plays() {
     let history = Rc::new(RefCell::new(Vec::new()));
+    let relay = FakeRelay::new(Rc::clone(&history)).with_pull(Ok(Sync::Offline));
+    let game = FakeGame::new(Rc::clone(&history), Ok(0));
+    assert_eq!(
+        play(&relay, &game, Path::new("/saves/island"), &[], &|_| {
+            Keep::Local
+        })
+        .unwrap_err()
+        .code(),
+        "relay_unreachable"
+    );
+    assert_eq!(history.borrow().len(), 1);
     let relay = FakeRelay::new(Rc::clone(&history))
-        .with_pull(Ok(Sync::Offline))
+        .with_pull(Ok(Sync::Off))
         .with_push(Ok(Sync::Offline));
-    let game = FakeGame::new(Rc::clone(&history), Ok(1));
-    let save_dir = Path::new("/saves/island");
-
-    let played = play(&relay, &game, save_dir, &[], &|_| {
-        panic!("unexpected choose")
+    let played = play(&relay, &game, Path::new("/saves/island"), &[], &|_| {
+        Keep::Local
     })
     .unwrap();
-
-    assert_eq!(
-        played,
-        Played {
-            pulled: Sync::Offline,
-            exit_code: 1,
-            pushed: Sync::Offline,
-        }
-    );
-
-    assert_eq!(
-        *history.borrow(),
-        vec![
-            Action::Pull {
-                dir: PathBuf::from("/saves/island"),
-                resolve: None,
-            },
-            Action::Run { env: vec![] },
-            Action::Push {
-                dir: PathBuf::from("/saves/island"),
-                resolve: None,
-            },
-        ]
-    );
+    assert_eq!(played.pulled, Sync::Off);
+    assert_eq!(played.pushed, Sync::Offline);
 }
 
 #[test]
@@ -241,8 +240,9 @@ fn pull_conflict_error_on_resolve_stops_before_the_game() {
     let history = Rc::new(RefCell::new(Vec::new()));
     let relay = FakeRelay::new(Rc::clone(&history))
         .with_pull(Ok(Sync::Conflict {
-            server: "s".into(),
-            local: "l".into(),
+            server: card("s"),
+            local: card("l"),
+            backup: None,
         }))
         .with_pull(Err(Error::Saves("resolve failed".into())));
     let game = FakeGame::new(Rc::clone(&history), Ok(0));
@@ -333,8 +333,9 @@ fn push_conflict_calls_choose_once_and_pushes_with_answer() {
     let relay = FakeRelay::new(Rc::clone(&history))
         .with_pull(Ok(Sync::Done("pulled".into())))
         .with_push(Ok(Sync::Conflict {
-            server: "server_card".into(),
-            local: "local_card".into(),
+            server: card("server_card"),
+            local: card("local_card"),
+            backup: None,
         }))
         .with_push(Ok(Sync::Done("pushed resolved".into())));
     let game = FakeGame::new(Rc::clone(&history), Ok(0));
@@ -351,8 +352,9 @@ fn push_conflict_calls_choose_once_and_pushes_with_answer() {
     assert_eq!(
         *choices.borrow(),
         vec![Sync::Conflict {
-            server: "server_card".into(),
-            local: "local_card".into(),
+            server: card("server_card"),
+            local: card("local_card"),
+            backup: None,
         }]
     );
     assert_eq!(played.pushed, Sync::Done("pushed resolved".into()));

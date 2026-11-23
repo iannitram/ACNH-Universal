@@ -26,6 +26,7 @@ struct Watched<'a> {
     inner: &'a dyn Relay,
     report: &'a dyn Fn(PlayEvent),
     conflict: RefCell<Option<PlayEvent>>,
+    anyway: bool,
 }
 
 impl Watched<'_> {
@@ -42,11 +43,17 @@ impl Watched<'_> {
         }
         (self.report)(PlayEvent::Step(step));
         let result = call()?;
-        if let launch::Sync::Conflict { server, local } = &result {
+        if let launch::Sync::Conflict { server, local, .. } = &result {
             self.conflict.replace(Some(PlayEvent::Conflict {
                 step,
                 server: server.clone(),
                 local: local.clone(),
+            }));
+        }
+        if let launch::Sync::Held { device, since } = &result {
+            self.conflict.replace(Some(PlayEvent::Held {
+                device: device.clone(),
+                since: since.clone(),
             }));
         }
         Ok(result)
@@ -55,7 +62,13 @@ impl Watched<'_> {
 
 impl Relay for Watched<'_> {
     fn pull(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<launch::Sync> {
-        self.step(SyncStep::Pull, resolve, || self.inner.pull(save_dir, None))
+        self.step(SyncStep::Pull, resolve, || {
+            if self.anyway {
+                self.inner.pull_anyway(save_dir)
+            } else {
+                self.inner.pull(save_dir, None)
+            }
+        })
     }
 
     fn push(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<launch::Sync> {
@@ -87,10 +100,22 @@ pub fn play(
     env: &[(String, String)],
     report: &dyn Fn(PlayEvent),
 ) {
+    play_inner(relay, game, save_dir, env, report, false);
+}
+
+fn play_inner(
+    relay: &dyn Relay,
+    game: &dyn Game,
+    save_dir: &Path,
+    env: &[(String, String)],
+    report: &dyn Fn(PlayEvent),
+    anyway: bool,
+) {
     let watched = Watched {
         inner: relay,
         report,
         conflict: RefCell::new(None),
+        anyway,
     };
     let announced = Announced {
         inner: game,
@@ -131,13 +156,14 @@ pub fn sync(
         }
     };
     match run() {
-        Ok(launch::Sync::Conflict { server, local }) if keep.is_none() => {
+        Ok(launch::Sync::Conflict { server, local, .. }) if keep.is_none() => {
             report(PlayEvent::Conflict {
                 step,
                 server,
                 local,
             });
         }
+        Ok(launch::Sync::Held { device, since }) => report(PlayEvent::Held { device, since }),
         result => report(PlayEvent::Synced(result)),
     }
 }
@@ -171,6 +197,13 @@ impl Session {
     /// `picture` is the island card's picture (`savecard::read_card`).
     pub fn new(vm: ContinuePageVm, runner: Runner, picture: PathBuf) -> Self {
         let (sender, events) = mpsc::channel();
+        let status_runner = runner.clone();
+        let status_sender = sender.clone();
+        thread::spawn(move || {
+            let _ = status_sender.send(PlayEvent::Status(
+                status_runner.relay.status(&status_runner.save_dir),
+            ));
+        });
         Self {
             vm,
             runner,
@@ -249,6 +282,27 @@ impl Session {
                     );
                 });
             }
+            Request::Status => {
+                thread::spawn(move || {
+                    report(PlayEvent::Status(runner.relay.status(&runner.save_dir)))
+                });
+            }
+            Request::PlayAnyway => {
+                thread::spawn(move || {
+                    report(PlayEvent::Step(SyncStep::Backup));
+                    match (runner.backup)(&runner.save_dir) {
+                        Ok(()) => play_inner(
+                            &*runner.relay,
+                            &*runner.game,
+                            &runner.save_dir,
+                            &runner.env,
+                            &report,
+                            true,
+                        ),
+                        Err(error) => report(PlayEvent::Played(Err(error))),
+                    }
+                });
+            }
             Request::Sync { step, keep } => {
                 thread::spawn(move || {
                     sync(
@@ -272,17 +326,17 @@ impl Session {
     }
 }
 
-/// No relay is set up on this device: every step is `Offline`, which plays on with the island
+/// No relay is set up on this device: every step is `Off`, which plays on with the island
 /// here (`launch::play`). `main.rs` uses it until the save-relay adapter is joined to the app.
 pub struct RelayOff;
 
 impl Relay for RelayOff {
     fn pull(&self, _save_dir: &Path, _resolve: Option<Keep>) -> Result<launch::Sync> {
-        Ok(launch::Sync::Offline)
+        Ok(launch::Sync::Off)
     }
 
     fn push(&self, _save_dir: &Path, _resolve: Option<Keep>) -> Result<launch::Sync> {
-        Ok(launch::Sync::Offline)
+        Ok(launch::Sync::Off)
     }
 }
 
@@ -375,18 +429,27 @@ mod tests {
         }
     }
 
-    fn conflict() -> launch::Sync {
-        launch::Sync::Conflict {
-            server: "device Strix Halo tablet\nplay 7200\nversion 3.0.2\nsaved 2000".to_string(),
-            local: "device AMD handheld".to_string(),
+    fn card(device: &str, saved_unix: u64, play_seconds: u64, version: &str) -> savecard::SaveCard {
+        savecard::SaveCard {
+            device: device.into(),
+            saved_unix,
+            play_seconds,
+            version: version.into(),
+            picture: PathBuf::new(),
         }
     }
-
+    fn conflict() -> launch::Sync {
+        launch::Sync::Conflict {
+            server: card("Strix Halo tablet", 2000, 7200, "3.0.2"),
+            local: card("AMD handheld", 1000, 3600, "3.0.2"),
+            backup: None,
+        }
+    }
     fn conflict_event(step: SyncStep) -> PlayEvent {
         PlayEvent::Conflict {
             step,
-            server: "device Strix Halo tablet\nplay 7200\nversion 3.0.2\nsaved 2000".to_string(),
-            local: "device AMD handheld".to_string(),
+            server: card("Strix Halo tablet", 2000, 7200, "3.0.2"),
+            local: card("AMD handheld", 1000, 3600, "3.0.2"),
         }
     }
 
@@ -579,9 +642,9 @@ mod tests {
         assert_eq!(
             events.into_inner().last(),
             Some(&PlayEvent::Played(Ok(Played {
-                pulled: launch::Sync::Offline,
+                pulled: launch::Sync::Off,
                 exit_code: 0,
-                pushed: launch::Sync::Offline,
+                pushed: launch::Sync::Off,
             })))
         );
     }

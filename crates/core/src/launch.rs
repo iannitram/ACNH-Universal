@@ -4,7 +4,8 @@
 //! are traits so the flow is tested with fakes. Copied from iannitram/totk-universal's
 //! `launch` (MIT) by its issue.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::savecard::SaveCard;
 use std::path::Path;
 
 /// What one save-relay pull or push did.
@@ -12,10 +13,32 @@ use std::path::Path;
 pub enum Sync {
     /// Done (pulled, pushed, or nothing to do); the message is save-relay's.
     Done(String),
-    /// The server is unreachable: play on (pull) or push next time (push).
+    /// A conflict was settled and the other side retained as a history entry.
+    Resolved { message: String, backup: String },
+    /// The configured relay is unreachable: refuse the pull or retry the push later.
     Offline,
+    /// Sync is not configured.
+    Off,
+    /// Another device has the island open.
+    Held { device: String, since: String },
     /// Both sides changed since the last sync; nothing was touched.
-    Conflict { server: String, local: String },
+    Conflict {
+        server: SaveCard,
+        local: SaveCard,
+        backup: Option<String>,
+    },
+}
+
+/// Status before play.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayStatus {
+    Ready,
+    RelayNewer(SaveCard),
+    LocalNewer,
+    Held { device: String, since: String },
+    Unavailable,
+    Conflict { server: SaveCard, local: SaveCard },
+    Off,
 }
 
 /// The player's answer to a conflict.
@@ -29,6 +52,12 @@ pub enum Keep {
 pub trait Relay {
     fn pull(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync>;
     fn push(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync>;
+    fn pull_anyway(&self, save_dir: &Path) -> Result<Sync> {
+        self.pull(save_dir, None)
+    }
+    fn status(&self, _save_dir: &Path) -> Result<RelayStatus> {
+        Ok(RelayStatus::Off)
+    }
 }
 
 /// The built game (the player, started with `NX_DATA_ROOT` set to the data root).
@@ -46,7 +75,8 @@ pub struct Played {
 }
 
 /// The play flow: `relay.pull`; on `Conflict` ask `choose` and pull again with its answer;
-/// `Offline` plays on. Then `game.run(env)`, then `relay.push` (a conflict asks again). A
+/// `Offline` refuses play; `Off` plays without syncing. Then `game.run(env)`, then
+/// `relay.push` (a conflict asks again). A
 /// relay error before the game starts stops the flow (the game does not start); a push error
 /// is returned after the game has quit.
 pub fn play(
@@ -57,6 +87,13 @@ pub fn play(
     choose: &dyn Fn(&Sync) -> Keep,
 ) -> Result<Played> {
     let pulled = sync_step(|resolve| relay.pull(save_dir, resolve), choose)?;
+    match &pulled {
+        Sync::Offline => return Err(Error::RelayUnreachable),
+        Sync::Held { .. } | Sync::Conflict { .. } => {
+            return Err(Error::Saves("the island is not ready to play".into()))
+        }
+        _ => {}
+    }
     let exit_code = game.run(env)?;
     let pushed = sync_step(|resolve| relay.push(save_dir, resolve), choose)?;
     Ok(Played {

@@ -413,16 +413,25 @@ fn conflict_detected_and_resolved() {
     // Step 5: Device B tries to pull -> Conflict!
     let conflict = relay_b.pull(&dev_b_saves, None).unwrap();
     match &conflict {
-        Sync::Conflict { server, local } => {
-            assert!(!server.is_empty(), "server description should not be empty");
-            assert!(!local.is_empty(), "local description should not be empty");
+        Sync::Conflict { server, local, .. } => {
+            assert!(
+                !server.device.is_empty(),
+                "server description should not be empty"
+            );
+            assert!(
+                !local.device.is_empty(),
+                "local description should not be empty"
+            );
         }
         other => panic!("expected Sync::Conflict, got {other:?}"),
     }
 
     // Step 6: Device B resolves conflict with Keep::Server
     let resolved = relay_b.pull(&dev_b_saves, Some(Keep::Server)).unwrap();
-    assert!(matches!(resolved, Sync::Done(_)));
+    match resolved {
+        Sync::Resolved { backup, .. } => assert!(!backup.is_empty()),
+        other => panic!("expected a retained backup, got {other:?}"),
+    }
 
     // Verify Device B now has Device A's changes
     let content = fs::read_to_string(dev_b_saves.join("main.dat")).unwrap();
@@ -703,9 +712,9 @@ fn map_sync_actions() {
         local_card: None,
     };
     match map_sync(conflict_report) {
-        Sync::Conflict { server, local } => {
-            assert!(server.contains("deck"));
-            assert!(local.contains("pc"));
+        Sync::Conflict { server, local, .. } => {
+            assert!(server.device.contains("deck"));
+            assert!(local.device.contains("pc"));
         }
         other => panic!("expected Sync::Conflict, got {other:?}"),
     }
@@ -723,9 +732,64 @@ fn map_sync_actions() {
         local_card: None,
     };
     match map_sync(held_report) {
-        Sync::Conflict { server, .. } => {
-            assert!(server.contains("switch"));
+        Sync::Held { device, .. } => {
+            assert!(device.contains("switch"));
         }
         other => panic!("expected Sync::Conflict, got {other:?}"),
     }
+}
+
+#[test]
+fn hold_requires_an_explicit_override_and_status_tracks_changes() {
+    use acnh_core::launch::RelayStatus;
+    let root = temp_fixture_dir("hold-status");
+    let remote = Arc::new(MemoryRemote::new());
+    let a = root.join("a");
+    let b = root.join("b");
+    let a_saves = a.join("saves");
+    let b_saves = b.join("saves");
+    populate_island(&a_saves, "initial");
+    let ra = SaveRelay::new(remote.clone(), create_store(&a), "a").with_clock(|| 1000);
+    let rb = SaveRelay::new(remote, create_store(&b), "b").with_clock(|| 1010);
+    ra.push(&a_saves, None).unwrap();
+    assert!(matches!(
+        rb.status(&b_saves).unwrap(),
+        RelayStatus::RelayNewer(_)
+    ));
+    rb.pull(&b_saves, None).unwrap();
+    fs::write(b_saves.join("main.dat"), "changed").unwrap();
+    assert_eq!(rb.status(&b_saves).unwrap(), RelayStatus::LocalNewer);
+    rb.push(&b_saves, None).unwrap();
+    assert!(matches!(ra.pull(&a_saves, None).unwrap(), Sync::Done(_)));
+    assert!(matches!(
+        rb.pull(&b_saves, Some(Keep::Local)).unwrap(),
+        Sync::Held { .. }
+    ));
+    assert!(matches!(rb.pull_anyway(&b_saves).unwrap(), Sync::Done(_)));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_card_is_written_after_push() {
+    let root = temp_fixture_dir("session-card");
+    let saves = root.join("saves");
+    populate_island(&saves, "before");
+    let time = Arc::new(AtomicUsize::new(1000));
+    let clock = time.clone();
+    let relay = SaveRelay::new(Arc::new(MemoryRemote::new()), create_store(&root), "device")
+        .with_clock(move || clock.load(Ordering::Relaxed) as u64);
+    relay.pull(&saves, None).unwrap();
+    time.store(1300, Ordering::Relaxed);
+    fs::write(saves.join("main.dat"), "after").unwrap();
+    relay.push(&saves, None).unwrap();
+    let card = acnh_core::savecard::read_card(&saves, Path::new("")).unwrap();
+    assert_eq!(
+        (card.device.as_str(), card.saved_unix, card.play_seconds),
+        ("device", 1300, 300)
+    );
+    fs::write(saves.join("main.dat"), "changed after the session").unwrap();
+    let changed = acnh_core::savecard::read_card(&saves, Path::new("")).unwrap();
+    assert_eq!(changed.device, "");
+    assert_eq!(changed.play_seconds, 0);
+    let _ = fs::remove_dir_all(root);
 }

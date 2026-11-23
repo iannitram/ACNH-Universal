@@ -4,7 +4,8 @@
 //! `launch::Sync`.
 
 use crate::error::{Error, Result};
-use crate::launch::{Keep, Relay, Sync};
+use crate::launch::{Keep, Relay, RelayStatus, Sync};
+use crate::savecard::SaveCard;
 use save_relay::api::{Action, SignInPrompt, SyncReport};
 use save_relay::clients::{Client, ClientSet};
 use save_relay::creds::{self, CredentialStore, Secret};
@@ -28,6 +29,7 @@ pub struct SaveRelay {
     device: String,
     root: String,
     clock: Option<Arc<dyn Fn() -> u64 + Send + core::marker::Sync>>,
+    version: Option<crate::version::Version>,
 }
 
 impl SaveRelay {
@@ -39,12 +41,19 @@ impl SaveRelay {
             device: device.into(),
             root: save_relay::cli::DEFAULT_ROOT.to_string(),
             clock: None,
+            version: None,
         }
     }
 
     /// Override the root folder under which game saves are stored on the server.
     pub fn with_root(mut self, root: impl Into<String>) -> Self {
         self.root = root.into();
+        self
+    }
+
+    /// Record the selected game version on cards produced by this device.
+    pub fn with_version(mut self, version: crate::version::Version) -> Self {
+        self.version = Some(version);
         self
     }
 
@@ -93,10 +102,11 @@ impl Relay for SaveRelay {
             saves_dir: save_dir.to_path_buf(),
         };
         let resolve_sync = map_resolve(resolve);
-        let anyway = resolve.is_some();
+        let anyway = false;
         let report =
             sync::pull(&session, &game, &self.store, resolve_sync, anyway).map_err(map_err)?;
-        Ok(map_sync(report))
+        persist_card(save_dir, &report, self.version)?;
+        Ok(map_sync_with_local(report, save_dir))
     }
 
     fn push(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
@@ -109,7 +119,57 @@ impl Relay for SaveRelay {
         };
         let resolve_sync = map_resolve(resolve);
         let report = sync::push(&session, &game, &self.store, resolve_sync).map_err(map_err)?;
-        Ok(map_sync(report))
+        persist_card(save_dir, &report, self.version)?;
+        Ok(map_sync_with_local(report, save_dir))
+    }
+    fn pull_anyway(&self, save_dir: &Path) -> Result<Sync> {
+        let game = Game {
+            manifest: self.parse_manifest()?,
+            saves_dir: save_dir.to_path_buf(),
+        };
+        let session = self.session(Layout::new(&self.root).map_err(map_err)?);
+        let report = sync::pull(&session, &game, &self.store, None, true).map_err(map_err)?;
+        persist_card(save_dir, &report, self.version)?;
+        Ok(map_sync_with_local(report, save_dir))
+    }
+
+    fn status(&self, save_dir: &Path) -> Result<RelayStatus> {
+        use save_relay::plan::Decision;
+        let game = Game {
+            manifest: self.parse_manifest()?,
+            saves_dir: save_dir.to_path_buf(),
+        };
+        let session = self.session(Layout::new(&self.root).map_err(map_err)?);
+        let status = sync::status(&session, &game, &self.store).map_err(map_err)?;
+        Ok(match status.would {
+            Decision::Noop | Decision::Adopt => RelayStatus::Ready,
+            Decision::Push => RelayStatus::LocalNewer,
+            Decision::Pull => {
+                let card = sync::history(&session, &game.manifest.id)
+                    .ok()
+                    .and_then(|history| history.entries.into_iter().find(|entry| entry.current))
+                    .and_then(|entry| entry.card);
+                RelayStatus::RelayNewer(make_card(card.as_ref(), status.server.as_ref()))
+            }
+            Decision::Conflict => {
+                let card = sync::history(&session, &game.manifest.id)
+                    .ok()
+                    .and_then(|history| history.entries.into_iter().find(|entry| entry.current))
+                    .and_then(|entry| entry.card);
+                RelayStatus::Conflict {
+                    server: make_card(card.as_ref(), status.server.as_ref()),
+                    local: make_card(None, status.local.as_ref()),
+                }
+            }
+            Decision::Offline => RelayStatus::Unavailable,
+            Decision::Held => {
+                let held = status.held.expect("held decision has a mark");
+                RelayStatus::Held {
+                    device: held.device,
+                    since: held.since,
+                }
+            }
+        })
     }
 }
 
@@ -494,51 +554,125 @@ fn finish_setup(
 }
 
 /// Map save-relay's `SyncReport` outcome to `launch::Sync`.
+fn make_card(
+    card: Option<&save_relay::card::Card>,
+    side: Option<&save_relay::api::Side>,
+) -> SaveCard {
+    let device = card
+        .map(|c| c.device.clone())
+        .or_else(|| side.map(|s| s.device.clone()))
+        .unwrap_or_default();
+    let time = card
+        .map(|c| c.time.as_str())
+        .or_else(|| side.map(|s| s.time.as_str()))
+        .unwrap_or("");
+    SaveCard {
+        saved_unix: save_relay::stamp::parse_rfc3339(time).unwrap_or(0),
+        device,
+        play_seconds: card.and_then(|c| c.playtime_secs).unwrap_or(0),
+        version: String::new(),
+        picture: Default::default(),
+    }
+}
+
+fn persist_card(
+    save_dir: &Path,
+    report: &SyncReport,
+    version: Option<crate::version::Version>,
+) -> Result<()> {
+    if matches!(
+        report.sync.action,
+        Action::Pulled | Action::Pushed | Action::Adopted
+    ) {
+        if let Some(card) = &report.server_card {
+            let old = crate::savecard::read_card(save_dir, Path::new("")).ok();
+            let version = version
+                .map(|v| v.name().to_string())
+                .or_else(|| old.map(|c| c.version))
+                .unwrap_or_default();
+            let modified_ns = std::fs::metadata(save_dir.join("main.dat"))?
+                .modified()?
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let content = format!(
+                "device {}\nplay {}\nversion {}\nsaved {}\nfile_modified_ns {}\n",
+                card.device,
+                card.playtime_secs.unwrap_or(0),
+                version,
+                save_relay::stamp::parse_rfc3339(&card.time).unwrap_or(0),
+                modified_ns
+            );
+            use std::io::Write;
+            let parent = save_dir.parent().unwrap_or_else(|| Path::new("."));
+            let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+            temp.write_all(content.as_bytes())?;
+            temp.persist(parent.join("launcher-card.txt"))
+                .map_err(|e| Error::Io(e.error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn map_sync_with_local(report: SyncReport, save_dir: &Path) -> Sync {
+    let local_time = report
+        .sync
+        .local
+        .as_ref()
+        .and_then(|s| save_relay::stamp::parse_rfc3339(&s.time));
+    let mut result = map_sync(report);
+    if let Sync::Conflict { local, .. } = &mut result {
+        if let (Some(time), Ok(saved)) = (
+            local_time,
+            crate::savecard::read_card(save_dir, Path::new("")),
+        ) {
+            let file_time = std::fs::metadata(save_dir.join("main.dat"))
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            if saved.device == local.device && file_time == Some(time) && local.play_seconds == 0 {
+                local.play_seconds = saved.play_seconds;
+                local.version = saved.version;
+            }
+        }
+    }
+    result
+}
+
+/// Map save-relay's report without losing either side or its backup.
 pub fn map_sync(report: SyncReport) -> Sync {
     match report.sync.action {
         Action::Noop | Action::Adopted | Action::Pulled | Action::Pushed => {
-            Sync::Done(report.sync.message)
+            match report.sync.backup {
+                Some(backup) => Sync::Resolved {
+                    message: report.sync.message,
+                    backup,
+                },
+                None => Sync::Done(report.sync.message),
+            }
         }
         Action::Offline | Action::Deferred => Sync::Offline,
-        Action::Conflict => {
-            let server = report
-                .server_card
-                .as_ref()
-                .map(|c| c.to_json())
-                .or_else(|| {
-                    report
-                        .sync
-                        .server
-                        .as_ref()
-                        .map(|s| format!("{}, {}", s.device, s.time))
-                })
-                .unwrap_or_else(|| "server".to_string());
-            let local = report
-                .local_card
-                .as_ref()
-                .map(|c| c.to_json())
-                .or_else(|| {
-                    report
-                        .sync
-                        .local
-                        .as_ref()
-                        .map(|s| format!("{}, {}", s.device, s.time))
-                })
-                .unwrap_or_else(|| "local".to_string());
-            Sync::Conflict { server, local }
-        }
+        Action::Conflict => Sync::Conflict {
+            server: make_card(report.server_card.as_ref(), report.sync.server.as_ref()),
+            local: make_card(report.local_card.as_ref(), report.sync.local.as_ref()),
+            backup: report.sync.backup,
+        },
         Action::Held => {
-            let server = report
-                .held
-                .as_ref()
-                .map(|h| format!("held by {} since {}", h.device, h.since))
-                .unwrap_or_else(|| "held by another machine".to_string());
-            let local = report
-                .local_card
-                .as_ref()
-                .map(|c| c.to_json())
-                .unwrap_or_default();
-            Sync::Conflict { server, local }
+            let held = report.held.unwrap_or(HeldFallback::held());
+            Sync::Held {
+                device: held.device,
+                since: held.since,
+            }
+        }
+    }
+}
+struct HeldFallback;
+impl HeldFallback {
+    fn held() -> save_relay::api::Held {
+        save_relay::api::Held {
+            device: String::new(),
+            since: String::new(),
         }
     }
 }

@@ -290,7 +290,7 @@ fn play(options: &Options) -> Result<i32> {
     let launcher = std::env::current_exe().unwrap_or_default();
     let program = assemble::player(os, &launcher, &dirs.install());
     let player = Player { program };
-    let relay = Offline;
+    let relay = RelayOff;
     let save_dir = saves::save_dir(&root);
     let env = vec![("NX_DATA_ROOT".to_owned(), root.display().to_string())];
     let choose = |_: &Sync| Keep::Local;
@@ -320,8 +320,10 @@ fn apply_profile(root: &Path, chosen: &profile::DeviceProfile) -> Result<()> {
 
 fn report_sync(step: &str, sync: &Sync) {
     match sync {
-        Sync::Done(message) => println!("{step}: {message}"),
+        Sync::Done(message) | Sync::Resolved { message, .. } => println!("{step}: {message}"),
         Sync::Offline => println!("{step}: offline"),
+        Sync::Off => println!("{step}: sync off"),
+        Sync::Held { .. } => println!("{step}: held"),
         Sync::Conflict { .. } => println!("{step}: conflict"),
     }
 }
@@ -535,15 +537,15 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-struct Offline;
+struct RelayOff;
 
-impl Relay for Offline {
+impl Relay for RelayOff {
     fn pull(&self, _save_dir: &Path, _resolve: Option<Keep>) -> Result<Sync> {
-        Ok(Sync::Offline)
+        Ok(Sync::Off)
     }
 
     fn push(&self, _save_dir: &Path, _resolve: Option<Keep>) -> Result<Sync> {
-        Ok(Sync::Offline)
+        Ok(Sync::Off)
     }
 }
 

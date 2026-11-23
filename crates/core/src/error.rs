@@ -37,6 +37,8 @@ pub enum Error {
     Build(String),
     /// A build hub, its bundles or its pairing (ADR 0004).
     Hub(String),
+    /// The configured relay could not be reached before play.
+    RelayUnreachable,
     /// A local file operation failed.
     Io(String),
 }
@@ -58,6 +60,7 @@ impl Error {
             Error::Saves(_) => "saves",
             Error::Build(_) => "build",
             Error::Hub(_) => "hub",
+            Error::RelayUnreachable => "relay_unreachable",
             Error::Io(_) => "io",
         }
     }
@@ -82,6 +85,10 @@ impl fmt::Display for Error {
             Error::Saves(m) => write!(f, "Saves: {m}"),
             Error::Build(m) => write!(f, "The build failed: {m}"),
             Error::Hub(m) => write!(f, "Build hub: {m}"),
+            Error::RelayUnreachable => write!(
+                f,
+                "save-relay could not be reached and the game was not started."
+            ),
             Error::Io(m) => write!(f, "{m}"),
         }
     }
