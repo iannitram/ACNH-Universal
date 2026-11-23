@@ -13,8 +13,17 @@ namespace {
 // kGuestShift (0xC0_0800_0000..0x140_0000_0000), so a guest pointer such as main + x (0x100_xxxx_xxxx) arrives with
 // its high bits cut off: they are put back here (issue #77, a crash reading hid's vibration values on macOS).
 uint64_t desc_addr(uint64_t v) {
+#if defined(NX_COMPACT_LAYOUT)
+    // iOS's compact layout (fork, issue #150): one window at a base chosen at run time (nx_guest_base()), so the
+    // bits cut off are put back relative to it. v is (base + offset) mod 2^39 with offset < 2^39: v - base, mod 2^39,
+    // is the offset again.
+    if (v == 0) return v;
+    const uint64_t base = NX_BASE;
+    return base + ((v - base) & 0x7FFFFFFFFFull);
+#else
     if (kGuestShift == 0 || v == 0) return v;
     return kGuestShift + ((v - kGuestShift) & 0x7FFFFFFFFFull);
+#endif
 }
 
 struct DomainState {
