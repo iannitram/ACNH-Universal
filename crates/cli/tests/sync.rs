@@ -22,7 +22,7 @@ use save_relay::service::{self, Service};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 const PASSWORD: &str = "app-password-4821";
@@ -34,13 +34,19 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct FakePlayer {
     marker: PathBuf,
     env: Mutex<Vec<(String, String)>>,
+    /// What happens while the game runs (the island changes here, the relay changes).
+    during: Mutex<Option<Box<dyn FnOnce()>>>,
+    exit: AtomicI32,
 }
 
 impl Game for FakePlayer {
     fn run(&self, env: &[(String, String)]) -> Result<i32> {
         fs::write(&self.marker, "started").unwrap();
         *self.env.lock().unwrap() = env.to_vec();
-        Ok(0)
+        if let Some(during) = self.during.lock().unwrap().take() {
+            during();
+        }
+        Ok(self.exit.load(Ordering::SeqCst))
     }
 }
 
@@ -69,6 +75,8 @@ impl Machine {
         let player = FakePlayer {
             marker: root.join("player-started"),
             env: Mutex::new(Vec::new()),
+            during: Mutex::new(None),
+            exit: AtomicI32::new(0),
         };
         Machine {
             root,
@@ -493,4 +501,98 @@ fn sign_in_prints_the_code_in_game_mode_and_follows_the_browser_on_a_desktop() {
         "",
     );
     assert_eq!(code, 1);
+}
+
+/// Device A and this machine in step; returns this machine's relay and A's relay and island.
+fn in_step(machine: &Machine, remote: &Arc<MemoryRemote>) -> (SaveRelay, SaveRelay, PathBuf) {
+    let a = machine.relay_over(remote, "device-a", 1000);
+    let a_saves = machine.root.join("a-saves");
+    island(&a_saves, "initial");
+    a.push(&a_saves, None).unwrap();
+    let here = machine.relay_over(remote, "device-b", 1010);
+    here.pull(&machine.save_dir(), None).unwrap();
+    (here, a, a_saves)
+}
+
+#[test]
+fn a_push_conflict_after_the_game_exits_6_keeps_the_island_and_sync_push_settles_it() {
+    let machine = Machine::new("push-conflict");
+    let remote = Arc::new(MemoryRemote::new());
+    let (here, a, a_saves) = in_step(&machine, &remote);
+    let save_dir = machine.save_dir();
+    // While the game runs, the island here changes and so does the relay.
+    *machine.player.during.lock().unwrap() = Some(Box::new(move || {
+        fs::write(save_dir.join("main.dat"), "main island data: played-here").unwrap();
+        fs::write(a_saves.join("main.dat"), "main island data: from-a").unwrap();
+        a.push(&a_saves, None).unwrap();
+    }));
+    machine.player.exit.store(7, Ordering::SeqCst);
+
+    let (code, out, _) = machine.exec(&["play"], "", RelaySource::Fixed(&here));
+    assert_eq!(code, 6, "{out}");
+    assert!(machine.started());
+    assert!(out.contains("The game ran (exit 7)"), "{out}");
+    assert!(!out.contains("was not started"), "{out}");
+    assert!(out.contains("relay: ") && out.contains("here: "), "{out}");
+    assert!(out.contains("sync push --keep"), "{out}");
+    assert_eq!(
+        fs::read_to_string(machine.save_dir().join("main.dat")).unwrap(),
+        "main island data: played-here"
+    );
+
+    let (code, out, _) = machine.exec(&["sync", "push"], "", RelaySource::Fixed(&here));
+    assert_eq!(code, 6, "{out}");
+    let (code, out, err) = machine.exec(
+        &["sync", "push", "--keep", "relay"],
+        "",
+        RelaySource::Fixed(&here),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let backups = saves::backups_dir(&machine.data_root());
+    let stamps: Vec<_> = fs::read_dir(&backups).unwrap().flatten().collect();
+    assert_eq!(stamps.len(), 1);
+    assert_eq!(
+        fs::read_to_string(stamps[0].path().join("main.dat")).unwrap(),
+        "main island data: played-here"
+    );
+    assert_eq!(
+        fs::read_to_string(machine.save_dir().join("main.dat")).unwrap(),
+        "main island data: from-a"
+    );
+}
+
+#[test]
+fn a_game_that_fails_exits_1_and_prints_its_code() {
+    let machine = Machine::new("game-code");
+    island(&machine.save_dir(), "here");
+    machine.player.exit.store(4, Ordering::SeqCst);
+    let (code, out, _) = machine.exec(&["play"], "", RelaySource::Open);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("game exited with 4"), "{out}");
+}
+
+#[test]
+fn anyway_on_a_held_island_that_also_changed_here_is_still_a_conflict() {
+    let machine = Machine::new("held-conflict");
+    let remote = Arc::new(MemoryRemote::new());
+    let (here, a, a_saves) = in_step(&machine, &remote);
+    // Device A pushes and B pushes; then A takes the island again, and B changes locally.
+    fs::write(a_saves.join("main.dat"), "main island data: from-a").unwrap();
+    a.push(&a_saves, None).unwrap();
+    fs::write(
+        machine.save_dir().join("main.dat"),
+        "main island data: from-b",
+    )
+    .unwrap();
+
+    let (code, out, err) = machine.exec(&["play", "--anyway"], "", RelaySource::Fixed(&here));
+    assert_eq!(code, 3, "{out}{err}");
+    assert!(!machine.started());
+    let (code, out, err) = machine.exec(
+        &["play", "--anyway", "--keep", "here"],
+        "",
+        RelaySource::Fixed(&here),
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(machine.started());
 }

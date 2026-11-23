@@ -16,7 +16,9 @@
 //!
 //! `play` never answers a save conflict on its own: a conflict exits 3 (unless `--keep relay`
 //! or `--keep here` was given), a held island exits 4 (unless `--anyway`), and save sync that
-//! is set up but cannot be reached exits 5. None of the three starts the game.
+//! is set up but cannot be reached exits 5. None of the three starts the game. A push that conflicts after the game ran exits 6 (settle
+//! it with `sync push --keep relay|here`). A game that quits with a non-zero code makes `play`
+//! exit 1 and print that code, so its own code never looks like one of these.
 
 #![forbid(unsafe_code)]
 
@@ -37,7 +39,7 @@ use acnh_core::savecard;
 use acnh_core::saves;
 use acnh_core::steam;
 use acnh_core::{Error, Result};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{BufRead, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -49,7 +51,8 @@ use crate::sync::SyncEnv;
 const USAGE: &str = "usage: acnh-universal check|build|play|sync|steam-add|hub|fleet\n\
 play [--profile <id>] [--keep relay|here] [--anyway]\n\
 sync setup --server <url> --user <name> [--device <name>] (app password on standard input)\n\
-sync sign-in gdrive|dropbox | sync status | sync off\n\
+sync sign-in gdrive|dropbox | sync status | sync off | sync push [--keep relay|here]\n\
+exit codes: play 3 conflict, 4 held, 5 relay unreachable, 6 push conflict after the game ran; the game's own failure is 1\n\
 hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>]\n\
 hub pair --address <ip:port> --name <device> --peer <hub> [--target <os>]\n\
 hub pull --address <ip:port> --name <device> --peer <hub> [--target <os>] [--prepared <private-data-root>]\n\
@@ -291,7 +294,7 @@ pub fn run(args: Vec<String>, cx: &mut Context<'_>) -> i32 {
 }
 
 /// Print `error` (its `code()` with `--json`) and give `exit`.
-fn fail(options: &Options, cx: &mut Context<'_>, error: &Error, exit: i32) -> i32 {
+pub(crate) fn fail(options: &Options, cx: &mut Context<'_>, error: &Error, exit: i32) -> i32 {
     let _ = if options.json {
         writeln!(cx.out, "{{\"code\":\"{}\"}}", error.code())
     } else {
@@ -439,17 +442,26 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
         backups: &backups,
         stopped: RefCell::new(None),
     };
+    let ran = Ran {
+        inner: game,
+        code: Cell::new(None),
+    };
     // The guard never reports a conflict upward, so `choose` is never asked.
     let choose = |_: &Sync| Keep::Local;
-    match launch::play(&guard, game, &save_dir, &env, &choose) {
+    match launch::play(&guard, &ran, &save_dir, &env, &choose) {
         Ok(played) => {
             report_sync(cx.out, "pull", &played.pulled)?;
             report_sync(cx.out, "push", &played.pushed)?;
             writeln!(cx.out, "game exited with {}", played.exit_code)?;
-            Ok(played.exit_code)
+            // The game's own code never shares a number with the codes above.
+            Ok(if played.exit_code == 0 { 0 } else { 1 })
         }
         Err(error) => match guard.stopped.take() {
-            Some(Stop::Conflict { server, local }) => {
+            Some(Stop::Conflict {
+                step: Step::Pull,
+                server,
+                local,
+            }) => {
                 let error = Error::Saves(
                     "the island changed here and on the relay: nothing was changed".into(),
                 );
@@ -464,6 +476,30 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
                 }
                 Ok(fail(options, cx, &error, 3))
             }
+            Some(Stop::Conflict {
+                step: Step::Push,
+                server,
+                local,
+            }) => {
+                let error = Error::Saves(
+                    "the island changed on the relay while the game ran: it was not sent".into(),
+                );
+                if !options.json {
+                    writeln!(
+                        cx.out,
+                        "The game ran (exit {}) and the island here was kept, but not sent: \
+                         the relay changed meanwhile.",
+                        ran.code.get().unwrap_or(0)
+                    )?;
+                    print_card(cx.out, "relay", &server)?;
+                    print_card(cx.out, "here", &local)?;
+                    writeln!(
+                        cx.out,
+                        "Settle it with: acnh-universal sync push --keep relay|here"
+                    )?;
+                }
+                Ok(fail(options, cx, &error, 6))
+            }
             Some(Stop::Held { device, since }) => {
                 let error = Error::Saves(format!(
                     "the island is open on {device} since {since}: the game was not started \
@@ -477,8 +513,22 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     }
 }
 
+/// The player, remembering the code it quit with (a failed push afterwards still reports it).
+struct Ran<'a> {
+    inner: &'a dyn Game,
+    code: Cell<Option<i32>>,
+}
+
+impl Game for Ran<'_> {
+    fn run(&self, env: &[(String, String)]) -> Result<i32> {
+        let code = self.inner.run(env)?;
+        self.code.set(Some(code));
+        Ok(code)
+    }
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn open_relay(cx: &Context<'_>) -> Result<Box<dyn Relay>> {
+pub(crate) fn open_relay(cx: &Context<'_>) -> Result<Box<dyn Relay>> {
     // An error opening save sync stops play: there is no quiet fall back to no sync.
     Ok(
         match acnh_core::relay::open(&cx.sync.dirs()?, cx.sync.creds, cx.sync.transport.clone())? {
@@ -490,11 +540,11 @@ fn open_relay(cx: &Context<'_>) -> Result<Box<dyn Relay>> {
 
 /// Android and the iPad get save sync through their own apps.
 #[cfg(any(target_os = "android", target_os = "ios"))]
-fn open_relay(_cx: &Context<'_>) -> Result<Box<dyn Relay>> {
+pub(crate) fn open_relay(_cx: &Context<'_>) -> Result<Box<dyn Relay>> {
     Ok(Box::new(RelayOff))
 }
 
-fn print_card(out: &mut dyn Write, side: &str, card: &savecard::SaveCard) -> Result<()> {
+pub(crate) fn print_card(out: &mut dyn Write, side: &str, card: &savecard::SaveCard) -> Result<()> {
     let [saved, played] = savecard::side_by_side(card);
     let device = if card.device.is_empty() {
         "unknown device"
@@ -505,9 +555,17 @@ fn print_card(out: &mut dyn Write, side: &str, card: &savecard::SaveCard) -> Res
     Ok(())
 }
 
-/// Why a play step stopped before the game: it was told nothing about which island to keep.
-enum Stop {
+/// Which relay step stopped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    Pull,
+    Push,
+}
+
+/// Why a step stopped: it was told nothing about which island to keep.
+pub(crate) enum Stop {
     Conflict {
+        step: Step,
         server: savecard::SaveCard,
         local: savecard::SaveCard,
     },
@@ -519,18 +577,18 @@ enum Stop {
 
 /// The relay as `play` uses it: a conflict is answered only by `--keep`, a held island is
 /// played only with `--anyway`; otherwise the step fails with the reason kept in `stopped`.
-struct Guard<'a> {
-    inner: &'a dyn Relay,
-    keep: Option<Keep>,
-    anyway: bool,
-    backups: &'a Path,
-    stopped: RefCell<Option<Stop>>,
+pub(crate) struct Guard<'a> {
+    pub(crate) inner: &'a dyn Relay,
+    pub(crate) keep: Option<Keep>,
+    pub(crate) anyway: bool,
+    pub(crate) backups: &'a Path,
+    pub(crate) stopped: RefCell<Option<Stop>>,
 }
 
 type Retry<'a> = &'a dyn Fn(Keep) -> Result<Sync>;
 
 impl Guard<'_> {
-    fn settle(&self, save_dir: &Path, first: Sync, retry: Retry<'_>) -> Result<Sync> {
+    fn settle(&self, save_dir: &Path, step: Step, first: Sync, retry: Retry<'_>) -> Result<Sync> {
         match first {
             Sync::Conflict { server, local, .. } => match self.keep {
                 Some(keep) => {
@@ -549,7 +607,11 @@ impl Guard<'_> {
                     retry(keep)
                 }
                 None => {
-                    *self.stopped.borrow_mut() = Some(Stop::Conflict { server, local });
+                    *self.stopped.borrow_mut() = Some(Stop::Conflict {
+                        step,
+                        server,
+                        local,
+                    });
                     Err(Error::Saves(
                         "the island changed here and on the relay".into(),
                     ))
@@ -559,9 +621,8 @@ impl Guard<'_> {
         }
     }
 
-    fn held(&self, result: Sync, save_dir: &Path) -> Result<Sync> {
+    fn held(&self, result: Sync) -> Result<Sync> {
         match result {
-            Sync::Held { .. } if self.anyway => self.inner.pull_anyway(save_dir),
             Sync::Held { device, since } => {
                 *self.stopped.borrow_mut() = Some(Stop::Held {
                     device: device.clone(),
@@ -576,22 +637,30 @@ impl Guard<'_> {
 
 impl Relay for Guard<'_> {
     fn pull(&self, save_dir: &Path, _resolve: Option<Keep>) -> Result<Sync> {
-        let first = self.inner.pull(save_dir, None)?;
-        let settled = self.settle(save_dir, first, &|keep| {
-            self.inner.pull(save_dir, Some(keep))
+        let (first, anyway) = match self.inner.pull(save_dir, None)? {
+            Sync::Held { .. } if self.anyway => (self.inner.pull_anyway(save_dir, None)?, true),
+            other => (other, false),
+        };
+        // A held island that also changed here is still a conflict, answered only by --keep.
+        let settled = self.settle(save_dir, Step::Pull, first, &|keep| {
+            if anyway {
+                self.inner.pull_anyway(save_dir, Some(keep))
+            } else {
+                self.inner.pull(save_dir, Some(keep))
+            }
         })?;
-        self.held(settled, save_dir)
+        self.held(settled)
     }
 
     fn push(&self, save_dir: &Path, _resolve: Option<Keep>) -> Result<Sync> {
         let first = self.inner.push(save_dir, None)?;
-        self.settle(save_dir, first, &|keep| {
+        self.settle(save_dir, Step::Push, first, &|keep| {
             self.inner.push(save_dir, Some(keep))
         })
     }
 
-    fn pull_anyway(&self, save_dir: &Path) -> Result<Sync> {
-        self.inner.pull_anyway(save_dir)
+    fn pull_anyway(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
+        self.inner.pull_anyway(save_dir, resolve)
     }
 
     fn status(&self, save_dir: &Path) -> Result<launch::RelayStatus> {
@@ -616,7 +685,7 @@ fn apply_profile(root: &Path, chosen: &profile::DeviceProfile) -> Result<()> {
     Ok(())
 }
 
-fn report_sync(out: &mut dyn Write, step: &str, sync: &Sync) -> Result<()> {
+pub(crate) fn report_sync(out: &mut dyn Write, step: &str, sync: &Sync) -> Result<()> {
     match sync {
         Sync::Done(message) | Sync::Resolved { message, .. } => writeln!(out, "{step}: {message}")?,
         Sync::Offline => writeln!(

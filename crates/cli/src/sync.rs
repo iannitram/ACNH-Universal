@@ -64,6 +64,7 @@ pub(crate) fn command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
         Some("sign-in") => sign_in(options, cx),
         Some("status") => status(cx),
         Some("off") => off(cx),
+        Some("push") => push(options, cx),
         _ => Err(Error::Config(
             "usage: sync setup --server <url> --user <name> | sign-in gdrive|dropbox | status | off"
                 .into(),
@@ -182,6 +183,53 @@ fn status(cx: &mut Context<'_>) -> Result<i32> {
     };
     writeln!(cx.out, "{line}")?;
     Ok(0)
+}
+
+/// `sync push [--keep relay|here]`: send the island here once, as after a `play` whose push
+/// conflicted (exit 6). `--keep relay` backs the island here up before the relay's replaces it.
+fn push(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
+    use crate::{Guard, Stop};
+    use acnh_core::launch::Relay;
+    let vars = acnh_core::platform::Vars::from_lookup(cx.os, cx.var)?;
+    let root = acnh_core::platform::AppDirs::for_os(cx.os, &vars).data_root();
+    let (save_dir, backups) = (saves::save_dir(&root), saves::backups_dir(&root));
+    let opened;
+    let relay: &dyn Relay = match cx.relay {
+        crate::RelaySource::Fixed(relay) => relay,
+        crate::RelaySource::Open => {
+            opened = crate::open_relay(cx)?;
+            &*opened
+        }
+    };
+    let guard = Guard {
+        inner: relay,
+        keep: options.keep,
+        anyway: false,
+        backups: &backups,
+        stopped: std::cell::RefCell::new(None),
+    };
+    match guard.push(&save_dir, None) {
+        Ok(acnh_core::launch::Sync::Offline) => {
+            Ok(crate::fail(options, cx, &Error::RelayUnreachable, 5))
+        }
+        Ok(sync) => {
+            crate::report_sync(cx.out, "push", &sync)?;
+            Ok(0)
+        }
+        Err(error) => match guard.stopped.take() {
+            Some(Stop::Conflict { server, local, .. }) => {
+                if !options.json {
+                    writeln!(cx.out, "Both have a newer island. Nothing was sent.")?;
+                    crate::print_card(cx.out, "relay", &server)?;
+                    crate::print_card(cx.out, "here", &local)?;
+                    writeln!(cx.out, "Run sync push with --keep relay or --keep here.")?;
+                }
+                let error = Error::Saves("the island changed here and on the relay".into());
+                Ok(crate::fail(options, cx, &error, 6))
+            }
+            _ => Err(error),
+        },
+    }
 }
 
 fn off(cx: &mut Context<'_>) -> Result<i32> {

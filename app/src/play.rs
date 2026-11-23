@@ -65,7 +65,7 @@ impl Relay for Watched<'_> {
     fn pull(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<launch::Sync> {
         self.step(SyncStep::Pull, resolve, || {
             if self.anyway {
-                self.inner.pull_anyway(save_dir)
+                self.inner.pull_anyway(save_dir, None)
             } else {
                 self.inner.pull(save_dir, None)
             }

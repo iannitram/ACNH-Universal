@@ -50,8 +50,8 @@ where
         (self.0)().push(save_dir, resolve)
     }
 
-    fn pull_anyway(&self, save_dir: &Path) -> Result<Sync> {
-        (self.0)().pull_anyway(save_dir)
+    fn pull_anyway(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
+        (self.0)().pull_anyway(save_dir, resolve)
     }
 
     fn status(&self, save_dir: &Path) -> Result<RelayStatus> {
