@@ -5,7 +5,7 @@ import { InputHints } from "hints.slint";
 // back as the button it hit.
 
 // A button on the page (`FocusTarget` in the view model).
-export enum PadTarget { play, keep-this, keep-relay, update, back, saves, settings, fleet, about }
+export enum PadTarget { play, play-anyway, keep-this, keep-relay, update, back, saves, settings, fleet, about }
 
 // One save card, as lines of text.
 export struct CardView {
@@ -30,6 +30,7 @@ export struct ContinueView {
     // The drift warning; "" for none.
     warning: string,
     play-anyway: bool,
+    held: bool,
     back: bool,
     pages-enabled: bool,
     // The About overlay is open over the page.
@@ -237,9 +238,9 @@ export component ContinuePage inherits Rectangle {
             if root.view.play-anyway: PadButton {
                 primary: true;
                 text: "Play anyway";
-                focused: root.view.focus == PadTarget.play;
+                focused: root.view.focus == (root.view.held ? PadTarget.play-anyway : PadTarget.play);
                 clicked => {
-                    root.clicked(PadTarget.play);
+                    root.clicked(root.view.held ? PadTarget.play-anyway : PadTarget.play);
                 }
             }
 

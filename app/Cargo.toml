@@ -19,3 +19,7 @@ arboard = { version = "3.7", default-features = false }
 
 [build-dependencies]
 slint-build = "1.13"
+
+[dev-dependencies]
+acnh-core = { path = "../crates/core", features = ["relay"] }
+save-relay = { git = "https://github.com/iannitram/save-relay" }
