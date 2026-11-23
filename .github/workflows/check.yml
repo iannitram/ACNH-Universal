@@ -262,6 +262,11 @@ jobs:
             [ "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")" = 15.0 ]
             [ "$(lipo -archs "$app/ACNH")" = arm64 ]
           done
+      - name: Prepare makes the iOS .ipa (stages faked, scripts real, stub gen)
+        run: |
+          out="$RUNNER_TEMP/ios-prepare"
+          trap 'rm -rf "$out"' EXIT
+          ACNH_IOS_PREPARE_DIR="$out" cargo test -p acnh-core --test prepare_runner ios_real -- --nocapture
       - name: Package the Mac app (fake app, empty decoys)
         run: bash tests/package_mac_test.sh
       - name: Package the iOS device stub
