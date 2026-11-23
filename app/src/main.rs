@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use acnh_app::first_run::{route_text, system_relay_setup, FirstRun};
 use acnh_app::input::{key_nav, poll_nav, DeviceEvent, Devices, Stick};
 use acnh_app::play::{Player, Runner, Session};
-use acnh_app::relay_setup::{PageView, RelaySettings};
+use acnh_app::relay_setup::{PageView, RecheckWhenClosed, RelaySettings};
 use acnh_app::ui::{from_slint, to_slint};
 use acnh_app::vm::fleet::FleetVm;
 use acnh_app::vm::saves::SavesVm;
@@ -613,6 +613,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = window.as_weak();
     let mut was_first_open = window.get_first_run_open();
     let mut was_settings_open = false;
+    let mut recheck = RecheckWhenClosed::default();
     let mut fleet_tick = 0_u32;
     timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
         let navs = match gilrs.as_mut() {
@@ -649,8 +650,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             relay.refresh();
         }
         let relay_changed = relay.pump();
-        if relay.take_changed() {
-            // Settings set save sync up or turned it off: Continue checks it again.
+        // Settings set save sync up or turned it off: Continue checks it again once Settings
+        // has closed, so Back is never held up by the check.
+        if recheck.update(settings_open, relay.take_changed()) {
             session.recheck_status();
         }
         if (settings_open != was_settings_open

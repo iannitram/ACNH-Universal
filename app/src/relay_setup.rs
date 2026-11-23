@@ -373,15 +373,21 @@ You can close this tab and go back to ACNH Universal.</p>";
                 transport,
             )
             .map_err(|error| plain_error(&error))?;
-            if cancelled() {
-                // Backed out while this ran: the listener is dropped here, not kept.
-                return Err("The sign-in was cancelled.".into());
+            // Keep the listener only if nobody backed out: check under the lock, so a Cancel
+            // that clears it cannot slip in between the check and the store. Only then open
+            // the browser.
+            {
+                let mut held = self
+                    .listener
+                    .lock()
+                    .map_err(|_| "Save sync sign-in is unavailable.".to_owned())?;
+                if cancelled() {
+                    drop(listener);
+                    return Err("The sign-in was cancelled.".into());
+                }
+                *held = listener;
             }
             let browser = !game_mode && (self.open_browser)(&prompt.url);
-            *self
-                .listener
-                .lock()
-                .map_err(|_| "Save sync sign-in is unavailable.".to_owned())? = listener;
             Ok(Prompt {
                 url: prompt.url,
                 code: prompt.code,
@@ -520,6 +526,29 @@ pub fn flow_page(flow: &RelaySetupVm) -> PageView {
     }
 }
 
+/// When Continue checks save sync again after Settings changed it: not while Settings is open
+/// (the check would make Continue busy and Back could not close Settings), but once it has
+/// closed.
+#[derive(Debug, Default)]
+pub struct RecheckWhenClosed {
+    pending: bool,
+    was_open: bool,
+}
+
+impl RecheckWhenClosed {
+    /// Call every tick; true when the check should start now.
+    pub fn update(&mut self, settings_open: bool, changed: bool) -> bool {
+        self.pending |= changed;
+        let closed_now = self.was_open && !settings_open;
+        self.was_open = settings_open;
+        if self.pending && !settings_open && (closed_now || changed) {
+            self.pending = false;
+            return true;
+        }
+        false
+    }
+}
+
 /// The save sync rows of Settings with the work they start: Sign in again opens the setup
 /// pages, Turn off save sync forgets the account (on a thread of its own, since the credential
 /// store may be slow).
@@ -601,8 +630,10 @@ impl RelaySettings {
 
     fn apply(&mut self, outcome: Outcome) {
         let was = self.vm.account.clone();
+        let done = matches!(outcome, Outcome::Done(_));
         self.vm.flow_outcome(outcome);
-        if self.vm.account != was {
+        // Signing in again to the same account checks save sync again too.
+        if self.vm.account != was || done {
             self.changed = true;
         }
     }

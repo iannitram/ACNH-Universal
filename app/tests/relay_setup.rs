@@ -10,7 +10,7 @@ use acnh_app::first_run::{route_text, FirstRun};
 use acnh_app::play::{Runner, Session};
 use acnh_app::relay::{choose, opened_each_step, SharedRelay};
 use acnh_app::relay_setup::fake::FakeSetup;
-use acnh_app::relay_setup::{RelaySettings, RelaySetup, SystemSetup};
+use acnh_app::relay_setup::{RecheckWhenClosed, RelaySettings, RelaySetup, SystemSetup};
 use acnh_app::vm::continue_page::ContinueState;
 use acnh_app::vm::first_run::{Event, Step};
 use acnh_app::vm::relay_setup::{Phase, Prompt, Service};
@@ -434,6 +434,9 @@ impl Game for Quits {
     }
 }
 
+/// Tests that bind the sign-in port take turns.
+static PORT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 struct Machine {
@@ -694,6 +697,7 @@ fn letters_typed_in_the_settings_editor_reach_it() {
 
 #[test]
 fn backing_out_of_a_desktop_sign_in_lets_go_of_the_loopback_port() {
+    let _port = PORT.lock().unwrap_or_else(|e| e.into_inner());
     let machine = Machine::new();
     let (creds, dav, dirs) = (
         machine.creds.clone(),
@@ -771,4 +775,177 @@ fn continue_checks_save_sync_again_after_settings_changes_it() {
     session.recheck_status();
     settle(&mut session);
     assert_ne!(session.vm().state(), &ContinueState::SyncOff);
+}
+
+#[test]
+fn a_cancel_that_lands_while_the_browser_opens_does_not_keep_the_port() {
+    let _port = PORT.lock().unwrap_or_else(|e| e.into_inner());
+    let machine = Machine::new();
+    let (creds, dav, dirs) = (
+        machine.creds.clone(),
+        machine.dav.clone(),
+        machine.dirs.clone(),
+    );
+    let entered = Arc::new(AtomicBool::new(false));
+    let hook = entered.clone();
+    let setup = Arc::new(SystemSetup::with(
+        dirs,
+        Arc::new(move || {
+            (
+                Box::new(Shared(creds.clone())) as Box<dyn CredentialStore>,
+                dav.clone() as Arc<dyn Transport>,
+            )
+        }),
+        Arc::new(|| false),
+        // Opening the browser takes a while; Back is pressed meanwhile.
+        Arc::new(move |_| {
+            hook.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(300));
+            false
+        }),
+        "desktop".into(),
+    ));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let job = {
+        let (setup, cancelled) = (setup.clone(), cancelled.clone());
+        std::thread::spawn(move || {
+            setup.start_sign_in(Service::GoogleDrive, &|| cancelled.load(Ordering::SeqCst))
+        })
+    };
+    let started = Instant::now();
+    while !entered.load(Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "browser never opened"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    cancelled.store(true, Ordering::SeqCst);
+    setup.cancel_sign_in();
+    let _ = job.join().unwrap();
+    // The next sign-in can bind the port.
+    setup
+        .start_sign_in(Service::GoogleDrive, &|| false)
+        .expect("the port was kept");
+    setup.cancel_sign_in();
+}
+
+#[test]
+fn back_closes_settings_at_once_and_the_recheck_runs_after_it_closes() {
+    let machine = Machine::new();
+    let setup = machine.setup();
+    let played = Arc::new(AtomicBool::new(false));
+    let runner = Runner {
+        relay: machine.relay(),
+        game: Arc::new(Quits(played)),
+        save_dir: machine.root.join("saves"),
+        env: Vec::new(),
+        backup: Arc::new(|_: &Path| Ok(())),
+    };
+    let card = SaveCard {
+        saved_unix: 1000,
+        device: "desktop".into(),
+        play_seconds: 60,
+        version: "3.0.2".into(),
+        picture: PathBuf::new(),
+    };
+    let mut session = Session::new(
+        ContinuePageVm::new(Some(card), None),
+        runner,
+        PathBuf::new(),
+    );
+    let started = Instant::now();
+    while session.vm().state() == &ContinueState::CheckingStatus {
+        assert!(started.elapsed() < Duration::from_secs(20));
+        session.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(session.vm().state(), &ContinueState::SyncOff);
+    session.nav(Nav::Down);
+    session.nav(Nav::Right);
+    session.nav(Nav::Accept);
+    assert!(session.vm().settings_open());
+
+    // Save sync is set up while Settings is open: the check waits.
+    setup
+        .setup_nextcloud("https://cloud.test", "alex", PASSWORD)
+        .unwrap();
+    let mut recheck = RecheckWhenClosed::default();
+    assert!(!recheck.update(true, true), "not while Settings is open");
+    assert!(!recheck.update(true, false));
+    assert_ne!(session.vm().state(), &ContinueState::CheckingStatus);
+    session.nav(Nav::Back);
+    assert!(
+        !session.vm().settings_open(),
+        "Back closes Settings at once"
+    );
+    assert_ne!(session.vm().state(), &ContinueState::CheckingStatus);
+    assert!(
+        recheck.update(false, false),
+        "the check starts once it is closed"
+    );
+    assert!(!recheck.update(false, false), "and only once");
+    session.recheck_status();
+    assert_eq!(session.vm().state(), &ContinueState::CheckingStatus);
+}
+
+#[test]
+fn a_page_in_relay_error_checks_again_when_asked() {
+    let machine = Machine::new();
+    let relay: SharedRelay = Arc::new(acnh_app::relay::RelayFailed(acnh_core::Error::Saves(
+        "the credential store is locked".into(),
+    )));
+    let runner = Runner {
+        relay,
+        game: Arc::new(Quits(Arc::new(AtomicBool::new(false)))),
+        save_dir: machine.root.join("saves"),
+        env: Vec::new(),
+        backup: Arc::new(|_: &Path| Ok(())),
+    };
+    let mut session = Session::new(ContinuePageVm::new(None, None), runner, PathBuf::new());
+    let started = Instant::now();
+    while session.vm().state() == &ContinueState::CheckingStatus {
+        assert!(started.elapsed() < Duration::from_secs(20));
+        session.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(matches!(session.vm().state(), ContinueState::RelayError(_)));
+    session.recheck_status();
+    assert_eq!(session.vm().state(), &ContinueState::CheckingStatus);
+}
+
+#[test]
+fn signing_in_again_to_the_same_account_still_asks_for_a_recheck() {
+    let fake = FakeSetup::new(PASSWORD, google_prompt());
+    let mut settings = RelaySettings::new(fake.clone());
+    settings.press_sign_in();
+    settings.click(1);
+    let started = Instant::now();
+    while settings
+        .vm
+        .flow
+        .as_ref()
+        .is_some_and(|f| f.phase != Phase::Waiting)
+    {
+        assert!(started.elapsed() < Duration::from_secs(20));
+        settings.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    fake.release();
+    while settings.flow_open() {
+        assert!(started.elapsed() < Duration::from_secs(20));
+        settings.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(settings.take_changed());
+    // The same account again.
+    fake.release();
+    settings.press_sign_in();
+    settings.click(1);
+    while settings.flow_open() {
+        assert!(started.elapsed() < Duration::from_secs(20));
+        settings.pump();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(settings.take_changed(), "same account, still a recheck");
 }

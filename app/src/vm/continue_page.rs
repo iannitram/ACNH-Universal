@@ -498,6 +498,8 @@ impl ContinuePageVm {
                 | ContinueState::SyncOff
                 | ContinueState::RelayNewer
                 | ContinueState::LocalNewer
+                | ContinueState::RelayUnavailable
+                | ContinueState::RelayError(_)
         ) {
             self.state = ContinueState::CheckingStatus;
             true
