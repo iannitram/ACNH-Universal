@@ -798,6 +798,49 @@ fn session_card_is_written_after_push() {
 }
 
 #[test]
+fn a_refused_sign_in_is_relay_sign_in_and_never_holds_the_password() {
+    let (root, dirs) = temp_dirs("sign-in-refused");
+    let creds = MemoryStore::new();
+    let fake = Arc::new(FakeDav::new(PASSWORD));
+    setup_nextcloud(
+        "https://cloud.test",
+        "alex",
+        PASSWORD,
+        "desktop",
+        &dirs,
+        &creds,
+        fake.clone(),
+    )
+    .unwrap();
+
+    // The server now answers 401 to the stored password (a revoked app password).
+    let revoked = Arc::new(FakeDav::new("another-password"));
+    let relay = open(&dirs, &creds, revoked).unwrap().expect("set up");
+    let saves = root.join("saves");
+    populate_island(&saves, "v1");
+    let error = relay.pull(&saves, None).unwrap_err();
+    assert_eq!(error.code(), "relay_sign_in", "{error}");
+    assert!(error.to_string().contains("sign in"), "{error}");
+    assert!(!error.to_string().contains(PASSWORD), "{error}");
+
+    // The same at setup: a wrong password is the sign-in error, not a generic one.
+    let error = setup_nextcloud(
+        "https://cloud.test",
+        "alex",
+        WRONG_PASSWORD,
+        "desktop",
+        &dirs,
+        &MemoryStore::new(),
+        fake,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "relay_sign_in");
+    assert!(!error.to_string().contains(WRONG_PASSWORD));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn pull_anyway_answers_a_conflict_with_the_given_keep() {
     let root = temp_fixture_dir("anyway-conflict");
     let remote = Arc::new(MemoryRemote::new());

@@ -92,8 +92,11 @@ impl SaveRelay {
     }
 }
 
-impl Relay for SaveRelay {
-    fn pull(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
+impl SaveRelay {
+    /// A pull with both knobs: the player's answer to a conflict (`resolve`) and Play anyway on
+    /// an island another device holds (`anyway`). After Play anyway a conflict can still come
+    /// back, and this settles it.
+    pub fn pull_with(&self, save_dir: &Path, resolve: Option<Keep>, anyway: bool) -> Result<Sync> {
         let manifest = self.parse_manifest()?;
         let layout = Layout::new(&self.root).map_err(|e| Error::Saves(e.to_string()))?;
         let session = self.session(layout);
@@ -102,11 +105,16 @@ impl Relay for SaveRelay {
             saves_dir: save_dir.to_path_buf(),
         };
         let resolve_sync = map_resolve(resolve);
-        let anyway = false;
         let report =
             sync::pull(&session, &game, &self.store, resolve_sync, anyway).map_err(map_err)?;
         persist_card(save_dir, &report, self.version)?;
         Ok(map_sync_with_local(report, save_dir))
+    }
+}
+
+impl Relay for SaveRelay {
+    fn pull(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
+        self.pull_with(save_dir, resolve, false)
     }
 
     fn push(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
@@ -123,15 +131,7 @@ impl Relay for SaveRelay {
         Ok(map_sync_with_local(report, save_dir))
     }
     fn pull_anyway(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
-        let game = Game {
-            manifest: self.parse_manifest()?,
-            saves_dir: save_dir.to_path_buf(),
-        };
-        let session = self.session(Layout::new(&self.root).map_err(map_err)?);
-        let report = sync::pull(&session, &game, &self.store, map_resolve(resolve), true)
-            .map_err(map_err)?;
-        persist_card(save_dir, &report, self.version)?;
-        Ok(map_sync_with_local(report, save_dir))
+        self.pull_with(save_dir, resolve, true)
     }
 
     fn status(&self, save_dir: &Path) -> Result<RelayStatus> {
@@ -196,6 +196,7 @@ fn map_resolve(keep: Option<Keep>) -> Option<Resolve> {
 fn map_err(err: save_relay::Error) -> Error {
     match err {
         save_relay::Error::Io(msg) => Error::Io(msg),
+        save_relay::Error::AuthFailed => Error::RelaySignIn,
         other => Error::Saves(other.to_string()),
     }
 }

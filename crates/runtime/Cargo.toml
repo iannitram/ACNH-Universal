@@ -20,6 +20,24 @@ player = ["dep:cmake"]
 
 [dependencies]
 
+# The save-relay adapter in the iPad's player (`src/apple.rs`, issue #172): the same
+# `acnh_core::relay` as the Mac and the PC. iOS only, so the Android cross-build is unchanged.
+# `keyring` stays off (the Keychain store is `apple_ios.rs`); `http` is ureq with rustls.
+[target.'cfg(target_os = "ios")'.dependencies]
+acnh-core = { path = "../core", features = ["relay"] }
+save-relay = { git = "https://github.com/iannitram/save-relay", default-features = false, features = ["http"] }
+security-framework = "3"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-ui-kit = "0.3"
+block2 = "0.6"
+dispatch2 = { version = "0.3", features = ["objc2"] }
+
+# The tests include `src/apple.rs` and run it with fakes on every desktop runner.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dev-dependencies]
+acnh-core = { path = "../core", features = ["relay"] }
+save-relay = { git = "https://github.com/iannitram/save-relay" }
+
 [build-dependencies]
 cbindgen = { version = "0.27", default-features = false }
 cmake = { version = "0.1", optional = true }

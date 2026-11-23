@@ -23,6 +23,7 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -892,6 +893,42 @@ void thread_cpu_watch() {
 }
 }  // namespace
 
+#if TARGET_OS_IPHONE
+// save-relay inside the player (crates/runtime, apple.rs; issue #172). The Rust half pulls the island before the game
+// boots (it returns only when the game may boot) and pushes it when the game quits or the app goes to the background.
+extern "C" void acnh_relay_before_game(const char* data_root);
+extern "C" void acnh_relay_after_game(const char* data_root);   // synchronous: the game has quit
+extern "C" void acnh_relay_background(const char* data_root);   // returns at once: the push runs on a worker
+
+// The Rust half's log lines go into the player's log (Documents/logs/nx.log).
+extern "C" void nx_relay_log(const char* line) { nx::log("%s", line); }
+
+// relay.ask lives in the player's own settings: this side is the only writer of config.ini (config_save rewrites the
+// file from the entries it loaded, so a key written behind its back would be lost at the next save).
+extern "C" bool nx_relay_ask_off() { return nx::config_get("relay.ask", "") == "0"; }
+extern "C" bool nx_relay_remember_not_now() {
+    nx::config_set("relay.ask", "0");
+    return nx::config_save();
+}
+
+static void relay_after_game() {
+    if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
+}
+
+// The app went to the background. SDL's WILL_ENTER_BACKGROUND is UIKit's resign-active, which also fires for
+// Control Center or a notification pulled over the game, so the push waits for DID_ENTER_BACKGROUND. The watch runs
+// on the main thread, which must keep its run loop: acnh_relay_background begins the background task here
+// (beginBackgroundTaskWithExpirationHandler:), pushes on a worker thread and returns at once. It does nothing until
+// acnh_relay_before_game has returned.
+static bool background_watch(void*, SDL_Event* e) {
+    if (e->type == SDL_EVENT_DID_ENTER_BACKGROUND)
+        if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_background(root);
+    return true;
+}
+#else
+static void relay_after_game() {}
+#endif
+
 // ---- crash handler and entry ----------------------------------------------------------------------------------
 
 namespace {
@@ -917,6 +954,10 @@ void crash_handler(int sig, siginfo_t* info, void* uc) {
 
 void game_thread() {
     try {
+#if TARGET_OS_IPHONE
+        // On this thread, so the main thread keeps the run loop the prompts need. Returns when the game may boot.
+        if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_before_game(root);
+#endif
         nx::boot();
     } catch (const nx::LongJmp& j) {
         nx::fatal("longjmp to buffer %llx with no setjmp frame", (unsigned long long)j.buf);
@@ -937,6 +978,13 @@ int main(int argc, char** argv) {
         if (const char* home = std::getenv("HOME")) {
             const std::string docs = std::string(home) + "/Documents";
             setenv("NX_DATA_ROOT", docs.c_str(), 1);
+        }
+    // The log goes with the saves, where the Files app shows it (the loader's default is one folder above Documents).
+    if (!std::getenv("NX_LOG"))
+        if (const char* root = std::getenv("NX_DATA_ROOT")) {
+            const std::string logs = std::string(root) + "/logs";
+            mkdir(logs.c_str(), 0755);  // the player opens the log with fopen: the folder must exist
+            setenv("NX_LOG", (logs + "/nx.log").c_str(), 1);
         }
 #endif
     nx::config_apply();  // config.ini -> NX_* defaults, before anything reads them (config.h)
@@ -991,7 +1039,10 @@ int main(int argc, char** argv) {
 
     // The game on its own thread, with a big stack (recompiled calls nest deeply); the main thread keeps Cocoa's
     // event loop.
-    nx::plat::start_thread([](void*) { game_thread(); nx::plat::exit_process(0); }, nullptr, 64ull << 20);
+#if TARGET_OS_IPHONE
+    SDL_AddEventWatch(background_watch, nullptr);
+#endif
+    nx::plat::start_thread([](void*) { game_thread(); relay_after_game(); nx::plat::exit_process(0); }, nullptr, 64ull << 20);
 
     using namespace nx::plat;
     pthread_setname_np("events");        // the Cocoa main thread (NX_THREAD_CPU names it)
@@ -1006,6 +1057,7 @@ int main(int argc, char** argv) {
             switch (e.type) {
             case SDL_EVENT_QUIT:
                 nx::log("platform: quit requested (window closed / Cmd-Q)");
+                relay_after_game();
                 exit_process(0);
             case SDL_EVENT_WINDOW_MINIMIZED:
             case SDL_EVENT_WINDOW_HIDDEN:

@@ -26,7 +26,9 @@ hub = ["dep:mdns-sd", "dep:spake2", "dep:hmac", "dep:serde", "dep:serde_json", "
 sha2 = "0.10"
 # Pure-Rust TrueType parsing and composite outline traversal for the fonts stage.
 ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
-save-relay = { git = "https://github.com/iannitram/save-relay", optional = true }
+# `http` (ureq with rustls) everywhere; `keyring` on every target but iOS (the target-specific
+# line below), where the app's credential store is the Keychain (crates/runtime, `apple`).
+save-relay = { git = "https://github.com/iannitram/save-relay", optional = true, default-features = false, features = ["http"] }
 # Pure-Rust discovery, PAKE, peer records, and authenticated bounded-memory transfers.
 # Versions follow the credited sibling hub implementation (see NOTICE).
 mdns-sd = { version = "0.21.7", optional = true, default-features = false }
@@ -40,3 +42,6 @@ chacha20poly1305 = { version = "0.11.0", optional = true, features = ["zeroize"]
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
 # Scratch directory beside an archive while zstd writes a replacement for an atomic rename.
 tempfile = "3"
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+save-relay = { git = "https://github.com/iannitram/save-relay", optional = true, default-features = false, features = ["http", "keyring"] }

@@ -216,7 +216,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: aarch64-apple-ios
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
@@ -235,6 +235,8 @@ jobs:
           test -n "$(cargo tree -e normal --target "$host" -p acnh-cli -i save-relay)"
       - name: iOS cross-check
         run: cargo check --workspace --target aarch64-apple-ios
+      - name: iOS runtime library (save-relay in the player)
+        run: cargo build -p acnh-runtime --release --target aarch64-apple-ios
       - name: Homebrew headers (SDL3, Vulkan)
         run: brew install ninja sdl3 vulkan-headers
       - name: Compact and desktop guest layout (macOS)
@@ -262,6 +264,18 @@ jobs:
             [ "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")" = 15.0 ]
             [ "$(lipo -archs "$app/ACNH")" = arm64 ]
           done
+      - name: Check the iOS app's save-relay and frameworks
+        run: |
+          app="private/ios/build-iphoneos/ACNH.app"
+          defined="$(nm -gU "$app/ACNH")"
+          grep -q ' T _acnh_relay_before_game$' <<<"$defined"
+          grep -q ' T _acnh_relay_after_game$' <<<"$defined"
+          linked="$(otool -L "$app/ACNH")"
+          grep -q 'GameController.framework' <<<"$linked"
+          grep -q 'Security.framework' <<<"$linked"
+          if grep -Eq '/opt/homebrew|/usr/local' <<<"$linked"; then exit 1; fi
+          [ "$(plutil -extract UIFileSharingEnabled raw "$app/Info.plist")" = true ]
+
       - name: Prepare makes the iOS .ipa (stages faked, scripts real, stub gen)
         run: |
           out="$RUNNER_TEMP/ios-prepare"

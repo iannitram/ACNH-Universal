@@ -65,3 +65,9 @@ pub fn ported(service: Service) -> bool {
 pub extern "C" fn acnh_runtime_abi_version() -> u32 {
     1
 }
+
+/// save-relay inside the iPad's player: pull before the game, push after, Nextcloud setup,
+/// the conflict and held prompts (issue #172; `apple.rs`, UIKit and Keychain in `apple_ios.rs`).
+/// The tests run the platform-free half on every runner (`tests/apple_relay.rs`).
+#[cfg(target_os = "ios")]
+pub mod apple;
