@@ -65,6 +65,7 @@ pub enum PlayAction {
     ResolveConflict,
     SetUp,
     Prepare,
+    Pull,
     Update,
 }
 
@@ -79,6 +80,7 @@ impl PlayAction {
             Self::ResolveConflict => "Resolve conflict",
             Self::SetUp => "Set up",
             Self::Prepare => "Prepare",
+            Self::Pull => "Pull",
             Self::Update => "Update",
         }
     }
@@ -211,6 +213,8 @@ pub enum Request {
     /// One relay step on its own (`Pull` or `Push`): with `keep`, the player's answer to a
     /// conflict found at that step; without, a push tried again after the game has run.
     Sync { step: SyncStep, keep: Option<Keep> },
+    /// Prepare locally or pull from a paired hub.
+    Build,
     /// Bring this device's build up to date (`update`).
     Update,
 }
@@ -234,6 +238,8 @@ pub enum PlayEvent {
     Played(Result<Played>),
     /// A `Request::Sync` returned.
     Synced(Result<Sync>),
+    /// A build stage began or a target was skipped.
+    BuildProgress(String),
     /// A `Request::Update` returned.
     Updated(Result<()>),
 }
@@ -369,6 +375,7 @@ pub struct ContinuePageVm {
     /// The step the relay reported the conflict at.
     conflict_step: SyncStep,
     request: Option<Request>,
+    build_request: Request,
 }
 
 impl Default for ContinuePageVm {
@@ -412,6 +419,7 @@ impl ContinuePageVm {
             home: PathBuf::new(),
             conflict_step: SyncStep::Pull,
             request: None,
+            build_request: Request::Build,
         }
     }
 
@@ -471,6 +479,17 @@ impl ContinuePageVm {
             ContinueState::Conflict => "Unresolved conflict",
             _ => "",
         }
+    }
+
+    /// Mark an unavailable build before the player can start it.
+    pub fn set_build_missing(&mut self, local: bool) {
+        self.build_request = Request::Build;
+        self.state = ContinueState::BuildMissing;
+        self.play_action = Some(if local {
+            PlayAction::Prepare
+        } else {
+            PlayAction::Pull
+        });
     }
 
     /// The job the last press asked for, once: the driver runs it and reports back through
@@ -678,8 +697,10 @@ impl ContinuePageVm {
                     self.focus = FocusTarget::Play;
                 }
                 Nav::Accept if newer_save_refused || self.focus == FocusTarget::Update => {
+                    self.status_message = None;
                     self.state = ContinueState::Updating("Starting update".to_string());
                     self.play_action = Some(PlayAction::Syncing);
+                    self.build_request = Request::Update;
                     self.request = Some(Request::Update);
                     return true;
                 }
@@ -729,6 +750,16 @@ impl ContinuePageVm {
 
     /// Accept on the one Play button outside the chooser and the drift warning.
     fn accept_play(&mut self) -> bool {
+        if matches!(
+            self.state,
+            ContinueState::BuildMissing | ContinueState::UpdateFailed(_)
+        ) {
+            self.status_message = None;
+            self.state = ContinueState::Updating("Starting preparation".into());
+            self.play_action = Some(PlayAction::Syncing);
+            self.request = Some(self.build_request);
+            return true;
+        }
         if matches!(self.state, ContinueState::PushFailed(_)) {
             // The game has already run: only the push is tried again.
             self.state = ContinueState::Saving;
@@ -920,6 +951,12 @@ impl ContinuePageVm {
                     }
                 }
             }
+            PlayEvent::BuildProgress(stage) => {
+                if stage.contains("; skipped") {
+                    self.status_message = Some(stage.clone());
+                }
+                self.state = ContinueState::Updating(stage);
+            }
             PlayEvent::Updated(result) => {
                 self.focus = FocusTarget::Play;
                 match result {
@@ -928,6 +965,7 @@ impl ContinuePageVm {
                         self.play_action = Some(PlayAction::Play);
                     }
                     Err(error) => {
+                        self.status_message = None;
                         let reason = self.reason(&error);
                         self.fail(ContinueState::UpdateFailed(reason));
                     }
@@ -1363,6 +1401,24 @@ mod tests {
             server: "device Strix Halo tablet\nplay 7200\nversion 3.0.2\nsaved 2000".to_string(),
             local: "device AMD handheld".to_string(),
         });
+    }
+
+    #[test]
+    fn missing_build_requests_preparation_and_reports_progress() {
+        let mut vm = ContinuePageVm::default();
+        vm.set_build_missing(true);
+        assert_eq!(vm.state(), &ContinueState::BuildMissing);
+        assert_eq!(vm.view().button, "Prepare");
+        assert!(vm.handle(Nav::Accept));
+        assert_eq!(vm.take_request(), Some(Request::Build));
+        vm.on_play_event(PlayEvent::BuildProgress("build".into()));
+        assert_eq!(vm.view().button, "build");
+        vm.on_play_event(PlayEvent::BuildProgress(
+            "ios is not supported yet; skipped".into(),
+        ));
+        vm.on_play_event(PlayEvent::Updated(Ok(())));
+        assert_eq!(vm.state(), &ContinueState::Ready);
+        assert!(vm.view().message.contains("ios is not supported"));
     }
 
     #[test]

@@ -46,6 +46,7 @@ fn session() -> acnh_core::Result<Session> {
         std::env::current_exe().unwrap_or_default()
     };
     let program = assemble::player(os, &launcher, &dirs.install());
+    let player_path = program.clone();
     let runner = Runner {
         // No relay is set up from the app yet (Settings): the island here is played, and
         // nothing is pulled or pushed.
@@ -62,7 +63,12 @@ fn session() -> acnh_core::Result<Session> {
             Ok(())
         }),
     };
-    Ok(Session::new(vm, runner, picture))
+    let mut session = Session::new(vm, runner, picture);
+    session.set_build_actions(
+        acnh_app::build_actions::BuildActions { dirs, os },
+        &player_path,
+    );
+    Ok(session)
 }
 
 fn render(window: &Weak<MainWindow>, session: &Session) {

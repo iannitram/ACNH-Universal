@@ -13,9 +13,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
+use crate::build_actions::BuildActions;
 use acnh_core::launch::{self, Game, Keep, Relay};
 use acnh_core::savecard;
-use acnh_core::{Error, NotBuilt, Result};
+use acnh_core::{Error, Result};
 
 use crate::vm::continue_page::{ContinuePageVm, FocusTarget, PlayEvent, Request, SyncStep};
 use crate::vm::Nav;
@@ -162,6 +163,7 @@ pub struct Runner {
 pub struct Session {
     vm: ContinuePageVm,
     runner: Runner,
+    builds: Option<BuildActions>,
     picture: PathBuf,
     sender: Sender<PlayEvent>,
     events: Receiver<PlayEvent>,
@@ -174,15 +176,25 @@ impl Session {
         Self {
             vm,
             runner,
+            builds: None,
             picture,
             sender,
             events,
         }
     }
 
+    pub fn set_build_actions(&mut self, builds: BuildActions, player: &Path) {
+        if !builds.installed(player) {
+            self.vm
+                .set_build_missing(builds.game_folder().ok().flatten().is_some());
+        }
+        self.builds = Some(builds);
+    }
+
     /// Use the locally prepared player and game root for subsequent launches.
     pub fn set_prepared_player(&mut self, program: PathBuf, root: &Path) {
         self.runner.game = Arc::new(Player { program });
+        self.vm.on_play_event(PlayEvent::Updated(Ok(())));
         self.runner.env.retain(|(name, _)| name != "NX_GAME_ROOT");
         self.runner
             .env
@@ -213,6 +225,26 @@ impl Session {
         let events: Vec<PlayEvent> = self.events.try_iter().collect();
         let any = !events.is_empty();
         for event in events {
+            if matches!(event, PlayEvent::Updated(Ok(()))) {
+                if let Some(builds) = &self.builds {
+                    let local = builds.game_folder().ok().flatten().is_some();
+                    let launcher = if local {
+                        PathBuf::new()
+                    } else {
+                        std::env::current_exe().unwrap_or_default()
+                    };
+                    let program =
+                        acnh_core::assemble::player(builds.os, &launcher, &builds.dirs.install());
+                    self.runner.game = Arc::new(Player { program });
+                    if local {
+                        self.runner.env.retain(|(key, _)| key != "NX_GAME_ROOT");
+                        self.runner.env.push((
+                            "NX_GAME_ROOT".into(),
+                            builds.dirs.data.join("prepare").display().to_string(),
+                        ));
+                    }
+                }
+            }
             let finished = matches!(event, PlayEvent::Played(_) | PlayEvent::Synced(_));
             self.vm.on_play_event(event);
             if finished {
@@ -261,13 +293,23 @@ impl Session {
                     );
                 });
             }
-            // The update flow is joined to the app with the Fleet page; until then the page
-            // says so instead of waiting.
-            Request::Update => self
-                .vm
-                .on_play_event(PlayEvent::Updated(Err(Error::NotBuilt(NotBuilt(
-                    "update from the Continue page",
-                ))))),
+            Request::Build | Request::Update => {
+                let builds = self.builds.clone();
+                thread::spawn(move || {
+                    let result = match builds {
+                        Some(builds) => {
+                            let progress = |stage| report(PlayEvent::BuildProgress(stage));
+                            if request == Request::Update {
+                                builds.update(&progress)
+                            } else {
+                                builds.build(&progress)
+                            }
+                        }
+                        None => Err(Error::Build("Build setup is unavailable".into())),
+                    };
+                    report(PlayEvent::Updated(result));
+                });
+            }
         }
     }
 }
@@ -709,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn update_from_the_page_says_it_is_not_built_instead_of_waiting() {
+    fn update_without_build_configuration_reports_an_error() {
         let log = Log::default();
         let mut session = session(&log, None);
         session.vm.this_device = None;
@@ -718,10 +760,12 @@ mod tests {
         };
         session.vm.focus = FocusTarget::Update;
         assert!(session.click(FocusTarget::Update));
-        assert!(matches!(
-            session.vm().state(),
-            ContinueState::UpdateFailed(_)
-        ));
+        let started = Instant::now();
+        while !matches!(session.vm().state(), ContinueState::UpdateFailed(_)) {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            session.pump();
+            thread::sleep(Duration::from_millis(2));
+        }
         assert!(lines(&log).is_empty());
     }
 }
