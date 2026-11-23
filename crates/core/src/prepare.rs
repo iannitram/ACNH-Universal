@@ -1365,14 +1365,27 @@ fn has_xcode(dirs: &[PathBuf]) -> bool {
 }
 
 /// `Some(false)` when the interpreter's standard library is found and has no `venv` module;
-/// `None` when it cannot be told from the folder (a fake in a test).
+/// `None` when it cannot be told from the folder (a fake in a test). The `lib` folders of both
+/// the path as found and the file it links to are looked in: Homebrew's `bin/python3` is a link
+/// into its Cellar, and the `lib/python3.N` beside the link holds only `site-packages`.
 fn has_venv(python: &Path) -> Option<bool> {
-    let prefix = prefix_of(python.parent()?);
+    let mut prefixes = vec![prefix_of(python.parent()?).to_path_buf()];
+    if let Some(dir) = std::fs::canonicalize(python)
+        .ok()
+        .and_then(|real| real.parent().map(Path::to_path_buf))
+    {
+        let prefix = prefix_of(&dir).to_path_buf();
+        if !prefixes.contains(&prefix) {
+            prefixes.push(prefix);
+        }
+    }
     let mut roots = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(prefix.join("lib")) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("python") {
-                roots.push(entry.path());
+    for prefix in &prefixes {
+        if let Ok(entries) = std::fs::read_dir(prefix.join("lib")) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("python") {
+                    roots.push(entry.path());
+                }
             }
         }
     }

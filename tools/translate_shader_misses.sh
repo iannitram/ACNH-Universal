@@ -38,7 +38,8 @@ mkdir -p "$G" "$T/out"
 n=$(($(wc -l < "$G/manifest.tsv") - 1))
 [ "$n" -gt 0 ] || { echo "nothing new to translate"; exit 0; }
 echo "$n shaders to translate"
-"$DOTNET" "$HARNESS" --batch "$T/in" --out "$T/out" --jobs 4 --spirv-val "$VAL" | tail -n 3
+# Tiered compilation off, as crates/core/src/shaders.rs: the .NET 10 JIT segfaulted in its tiering paths on macOS 27.
+DOTNET_TieredCompilation=0 "$DOTNET" "$HARNESS" --batch "$T/in" --out "$T/out" --jobs 4 --spirv-val "$VAL" | tail -n 3
 mkdir -p "$W/spirv"
 added=0
 while IFS=$'\t' read -r h rest; do

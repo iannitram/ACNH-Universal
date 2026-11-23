@@ -182,8 +182,15 @@ jobs:
           SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}
           SDKMANAGER=$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")
           SUDO=$(command -v sudo || true)
-          $SUDO "$SDKMANAGER" --install "ndk;28.2.13676358" < <(yes 2>/dev/null)
           CLANG="$SDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
+          # Up to three tries: the download has come back as a corrupt zip ("Error on ZipFile unknown archive").
+          for attempt in 1 2 3; do
+            $SUDO "$SDKMANAGER" --install "ndk;28.2.13676358" < <(yes 2>/dev/null) || true
+            [ -x "$CLANG" ] && break
+            echo "::warning::NDK install attempt $attempt did not leave $CLANG; retrying"
+            $SUDO rm -rf "$SDK/ndk/28.2.13676358"
+            sleep $((attempt * 15))
+          done
           [ -x "$CLANG" ] || { echo "::error::Android NDK 28.2.13676358 install failed: $CLANG not found"; exit 1; }
           echo "ANDROID_NDK_HOME=$SDK/ndk/28.2.13676358" >> "$GITHUB_ENV"
       - name: Android NDK (compiler and archiver)

@@ -535,13 +535,15 @@ impl<'a> Emitter<'a> {
                         .iter()
                         .map(|&target| {
                             format!(
-                                "case {B} + {target:#x}ull: {}",
+                                "case {target:#x}ull: {}",
                                 self.goto_or_tail(f, target as i64, state)
                             )
                         })
                         .collect();
+                    // On the offset from the base: a case label must be a constant, and the compact
+                    // layout (iOS) picks the base at run time.
                     format!(
-                        "switch ({r}) {{ {} default: nx::call(c, {r}); return; }}",
+                        "switch (uint64_t(({r}) - {B})) {{ {} default: nx::call(c, {r}); return; }}",
                         cases.join(" ")
                     )
                 } else {

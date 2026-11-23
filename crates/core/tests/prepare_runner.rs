@@ -781,6 +781,53 @@ fn a_complete_toolchain_has_nothing_missing() {
     assert_eq!(toolchain_with(Os::Linux, &bin, &[]), Vec::new());
 }
 
+/// A Homebrew-style `python3`: `<prefix>/bin/python3` links into the Cellar, and the
+/// `<prefix>/lib/python3.N` beside the link holds only `site-packages`. The standard library
+/// (and its `venv`) is under the link's target.
+#[cfg(unix)]
+fn linked_python(name: &str, with_venv: bool) -> Vec<Missing> {
+    let base = toolchain_dir(name);
+    let prefix = base.join("usr");
+    let bin = prefix.join("bin");
+    for tool in ["clang", "clang++", "curl"] {
+        file(&bin.join(tool));
+    }
+    file(&prefix.join("include/SDL3/SDL.h"));
+    file(&prefix.join("lib/pkgconfig/vpx.pc"));
+    file(&prefix.join("lib/pkgconfig/vorbis.pc"));
+    file(&prefix.join("lib/python3.15/site-packages/placeholder"));
+    let framework = base.join("Cellar/python/3.15.2/Frameworks/Python.framework/Versions/3.15");
+    file(&framework.join("bin/python3.15"));
+    let stdlib = framework.join("lib/python3.15");
+    if with_venv {
+        file(&stdlib.join("venv/__init__.py"));
+    } else {
+        file(&stdlib.join("os.py"));
+    }
+    std::os::unix::fs::symlink(framework.join("bin/python3.15"), bin.join("python3")).unwrap();
+    toolchain_with(Os::Linux, &bin, &[])
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_python_finds_venv_under_the_link_target() {
+    let missing = linked_python("linked-venv", true);
+    assert!(
+        find(&missing, "python3's venv module").is_none(),
+        "{missing:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_python_without_venv_is_still_named() {
+    let missing = linked_python("linked-no-venv", false);
+    assert!(
+        find(&missing, "python3's venv module").is_some(),
+        "{missing:?}"
+    );
+}
+
 /// A fake installed layout: `<base>/app/usr/bin/acnh-app` and the source under
 /// `<base>/app/usr/share/acnh-universal/source`.
 fn installed(name: &str, commit: &str) -> (PathBuf, PathBuf, AppDirs) {
