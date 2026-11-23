@@ -135,9 +135,7 @@ final class DropboxAuth {
                 } catch (Exception e) {
                     error = e.getMessage() == null ? e.toString() : e.getMessage();
                 }
-                reply(s.getOutputStream(), 200, page(error == null
-                        ? "Signed in to Dropbox. Go back to ACNH Recomp: the download is running there."
-                        : "Dropbox sign-in failed: " + error));
+                reply(s.getOutputStream(), 200, error == null ? back() : page("Dropbox sign-in failed: " + error));
                 return error;
             } catch (java.net.SocketTimeoutException | java.net.SocketException e) {
                 // one bad connection (a preconnect that never sends): wait for the next
@@ -160,6 +158,18 @@ final class DropboxAuth {
             if (eq > 0 && kv.substring(0, eq).equals(name)) return URLDecoder.decode(kv.substring(eq + 1), "UTF-8");
         }
         return null;
+    }
+
+    // After a sign-in: straight back to the app (an intent link Chrome hands to Android), with a button in case
+    // the browser asks for a tap first.
+    private static String back() {
+        String app = "intent://signed-in#Intent;scheme=acnhrecomp;package=io.github.acnhrecomp;end";
+        return "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                + "<body style='font-family:sans-serif;padding:2em;background:#fffae8;color:#5c4632;text-align:center'>"
+                + "<h2>Signed in to Dropbox</h2><p>The game download is running in ACNH Recomp.</p>"
+                + "<p><a href='" + app + "' style='display:inline-block;padding:16px 28px;border-radius:26px;"
+                + "background:#5aaa5a;color:white;font-size:20px;text-decoration:none'>Back to ACNH Recomp</a></p>"
+                + "<script>location.replace('" + app + "')</script>";
     }
 
     private static String page(String text) {

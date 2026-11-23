@@ -11,6 +11,7 @@
     <uses-permission android:name="android.permission.VIBRATE"/>
     <!-- The in-app game download from the owner's own Dropbox (GameDownload, DropboxAuth; issue #230) -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
@@ -32,6 +33,13 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
             <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts"/>
+            <!-- The way back from the Dropbox sign-in page in the browser (DropboxAuth's answer links here) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="acnhrecomp" android:host="signed-in"/>
+            </intent-filter>
         </activity>
         <!-- The settings screen's folder picker (Saves: import, export, open folder): platform_android.cpp starts it -->
         <activity android:name="io.github.acnhrecomp.Picker" android:exported="false"

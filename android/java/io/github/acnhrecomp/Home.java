@@ -54,6 +54,7 @@ public class Home extends Activity {
     private boolean busy;
     private boolean askedNotifications;
     private TextView progress;
+    private ProgressBar bar;
     private final Handler ticks = new Handler(Looper.getMainLooper());
 
     private String t(String en, String ptBr) { return pt ? ptBr : en; }
@@ -159,12 +160,17 @@ public class Home extends Activity {
         if (progress != null) {
             String e = GameDownload.error;
             if (GameDownload.running) {
+                if (message != null && DropboxAuth.signedIn(this)) message.setVisibility(View.GONE);  // the sign-in note
                 long all = GameDownload.total, have = GameDownload.done;
                 progress.setText((all > 0 ? (have * 100 / all) + "%  ·  " : "") + GameDownload.status);
                 progress.setVisibility(View.VISIBLE);
+                bar.setIndeterminate(all <= 0);
+                if (all > 0) bar.setProgress((int) (have * 1000 / all));
+                bar.setVisibility(View.VISIBLE);
             } else if (e != null) {
                 progress.setText(e);
                 progress.setVisibility(View.VISIBLE);
+                bar.setVisibility(View.GONE);
             } else if (GameDownload.downloaded(this) && GameDownload.finished) {
                 GameDownload.finished = false;
                 progress.setVisibility(View.GONE);
@@ -251,6 +257,10 @@ public class Home extends Activity {
         progress.setPadding(0, dp(8), 0, 0);
         progress.setVisibility(View.GONE);
         box.addView(progress);
+        bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(1000);
+        bar.setVisibility(View.GONE);
+        box.addView(bar, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(14)));
         if (GameDownload.downloaded(this))
             box.addView(button(t("Play the downloaded game", "Jogar o jogo baixado"), Color.rgb(90, 170, 90),
                     v -> check(GameDownload.gameDir(this).getAbsolutePath(), false)));
