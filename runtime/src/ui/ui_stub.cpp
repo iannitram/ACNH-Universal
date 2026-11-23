@@ -16,8 +16,6 @@ void ui_event(const SDL_Event&) {}
 bool ui_pad(uint64_t, int32_t, int32_t) { return false; }
 uint64_t ui_filter_game_buttons(uint64_t buttons, bool) { return buttons; }
 bool ui_visible() { return false; }
-bool ui_text_field() { return false; }
-void ui_open_online() {}
 void amiibo_importer_poll() {}
 void ui_toggle() {}
 void ui_open_online() {}

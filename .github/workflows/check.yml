@@ -106,9 +106,15 @@ jobs:
       - name: Configure
         run: cmake -B build -G Ninja -DNX_TESTS=ON -DNX_GAME=acnh -DNX_LAUNCHER=OFF -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        run: cmake --build build --target gpu_pick_test tiling_test astc_test game_root_test
+        # Every *_test target ctest runs, ours and upstream's (nextendo, ldn_net, recomp, prepare_io, ...), except
+        # upstream's end-to-end prepare runs, which need a prepared tool chain (zig) and inputs CI does not have.
+        run: |
+          targets=$(cmake --build build --target help | sed -n 's/^\([A-Za-z0-9_]*_test\):.*/\1/p' |
+                    grep -v -x -e prepare_e2e_test -e prepare_launcher_test | sort -u)
+          echo "test targets: $targets"
+          cmake --build build --target $targets
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig|prepare_launcher)$'
       - name: Game reads stay on the game root
         run: bash tests/game_root_check.sh
 
