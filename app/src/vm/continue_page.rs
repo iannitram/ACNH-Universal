@@ -44,6 +44,7 @@ pub enum ContinueState {
     Drift { newer_save_refused: bool },
     BuildMissing,
     RelayUnavailable,
+    SyncOff,
     RelayError(String),
     CheckingStatus,
     Syncing(SyncStep),
@@ -451,10 +452,20 @@ impl ContinuePageVm {
             ContinueState::LocalNewer => "Newer here",
             ContinueState::PushFailed(_) => "Not synced yet",
             ContinueState::NoIsland => "No island yet",
-            ContinueState::RelayUnavailable => "Will sync later",
+            ContinueState::RelayUnavailable => "Waiting to sync",
+            ContinueState::SyncOff => "Save sync is off",
             ContinueState::Conflict => "Unresolved conflict",
             ContinueState::Held { .. } => "Open on another device",
             _ => "",
+        }
+    }
+
+    pub fn begin_status(&mut self) -> bool {
+        if matches!(self.state, ContinueState::Ready | ContinueState::NoIsland) {
+            self.state = ContinueState::CheckingStatus;
+            true
+        } else {
+            false
         }
     }
 
@@ -909,9 +920,11 @@ impl ContinuePageVm {
                                 local,
                             })
                         }
-                        Ok(RelayStatus::Unavailable) => self.fail(ContinueState::RelayError(
-                            "save-relay could not be reached".into(),
-                        )),
+                        Ok(RelayStatus::Unavailable) => self.fail(ContinueState::RelayUnavailable),
+                        Ok(RelayStatus::Off) => {
+                            self.state = ContinueState::SyncOff;
+                            self.play_action = Some(PlayAction::Play);
+                        }
                         Ok(_) => {
                             self.state = if self.local_card.is_some() {
                                 ContinueState::Ready
@@ -940,10 +953,15 @@ impl ContinuePageVm {
                     Ok(played) if played.pushed == Sync::Offline => {
                         self.fail(ContinueState::PushFailed("the relay did not answer".into()));
                     }
-                    Ok(_) => {
-                        self.state = ContinueState::Ready;
+                    Ok(played) => {
+                        self.state = if played.pulled == Sync::Off {
+                            ContinueState::SyncOff
+                        } else {
+                            ContinueState::Ready
+                        };
                         self.play_action = Some(PlayAction::Play);
                     }
+                    Err(Error::RelayUnreachable) => self.fail(ContinueState::RelayUnavailable),
                     Err(error) => {
                         let reason = self.reason(&error);
                         self.fail(match self.state {
@@ -1051,9 +1069,10 @@ impl ContinuePageVm {
             }
             ContinueState::NoIsland => "A new island starts when the game does.".to_string(),
             ContinueState::RelayUnavailable => {
-                "The relay did not answer: this device's island is used and will sync later."
+                "Save-relay could not be reached. The game starts once the island has synced."
                     .to_string()
             }
+            ContinueState::SyncOff => "Turn on save sync in Settings.".to_string(),
             ContinueState::RelayError(reason) => format!("The relay could not sync: {reason}"),
             ContinueState::PlayerFailed { exit, log_hint } if *exit < 0 => {
                 format!("The game did not start: {log_hint}")

@@ -145,25 +145,23 @@ impl Relay for SaveRelay {
             Decision::Noop | Decision::Adopt => RelayStatus::Ready,
             Decision::Push => RelayStatus::LocalNewer,
             Decision::Pull => {
-                let card = sync::history(&session, &game.manifest.id)
-                    .ok()
-                    .and_then(|history| history.entries.into_iter().find(|entry| entry.current))
-                    .and_then(|entry| entry.card);
+                let card = current_card(&session, &game.manifest.id, status.server.as_ref());
                 RelayStatus::RelayNewer(make_card(card.as_ref(), status.server.as_ref()))
             }
             Decision::Conflict => {
-                let card = sync::history(&session, &game.manifest.id)
-                    .ok()
-                    .and_then(|history| history.entries.into_iter().find(|entry| entry.current))
-                    .and_then(|entry| entry.card);
+                let card = current_card(&session, &game.manifest.id, status.server.as_ref());
+                let mut local = make_card(None, status.local.as_ref());
+                restore_local_card_details(&mut local, status.local.as_ref(), save_dir);
                 RelayStatus::Conflict {
                     server: make_card(card.as_ref(), status.server.as_ref()),
-                    local: make_card(None, status.local.as_ref()),
+                    local,
                 }
             }
             Decision::Offline => RelayStatus::Unavailable,
             Decision::Held => {
-                let held = status.held.expect("held decision has a mark");
+                let held = status.held.ok_or_else(|| {
+                    Error::Saves("the relay did not identify the device holding the island".into())
+                })?;
                 RelayStatus::Held {
                     device: held.device,
                     since: held.since,
@@ -171,6 +169,20 @@ impl Relay for SaveRelay {
             }
         })
     }
+}
+
+fn current_card(
+    session: &Session<'_>,
+    game: &str,
+    side: Option<&save_relay::api::Side>,
+) -> Option<save_relay::card::Card> {
+    let side = side?;
+    let history = sync::history(session, game).ok()?;
+    history
+        .entries
+        .into_iter()
+        .find(|entry| entry.current && entry.device == side.device && entry.time == side.time)?
+        .card
 }
 
 fn map_resolve(keep: Option<Keep>) -> Option<Resolve> {
@@ -597,7 +609,7 @@ fn persist_card(
                 .unwrap_or(0);
             let content = format!(
                 "device {}\nplay {}\nversion {}\nsaved {}\nfile_modified_ns {}\n",
-                card.device,
+                card.device.replace(['\r', '\n'], " "),
                 card.playtime_secs.unwrap_or(0),
                 version,
                 save_relay::stamp::parse_rfc3339(&card.time).unwrap_or(0),
@@ -614,28 +626,32 @@ fn persist_card(
     Ok(())
 }
 
-fn map_sync_with_local(report: SyncReport, save_dir: &Path) -> Sync {
-    let local_time = report
-        .sync
-        .local
-        .as_ref()
-        .and_then(|s| save_relay::stamp::parse_rfc3339(&s.time));
-    let mut result = map_sync(report);
-    if let Sync::Conflict { local, .. } = &mut result {
-        if let (Some(time), Ok(saved)) = (
-            local_time,
-            crate::savecard::read_card(save_dir, Path::new("")),
-        ) {
-            let file_time = std::fs::metadata(save_dir.join("main.dat"))
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            if saved.device == local.device && file_time == Some(time) && local.play_seconds == 0 {
+fn restore_local_card_details(
+    local: &mut SaveCard,
+    side: Option<&save_relay::api::Side>,
+    save_dir: &Path,
+) {
+    let side_time = side.and_then(|s| save_relay::stamp::parse_rfc3339(&s.time));
+    let file_time = std::fs::metadata(save_dir.join("main.dat"))
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    if file_time.is_some() && file_time == side_time && local.play_seconds == 0 {
+        if let Ok(saved) = crate::savecard::read_card(save_dir, Path::new("")) {
+            if saved.device == local.device {
                 local.play_seconds = saved.play_seconds;
                 local.version = saved.version;
             }
         }
+    }
+}
+
+fn map_sync_with_local(report: SyncReport, save_dir: &Path) -> Sync {
+    let side = report.sync.local.clone();
+    let mut result = map_sync(report);
+    if let Sync::Conflict { local, .. } = &mut result {
+        restore_local_card_details(local, side.as_ref(), save_dir);
     }
     result
 }

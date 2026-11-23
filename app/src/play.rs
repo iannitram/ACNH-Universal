@@ -195,15 +195,17 @@ pub struct Session {
 
 impl Session {
     /// `picture` is the island card's picture (`savecard::read_card`).
-    pub fn new(vm: ContinuePageVm, runner: Runner, picture: PathBuf) -> Self {
+    pub fn new(mut vm: ContinuePageVm, runner: Runner, picture: PathBuf) -> Self {
         let (sender, events) = mpsc::channel();
-        let status_runner = runner.clone();
-        let status_sender = sender.clone();
-        thread::spawn(move || {
-            let _ = status_sender.send(PlayEvent::Status(
-                status_runner.relay.status(&status_runner.save_dir),
-            ));
-        });
+        if vm.begin_status() {
+            let status_runner = runner.clone();
+            let status_sender = sender.clone();
+            thread::spawn(move || {
+                let _ = status_sender.send(PlayEvent::Status(
+                    status_runner.relay.status(&status_runner.save_dir),
+                ));
+            });
+        }
         Self {
             vm,
             runner,
@@ -337,6 +339,9 @@ impl Relay for RelayOff {
 
     fn push(&self, _save_dir: &Path, _resolve: Option<Keep>) -> Result<launch::Sync> {
         Ok(launch::Sync::Off)
+    }
+    fn status(&self, _save_dir: &Path) -> Result<launch::RelayStatus> {
+        Ok(launch::RelayStatus::Off)
     }
 }
 
@@ -678,11 +683,15 @@ mod tests {
                 Ok(())
             }),
         };
-        Session::new(
+        let mut session = Session::new(
             ContinuePageVm::new(Some(card), None),
             runner,
             PathBuf::from("assets/acnhrecomp.png"),
-        )
+        );
+        assert_eq!(session.vm().state(), &ContinueState::CheckingStatus);
+        assert!(!session.nav(Nav::Accept));
+        wait_for(&mut session, &ContinueState::Ready);
+        session
     }
 
     /// Pump until the page is in `state`, as the window's timer does.

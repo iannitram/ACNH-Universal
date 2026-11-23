@@ -56,7 +56,7 @@ pub trait Relay {
         self.pull(save_dir, None)
     }
     fn status(&self, _save_dir: &Path) -> Result<RelayStatus> {
-        Ok(RelayStatus::Off)
+        Ok(RelayStatus::Ready)
     }
 }
 
