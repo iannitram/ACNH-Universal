@@ -3,6 +3,8 @@
 // (tools/android_install.sh: the recompiled code as libacnh_game.so, romfs.pak, spirv.pak, ...; docs/ANDROID.md).
 // The folder chosen is kept in <files>/data_root.txt, which platform_android.cpp reads; next time the game starts
 // right away. The launcher icon's shortcut "Change game folder" (res/xml/shortcuts.xml) asks again.
+// Or the game comes from the owner's own Dropbox (issue #230): "Download the game" signs in (DropboxAuth) and
+// GameDownload fetches it into the app's private storage, <files>/gamedata, which then is the game folder.
 package io.github.acnhrecomp;
 
 import android.app.Activity;
@@ -11,8 +13,11 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.view.Gravity;
@@ -47,6 +52,9 @@ public class Home extends Activity {
     private TextView message;
     private String waitingForAccess;  // a folder picked before the all-files permission was given
     private boolean busy;
+    private boolean signingIn;  // the browser is open on Dropbox's sign-in
+    private TextView progress;
+    private final Handler ticks = new Handler(Looper.getMainLooper());
 
     private String t(String en, String ptBr) { return pt ? ptBr : en; }
 
@@ -55,13 +63,17 @@ public class Home extends Activity {
         super.onCreate(state);
         String error = getIntent().getStringExtra("error");
         boolean ask = getIntent().getBooleanExtra("pick", false) || error != null;
+        File downloaded = GameDownload.gameDir(this);
+        if (!ask && hasPackage(downloaded)) {
+            check(downloaded.getAbsolutePath(), true);  // the game downloaded from Dropbox
+            return;
+        }
         String saved = ask ? "" : readSaved();
         if (!saved.isEmpty() && hasPackage(new File(saved)) && canRead(saved)) {
             check(saved, true);  // the folder of last time: straight into the game
             return;
         }
         show(error != null ? explain(error) : null);
-        if (!ask && found().isEmpty()) pick();
     }
 
     @Override
@@ -72,6 +84,74 @@ public class Home extends Activity {
             waitingForAccess = null;
             check(f, false);
         }
+        if (signingIn && DropboxAuth.signedIn(this)) {
+            signingIn = false;
+            startDownload();
+        }
+        ticks.removeCallbacksAndMessages(null);
+        ticks.post(this::tick);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        ticks.removeCallbacksAndMessages(null);
+    }
+
+    // ---- the download -----------------------------------------------------------------------------------------
+
+    private void download() {
+        if (GameDownload.running) return;
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 2);
+        if (DropboxAuth.signedIn(this)) {
+            startDownload();
+            return;
+        }
+        try {
+            String url = DropboxAuth.start(this, err -> runOnUiThread(() -> {
+                if (err != null) {
+                    signingIn = false;
+                    say(t("Dropbox sign-in: ", "Login no Dropbox: ") + err, true);
+                }
+            }));
+            signingIn = true;
+            say(t("Sign in to Dropbox in the browser, allow ACNH Recomp's access, then come back here.",
+                    "Entre no Dropbox no navegador, permita o acesso do ACNH Recomp e volte aqui."), false);
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception e) {
+            say(t("Dropbox sign-in could not start: ", "O login no Dropbox não começou: ") + e.getMessage(), true);
+        }
+    }
+
+    private void startDownload() {
+        GameDownload.error = null;
+        GameDownload.status = t("Starting the download", "Começando o download");
+        GameDownload.running = true;
+        GameDownload.start(this);
+        tick();
+    }
+
+    // Twice a second while the screen is open: the download's progress, and the game when it is done.
+    private void tick() {
+        if (progress != null) {
+            String e = GameDownload.error;
+            if (GameDownload.running) {
+                long all = GameDownload.total, have = GameDownload.done;
+                progress.setText((all > 0 ? (have * 100 / all) + "%  ·  " : "") + GameDownload.status);
+                progress.setVisibility(View.VISIBLE);
+            } else if (e != null) {
+                progress.setText(e);
+                progress.setVisibility(View.VISIBLE);
+            } else if (hasPackage(GameDownload.gameDir(this)) && GameDownload.finished) {
+                GameDownload.finished = false;
+                progress.setVisibility(View.GONE);
+                check(GameDownload.gameDir(this).getAbsolutePath(), false);
+                return;
+            }
+        }
+        ticks.postDelayed(this::tick, 500);
     }
 
     // ---- the screen -------------------------------------------------------------------------------------------
@@ -125,10 +205,12 @@ public class Home extends Activity {
         title.setTextColor(Color.rgb(92, 70, 50));
         box.addView(title);
         TextView text = new TextView(this);
-        text.setText(t("Choose the game folder: the one your computer prepared from your own copy of the game "
-                        + "(with libacnh_game.so, romfs.pak and spirv.pak inside).",
-                "Escolha a pasta do jogo: a que o seu computador preparou a partir da sua cópia do jogo "
-                        + "(com libacnh_game.so, romfs.pak e spirv.pak dentro)."));
+        text.setText(t("Download the game your computer prepared from your own copy into your Dropbox (about 11 GB; "
+                        + "it keeps going in the background and picks up where it stopped), or choose a game folder "
+                        + "on this device (with libacnh_game.so, romfs.pak and spirv.pak inside).",
+                "Baixe o jogo que o seu computador preparou a partir da sua cópia no seu Dropbox (cerca de 11 GB; "
+                        + "continua em segundo plano e retoma de onde parou), ou escolha uma pasta do jogo neste "
+                        + "aparelho (com libacnh_game.so, romfs.pak e spirv.pak dentro)."));
         text.setTextSize(16);
         text.setTextColor(Color.rgb(120, 100, 80));
         text.setPadding(0, dp(8), 0, dp(8));
@@ -139,6 +221,20 @@ public class Home extends Activity {
         message.setVisibility(note == null ? View.GONE : View.VISIBLE);
         if (note != null) message.setText(note);
         box.addView(message);
+
+        box.addView(button(t("Download the game from Dropbox", "Baixar o jogo do Dropbox"), Color.rgb(90, 170, 90),
+                v -> download()));
+        progress = new TextView(this);
+        progress.setTextSize(15);
+        progress.setTextColor(Color.rgb(92, 70, 50));
+        progress.setPadding(0, dp(8), 0, 0);
+        progress.setVisibility(View.GONE);
+        box.addView(progress);
+        if (DropboxAuth.signedIn(this))
+            box.addView(button(t("Sign out of Dropbox", "Sair do Dropbox"), Color.WHITE, v -> {
+                DropboxAuth.signOut(this);
+                show(null);
+            }));
 
         for (final String f : found())
             box.addView(button(t("Use the game found", "Usar o jogo encontrado") + " ("
@@ -197,7 +293,9 @@ public class Home extends Activity {
         return false;
     }
 
-    private boolean canRead(String path) { return ownFolder(path) || Environment.isExternalStorageManager(); }
+    private boolean canRead(String path) {
+        return path.startsWith(getFilesDir().getAbsolutePath()) || ownFolder(path) || Environment.isExternalStorageManager();
+    }
 
     private String readSaved() {
         try {
