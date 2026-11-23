@@ -18,6 +18,7 @@
 //! before Prepare advances past the script's version marker.
 
 pub use crate::assemble::assemble;
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::gamefolder::GameFolder;
 use crate::platform::{AppDirs, Os, Vars};
@@ -62,6 +63,81 @@ pub struct Request {
     pub source: Option<PathBuf>,
     /// Snapshot of the two opt-in settings for the whole prepare.
     pub fan_mods: FanMods,
+    /// Where a target's final deliverable goes (`delivery_folder`): `<dropbox>/_transfers/
+    /// ACNH-Universal/<ios|mac>/`. The `ios` target needs it; the others ignore it.
+    pub delivery: Option<PathBuf>,
+}
+
+/// The folders of a delivery under the Dropbox folder: `_transfers/ACNH-Universal/<target>/`.
+pub const DELIVERY_ROOT: [&str; 2] = ["_transfers", "ACNH-Universal"];
+
+/// The delivery subfolder of `target`: "ios" for the iPhone and iPad, "mac" for the Mac,
+/// `None` for the others (nothing of theirs goes to Dropbox).
+pub fn delivery_subfolder(target: Os) -> Option<&'static str> {
+    match target {
+        Os::Ios => Some("ios"),
+        Os::Mac => Some("mac"),
+        _ => None,
+    }
+}
+
+/// The delivery folder `<dropbox>/_transfers/ACNH-Universal/<subfolder>/` for `subfolder`
+/// ("ios" or "mac"): `<dropbox>` is `launcher.ini`'s `dropbox` key when it is set and not
+/// empty, else `<home>/Dropbox`.
+pub fn delivery_folder(config: &Config, home: &Path, subfolder: &str) -> PathBuf {
+    let dropbox = match config.get("dropbox") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => home.join("Dropbox"),
+    };
+    DELIVERY_ROOT
+        .iter()
+        .fold(dropbox, |path, part| path.join(part))
+        .join(subfolder)
+}
+
+/// Stop with `Error::Build` unless the `_transfers/ACNH-Universal/` folder above `delivery`
+/// is there. The message names the `dropbox` key of `launcher.ini` (paths through `redact`).
+pub fn check_delivery(delivery: &Path, home: &Path) -> Result<()> {
+    let root = delivery.parent().unwrap_or(delivery);
+    if root.is_dir() {
+        return Ok(());
+    }
+    Err(Error::Build(format!(
+        "the folder {} is not there: make it in your Dropbox, or set the `dropbox` key in \
+         launcher.ini to the folder that holds _transfers/ACNH-Universal/",
+        redact(&root.display().to_string(), home)
+    )))
+}
+
+/// The arguments of `tools/build_ios.sh`: the `iphoneos` SDK, the recompiled code in `gen`,
+/// and the folder the build is made in.
+fn build_ios_args(gen: &Path, build: &Path) -> Vec<String> {
+    vec![
+        "tools/build_ios.sh".to_owned(),
+        "iphoneos".to_owned(),
+        gen.display().to_string(),
+        build.display().to_string(),
+    ]
+}
+
+/// The arguments of `tools/package_ios.sh`, in one place so a later step can add the game.
+fn package_ios_args(version: &str, build: &Path, delivery: &Path) -> Vec<String> {
+    vec![
+        "tools/package_ios.sh".to_owned(),
+        version.to_owned(),
+        build.display().to_string(),
+        delivery.display().to_string(),
+    ]
+}
+
+/// The version the `.ipa` is named with: the engine's.
+fn ios_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// The `.ipa` an iOS prepare makes in `delivery` (`package_ios.sh` names it).
+fn ipa_path(delivery: &Path) -> PathBuf {
+    delivery.join(format!("ACNH-Universal-{}.ipa", ios_version()))
 }
 
 /// A build tool a hub is missing, and how to install it. Required pieces stop a prepare
@@ -167,6 +243,52 @@ pub trait ScriptRunner {
 
     /// Where the game-stage script leaves work for Rust after mod extraction.
     fn set_message_paths(&mut self, _game_romfs: &Path, _out: &Path) {}
+
+    /// Run `program` with `args` for its output, as the pre-flight checks of the `ios` target
+    /// do (`xcrun`, `cargo`, `rustup`): `Some(stdout)` when it ran and succeeded, else `None`.
+    /// A test runner stands in for the machine's tools.
+    fn probe(&mut self, program: &str, args: &[&str]) -> Option<String> {
+        let output = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+/// What the `ios` target needs before its first stage, found with `runner.probe`: Xcode's
+/// `iphoneos` SDK (the command-line tools alone do not have it), `cargo`, and the
+/// `aarch64-apple-ios` Rust target. `Error::Build` naming what is missing.
+fn ios_preflight(runner: &mut dyn ScriptRunner) -> Result<()> {
+    let sdk = runner.probe("xcrun", &["--sdk", "iphoneos", "--show-sdk-path"]);
+    if !sdk.is_some_and(|path| !path.trim().is_empty()) {
+        return Err(Error::Build(
+            "building for iPhone and iPad needs Xcode with its iphoneos SDK (the command-line \
+             tools alone do not have it): install Xcode from the App Store, open it once, then \
+             run `sudo xcode-select -s /Applications/Xcode.app`"
+                .to_owned(),
+        ));
+    }
+    if runner.probe("cargo", &["--version"]).is_none() {
+        return Err(Error::Build(
+            "building for iPhone and iPad needs cargo on the PATH: install Rust from rustup.rs"
+                .to_owned(),
+        ));
+    }
+    let targets = runner.probe("rustup", &["target", "list", "--installed"]);
+    if !targets.is_some_and(|list| list.lines().any(|line| line.trim() == "aarch64-apple-ios")) {
+        return Err(Error::Build(
+            "the Rust target for iPhone and iPad is not installed: run \
+             `rustup target add aarch64-apple-ios`"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// The real runner: upstream's command as a child process in the repo root, started once
@@ -516,7 +638,7 @@ fn stage_complete(stage: Stage, req: &Request) -> bool {
         Stage::Build => req
             .out
             .join("build")
-            .join(if req.target == Os::Mac {
+            .join(if matches!(req.target, Os::Mac | Os::Ios) {
                 "acnh"
             } else {
                 output(req.target)
@@ -675,15 +797,21 @@ fn run_stages(
 ) -> Result<PathBuf> {
     if !serves(hub).contains(&req.target) {
         return Err(Error::Unsupported(format!(
-            "the {} hub does not build for {}",
+            "the {} hub does not build for {}: that is built on the {} hub{}",
             hub.key(),
-            req.target.key()
+            req.target.key(),
+            hub_for(req.target).key(),
+            if hub_for(req.target) == Hub::Mac {
+                " (the Mac)"
+            } else {
+                ""
+            }
         )));
     }
     // Upstream's script builds the desktop player of the machine it runs on. Its Android
-    // route is another script with its own data folder (ADR 0005) and iOS has none yet
-    // (stage 8): until those are built, neither is answered with the hub's desktop build.
-    if matches!(req.target, Os::Android | Os::Ios) {
+    // route is another script with its own data folder (ADR 0005): until that is built, it
+    // is not answered with the hub's desktop build.
+    if req.target == Os::Android {
         return Err(Error::Unsupported(format!(
             "no stage builds for {} yet",
             req.target.key()
@@ -697,6 +825,13 @@ fn run_stages(
             message.push_str(&piece.message);
         }
         return Err(Error::Build(message));
+    }
+    if req.target == Os::Ios {
+        let delivery = req.delivery.as_deref().ok_or_else(|| {
+            Error::Env("the delivery folder is not set (the `dropbox` key in launcher.ini)".into())
+        })?;
+        check_delivery(delivery, home)?;
+        ios_preflight(runner)?;
     }
     runner.set_message_paths(&req.game.romfs, &req.out);
     // Recover a mod left by a previous child, even when every stage is cached.
@@ -767,7 +902,37 @@ fn run_stages(
             .map_err(|log| build_error(stage, &log, home))?;
     }
     std::fs::write(record, flags)?;
+    if req.target == Os::Ios {
+        return ios_deliver(req, runner, home);
+    }
     Ok(req.out.clone())
+}
+
+/// What the `ios` target does after the shared stages (which made the Mac player there too,
+/// as upstream's script cannot stop before it; the iOS build does not use it): the two packs
+/// when they are missing, the `iphoneos` build under the prepared folder, and the `.ipa` in
+/// the delivery folder, whose path it returns.
+fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Result<PathBuf> {
+    let delivery = req
+        .delivery
+        .as_deref()
+        .ok_or_else(|| Error::Env("the delivery folder is not set".into()))?;
+    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
+        pack_stage(req)?;
+    }
+    let build = req.out.join("build-ios");
+    for args in [
+        build_ios_args(&req.out.join("gen"), &build),
+        package_ios_args(ios_version(), &build, delivery),
+    ] {
+        runner
+            .run(Stage::Build, &args)
+            .map_err(|log| build_error(Stage::Build, &log, home))?;
+        runner
+            .finish()
+            .map_err(|log| build_error(Stage::Build, &log, home))?;
+    }
+    Ok(ipa_path(delivery))
 }
 
 /// The build tools `os` needs before its first stage, searched for in `path` (and, on the Mac,

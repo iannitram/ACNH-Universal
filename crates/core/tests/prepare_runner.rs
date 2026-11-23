@@ -1,10 +1,11 @@
 // Tests for the prepare stage runner (issue 1.22), with a fake script runner.
+use acnh_core::config::Config;
 use acnh_core::error::Error;
 use acnh_core::gamefolder::GameFolder;
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{
-    prepare_installed, prepare_with, step, toolchain_with, Missing, ProcessRunner, Request,
-    ScriptRunner, Step,
+    delivery_folder, delivery_subfolder, prepare_installed, prepare_with, step, toolchain_with,
+    Missing, ProcessRunner, Request, ScriptRunner, Step,
 };
 use acnh_core::recipe::{Hub, Stage, STAGES};
 use acnh_core::version::Version;
@@ -31,6 +32,7 @@ fn request(name: &str, target: Os) -> Request {
         jobs: 0,
         source: None,
         fan_mods: Default::default(),
+        delivery: None,
     }
 }
 
@@ -48,6 +50,23 @@ struct Fake {
     args: Vec<Vec<String>>,
     fail_at: Option<Stage>,
     root: Option<PathBuf>,
+    /// The programs `probe` finds (and what they print); the others are not there.
+    tools: Vec<(&'static str, &'static str)>,
+    probed: Vec<String>,
+}
+
+impl Fake {
+    /// A Mac with Xcode, cargo and the iOS Rust target.
+    fn with_ios_tools() -> Fake {
+        Fake {
+            tools: vec![
+                ("xcrun", "/Applications/Xcode.app/iPhoneOS.sdk\n"),
+                ("cargo", "cargo 1.90.0\n"),
+                ("rustup", "aarch64-apple-darwin\naarch64-apple-ios\n"),
+            ],
+            ..Fake::default()
+        }
+    }
 }
 
 impl ScriptRunner for Fake {
@@ -66,6 +85,14 @@ impl ScriptRunner for Fake {
 
     fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
+    }
+
+    fn probe(&mut self, program: &str, args: &[&str]) -> Option<String> {
+        self.probed.push(format!("{program} {}", args.join(" ")));
+        self.tools
+            .iter()
+            .find(|(name, _)| *name == program)
+            .map(|(_, output)| (*output).to_owned())
     }
 }
 
@@ -247,7 +274,8 @@ fn incomplete_module_outputs_are_not_skipped() {
 
 #[test]
 fn mobile_requests_never_fall_back_to_a_desktop_build() {
-    for (target, hub) in [(Os::Android, Hub::StrixHalo), (Os::Ios, Hub::Mac)] {
+    {
+        let (target, hub) = (Os::Android, Hub::StrixHalo);
         let req = request(target.key(), target);
         let mut fake = Fake::default();
         let mut seen = Vec::new();
@@ -853,4 +881,229 @@ fn fan_mod_choices_are_snapshotted_in_each_script_pass() {
     req.fan_mods.ptbr = false;
     assert!(!args(&req).contains(&"--ptbr".to_owned()));
     assert!(args(&req).contains(&"--speedfix".to_owned()));
+}
+
+/// A dropbox folder with `_transfers/ACNH-Universal/` in it, and the request that delivers to
+/// its `ios` folder.
+fn ios_request(name: &str) -> (Request, PathBuf) {
+    let mut req = request(name, Os::Ios);
+    let dropbox = req.out.join("dropbox");
+    std::fs::create_dir_all(dropbox.join("_transfers/ACNH-Universal")).unwrap();
+    let config = Config::parse(&format!("dropbox = {}\n", dropbox.display())).unwrap();
+    let delivery = delivery_folder(&config, Path::new("/Users/user"), "ios");
+    req.delivery = Some(delivery.clone());
+    (req, delivery)
+}
+
+#[test]
+fn the_delivery_folder_is_the_dropbox_keys_or_homes() {
+    let home = Path::new("/Users/user");
+    assert_eq!(
+        delivery_folder(&Config::default(), home, "ios"),
+        Path::new("/Users/user/Dropbox/_transfers/ACNH-Universal/ios")
+    );
+    assert_eq!(
+        delivery_folder(&Config::default(), home, "mac"),
+        Path::new("/Users/user/Dropbox/_transfers/ACNH-Universal/mac")
+    );
+    let keyed = Config::parse("dropbox = /Volumes/Cloud\n").unwrap();
+    assert_eq!(
+        delivery_folder(&keyed, home, "ios"),
+        Path::new("/Volumes/Cloud/_transfers/ACNH-Universal/ios")
+    );
+    // A key that is empty is not set.
+    let empty = Config::parse("dropbox =\n").unwrap();
+    assert_eq!(
+        delivery_folder(&empty, home, "ios"),
+        Path::new("/Users/user/Dropbox/_transfers/ACNH-Universal/ios")
+    );
+    assert_eq!(delivery_subfolder(Os::Ios), Some("ios"));
+    assert_eq!(delivery_subfolder(Os::Mac), Some("mac"));
+    assert_eq!(delivery_subfolder(Os::Linux), None);
+}
+
+#[test]
+fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
+    let (mut req, delivery) = ios_request("ios-order");
+    // The game's RomFS and one translated shader, so the two packs can be made.
+    let romfs = req.out.join("game-romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    std::fs::write(romfs.join("a.bin"), b"a").unwrap();
+    req.game.romfs = romfs;
+    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
+    std::fs::write(req.out.join("spirv/a.spv"), b"spv").unwrap();
+    let mut fake = Fake::with_ios_tools();
+    let mut seen = vec![];
+    let ipa = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap();
+    assert_eq!(seen, STAGES.to_vec());
+    assert!(req.out.join("romfs.pak").is_file());
+    assert!(req.out.join("spirv.pak").is_file());
+    let mut stages = scripted();
+    stages.extend([Stage::Build, Stage::Build]);
+    assert_eq!(fake.ran, stages);
+    let n = fake.args.len();
+    let build = req.out.join("build-ios");
+    assert_eq!(
+        fake.args[n - 2],
+        [
+            "tools/build_ios.sh".to_owned(),
+            "iphoneos".to_owned(),
+            req.out.join("gen").display().to_string(),
+            build.display().to_string(),
+        ]
+    );
+    assert_eq!(
+        fake.args[n - 1],
+        [
+            "tools/package_ios.sh".to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
+            build.display().to_string(),
+            delivery.display().to_string(),
+        ]
+    );
+    assert_eq!(
+        ipa,
+        delivery.join(format!("ACNH-Universal-{}.ipa", env!("CARGO_PKG_VERSION")))
+    );
+}
+
+#[test]
+fn ios_without_the_transfers_folder_stops_before_the_first_stage() {
+    let (mut req, _) = ios_request("ios-no-transfers");
+    let home = Path::new("/Users/user");
+    req.delivery = Some(delivery_folder(&Config::default(), home, "ios"));
+    let mut fake = Fake::with_ios_tools();
+    let mut seen = vec![];
+    let error = prepare_with(&req, Hub::Mac, &mut fake, home, &mut |s| seen.push(s)).unwrap_err();
+    match error {
+        Error::Build(message) => {
+            assert!(message.contains("`dropbox`"), "{message}");
+            assert!(
+                message.contains("~/Dropbox/_transfers/ACNH-Universal"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(fake.ran.is_empty() && seen.is_empty());
+}
+
+#[test]
+fn ios_without_the_iphoneos_sdk_stops_before_the_first_stage() {
+    let (req, _) = ios_request("ios-no-sdk");
+    // The command-line tools alone: `xcrun` fails for the iphoneos SDK.
+    let mut fake = Fake::default();
+    let mut seen = vec![];
+    let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap_err();
+    assert!(matches!(error, Error::Build(message) if message.contains("Xcode")));
+    assert!(fake.probed[0].starts_with("xcrun --sdk iphoneos --show-sdk-path"));
+    assert!(fake.ran.is_empty() && seen.is_empty());
+}
+
+#[test]
+fn ios_without_cargo_or_its_rust_target_stops_before_the_first_stage() {
+    let (req, _) = ios_request("ios-no-rust");
+    let mut no_cargo = Fake::with_ios_tools();
+    no_cargo.tools.retain(|(name, _)| *name != "cargo");
+    let error =
+        prepare_with(&req, Hub::Mac, &mut no_cargo, Path::new("/h"), &mut |_| {}).unwrap_err();
+    assert!(matches!(error, Error::Build(message) if message.contains("cargo")));
+    assert!(no_cargo.ran.is_empty());
+
+    let mut no_target = Fake::with_ios_tools();
+    no_target.tools.retain(|(name, _)| *name != "rustup");
+    no_target
+        .tools
+        .push(("rustup", "aarch64-apple-darwin\naarch64-apple-ios-sim\n"));
+    let error =
+        prepare_with(&req, Hub::Mac, &mut no_target, Path::new("/h"), &mut |_| {}).unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Build(message) if message.contains("rustup target add aarch64-apple-ios")
+    ));
+    assert!(no_target.ran.is_empty());
+}
+
+#[test]
+fn ios_on_another_hub_is_unsupported_and_names_the_mac() {
+    for hub in [Hub::StrixHalo, Hub::Desktop] {
+        let (req, _) = ios_request("ios-wrong-hub");
+        let mut fake = Fake::with_ios_tools();
+        let error = prepare_with(&req, hub, &mut fake, Path::new("/h"), &mut |_| {}).unwrap_err();
+        assert!(matches!(error, Error::Unsupported(message) if message.contains("the Mac")));
+        assert!(fake.ran.is_empty() && fake.probed.is_empty());
+    }
+}
+
+#[test]
+fn ios_needs_a_delivery_folder() {
+    let mut req = request("ios-no-delivery", Os::Ios);
+    req.delivery = None;
+    let mut fake = Fake::with_ios_tools();
+    let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap_err();
+    assert!(matches!(error, Error::Env(_)));
+    assert!(fake.ran.is_empty());
+}
+
+/// The macOS job's runner: the stages of upstream's script are faked, everything else runs.
+struct StagesFaked(ProcessRunner);
+
+impl ScriptRunner for StagesFaked {
+    fn run(&mut self, stage: Stage, args: &[String]) -> Result<(), Vec<String>> {
+        if args.iter().any(|arg| arg == "tools/setup_acnh.py") {
+            return Ok(());
+        }
+        self.0.run(stage, args)
+    }
+
+    fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn root(&self) -> PathBuf {
+        self.0.root()
+    }
+
+    fn finish(&mut self) -> Result<(), Vec<String>> {
+        self.0.finish()
+    }
+}
+
+/// macOS job only (`ACNH_IOS_PREPARE_DIR` names a scratch folder outside the checkout): the
+/// stages are faked, the two scripts are real, on the stub gen folder, and the delivery
+/// folder is under the scratch folder. An `.ipa` is made there.
+#[test]
+fn ios_real_scripts_make_an_ipa_on_the_stub_gen() {
+    let Some(scratch) = std::env::var_os("ACNH_IOS_PREPARE_DIR").map(PathBuf::from) else {
+        eprintln!("skipped: ACNH_IOS_PREPARE_DIR is not set");
+        return;
+    };
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let out = scratch.join("prepared");
+    let delivery = scratch.join("Dropbox/_transfers/ACNH-Universal/ios");
+    std::fs::create_dir_all(delivery.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join(".fan-mod-settings"), "false false\n").unwrap();
+    // The stub gen folder stands in for the recompiled code.
+    let status = std::process::Command::new("cp")
+        .arg("-R")
+        .arg(repo.join("tests/ios_stub_gen"))
+        .arg(out.join("gen"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut req = request("ios-real", Os::Ios);
+    req.out = out;
+    req.delivery = Some(delivery.clone());
+    let mut runner = StagesFaked(ProcessRunner::new(repo, 0));
+    let ipa = prepare_with(&req, Hub::Mac, &mut runner, Path::new("/h"), &mut |_| {}).unwrap();
+    assert!(ipa.is_file(), "{} was not made", ipa.display());
+    assert!(ipa.starts_with(&delivery));
 }

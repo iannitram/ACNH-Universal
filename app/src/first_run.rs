@@ -337,6 +337,7 @@ fn run(
                         ptbr: config.enabled("mods.ptbr"),
                         speedfix: config.enabled("mods.speedfix"),
                     },
+                    delivery: None,
                 };
                 let out = prepare::prepare(&request, &mut |stage| {
                     let _ = sender.send((generation, Event::Stage(stage)));

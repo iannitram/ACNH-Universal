@@ -93,10 +93,15 @@ impl BuildActions {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
                 Err(e) => return Err(e.into()),
             };
+            let launcher = self.launcher_config()?;
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
             prepare_targets(self.os, report, &mut |target, progress| {
                 let request = prepare::Request {
                     game: game.clone(),
-                    out: if target == self.os {
+                    // The Mac hub's two targets make the same game data, in one folder.
+                    out: if target == self.os || (self.os == Os::Mac && target == Os::Ios) {
                         self.prepare_root()
                     } else {
                         self.dirs.data.join("prepare-targets").join(target.key())
@@ -108,8 +113,14 @@ impl BuildActions {
                         ptbr: config.enabled("mods.ptbr"),
                         speedfix: config.enabled("mods.speedfix"),
                     },
+                    delivery: (target == Os::Ios)
+                        .then(|| prepare::delivery_folder(&launcher, &home, "ios")),
                 };
                 let out = prepare::prepare(&request, progress)?;
+                if target == Os::Ios {
+                    // The `.ipa` is in Dropbox: nothing to assemble here.
+                    return Ok(());
+                }
                 if target != self.os {
                     return Err(Error::Unsupported(format!(
                         "no delivery for {} yet",
