@@ -152,8 +152,8 @@ Built as a static library linked into the player while C++ remains; each Rust gr
 | `app/src/play.rs` | present | Continue action, player process and save-sync results including conflict choices | | M6, M10 |
 | `app/src/ui.rs` | present | Converts Continue view state and focus targets between Rust and Slint | | M10 |
 | `app/src/vm/` | partial | `continue_page`, `saves`, `settings`, and `about` exist. Settings stores the pt-BR and SpeedFix opt-ins in `config.ini` (#85), and Prepare snapshots them for each build. `fleet` reads the local hub’s authenticated records, presents versions, builds, save-sync and free-space fields, and labels the comparison device. `first_run` manages folder validation, hub discovery and pairing, progress, and device setup | | M8, M10, M11 |
-| `app/src/input.rs` | partial | Maps gilrs events and keyboard text to desktop `Nav`. Per-controller glyphs and Android input are follow-ups | | M9, M10 |
-| `app/ui/` | partial | Slint window, Continue, About, Fleet, guided first run and the controller-accessible fan-mod Settings overlay | `launcher/pages.cpp` | M10 |
+| `app/src/input.rs` | partial | Maps gilrs events and keyboard text to desktop `Nav`. Identifies controller layouts by device ID, tracks hot-plug and last-used input, and repeats stick and D-pad navigation. Android input integration is #173 | | M9, M10 |
+| `app/ui/` | partial | Slint window, Continue, About, Fleet, read-only Saves, guided first run and fan-mod Settings. Shared input hints select original SVGs for the active controller | `launcher/pages.cpp` | M10 |
 | `docs/design/continue-screen.md` | present | the Continue screen brief, shared with totk-universal | | M10 |
 
 ## Upstream code that stays (C++ or Java, behind a C ABI)

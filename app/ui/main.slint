@@ -1,3 +1,5 @@
+import { SavesPage } from "saves.slint";
+import { InputHints } from "hints.slint";
 import { FirstRunPage } from "first_run.slint";
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 import { FleetPage, FleetEntry } from "fleet.slint";
@@ -33,6 +35,8 @@ component SettingsRow inherits Rectangle {
 // a key press (true when it was one of the launcher's keys).
 export component MainWindow inherits Window {
     in property <ContinueView> view;
+    in property <int> input-device;
+    callback pointer-used();
     in property <bool> first-run-open;
     in property <string> first-run-title;
     in property <string> first-run-choice;
@@ -58,6 +62,14 @@ export component MainWindow inherits Window {
     in-out property <int> fleet-offset;
     in property <bool> fleet-has-previous;
     in property <bool> fleet-has-next;
+    in property <string> saves-island;
+    in property <[string]> saves-backups;
+    in property <string> saves-message;
+    in property <string> saves-position;
+    in-out property <int> saves-offset;
+    in property <bool> saves-has-previous;
+    in property <bool> saves-has-next;
+    callback saves-scroll(int);
     in property <bool> ptbr;
     in property <bool> speedfix;
     in property <SettingsControl> settings-focus: SettingsControl.ptbr;
@@ -80,9 +92,15 @@ export component MainWindow inherits Window {
             return root.key(event.text) ? EventResult.accept : EventResult.reject;
         }
 
+        TouchArea {
+            clicked => { root.pointer-used(); }
+        }
+
         ContinuePage {
             view: root.view;
+            input-device: root.input-device;
             clicked(target) => {
+                root.pointer-used();
                 root.clicked(target);
             }
         }
@@ -98,24 +116,26 @@ export component MainWindow inherits Window {
                     label: "Brazilian Portuguese fan translation";
                     value: root.ptbr ? "On" : "Off";
                     selected: root.settings-focus == SettingsControl.ptbr;
-                    activate => { root.set-ptbr(!root.ptbr); }
+                    activate => { root.pointer-used(); root.set-ptbr(!root.ptbr); }
                 }
                 SettingsRow {
                     label: "60 FPS SpeedFix (3.0.2 and 3.0.3)";
                     value: root.speedfix ? "On" : "Off";
                     selected: root.settings-focus == SettingsControl.speedfix;
-                    activate => { root.set-speedfix(!root.speedfix); }
+                    activate => { root.pointer-used(); root.set-speedfix(!root.speedfix); }
                 }
                 if root.settings-error != "": Text { text: root.settings-error; color: #f7d681; }
                 SettingsRow {
                     label: "Back";
                     selected: root.settings-focus == SettingsControl.back;
-                    activate => { root.clicked(PadTarget.back); }
+                    activate => { root.pointer-used(); root.clicked(PadTarget.back); }
                 }
+                InputHints { device: root.input-device; }
             }
         }
 
         if root.first-run-open: FirstRunPage {
+            input-device: root.input-device;
             title: root.first-run-title;
             choice: root.first-run-choice;
             position: root.first-run-position;
@@ -126,32 +146,48 @@ export component MainWindow inherits Window {
             message: root.first-run-message;
             choices: root.first-run-choices;
             focus-index: root.first-run-focus-index;
-            choose(index) => { root.first-run-choose(index); }
-            previous => { root.first-run-nav(0); }
-            next => { root.first-run-nav(1); }
-            accept => { root.first-run-nav(2); }
-            back => { root.first-run-nav(3); }
+            choose(index) => { root.pointer-used(); root.first-run-choose(index); }
+            previous => { root.pointer-used(); root.first-run-nav(0); }
+            next => { root.pointer-used(); root.first-run-nav(1); }
+            accept => { root.pointer-used(); root.first-run-nav(2); }
+            back => { root.pointer-used(); root.first-run-nav(3); }
         }
 
         if root.view.fleet-open && !root.first-run-open: FleetPage {
+            input-device: root.input-device;
             rows: root.fleet-rows;
             message: root.fleet-message;
             comparison: root.fleet-comparison;
             position: root.fleet-position;
             has-previous: root.fleet-has-previous;
             has-next: root.fleet-has-next;
-            back => { root.clicked(PadTarget.back); }
-            previous => { root.fleet-scroll(-1); }
-            next => { root.fleet-scroll(1); }
+            back => { root.pointer-used(); root.clicked(PadTarget.back); }
+            previous => { root.pointer-used(); root.fleet-scroll(-1); }
+            next => { root.pointer-used(); root.fleet-scroll(1); }
+        }
+
+        if root.view.saves-open && !root.first-run-open: SavesPage {
+            input-device: root.input-device;
+            island: root.saves-island;
+            backups: root.saves-backups;
+            message: root.saves-message;
+            position: root.saves-position;
+            has-previous: root.saves-has-previous;
+            has-next: root.saves-has-next;
+            back => { root.pointer-used(); root.clicked(PadTarget.back); }
+            previous => { root.pointer-used(); root.saves-scroll(-1); }
+            next => { root.pointer-used(); root.saves-scroll(1); }
         }
 
         // The About overlay: opened by the About entry on the Continue page, closed by Back.
         if root.view.about-open && !root.first-run-open: AboutPage {
+            input-device: root.input-device;
             upstream-credit: root.about-upstream;
             slint-notice: root.about-slint-notice;
             credits: root.about-credits;
             offered-fixes: root.about-fixes;
             back => {
+                root.pointer-used();
                 root.clicked(PadTarget.back);
             }
         }

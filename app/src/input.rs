@@ -131,20 +131,21 @@ pub struct Repeat {
 }
 
 impl Repeat {
-    /// Update the held direction and emit all presses due at `now`.
+    /// Update the held direction and emit the press due at `now`. Missed frames do not queue presses.
     pub fn update(&mut self, direction: Option<Nav>, now: Duration) -> Vec<Nav> {
         if self.held.map(|(nav, _)| nav) != direction {
             self.held = direction.map(|nav| (nav, now + Duration::from_millis(400)));
             return direction.into_iter().collect();
         }
-        let mut result = Vec::new();
         if let Some((nav, next)) = &mut self.held {
-            while now >= *next {
-                result.push(*nav);
-                *next += Duration::from_millis(100);
+            if now >= *next {
+                const INTERVAL: Duration = Duration::from_millis(100);
+                let late = (now - *next).as_nanos() % INTERVAL.as_nanos();
+                *next = now + (INTERVAL - Duration::from_nanos(late as u64));
+                return vec![*nav];
             }
         }
-        result
+        Vec::new()
     }
 }
 
@@ -422,13 +423,15 @@ mod tests {
         assert_eq!(repeat.update(Some(Nav::Right), ms(0)), vec![Nav::Right]);
         assert!(repeat.update(Some(Nav::Right), ms(399)).is_empty());
         assert_eq!(repeat.update(Some(Nav::Right), ms(400)), vec![Nav::Right]);
-        assert_eq!(
-            repeat.update(Some(Nav::Right), ms(600)),
-            vec![Nav::Right, Nav::Right]
-        );
-        assert!(repeat.update(None, ms(601)).is_empty());
-        assert!(repeat.update(None, ms(1000)).is_empty());
-        assert_eq!(repeat.update(Some(Nav::Left), ms(1000)), vec![Nav::Left]);
+        assert!(repeat.update(Some(Nav::Right), ms(499)).is_empty());
+        assert_eq!(repeat.update(Some(Nav::Right), ms(500)), vec![Nav::Right]);
+        assert_eq!(repeat.update(Some(Nav::Right), ms(600)), vec![Nav::Right]);
+        assert_eq!(repeat.update(Some(Nav::Right), ms(950)), vec![Nav::Right]);
+        assert!(repeat.update(Some(Nav::Right), ms(999)).is_empty());
+        assert_eq!(repeat.update(Some(Nav::Right), ms(1000)), vec![Nav::Right]);
+        assert!(repeat.update(None, ms(1001)).is_empty());
+        assert!(repeat.update(None, ms(1500)).is_empty());
+        assert_eq!(repeat.update(Some(Nav::Left), ms(1500)), vec![Nav::Left]);
     }
 
     #[test]
