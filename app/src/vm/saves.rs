@@ -4,6 +4,11 @@
 use acnh_core::{backup, saves, Result};
 use std::path::PathBuf;
 
+/// Page through backup entries or close the Saves overlay.
+pub fn navigate(offset: usize, rows: usize, nav: crate::vm::Nav) -> (usize, bool) {
+    crate::vm::fleet::navigate(offset, rows, nav)
+}
+
 /// What the island card says about the save folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IslandCard {

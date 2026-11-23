@@ -372,7 +372,7 @@ fn run(
 }
 
 fn add_steam(vars: &Vars, dirs: &AppDirs, folder: &Path) -> acnh_core::Result<()> {
-    use acnh_core::steam::{self, Shortcut};
+    use acnh_core::steam;
     if Os::current() != Os::Linux {
         return Err(acnh_core::Error::Steam(
             "Steam setup is available on Linux devices".into(),
@@ -404,13 +404,13 @@ fn add_steam(vars: &Vars, dirs: &AppDirs, folder: &Path) -> acnh_core::Result<()
         std::fs::write(&icon, bytes)?;
     }
     let exe = std::env::current_exe()?;
-    let shortcut = Shortcut {
-        name: "Animal Crossing: New Horizons".into(),
-        exe: exe.display().to_string(),
-        start_dir: exe.parent().unwrap_or(Path::new(".")).display().to_string(),
-        launch_options: String::new(),
-        icon: icon.display().to_string(),
-    };
+    let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
+    let shortcut = steam::launcher_shortcut(
+        &exe,
+        appimage.as_deref(),
+        "Animal Crossing: New Horizons",
+        &icon,
+    );
     if steam::write_shortcut(&userdata, &shortcut, &images, &running)?.is_empty() {
         return Err(acnh_core::Error::Steam("No Steam user folder found".into()));
     }
@@ -430,9 +430,10 @@ fn steam_artwork(folder: &Path) -> acnh_core::Result<Vec<(acnh_core::artwork::Ar
         .and_then(|_| image::open(&icon).ok())
         .map(Ok)
         .unwrap_or_else(|| {
-            image::load_from_memory_with_format(
-                include_bytes!("../../assets/acnhrecomp.png"),
-                ImageFormat::Png,
+            image::open(
+                acnh_core::steam::assets_dir()
+                    .unwrap_or_default()
+                    .join("acnhrecomp.png"),
             )
         })
         .map_err(|_| acnh_core::Error::Steam("Could not load shortcut artwork".into()))?;

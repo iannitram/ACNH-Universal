@@ -2,6 +2,18 @@
 use acnh_core::fleet::{self, DeviceRecord, Drift};
 use acnh_core::platform::AppDirs;
 
+/// Fleet navigation changes the scroll offset or closes the overlay.
+pub fn navigate(offset: usize, rows: usize, nav: crate::vm::Nav) -> (usize, bool) {
+    use crate::vm::Nav;
+    let max = rows.saturating_sub(3);
+    match nav {
+        Nav::Up | Nav::Left | Nav::Prev => (offset.saturating_sub(1).min(max), false),
+        Nav::Down | Nav::Right | Nav::Next => (offset.saturating_add(1).min(max), false),
+        Nav::Back | Nav::Accept => (offset.min(max), true),
+        _ => (offset.min(max), false),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetRow {
     pub device: String,

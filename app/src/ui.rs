@@ -17,6 +17,7 @@ fn card_view(lines: &CardLines) -> CardView {
 pub fn from_slint(target: PadTarget) -> FocusTarget {
     match target {
         PadTarget::Play => FocusTarget::Play,
+        PadTarget::PlayAnyway => FocusTarget::PlayAnyway,
         PadTarget::KeepThis => FocusTarget::Keep(Side::This),
         PadTarget::KeepRelay => FocusTarget::Keep(Side::Relay),
         PadTarget::Update => FocusTarget::Update,
@@ -31,6 +32,7 @@ pub fn from_slint(target: PadTarget) -> FocusTarget {
 fn pad_target(focus: FocusTarget) -> PadTarget {
     match focus {
         FocusTarget::Play => PadTarget::Play,
+        FocusTarget::PlayAnyway => PadTarget::PlayAnyway,
         FocusTarget::Keep(Side::This) => PadTarget::KeepThis,
         FocusTarget::Keep(Side::Relay) => PadTarget::KeepRelay,
         FocusTarget::Update => PadTarget::Update,
@@ -62,11 +64,13 @@ pub fn to_slint(view: &PageView) -> ContinueView {
         keep_enabled: view.keep_enabled,
         warning: view.warning.as_str().into(),
         play_anyway: view.play_anyway,
+        held: view.held,
         back: view.back,
         pages_enabled: view.pages_enabled,
         about_open: view.about_open,
         settings_open: view.settings_open,
         fleet_open: view.fleet_open,
+        saves_open: view.saves_open,
         focus: pad_target(view.focus),
     }
 }

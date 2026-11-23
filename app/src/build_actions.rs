@@ -114,7 +114,7 @@ impl BuildActions {
                 }
                 assemble::assemble(target, &out.join("build"), &self.dirs.install())?;
                 Ok(())
-            })
+            })?;
         } else {
             report("Finding paired hub".into());
             let peers = hub::read_peers(&self.dirs)?;
@@ -145,8 +145,15 @@ impl BuildActions {
             report("Pulling build".into());
             self.install_pulled(|staged| {
                 hub::pull_hub(address, &self.dirs, &id, &name, self.os, staged)
-            })
+            })?;
         }
+        let player = assemble::player(self.os, Path::new(""), &self.dirs.install());
+        if !self.installed(&player) {
+            return Err(Error::Build(
+                "the installed player could not be verified".into(),
+            ));
+        }
+        Ok(())
     }
     fn install_pulled(&self, pull: impl FnOnce(&Path) -> Result<bundle::Bundle>) -> Result<()> {
         std::fs::create_dir_all(&self.dirs.data)?;

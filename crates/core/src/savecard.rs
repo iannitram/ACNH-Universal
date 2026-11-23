@@ -26,8 +26,10 @@ pub struct SaveCard {
 /// `<save_dir>/../launcher-card.txt` (outside `device_save`, so it does not sync as game data
 /// but travels with the save-relay metadata): lines `device <name>`, `play <seconds>`,
 /// `version <name>`, in any order; unknown lines, and a `play` value that is not a number, are
-/// ignored; a later line wins. No sidecar leaves `device` and `version` "" and `play_seconds`
-/// 0. `saved_unix` is `<save_dir>/main.dat`'s modified time; with no `main.dat` the card is
+/// ignored; a later line wins. Relay-written cards also carry `saved` and `file_modified_ns`:
+/// when the file still matches that stamp, `saved` is the relay card time; when it changed,
+/// device and play time are unknown. No sidecar leaves `device` and `version` "" and
+/// `play_seconds` 0. Otherwise `saved_unix` is `<save_dir>/main.dat`'s modified time; with no `main.dat` the card is
 /// `Error::Saves("no island at <save_dir>")`. `picture` is copied into the card as given.
 pub fn read_card(save_dir: &Path, picture: &Path) -> Result<SaveCard> {
     let main_dat = save_dir.join("main.dat");
@@ -40,7 +42,7 @@ pub fn read_card(save_dir: &Path, picture: &Path) -> Result<SaveCard> {
         Err(e) => return Err(Error::from(e)),
     };
     let modified = meta.modified()?;
-    let saved_unix = match modified.duration_since(std::time::UNIX_EPOCH) {
+    let mut saved_unix = match modified.duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs(),
         Err(_) => 0,
     };
@@ -48,6 +50,8 @@ pub fn read_card(save_dir: &Path, picture: &Path) -> Result<SaveCard> {
     let mut device = String::new();
     let mut play_seconds = 0u64;
     let mut version = String::new();
+    let mut card_saved = None;
+    let mut file_stamp = None;
 
     let sidecar = save_dir.join("..").join("launcher-card.txt");
     if let Ok(content) = std::fs::read_to_string(&sidecar) {
@@ -55,6 +59,8 @@ pub fn read_card(save_dir: &Path, picture: &Path) -> Result<SaveCard> {
             if let Some((key, val)) = line.split_once(' ') {
                 match key {
                     "device" => device = val.to_string(),
+                    "saved" => card_saved = val.parse::<u64>().ok(),
+                    "file_modified_ns" => file_stamp = val.parse::<u128>().ok(),
                     "play" => {
                         if let Ok(secs) = val.parse::<u64>() {
                             play_seconds = secs;
@@ -64,6 +70,21 @@ pub fn read_card(save_dir: &Path, picture: &Path) -> Result<SaveCard> {
                     _ => {}
                 }
             }
+        }
+    }
+
+    if let Some(stamp) = file_stamp {
+        let actual = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_nanos());
+        if actual == Some(stamp) {
+            if let Some(time) = card_saved {
+                saved_unix = time;
+            }
+        } else {
+            device.clear();
+            play_seconds = 0;
         }
     }
 

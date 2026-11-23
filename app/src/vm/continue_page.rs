@@ -3,10 +3,10 @@
 //! window: a press may leave a `Request` for the driver (`crate::play::Session`), which runs it
 //! and feeds the result back as `PlayEvent`s; `ui/continue.slint` draws `view()`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use acnh_core::fleet::{self, DeviceRecord, Drift};
-use acnh_core::launch::{Keep, Played, Sync};
+use acnh_core::launch::{Keep, Played, RelayStatus, Sync};
 use acnh_core::prepare::redact;
 use acnh_core::savecard::{self, SaveCard};
 use acnh_core::{Error, Result};
@@ -40,10 +40,13 @@ pub enum ContinueState {
     RelayNewer,
     LocalNewer,
     Conflict,
+    Held { device: String, since: String },
     Drift { newer_save_refused: bool },
     BuildMissing,
     RelayUnavailable,
+    SyncOff,
     RelayError(String),
+    CheckingStatus,
     Syncing(SyncStep),
     Starting,
     Playing,
@@ -177,6 +180,7 @@ impl ConflictView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
     Play,
+    PlayAnyway,
     Keep(Side),
     Update,
     Back,
@@ -194,25 +198,19 @@ const PAGE_ROW: [(FocusTarget, &str); 4] = [
     (FocusTarget::About, "About"),
 ];
 
-/// Controller / input layout for glyph display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputDevice {
-    Xbox,
-    PlayStation,
-    SteamDeck,
-    Switch,
-    Keyboard,
-    Touch,
-}
-
 /// What a press asks the driver to run; taken with `ContinuePageVm::take_request`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
     /// `launch::play`: pull the island, run the game, push the island.
     Play,
+    PlayAnyway,
+    Status,
     /// One relay step on its own (`Pull` or `Push`): with `keep`, the player's answer to a
     /// conflict found at that step; without, a push tried again after the game has run.
-    Sync { step: SyncStep, keep: Option<Keep> },
+    Sync {
+        step: SyncStep,
+        keep: Option<Keep>,
+    },
     /// Prepare locally or pull from a paired hub.
     Build,
     /// Bring this device's build up to date (`update`).
@@ -220,6 +218,8 @@ pub enum Request {
 }
 
 /// What a running job tells the page, in the order it happens.
+// Events cross a channel infrequently; inline cards keep construction and matching simple.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayEvent {
     /// A relay step began.
@@ -231,9 +231,14 @@ pub enum PlayEvent {
     /// are the relay's texts for the two sides (`launch::Sync::Conflict`).
     Conflict {
         step: SyncStep,
-        server: String,
-        local: String,
+        server: SaveCard,
+        local: SaveCard,
     },
+    Held {
+        device: String,
+        since: String,
+    },
+    Status(Result<RelayStatus>),
     /// `launch::play` returned.
     Played(Result<Played>),
     /// A `Request::Sync` returned.
@@ -278,6 +283,7 @@ pub struct PageView {
     /// The drift warning; "" for none.
     pub warning: String,
     pub play_anyway: bool,
+    pub held: bool,
     /// Back is drawn: the chooser or the drift warning is open and can be left.
     pub back: bool,
     pub pages_enabled: bool,
@@ -285,39 +291,8 @@ pub struct PageView {
     pub about_open: bool,
     pub settings_open: bool,
     pub fleet_open: bool,
+    pub saves_open: bool,
     pub focus: FocusTarget,
-}
-
-/// The card for one side of a conflict, from the text the relay gave for it
-/// (`launch::Sync::Conflict`): `savecard`'s sidecar lines (`device <name>`, `play <seconds>`,
-/// `version <name>`) and `saved <unix seconds>`, in any order, a later line winning. Text
-/// with none of those lines is taken as the device's name, so the card still says whose it is.
-pub fn card_from_text(text: &str, picture: &Path) -> SaveCard {
-    let mut card = SaveCard {
-        saved_unix: 0,
-        device: String::new(),
-        play_seconds: 0,
-        version: String::new(),
-        picture: picture.to_path_buf(),
-    };
-    let mut known = false;
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once(' ') else {
-            continue;
-        };
-        match key {
-            "device" => card.device = value.to_string(),
-            "version" => card.version = value.to_string(),
-            "play" => card.play_seconds = value.parse().unwrap_or(card.play_seconds),
-            "saved" => card.saved_unix = value.parse().unwrap_or(card.saved_unix),
-            _ => continue,
-        }
-        known = true;
-    }
-    if !known {
-        card.device = text.lines().next().unwrap_or("").trim().to_string();
-    }
-    card
 }
 
 fn device_name(card: &SaveCard) -> &str {
@@ -359,7 +334,7 @@ pub struct ContinuePageVm {
     about_open: bool,
     settings_open: bool,
     fleet_open: bool,
-    pub glyph_set: InputDevice,
+    saves_open: bool,
     pub last_error: Option<String>,
     pub status_message: Option<String>,
     pub warning_text: Option<String>,
@@ -389,6 +364,10 @@ impl ContinuePageVm {
         self.settings_open
     }
 
+    pub fn saves_open(&self) -> bool {
+        self.saves_open
+    }
+
     pub fn fleet_open(&self) -> bool {
         self.fleet_open
     }
@@ -409,7 +388,7 @@ impl ContinuePageVm {
             about_open: false,
             settings_open: false,
             fleet_open: false,
-            glyph_set: InputDevice::SteamDeck,
+            saves_open: false,
             last_error: None,
             status_message: None,
             warning_text: None,
@@ -452,10 +431,6 @@ impl ContinuePageVm {
         self.focus
     }
 
-    pub fn glyph_set(&self) -> InputDevice {
-        self.glyph_set
-    }
-
     pub fn status_message(&self) -> Option<&str> {
         self.status_message.as_deref()
     }
@@ -475,8 +450,10 @@ impl ContinuePageVm {
             ContinueState::LocalNewer => "Newer here",
             ContinueState::PushFailed(_) => "Not synced yet",
             ContinueState::NoIsland => "No island yet",
-            ContinueState::RelayUnavailable => "Will sync later",
+            ContinueState::RelayUnavailable => "Waiting to sync",
+            ContinueState::SyncOff => "Save sync is off",
             ContinueState::Conflict => "Unresolved conflict",
+            ContinueState::Held { .. } => "Open on another device",
             _ => "",
         }
     }
@@ -490,6 +467,15 @@ impl ContinuePageVm {
         } else {
             PlayAction::Pull
         });
+    }
+
+    pub fn begin_status(&mut self) -> bool {
+        if matches!(self.state, ContinueState::Ready | ContinueState::NoIsland) {
+            self.state = ContinueState::CheckingStatus;
+            true
+        } else {
+            false
+        }
     }
 
     /// The job the last press asked for, once: the driver runs it and reports back through
@@ -563,7 +549,8 @@ impl ContinuePageVm {
     fn busy(&self) -> bool {
         matches!(
             self.state,
-            ContinueState::Syncing(_)
+            ContinueState::CheckingStatus
+                | ContinueState::Syncing(_)
                 | ContinueState::Starting
                 | ContinueState::Playing
                 | ContinueState::Saving
@@ -576,17 +563,20 @@ impl ContinuePageVm {
         if self.busy() {
             return false;
         }
-        if self.about_open || self.settings_open || self.fleet_open {
+        if self.about_open || self.settings_open || self.fleet_open || self.saves_open {
             // Only Back works under the About overlay.
             return target == FocusTarget::Back;
         }
         let phase = self.conflict.as_ref().map(|conflict| &conflict.phase);
         let in_drift = matches!(self.state, ContinueState::Drift { .. });
+        let held = matches!(self.state, ContinueState::Held { .. });
         match target {
+            FocusTarget::PlayAnyway => held,
             FocusTarget::Keep(_) => matches!(phase, Some(ConflictPhase::Choosing { .. })),
             FocusTarget::Update => in_drift,
             FocusTarget::Back => {
                 in_drift
+                    || held
                     || matches!(
                         phase,
                         Some(ConflictPhase::Choosing { .. } | ConflictPhase::Failed { .. })
@@ -599,7 +589,7 @@ impl ContinuePageVm {
                             newer_save_refused: true,
                         }
             }
-            _ => !in_drift && matches!(phase, None | Some(ConflictPhase::Pending)),
+            _ => !in_drift && !held && matches!(phase, None | Some(ConflictPhase::Pending)),
         }
     }
 
@@ -627,11 +617,12 @@ impl ContinuePageVm {
         if self.busy() {
             return false;
         }
-        if self.about_open || self.settings_open || self.fleet_open {
+        if self.about_open || self.settings_open || self.fleet_open || self.saves_open {
             if nav == Nav::Back {
                 self.about_open = false;
                 self.settings_open = false;
                 self.fleet_open = false;
+                self.saves_open = false;
             }
             return false;
         }
@@ -688,6 +679,29 @@ impl ContinuePageVm {
             None => {}
         }
 
+        if matches!(self.state, ContinueState::Held { .. }) {
+            match nav {
+                Nav::Back => {
+                    self.state = ContinueState::Ready;
+                    self.focus = FocusTarget::Play;
+                }
+                Nav::Right | Nav::Down => self.focus = FocusTarget::PlayAnyway,
+                Nav::Left | Nav::Up => self.focus = FocusTarget::Play,
+                Nav::Accept if self.focus == FocusTarget::PlayAnyway => {
+                    self.state = ContinueState::Syncing(SyncStep::Backup);
+                    self.request = Some(Request::PlayAnyway);
+                    return true;
+                }
+                Nav::Accept => {
+                    self.state = ContinueState::CheckingStatus;
+                    self.request = Some(Request::Status);
+                    return true;
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         if let ContinueState::Drift { newer_save_refused } = self.state {
             match nav {
                 Nav::Back => {
@@ -730,6 +744,9 @@ impl ContinuePageVm {
             (Some(_), Nav::Up) => self.focus = FocusTarget::Play,
             (Some(at), Nav::Left) if at > 0 => self.focus = PAGE_ROW[at - 1].0,
             (Some(at), Nav::Right) if at + 1 < PAGE_ROW.len() => self.focus = PAGE_ROW[at + 1].0,
+            (Some(at), Nav::Accept) if PAGE_ROW[at].0 == FocusTarget::Saves => {
+                self.saves_open = true;
+            }
             (Some(at), Nav::Accept) if PAGE_ROW[at].0 == FocusTarget::Fleet => {
                 self.fleet_open = true;
             }
@@ -880,20 +897,73 @@ impl ContinuePageVm {
                 server,
                 local,
             } => {
-                let picture = match &self.local_card {
-                    Some(card) => card.picture.clone(),
-                    None => PathBuf::new(),
-                };
-                let this_card = match &self.local_card {
-                    Some(card) => card.clone(),
-                    None => card_from_text(&local, &picture),
-                };
-                let relay_card = card_from_text(&server, &picture);
+                let mut this_card = local;
+                let mut relay_card = server;
+                if let Some(picture) = self.local_card.as_ref().map(|card| &card.picture) {
+                    if this_card.picture.as_os_str().is_empty() {
+                        this_card.picture = picture.clone();
+                    }
+                    if relay_card.picture.as_os_str().is_empty() {
+                        relay_card.picture = picture.clone();
+                    }
+                }
                 self.relay_card = Some(relay_card.clone());
                 self.auto_resolve = false;
                 self.conflict_step = step;
                 self.status_message = None;
                 self.set_conflict(this_card, relay_card);
+            }
+            PlayEvent::Held { device, since } => {
+                self.conflict = None;
+                self.state = ContinueState::Held { device, since };
+                self.focus = FocusTarget::Play;
+                self.play_action = Some(PlayAction::Play);
+            }
+            PlayEvent::Status(result) => {
+                // An initial status must not interrupt a job or a pending conflict.
+                if matches!(
+                    self.state,
+                    ContinueState::Ready | ContinueState::NoIsland | ContinueState::CheckingStatus
+                ) {
+                    match result {
+                        Ok(RelayStatus::Held { device, since }) => {
+                            self.on_play_event(PlayEvent::Held { device, since })
+                        }
+                        Ok(RelayStatus::RelayNewer(card)) => {
+                            self.relay_card = Some(card);
+                            self.state = ContinueState::RelayNewer;
+                            self.play_action = Some(PlayAction::Play);
+                        }
+                        Ok(RelayStatus::LocalNewer) => {
+                            self.state = ContinueState::LocalNewer;
+                            self.play_action = Some(PlayAction::Play);
+                        }
+                        Ok(RelayStatus::Conflict { server, local }) => {
+                            self.on_play_event(PlayEvent::Conflict {
+                                step: SyncStep::Pull,
+                                server,
+                                local,
+                            })
+                        }
+                        Ok(RelayStatus::Unavailable) => self.fail(ContinueState::RelayUnavailable),
+                        Ok(RelayStatus::Off) => {
+                            self.state = ContinueState::SyncOff;
+                            self.play_action = Some(PlayAction::Play);
+                        }
+                        Ok(_) => {
+                            self.state = if self.local_card.is_some() {
+                                ContinueState::Ready
+                            } else {
+                                ContinueState::NoIsland
+                            };
+                            self.play_action = Some(PlayAction::Play);
+                        }
+                        Err(error) => {
+                            let reason = self.reason(&error);
+                            self.fail(ContinueState::RelayError(reason));
+                        }
+                    }
+                }
             }
             PlayEvent::Played(result) => {
                 self.status_message = None;
@@ -905,16 +975,18 @@ impl ContinuePageVm {
                             log_hint: "The newest file in the logs folder says why.".to_string(),
                         });
                     }
+                    Ok(played) if played.pushed == Sync::Offline => {
+                        self.fail(ContinueState::PushFailed("the relay did not answer".into()));
+                    }
                     Ok(played) => {
-                        let offline =
-                            played.pulled == Sync::Offline || played.pushed == Sync::Offline;
-                        self.state = if offline {
-                            ContinueState::RelayUnavailable
+                        self.state = if played.pulled == Sync::Off {
+                            ContinueState::SyncOff
                         } else {
                             ContinueState::Ready
                         };
                         self.play_action = Some(PlayAction::Play);
                     }
+                    Err(Error::RelayUnreachable) => self.fail(ContinueState::RelayUnavailable),
                     Err(error) => {
                         let reason = self.reason(&error);
                         self.fail(match self.state {
@@ -930,8 +1002,11 @@ impl ContinuePageVm {
             }
             PlayEvent::Synced(result) => {
                 let outcome = match result {
-                    Ok(Sync::Done(_)) => Ok(()),
-                    Ok(Sync::Offline) => Err("the relay did not answer".to_string()),
+                    Ok(Sync::Done(_) | Sync::Resolved { .. }) => Ok(()),
+                    Ok(Sync::Off | Sync::Offline) => Err("the relay did not answer".to_string()),
+                    Ok(Sync::Held { .. }) => {
+                        Err("the island is open on another device".to_string())
+                    }
                     Ok(Sync::Conflict { .. }) => {
                         Err("the relay still reports a conflict".to_string())
                     }
@@ -984,6 +1059,8 @@ impl ContinuePageVm {
         match &self.state {
             // The warning holds the buttons.
             ContinueState::Drift { .. } => String::new(),
+            ContinueState::Held { .. } => "Wait".to_string(),
+            ContinueState::CheckingStatus => "Checking save sync".to_string(),
             ContinueState::Syncing(step) => step.label().to_string(),
             ContinueState::Starting => "Starting the game".to_string(),
             ContinueState::Saving => SyncStep::Push.label().to_string(),
@@ -1019,11 +1096,15 @@ impl ContinuePageVm {
             };
         }
         match &self.state {
+            ContinueState::Held { device, since } => {
+                format!("{device} has the island open since {since}. Wait, or play anyway.")
+            }
             ContinueState::NoIsland => "A new island starts when the game does.".to_string(),
             ContinueState::RelayUnavailable => {
-                "The relay did not answer: this device's island is used and will sync later."
+                "Save-relay could not be reached. The game starts once the island has synced."
                     .to_string()
             }
+            ContinueState::SyncOff => "Turn on save sync in Settings.".to_string(),
             ContinueState::RelayError(reason) => format!("The relay could not sync: {reason}"),
             ContinueState::PlayerFailed { exit, log_hint } if *exit < 0 => {
                 format!("The game did not start: {log_hint}")
@@ -1064,12 +1145,15 @@ impl ContinuePageVm {
                 Some(warning) if in_drift => warning.clone(),
                 _ => String::new(),
             },
-            play_anyway: in_drift && self.available(FocusTarget::Play),
+            play_anyway: (in_drift && self.available(FocusTarget::Play))
+                || self.available(FocusTarget::PlayAnyway),
+            held: matches!(self.state, ContinueState::Held { .. }),
             back: self.available(FocusTarget::Back),
             pages_enabled: self.available(FocusTarget::Saves),
             about_open: self.about_open,
             settings_open: self.settings_open,
             fleet_open: self.fleet_open,
+            saves_open: self.saves_open,
             focus: self.focus,
         }
     }
@@ -1398,8 +1482,8 @@ mod tests {
     fn relay_conflict(vm: &mut ContinuePageVm, step: SyncStep) {
         vm.on_play_event(PlayEvent::Conflict {
             step,
-            server: "device Strix Halo tablet\nplay 7200\nversion 3.0.2\nsaved 2000".to_string(),
-            local: "device AMD handheld".to_string(),
+            server: fake_card(2000, "Strix Halo tablet", 7200, "3.0.2"),
+            local: fake_card(1000, "AMD handheld", 3600, "3.0.2"),
         });
     }
 
@@ -1608,7 +1692,8 @@ mod tests {
             vm.conflict().map(|conflict| conflict.phase.clone()),
             Some(ConflictPhase::Pending)
         );
-        assert_eq!(vm.view().message, "Saves is coming soon.");
+        assert!(vm.view().saves_open);
+        vm.handle(Nav::Back);
         vm.handle(Nav::Up);
         assert_eq!(vm.focus(), FocusTarget::Play);
         // Back while the conflict is pending does nothing.
@@ -1733,29 +1818,26 @@ mod tests {
             exit_code: 0,
             pushed: Sync::Offline,
         })));
-        assert_eq!(vm.state(), &ContinueState::RelayUnavailable);
-        assert_eq!(vm.view().status, "Will sync later");
-        assert_eq!(vm.view().button, "Play");
+        assert!(matches!(vm.state(), ContinueState::PushFailed(_)));
+        assert_eq!(vm.view().status, "Not synced yet");
+        assert_eq!(vm.view().button, "Retry");
     }
-
     #[test]
-    fn card_from_text_reads_card_lines_or_takes_the_text_as_a_name() {
-        let picture = Path::new("assets/acnhrecomp.png");
-        assert_eq!(
-            card_from_text(
-                "device Strix Halo tablet\nplay 7200\nversion 3.0.2\nsaved 2000",
-                picture
-            ),
-            fake_card(2000, "Strix Halo tablet", 7200, "3.0.2")
-        );
-        let named = card_from_text("Living room PC", picture);
-        assert_eq!(named, fake_card(0, "Living room PC", 0, ""));
-        let lines = card_lines(&named, String::new());
-        assert_eq!(lines.saved, "Living room PC");
-        assert_eq!(lines.version, "Version unknown");
-        assert_eq!(
-            card_lines(&card_from_text("", picture), String::new()).saved,
-            "unknown device"
-        );
+    fn held_offers_wait_and_only_explicit_play_anyway_overrides() {
+        let mut vm = ContinuePageVm::new(None, None);
+        vm.on_play_event(PlayEvent::Held {
+            device: "other".into(),
+            since: "2026-11-17T10:00:00Z".into(),
+        });
+        assert_eq!(vm.view().button, "Wait");
+        assert!(vm.view().play_anyway);
+        assert!(vm.handle(Nav::Accept));
+        assert_eq!(vm.take_request(), Some(Request::Status));
+        vm.on_play_event(PlayEvent::Status(Ok(RelayStatus::Held {
+            device: "other".into(),
+            since: "2026-11-17T10:00:00Z".into(),
+        })));
+        assert!(vm.click(FocusTarget::PlayAnyway));
+        assert_eq!(vm.take_request(), Some(Request::PlayAnyway));
     }
 }

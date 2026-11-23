@@ -5,11 +5,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use acnh_app::first_run::FirstRun;
-use acnh_app::input::{key_nav, poll_nav, Stick};
+use acnh_app::input::{key_nav, poll_nav, DeviceEvent, Devices, Stick};
 use acnh_app::play::{Player, RelayOff, Runner, Session};
 use acnh_app::ui::{from_slint, to_slint};
 use acnh_app::vm::fleet::FleetVm;
-use acnh_app::vm::settings::SettingsVm;
+use acnh_app::vm::saves::SavesVm;
+use acnh_app::vm::settings::{move_focus, SettingsFocus, SettingsVm};
 use acnh_app::vm::{AboutVm, ContinuePageVm, Nav};
 use acnh_app::MainWindow;
 use acnh_app::{CreditEntry, FixEntry, FleetEntry, SettingsControl};
@@ -17,17 +18,13 @@ use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::{backup, savecard, saves};
 use slint::{ComponentHandle, SharedString, Timer, TimerMode, Weak};
 
-/// The picture on the island card.
-const PICTURE: &str = "assets/acnhrecomp.png";
-
 /// The Continue page for this device: its island, its player and its folders.
-fn session() -> acnh_core::Result<Session> {
+fn session(picture: PathBuf) -> acnh_core::Result<Session> {
     let os = Os::current();
     let vars = Vars::from_lookup(os, |name| std::env::var(name).ok())?;
     let dirs = AppDirs::new(&vars);
     let root = dirs.data_root();
     let save_dir = saves::save_dir(&root);
-    let picture = PathBuf::from(PICTURE);
 
     // `this_device` and `set_saved_by` take the fleet's records once the app keeps them
     // (the Fleet page); with neither, no drift is reported.
@@ -73,6 +70,44 @@ fn render(window: &Weak<MainWindow>, session: &Session) {
             window.set_settings_error(SharedString::default());
         }
         let view = session.vm().view();
+        if view.saves_open {
+            if !window.get_view().saves_open {
+                window.set_saves_offset(0);
+            }
+            if let Ok(vars) = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok()) {
+                let saves = SavesVm::new(AppDirs::new(&vars).data_root());
+                window.set_saves_island(saves.island_card().text.into());
+                let (backups, message) = match saves.backups() {
+                    Ok(backups) if backups.is_empty() => (backups, "No backups yet."),
+                    Ok(backups) => (backups, ""),
+                    Err(_) => (Vec::new(), "Could not read backups."),
+                };
+                let offset = (window.get_saves_offset().max(0) as usize)
+                    .min(backups.len().saturating_sub(3));
+                window.set_saves_offset(offset as i32);
+                window.set_saves_has_previous(offset > 0);
+                window.set_saves_has_next(offset + 3 < backups.len());
+                window.set_saves_position(if backups.len() > 3 {
+                    format!(
+                        "Showing {}–{} of {}",
+                        offset + 1,
+                        (offset + 3).min(backups.len()),
+                        backups.len()
+                    )
+                    .into()
+                } else {
+                    "".into()
+                });
+                let rows: Vec<SharedString> = backups
+                    .into_iter()
+                    .skip(offset)
+                    .take(3)
+                    .map(Into::into)
+                    .collect();
+                window.set_saves_backups(slint::ModelRc::new(slint::VecModel::from(rows)));
+                window.set_saves_message(message.into());
+            }
+        }
         if view.fleet_open {
             if !window.get_view().fleet_open {
                 window.set_fleet_offset(0);
@@ -122,29 +157,45 @@ fn render(window: &Weak<MainWindow>, session: &Session) {
 }
 
 fn move_settings_focus(focus: SettingsControl, nav: Nav) -> SettingsControl {
-    use SettingsControl::{Back, Ptbr, Speedfix};
-
-    match (focus, nav) {
-        (Ptbr, Nav::Down | Nav::Right) | (Back, Nav::Up | Nav::Left) => Speedfix,
-        (Speedfix, Nav::Down | Nav::Right) => Back,
-        (Speedfix, Nav::Up | Nav::Left) => Ptbr,
-        _ => focus,
+    let focus = match focus {
+        SettingsControl::Ptbr => SettingsFocus::Ptbr,
+        SettingsControl::Speedfix => SettingsFocus::Speedfix,
+        SettingsControl::Back => SettingsFocus::Back,
+    };
+    match move_focus(focus, nav) {
+        SettingsFocus::Ptbr => SettingsControl::Ptbr,
+        SettingsFocus::Speedfix => SettingsControl::Speedfix,
+        SettingsFocus::Back => SettingsControl::Back,
     }
 }
 
 fn navigate(window: &Weak<MainWindow>, session: &mut Session, nav: Nav) {
+    if let Some(window) = window.upgrade().filter(|_| session.vm().saves_open()) {
+        let offset = window.get_saves_offset().max(0) as usize;
+        let rows = if window.get_saves_has_next() {
+            offset + 4
+        } else {
+            offset + 3
+        };
+        let (offset, close) = acnh_app::vm::saves::navigate(offset, rows, nav);
+        window.set_saves_offset(offset as i32);
+        if close {
+            session.nav(Nav::Back);
+        }
+        return;
+    }
     if let Some(window) = window.upgrade().filter(|_| session.vm().fleet_open()) {
-        match nav {
-            Nav::Up | Nav::Left | Nav::Prev => {
-                window.set_fleet_offset(window.get_fleet_offset().saturating_sub(1).max(0))
-            }
-            Nav::Down | Nav::Right | Nav::Next => {
-                window.set_fleet_offset(window.get_fleet_offset().saturating_add(1))
-            }
-            Nav::Back | Nav::Accept => {
-                session.nav(Nav::Back);
-            }
-            _ => {}
+        // The row count is reflected by the existing previous/next flags.
+        let offset = window.get_fleet_offset().max(0) as usize;
+        let rows = if window.get_fleet_has_next() {
+            offset + 4
+        } else {
+            offset + 3
+        };
+        let (offset, close) = acnh_app::vm::fleet::navigate(offset, rows, nav);
+        window.set_fleet_offset(offset as i32);
+        if close {
+            session.nav(Nav::Back);
         }
         return;
     }
@@ -266,9 +317,30 @@ fn set_about(window: &MainWindow) {
     window.set_about_fixes(slint::ModelRc::new(slint::VecModel::from(fixes)));
 }
 
+fn fullscreen(flag: bool, desktop: Option<&str>, gamepad_ui: bool) -> bool {
+    flag || desktop == Some("gamescope") || gamepad_ui
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window = MainWindow::new()?;
+    window.window().set_fullscreen(fullscreen(
+        std::env::args_os().any(|arg| arg == "--fullscreen"),
+        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+        std::env::var_os("SteamGamepadUI").is_some(),
+    ));
     set_about(&window);
+    let devices = Rc::new(RefCell::new(Devices::default()));
+    window.set_input_device(devices.borrow().current() as i32);
+    window.on_pointer_used({
+        let devices = Rc::clone(&devices);
+        let weak = window.as_weak();
+        move || {
+            devices.borrow_mut().apply(DeviceEvent::Touch);
+            if let Some(window) = weak.upgrade() {
+                window.set_input_device(devices.borrow().current() as i32);
+            }
+        }
+    });
     let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
     let settings = Rc::new(SettingsVm::new(
         AppDirs::new(&vars).data_root(),
@@ -322,8 +394,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             render_first_run(&weak, &mut first);
         }
     });
-    let session = Rc::new(RefCell::new(session()?));
+    let picture = acnh_core::steam::assets_dir()?.join("acnhrecomp.png");
+    if let Ok(image) = image::open(&picture) {
+        let rgba = image.into_rgba8();
+        let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+        );
+        window.set_card_picture(slint::Image::from_rgba8(pixels));
+    }
+    let session = Rc::new(RefCell::new(session(picture)?));
     render(&window.as_weak(), &session.borrow());
+
+    window.on_saves_scroll({
+        let weak = window.as_weak();
+        let session = Rc::clone(&session);
+        move |delta| {
+            if let Some(window) = weak.upgrade() {
+                window.set_saves_offset(window.get_saves_offset().saturating_add(delta).max(0));
+                render(&weak, &session.borrow());
+            }
+        }
+    });
 
     window.on_fleet_scroll({
         let weak = window.as_weak();
@@ -353,10 +446,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     window.on_key({
+        let devices = Rc::clone(&devices);
         let weak = window.as_weak();
         let first = Rc::clone(&first);
         let session = Rc::clone(&session);
         move |text: SharedString| {
+            devices.borrow_mut().apply(DeviceEvent::Keyboard);
+            if let Some(window) = weak.upgrade() {
+                window.set_input_device(devices.borrow().current() as i32);
+            }
             if weak.upgrade().is_some_and(|w| w.get_first_run_open()) {
                 let mut first = first.borrow_mut();
                 if first.vm.step == acnh_app::vm::first_run::Step::Pair && !first.vm.busy {
@@ -413,9 +511,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fleet_tick = 0_u32;
     timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
         let navs = match gilrs.as_mut() {
-            Some(gilrs) => poll_nav(gilrs, &mut stick),
+            Some(gilrs) => poll_nav(gilrs, &mut stick, &mut devices.borrow_mut()),
             None => Vec::new(),
         };
+        if let Some(window) = weak.upgrade() {
+            window.set_input_device(devices.borrow().current() as i32);
+        }
         let first_open = weak.upgrade().is_some_and(|w| w.get_first_run_open());
         if first_open {
             let mut first = first.borrow_mut();
@@ -454,6 +555,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fullscreen_follows_arguments_and_gamescope() {
+        assert!(!fullscreen(false, None, false));
+        assert!(fullscreen(true, None, false));
+        assert!(fullscreen(false, Some("gamescope"), false));
+        assert!(fullscreen(false, None, true));
+        assert!(!fullscreen(false, Some("desktop"), false));
+    }
 
     #[test]
     fn settings_focus_reaches_both_switches_and_back() {

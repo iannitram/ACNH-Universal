@@ -1,3 +1,4 @@
+import { InputHints } from "hints.slint";
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 
 export struct FleetEntry {
@@ -8,6 +9,7 @@ export struct FleetEntry {
 }
 
 export component FleetPage inherits Rectangle {
+    in property <int> input-device;
     in property <[FleetEntry]> rows;
     in property <string> message;
     in property <string> comparison;
@@ -54,8 +56,13 @@ export component FleetPage inherits Rectangle {
             border-width: 2px;
             border-color: #f7d681;
             border-radius: 6px;
-            Text { text: "Back (Esc / east button)    •    Up / Down: more devices"; color: white; horizontal-alignment: center; vertical-alignment: center; }
+            Text { text: "Back"; color: white; horizontal-alignment: center; vertical-alignment: center; }
             TouchArea { clicked => { root.back(); } }
+        }
+        InputHints {
+            device: root.input-device;
+            move-label: root.has-previous || root.has-next ? "More devices" : "";
+            select-label: "";
         }
     }
 }
