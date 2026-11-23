@@ -903,6 +903,14 @@ extern "C" void acnh_relay_background(const char* data_root);   // returns at on
 // The Rust half's log lines go into the player's log (Documents/logs/nx.log).
 extern "C" void nx_relay_log(const char* line) { nx::log("%s", line); }
 
+// relay.ask lives in the player's own settings: this side is the only writer of config.ini (config_save rewrites the
+// file from the entries it loaded, so a key written behind its back would be lost at the next save).
+extern "C" bool nx_relay_ask_off() { return nx::config_get("relay.ask", "") == "0"; }
+extern "C" bool nx_relay_remember_not_now() {
+    nx::config_set("relay.ask", "0");
+    return nx::config_save();
+}
+
 static void relay_after_game() {
     if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
 }

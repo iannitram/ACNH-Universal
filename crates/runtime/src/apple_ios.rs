@@ -10,8 +10,8 @@
 //! verified on a device: whether a controller can answer the alerts (docs/IOS.md).
 
 use super::{
-    Blocked, BlockedAnswer, Connector, HeldAnswer, Live, Player, Prompt, Roots, SignInAnswer,
-    SignInForm,
+    Blocked, BlockedAnswer, Connector, HeldAnswer, Live, Player, Prompt, Roots, Settings,
+    SignInAnswer, SignInForm,
 };
 use acnh_core::launch::Keep;
 use acnh_core::savecard::SaveCard;
@@ -409,6 +409,27 @@ fn log(line: &str) {
     }
 }
 
+extern "C" {
+    /// `runtime/src/platform_mac.cpp`: `relay.ask` is `0` in the player's settings.
+    fn nx_relay_ask_off() -> bool;
+    /// `runtime/src/platform_mac.cpp`: `config_set("relay.ask", "0")` and `config_save()`.
+    fn nx_relay_remember_not_now() -> bool;
+}
+
+/// `relay.ask` through the player's settings: the C++ side is the only writer of `config.ini`.
+struct PlayerSettings;
+
+impl Settings for PlayerSettings {
+    fn ask_off(&self) -> bool {
+        // SAFETY: plain calls into the player, no pointers.
+        unsafe { nx_relay_ask_off() }
+    }
+    fn remember_not_now(&self) -> bool {
+        // SAFETY: as above.
+        unsafe { nx_relay_remember_not_now() }
+    }
+}
+
 /// True once `before_game` has returned: the push waits for it.
 static BOOTED: AtomicBool = AtomicBool::new(false);
 
@@ -430,6 +451,7 @@ fn with_player(data_root: &Path, work: impl FnOnce(&Player<'_>) + std::panic::Un
             connector,
             prompt: &UiPrompt,
             booted: &BOOTED,
+            settings: &PlayerSettings,
             log: Box::new(log),
         };
         work(&player);

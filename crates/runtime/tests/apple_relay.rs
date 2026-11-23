@@ -13,8 +13,8 @@ use acnh_core::relay::SaveRelay;
 use acnh_core::savecard::SaveCard;
 use acnh_core::{saves, Error};
 use apple::{
-    decide, describe_card, Action, Blocked, BlockedAnswer, Connector, HeldAnswer, Player, Prompt,
-    Roots, SignInAnswer, SignInForm,
+    decide, describe_card, Action, Blocked, BlockedAnswer, Connector, FileSettings, HeldAnswer,
+    Player, Prompt, Roots, SignInAnswer, SignInForm,
 };
 use save_relay::creds::{self, CredentialStore, MemoryStore, Secret};
 use save_relay::local::{Config, LocalStore};
@@ -200,46 +200,96 @@ enum Reply {
     Blocked(BlockedAnswer),
 }
 
+/// What the fake prompts got wrong (a wrong reply, an unanswered screen, a screen that should not
+/// have been shown). The fakes never panic: a panic inside `before_game` is caught by its
+/// recovery, which would hide it or abort the binary. They record, answer harmlessly, and
+/// `Run::finish`, `run` and `Fx`'s drop assert that nothing failed.
+type Failures = Arc<Mutex<Vec<String>>>;
+
+fn fail(failures: &Failures, what: String) {
+    let mut all = failures.lock().unwrap();
+    all.push(what);
+    // A harmless answer can loop (Retry, Cancel): stop the binary, loudly, rather than hang.
+    if all.len() > 40 {
+        eprintln!("too many prompt failures:\n{}", all.join("\n"));
+        std::process::exit(101);
+    }
+}
+
+fn no_failures(failures: &Failures) {
+    let all = failures.lock().unwrap();
+    assert!(all.is_empty(), "the fake prompts failed: {all:?}");
+}
+
 /// Shows each screen to the test and blocks until the test answers it.
 struct ChannelPrompt {
     shown: Mutex<Sender<Shown>>,
     replies: Mutex<Receiver<Reply>>,
+    failures: Failures,
 }
 
 impl ChannelPrompt {
-    fn ask(&self, shown: Shown) -> Reply {
-        self.shown.lock().unwrap().send(shown).unwrap();
-        self.replies
+    /// The test's reply, or None (recorded) when it gave none.
+    fn ask(&self, shown: Shown) -> Option<Reply> {
+        let _ = self.shown.lock().unwrap().send(shown);
+        match self
+            .replies
             .lock()
             .unwrap()
             .recv_timeout(Duration::from_secs(20))
-            .expect("the test did not answer the prompt")
+        {
+            Ok(reply) => Some(reply),
+            Err(_) => {
+                fail(&self.failures, "the test did not answer the prompt".into());
+                None
+            }
+        }
+    }
+
+    fn wrong(&self, got: Reply) {
+        fail(&self.failures, format!("wrong reply {got:?}"));
     }
 }
 
 impl Prompt for ChannelPrompt {
     fn sign_in(&self, form: &SignInForm) -> SignInAnswer {
         match self.ask(Shown::SignIn(form.clone())) {
-            Reply::SignIn(answer) => answer,
-            other => panic!("wrong reply {other:?}"),
+            Some(Reply::SignIn(answer)) => answer,
+            Some(other) => {
+                self.wrong(other);
+                SignInAnswer::Cancel
+            }
+            None => SignInAnswer::Cancel,
         }
     }
     fn conflict(&self, server: &SaveCard, local: &SaveCard) -> Keep {
         match self.ask(Shown::Conflict(server.clone(), local.clone())) {
-            Reply::Keep(keep) => keep,
-            other => panic!("wrong reply {other:?}"),
+            Some(Reply::Keep(keep)) => keep,
+            Some(other) => {
+                self.wrong(other);
+                Keep::Local
+            }
+            None => Keep::Local,
         }
     }
     fn held(&self, device: &str, since: &str) -> HeldAnswer {
         match self.ask(Shown::Held(device.into(), since.into())) {
-            Reply::Held(answer) => answer,
-            other => panic!("wrong reply {other:?}"),
+            Some(Reply::Held(answer)) => answer,
+            Some(other) => {
+                self.wrong(other);
+                HeldAnswer::PlayAnyway
+            }
+            None => HeldAnswer::PlayAnyway,
         }
     }
     fn blocked(&self, why: &Blocked) -> BlockedAnswer {
         match self.ask(Shown::Blocked(why.clone())) {
-            Reply::Blocked(answer) => answer,
-            other => panic!("wrong reply {other:?}"),
+            Some(Reply::Blocked(answer)) => answer,
+            Some(other) => {
+                self.wrong(other);
+                BlockedAnswer::Retry
+            }
+            None => BlockedAnswer::Retry,
         }
     }
 }
@@ -252,6 +302,8 @@ struct Fx {
     remote: Arc<MemoryRemote>,
     creds: Creds,
     booted: AtomicBool,
+    settings: FileSettings,
+    failures: Failures,
     connector: FakeConnector,
     log: Mutex<Vec<String>>,
 }
@@ -281,6 +333,8 @@ impl Fx {
                 unreadable: AtomicBool::new(false),
             },
             booted: AtomicBool::new(false),
+            settings: FileSettings(data_root.join("config.ini")),
+            failures: Failures::default(),
             log: Mutex::new(Vec::new()),
             root,
         }
@@ -303,6 +357,7 @@ impl Fx {
             connector: &self.connector,
             prompt,
             booted: &self.booted,
+            settings: &self.settings,
             log: Box::new(|line| self.log.lock().unwrap().push(line.to_string())),
         }
     }
@@ -342,6 +397,11 @@ impl Fx {
             .collect()
     }
 
+    /// `after_game` shows no screen: a screen it shows is recorded as a failure.
+    fn no_prompt(&self) -> NoPrompt {
+        NoPrompt(self.failures.clone())
+    }
+
     fn log_text(&self) -> String {
         self.log.lock().unwrap().join("\n")
     }
@@ -349,6 +409,9 @@ impl Fx {
 
 impl Drop for Fx {
     fn drop(&mut self) {
+        if !std::thread::panicking() {
+            no_failures(&self.failures);
+        }
         let _ = fs::remove_dir_all(&self.root);
     }
 }
@@ -369,21 +432,24 @@ fn text_of(dir: &Path) -> String {
     text
 }
 
-/// `after_game` shows no screen.
-struct NoPrompt;
+struct NoPrompt(Failures);
 
 impl Prompt for NoPrompt {
     fn sign_in(&self, _: &SignInForm) -> SignInAnswer {
-        panic!("no screen expected")
+        fail(&self.0, "a sign-in screen where none belongs".into());
+        SignInAnswer::Cancel
     }
     fn conflict(&self, _: &SaveCard, _: &SaveCard) -> Keep {
-        panic!("no screen expected")
+        fail(&self.0, "a conflict screen where none belongs".into());
+        Keep::Local
     }
     fn held(&self, _: &str, _: &str) -> HeldAnswer {
-        panic!("no screen expected")
+        fail(&self.0, "a held screen where none belongs".into());
+        HeldAnswer::PlayAnyway
     }
     fn blocked(&self, _: &Blocked) -> BlockedAnswer {
-        panic!("no screen expected")
+        fail(&self.0, "a blocked screen where none belongs".into());
+        BlockedAnswer::Retry
     }
 }
 
@@ -407,6 +473,7 @@ struct Run<'s> {
     shown: Receiver<Shown>,
     replies: Sender<Reply>,
     handle: std::thread::ScopedJoinHandle<'s, ()>,
+    failures: Failures,
 }
 
 impl Run<'_> {
@@ -436,8 +503,10 @@ impl Run<'_> {
             if let Ok(shown) = self.shown.try_recv() {
                 panic!("an unexpected screen: {shown:?}");
             }
+            no_failures(&self.failures);
             std::thread::sleep(Duration::from_millis(5));
         }
+        no_failures(&self.failures);
         assert!(self.shown.try_recv().is_err(), "an unanswered screen");
     }
 }
@@ -448,6 +517,7 @@ fn run<R>(fx: &Fx, test: impl FnOnce(&Run<'_>) -> R) -> R {
     let prompt = ChannelPrompt {
         shown: Mutex::new(shown_tx),
         replies: Mutex::new(replies_rx),
+        failures: fx.failures.clone(),
     };
     let player = fx.player(&prompt);
     std::thread::scope(|scope| {
@@ -456,8 +526,11 @@ fn run<R>(fx: &Fx, test: impl FnOnce(&Run<'_>) -> R) -> R {
             shown,
             replies,
             handle,
+            failures: fx.failures.clone(),
         };
-        test(&harness)
+        let result = test(&harness);
+        no_failures(&fx.failures);
+        result
     })
 }
 
@@ -618,7 +691,7 @@ fn a_conflict_shows_both_islands_and_nothing_plays_until_one_is_picked() {
         fx.set_up();
         island(&fx.saves(), "ipad-1");
         run(&fx, |game| game.finish()); // the first start
-        fx.player(&NoPrompt).after_game(); // the quit: pushes the island, clears the mark
+        fx.player(&fx.no_prompt()).after_game(); // the quit: pushes the island, clears the mark
 
         let (desktop, desktop_saves) = fx.other("desktop");
         assert!(matches!(
@@ -675,7 +748,7 @@ fn a_held_island_plays_only_after_play_anyway() {
     fx.set_up();
     island(&fx.saves(), "ipad-1");
     run(&fx, |game| game.finish());
-    fx.player(&NoPrompt).after_game();
+    fx.player(&fx.no_prompt()).after_game();
     // The desktop starts a game: its pull marks the island open there.
     let (desktop, desktop_saves) = fx.other("desktop");
     assert!(matches!(
@@ -709,7 +782,7 @@ fn an_offline_start_refuses_until_retry_sends_the_waiting_push_and_pulls() {
     // The game ran and quit with the server unreachable: the push is deferred.
     fs::write(fx.saves().join("main.dat"), "main played-offline").unwrap();
     fx.remote.set_reachable(false);
-    fx.player(&NoPrompt).after_game();
+    fx.player(&fx.no_prompt()).after_game();
     assert!(fx.roots.dirs().data.join("push-waiting").exists());
 
     run(&fx, |game| {
@@ -730,7 +803,7 @@ fn an_offline_start_refuses_until_retry_sends_the_waiting_push_and_pulls() {
         game.finish();
     });
     assert!(!fx.roots.dirs().data.join("push-waiting").exists());
-    fx.player(&NoPrompt).after_game();
+    fx.player(&fx.no_prompt()).after_game();
     let (desktop, desktop_saves) = fx.other("desktop");
     desktop.pull(&desktop_saves, None).unwrap();
     assert_eq!(read_main(&desktop_saves), "main played-offline");
@@ -833,7 +906,7 @@ fn a_synced_quit_pushes_the_island_and_clears_the_waiting_mark() {
     island(&fx.saves(), "v1");
     run(&fx, |game| game.finish());
     fs::write(fx.saves().join("main.dat"), "main after-play").unwrap();
-    fx.player(&NoPrompt).after_game();
+    fx.player(&fx.no_prompt()).after_game();
     assert!(!fx.roots.dirs().data.join("push-waiting").exists());
     let (desktop, desktop_saves) = fx.other("desktop");
     desktop.pull(&desktop_saves, None).unwrap();
@@ -846,7 +919,7 @@ fn after_game_before_the_game_has_booted_changes_nothing() {
     fx.set_up();
     island(&fx.saves(), "ipad-1");
     run(&fx, |game| game.finish());
-    fx.player(&NoPrompt).after_game();
+    fx.player(&fx.no_prompt()).after_game();
     let (desktop, desktop_saves) = fx.other("desktop");
     desktop.pull(&desktop_saves, None).unwrap();
 
@@ -860,7 +933,7 @@ fn after_game_before_the_game_has_booted_changes_nothing() {
         assert_eq!(device, "desktop");
         // The app goes to the background while the held screen is up: nothing is pushed.
         let before = fx.history();
-        fx.player(&NoPrompt).after_game();
+        fx.player(&fx.no_prompt()).after_game();
         assert_eq!(fx.history(), before);
         assert!(!fx.roots.dirs().data.join("push-waiting").exists());
         assert!(!game.returned());
@@ -882,7 +955,7 @@ fn a_conflict_after_play_anyway_goes_through_the_conflict_screen_and_resolves() 
     fx.set_up();
     island(&fx.saves(), "ipad-1");
     run(&fx, |game| game.finish());
-    fx.player(&NoPrompt).after_game();
+    fx.player(&fx.no_prompt()).after_game();
     // The desktop plays and quits (pushes), then starts again: it holds the island.
     let (desktop, desktop_saves) = fx.other("desktop");
     desktop.pull(&desktop_saves, None).unwrap();
@@ -953,7 +1026,7 @@ fn a_push_that_cannot_read_the_credential_is_left_waiting() {
     island(&fx.saves(), "v1");
     run(&fx, |game| game.finish());
     fx.creds.unreadable.store(true, Ordering::SeqCst);
-    fx.player(&NoPrompt).after_game();
+    fx.player(&fx.no_prompt()).after_game();
     assert!(fx.roots.dirs().data.join("push-waiting").exists());
     assert!(!fx.log_text().contains(PASSWORD));
 }

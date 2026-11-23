@@ -228,14 +228,65 @@ impl Roots {
         }
     }
 
-    fn config_ini(&self) -> PathBuf {
-        self.data_root.join("config.ini")
-    }
-
     /// A push that did not go (offline, a conflict, an error) leaves this file; the next start
     /// sends it before it pulls.
     fn push_waiting(&self) -> PathBuf {
         self.dirs().data.join("push-waiting")
+    }
+}
+
+/// The one `relay.ask` setting (`0`: Not now was chosen, do not ask again). On the iPad it is the
+/// player's own settings (`nx::config_set`, `nx::config_save`), so the C++ side stays the only
+/// writer of `config.ini`: a file Rust wrote behind its back would be dropped by the player's
+/// next `config_save`, which rewrites the file from what it loaded. `FileSettings` reads and
+/// writes the file directly, for the tests.
+pub trait Settings: std::marker::Sync {
+    /// `relay.ask = 0`.
+    fn ask_off(&self) -> bool;
+    /// Set `relay.ask = 0` and save; false when it could not be saved.
+    fn remember_not_now(&self) -> bool;
+}
+
+/// `Settings` straight on `<data root>/config.ini` (tests). A file that does not parse or read is
+/// left exactly as it is.
+#[allow(dead_code)] // the iPad uses the player's settings; only the tests use this
+pub struct FileSettings(pub PathBuf);
+
+impl FileSettings {
+    fn load(&self) -> Option<Config> {
+        match std::fs::read_to_string(&self.0) {
+            Ok(text) => Config::parse(&text).ok(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Config::default()),
+            Err(_) => None,
+        }
+    }
+}
+
+impl Settings for FileSettings {
+    fn ask_off(&self) -> bool {
+        self.load()
+            .is_some_and(|ini| ini.get("relay.ask") == Some("0"))
+    }
+
+    fn remember_not_now(&self) -> bool {
+        let Some(mut ini) = self.load() else {
+            return false;
+        };
+        ini.set("relay.ask", "0");
+        let partial = self.0.with_extension("ini.partial");
+        if self
+            .0
+            .parent()
+            .is_some_and(|p| std::fs::create_dir_all(p).is_err())
+            || std::fs::write(&partial, ini.to_text()).is_err()
+        {
+            return false;
+        }
+        if std::fs::rename(&partial, &self.0).is_err() {
+            let _ = std::fs::remove_file(&partial);
+            return false;
+        }
+        true
     }
 }
 
@@ -248,6 +299,8 @@ pub struct Player<'a> {
     /// False until `before_game` has returned; `after_game` does nothing before that (the player
     /// is not playing yet, and its island may be unsynced).
     pub booted: &'a AtomicBool,
+    /// Where `relay.ask` lives.
+    pub settings: &'a dyn Settings,
     /// One line per event, never holding a password.
     pub log: Box<dyn Fn(&str) + std::marker::Sync + 'a>,
 }
@@ -434,7 +487,7 @@ impl Player<'_> {
 
     /// The first start's form (with Not now). True once set up, so the loop opens again.
     fn first_start(&self) -> bool {
-        if self.ini().get("relay.ask") == Some("0") {
+        if self.settings.ask_off() {
             return false;
         }
         let mut form = SignInForm {
@@ -446,7 +499,9 @@ impl Player<'_> {
         loop {
             match self.prompt.sign_in(&form) {
                 SignInAnswer::NotNow => {
-                    self.remember_not_now();
+                    if !self.settings.remember_not_now() {
+                        self.log("Not now could not be remembered");
+                    }
                     return false;
                 }
                 // Closed without an answer: sync stays off for this start, and it asks again.
@@ -539,41 +594,6 @@ impl Player<'_> {
     fn sync_config(&self) -> Option<(String, String)> {
         let config = LocalStore::new(self.roots.dirs()).load_config().ok()??;
         Some((config.server, config.user))
-    }
-
-    fn ini(&self) -> Config {
-        std::fs::read_to_string(self.roots.config_ini())
-            .ok()
-            .and_then(|text| Config::parse(&text).ok())
-            .unwrap_or_default()
-    }
-
-    /// `relay.ask = 0` in config.ini: Not now is remembered.
-    fn remember_not_now(&self) {
-        let path = self.roots.config_ini();
-        // A settings file that cannot be read or parsed is left exactly as it is.
-        let mut ini = match std::fs::read_to_string(&path) {
-            Ok(text) => match Config::parse(&text) {
-                Ok(ini) => ini,
-                Err(_) => {
-                    self.log("config.ini does not parse: Not now is not remembered");
-                    return;
-                }
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
-            Err(_) => {
-                self.log("config.ini cannot be read: Not now is not remembered");
-                return;
-            }
-        };
-        ini.set("relay.ask", "0");
-        let partial = path.with_extension("ini.partial");
-        if std::fs::create_dir_all(&self.roots.data_root).is_ok()
-            && std::fs::write(&partial, ini.to_text()).is_ok()
-            && std::fs::rename(&partial, &path).is_err()
-        {
-            let _ = std::fs::remove_file(&partial);
-        }
     }
 
     fn set_waiting(&self, waiting: bool) {
