@@ -242,19 +242,43 @@ impl Vars {
 /// The launcher's own folders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppDirs {
-    /// `<config>/acnh-universal`: launcher settings.
+    /// `<config>/acnh-universal`: launcher settings. On the Mac,
+    /// `~/Library/Application Support/ACNH-Universal`, shared with `data`.
     pub config: PathBuf,
-    /// `<data>/acnh-universal`: the install, which holds the data root and the logs.
+    /// `<data>/acnh-universal`: the install, which holds the data root and the logs. On the
+    /// Mac, `~/Library/Application Support/ACNH-Universal`, which is also the data root.
     pub data: PathBuf,
 }
 
+/// The Mac's folder under `~/Library/Application Support`, for the data root, the settings and
+/// the logs together (they stay together whether or not the volume is case-sensitive).
+pub const MAC_FOLDER: &str = "ACNH-Universal";
+
 impl AppDirs {
-    /// `config` is `<vars.config>/acnh-universal`, `data` is `<vars.data>/acnh-universal`.
+    /// The folders for the OS this binary runs on (`AppDirs::for_os(Os::current(), vars)`).
     pub fn new(vars: &Vars) -> AppDirs {
+        AppDirs::for_os(Os::current(), vars)
+    }
+
+    /// Linux, Windows and the rest: `config` is `<vars.config>/acnh-universal`, `data` is
+    /// `<vars.data>/acnh-universal`. Mac: both are `<vars.data>/ACNH-Universal`.
+    pub fn for_os(os: Os, vars: &Vars) -> AppDirs {
+        if os == Os::Mac {
+            return AppDirs {
+                config: vars.config.join(MAC_FOLDER),
+                data: vars.data.join(MAC_FOLDER),
+            };
+        }
         AppDirs {
             config: vars.config.join("acnh-universal"),
             data: vars.data.join("acnh-universal"),
         }
+    }
+
+    /// Whether these are the Mac's one folder (`data` is named `ACNH-Universal`; the other
+    /// systems' is `acnh-universal`), where the data root and the logs sit directly in `data`.
+    fn contained(&self) -> bool {
+        self.data.file_name() == Some(std::ffi::OsStr::new(MAC_FOLDER))
     }
 
     /// `<data>/install`: the player and the game library, pulled from a hub or built here.
@@ -263,13 +287,20 @@ impl AppDirs {
     }
 
     /// `<data>/install/root`: the runtime's data root (`NX_DATA_ROOT`: `config.ini`, `mods/`,
-    /// `user/`), inside the install, which `bundle::install` keeps (`DEVICE_OWNED`).
+    /// `user/`), inside the install, which `bundle::install` keeps (`DEVICE_OWNED`). On the
+    /// Mac it is `<data>` itself.
     pub fn data_root(&self) -> PathBuf {
+        if self.contained() {
+            return self.data.clone();
+        }
         self.install().join("root")
     }
 
-    /// `<data>/install/logs`, also kept by `bundle::install`.
+    /// `<data>/install/logs`, also kept by `bundle::install`. On the Mac, `<data>/logs`.
     pub fn logs(&self) -> PathBuf {
+        if self.contained() {
+            return self.data.join("logs");
+        }
         self.install().join("logs")
     }
 }

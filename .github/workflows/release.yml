@@ -129,7 +129,7 @@ jobs:
       - run: cargo build --release -p acnh-app -p acnh-cli
       - name: App bundle
         run: |
-          A="ACNH Universal.app"
+          A="ACNH-Universal.app"
           rm -rf "$A" && mkdir -p "$A/Contents/MacOS" "$A/Contents/Resources"
           cp target/release/acnh-app "$A/Contents/MacOS/acnh-app"
           cp target/release/acnh-universal "$A/Contents/MacOS/acnh-universal"
@@ -145,7 +145,12 @@ jobs:
           # The same Info.plist the launcher writes when it makes the bundle from a checkout
           # (crates/core/src/assemble.rs), so the two cannot drift.
           sed "s/@VERSION@/${VERSION#v}/" assets/mac/Info.plist.in > "$A/Contents/Info.plist"
+          # No Rosetta: the Mac's one contained app is arm64 only.
+          /usr/libexec/PlistBuddy -c "Add :LSRequiresNativeExecution bool true" "$A/Contents/Info.plist"
           plutil -lint "$A/Contents/Info.plist"
+          # The release holds the launcher only: no player, and never a game (SPEC.md M14).
+          test ! -e "$A/Contents/MacOS/acnh" || { echo "the release app holds a player"; exit 1; }
+          test ! -e "$A/Contents/Resources/game" || { echo "the release app holds a game folder"; exit 1; }
           codesign --force --deep --sign - "$A"
           find "$A" -type f | tee files.txt
           bash tools/check_release_files.sh < files.txt

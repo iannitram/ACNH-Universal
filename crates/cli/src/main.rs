@@ -317,7 +317,24 @@ fn play(options: &Options) -> Result<i32> {
     let player = Player { program };
     let relay = RelayOff;
     let save_dir = saves::save_dir(&root);
-    let env = vec![("NX_DATA_ROOT".to_owned(), root.display().to_string())];
+    let mut env = vec![("NX_DATA_ROOT".to_owned(), root.display().to_string())];
+    if os == Os::Mac {
+        // As the app does (#171): the player opens its log with fopen and makes no folder.
+        std::fs::create_dir_all(dirs.logs())?;
+        env.push((
+            "NX_LOG".to_owned(),
+            dirs.logs().join("nx.log").display().to_string(),
+        ));
+        if let Some(game) = player
+            .program
+            .parent()
+            .and_then(Path::parent)
+            .map(|contents| contents.join("Resources/game"))
+            .filter(|game| game.join("analysis/main.bin").is_file())
+        {
+            env.push(("NX_GAME_ROOT".to_owned(), game.display().to_string()));
+        }
+    }
     let choose = |_: &Sync| Keep::Local;
     let played = launch::play(&relay, &player, &save_dir, &env, &choose)?;
     report_sync("pull", &played.pulled);

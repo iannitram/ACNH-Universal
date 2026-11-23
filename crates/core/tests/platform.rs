@@ -130,7 +130,7 @@ fn mobile_is_unsupported() {
 #[test]
 fn app_dirs_follow_vars() {
     let v = Vars::from_lookup(Os::Linux, env(&[("HOME", "/home/u")])).unwrap();
-    let d = AppDirs::new(&v);
+    let d = AppDirs::for_os(Os::Linux, &v);
     assert_eq!(
         d.data,
         p("/home/u").join(".local/share").join("acnh-universal")
@@ -142,4 +142,38 @@ fn app_dirs_follow_vars() {
     assert_eq!(d.install(), d.data.join("install"));
     assert_eq!(d.data_root(), d.data.join("install").join("root"));
     assert_eq!(d.logs(), d.data.join("install").join("logs"));
+}
+
+#[test]
+fn mac_data_root_and_settings_share_application_support() {
+    let v = Vars::from_lookup(Os::Mac, env(&[("HOME", "/Users/user")])).unwrap();
+    let d = AppDirs::for_os(Os::Mac, &v);
+    let folder = p("/Users/user/Library/Application Support/ACNH-Universal");
+    assert_eq!(d.config, folder);
+    assert_eq!(d.data_root(), folder);
+    assert_eq!(d.logs(), folder.join("logs"));
+}
+
+#[test]
+fn linux_and_windows_keep_their_folders() {
+    let v = Vars::from_lookup(Os::Linux, env(&[("HOME", "/home/user")])).unwrap();
+    assert_eq!(
+        AppDirs::for_os(Os::Linux, &v).data_root(),
+        p("/home/user/.local/share/acnh-universal/install/root")
+    );
+    const E: &[(&str, &str)] = &[
+        ("USERPROFILE", r"C:\Users\u"),
+        ("LOCALAPPDATA", r"C:\Users\u\AppData\Local"),
+        ("APPDATA", r"C:\Users\u\AppData\Roaming"),
+    ];
+    let v = Vars::from_lookup(Os::Windows, env(E)).unwrap();
+    let d = AppDirs::for_os(Os::Windows, &v);
+    assert_eq!(
+        d.data_root(),
+        p(r"C:\Users\u\AppData\Local").join("acnh-universal/install/root")
+    );
+    assert_eq!(
+        d.config,
+        p(r"C:\Users\u\AppData\Roaming").join("acnh-universal")
+    );
 }
