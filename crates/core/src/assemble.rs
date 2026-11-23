@@ -266,12 +266,20 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether `folder` is a bundle's `Contents/Resources/game`, which a copy of the app leaves out.
+fn skip_game(folder: &Path) -> bool {
+    folder.ends_with("Contents/Resources/game")
+}
+
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         let target = to.join(entry.file_name());
         if entry.path().is_dir() {
+            if skip_game(&entry.path()) {
+                continue;
+            }
             copy_tree(&entry.path(), &target)?;
         } else {
             copy(&entry.path(), &target)?;
@@ -475,7 +483,15 @@ fn mac(plan: &Plan, tools: &mut dyn Tools) -> Result<PathBuf> {
             fs::remove_dir_all(&app)?;
         }
         match running {
-            Some(bundle) => copy_tree(bundle, &app)?,
+            Some(bundle) => {
+                copy_tree(bundle, &app)?;
+                // The delivered app holds the prepared game: a copy never does (the game is
+                // added only by `tools/package_mac.sh`, from the prepared folder).
+                let game = app.join("Contents/Resources/game");
+                if game.exists() {
+                    fs::remove_dir_all(&game)?;
+                }
+            }
             None => bundle_from_checkout(plan, &contents)?,
         }
     }

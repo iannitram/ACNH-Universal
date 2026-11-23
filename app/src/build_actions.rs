@@ -450,14 +450,9 @@ mod tests {
     fn the_mac_hub_checks_the_mac_target_before_any_target_runs() {
         let root = tempfile::tempdir().unwrap();
         let (actions, launcher, game) = mac_hub(root.path());
-        // Everything for iOS is there, but the prepared folder is inside a work tree: the Mac
-        // target's own check stops the hub before it prepares anything.
-        let mut tools = Tools(vec![
-            ("xcrun", "/sdk\n"),
-            ("cargo", "cargo 1\n"),
-            ("rustup", "aarch64-apple-ios\n"),
-            ("git", "true\n"),
-        ]);
+        // No Xcode SDK: the iOS check would fail on "iphoneos". The prepared folder is also
+        // inside a work tree, so only the Mac check, which runs first, can give this error.
+        let mut tools = Tools(vec![("git", "true\n")]);
         let mut prepared = Vec::new();
         let error = actions
             .build_local(
@@ -474,6 +469,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("work tree"), "{error}");
+        assert!(!error.to_string().contains("iphoneos"), "{error}");
         assert!(prepared.is_empty(), "{prepared:?}");
     }
 
