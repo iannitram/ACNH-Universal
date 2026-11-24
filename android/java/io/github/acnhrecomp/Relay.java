@@ -39,6 +39,9 @@ import java.util.concurrent.BlockingQueue;
 import static io.github.acnhrecomp.Screen.t;
 
 final class Relay {
+    // The latest failure of the host's HTTP call, shown on the sign-in's error page (no query strings, no tokens).
+    static volatile String lastHttpError;
+
     private Relay() {}
 
     // ---- the natives (runtime/src/relay_android.cpp) ------------------------------------------------------------
@@ -152,13 +155,22 @@ final class Relay {
                     int n;
                     while ((n = in.read(buf)) > 0) {
                         out.write(buf, 0, n);
-                        if (maxResponseBytes > 0 && out.size() > maxResponseBytes) return null;
+                        if (maxResponseBytes > 0 && out.size() > maxResponseBytes) {
+                            lastHttpError = "the answer is over " + maxResponseBytes + " bytes (" + method + " "
+                                    + url.replaceAll("\\?.*", "") + ")";
+                            return null;
+                        }
                     }
                     in.close();
                 }
                 return new SaveRelayResponse(status, lines.toString(), out.toByteArray()).toWire();
-            } catch (Exception e) {
-                return null;  // a connection, DNS, TLS or timeout failure
+            } catch (Throwable e) {
+                // a connection, DNS, TLS or timeout failure: kept (without the query) for the sign-in's error page
+                String where = method + " " + url.replaceAll("\\?.*", "");
+                lastHttpError = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage())
+                        + " (" + where + ")";
+                android.util.Log.w("acnh-relay", "http " + where + " failed", e);
+                return null;
             } finally {
                 if (c != null) c.disconnect();
             }

@@ -75,6 +75,14 @@ final class DropboxAuth {
     private static ServerSocket waiting;
     private static int generation, finished;
     private static String failed;  // why the current sign-in failed, or null
+    private static boolean foreground, cancelled;
+
+    // Home.onResume / onPause: Android 15+ blocks outbound network/DNS for backgrounded apps without a foreground
+    // service (~5 s after the browser takes the foreground, blocked=APP_BACKGROUND). Token exchange waits for this.
+    static synchronized void setForeground(boolean active) {
+        foreground = active;
+        if (active) DropboxAuth.class.notifyAll();
+    }
 
     // Why the latest sign-in failed (GameDownload waits on it), or null while it runs or when it worked.
     static synchronized String failure() { return failed; }
@@ -95,10 +103,27 @@ final class DropboxAuth {
         return failed;
     }
 
-    // Stops sign-in `gen` waiting for the browser.
+    // Stops sign-in `gen` waiting for the browser or foreground return.
     static synchronized void cancel(int gen) {
-        if (gen == generation && waiting != null) {
-            try { waiting.close(); } catch (Exception ignored) {}
+        if (gen == generation) {
+            cancelled = true;
+            if (waiting != null) {
+                try { waiting.close(); } catch (Exception ignored) {}
+            }
+            DropboxAuth.class.notifyAll();
+        }
+    }
+
+    private static boolean waitForNetwork(int gen) {
+        synchronized (DropboxAuth.class) {
+            while (!foreground && !GameDownload.running && generation == gen && !cancelled) {
+                try {
+                    DropboxAuth.class.wait(500);
+                } catch (InterruptedException e) {
+                    return false;
+                }
+            }
+            return generation == gen && !cancelled;
         }
     }
 
@@ -116,6 +141,7 @@ final class DropboxAuth {
             waiting = null;
         }
         failed = null;
+        cancelled = false;
         final int gen = ++generation;
         DropboxAuth.class.notifyAll();  // an older await ends: superseded
         final Context app = ctx.getApplicationContext();
@@ -131,7 +157,7 @@ final class DropboxAuth {
         new Thread(() -> {
             String error;
             try {
-                error = serve(app, server, state);
+                error = serve(app, server, state, gen);
             } catch (Exception e) {
                 error = server.isClosed() ? "cancelled" : e.getMessage() == null ? e.toString() : e.getMessage();
             } finally {
@@ -152,8 +178,9 @@ final class DropboxAuth {
         return url;
     }
 
-    // Answers requests until one carries this sign-in's answer, then hands it to save-relay.
-    private static String serve(Context app, ServerSocket server, String state) throws Exception {
+    // Answers requests until one carries this sign-in's answer, sends the browser back to the app, and hands the
+    // redirect to save-relay once the app has network access (back in the foreground, or GameDownload running).
+    private static String serve(Context app, ServerSocket server, String state, int gen) throws Exception {
         while (true) {
             Socket s = server.accept();
             try {
@@ -179,19 +206,33 @@ final class DropboxAuth {
                     String why = param(query, "error_description");
                     return why != null ? why : err;
                 }
+                // Return to the app before exchanging the code: Android 15+ blocks outbound DNS/HTTP for backgrounded
+                // apps without a foreground service (issue #261), so calling api.dropboxapi.com here would fail with
+                // UnknownHostException while the browser is still in front.
+                reply(s.getOutputStream(), 200, back());
+                try { s.close(); } catch (Exception ignored) {}
+                if (!waitForNetwork(gen)) return "cancelled";
+                String redirectUrl = "http://127.0.0.1:" + PORT + target;
                 String error = null;
-                try {
-                    // save-relay checks the state, exchanges the code with its PKCE verifier and files the token.
-                    JSONObject done = new JSONObject(Relay.saveRelay(app).signInFinish("http://127.0.0.1:" + PORT + target));
-                    if (!done.optBoolean("ok")) error = envelopeError(done);
-                    else {  // an older download-only sign-in, or one kept after sync was turned off: replaced
-                        prefs(app).edit().clear().apply();
-                        Relay.signedIn(app);
+                // Android lifts the UID background firewall rule as Home resumes; retry briefly if the first call
+                // races netd (save-relay keeps the pending sign-in on Unreachable/Server errors).
+                for (int attempt = 0; attempt < 4; attempt++) {
+                    error = null;
+                    Relay.lastHttpError = null;
+                    try {
+                        JSONObject done = new JSONObject(Relay.saveRelay(app).signInFinish(redirectUrl));
+                        if (!done.optBoolean("ok")) error = envelopeError(done);
+                        else {  // an older download-only sign-in, or one kept after sync was turned off: replaced
+                            prefs(app).edit().clear().apply();
+                            Relay.signedIn(app);
+                        }
+                    } catch (Exception e) {
+                        error = e.getMessage() == null ? e.toString() : e.getMessage();
                     }
-                } catch (Exception e) {
-                    error = e.getMessage() == null ? e.toString() : e.getMessage();
+                    if (error == null || Relay.lastHttpError == null || attempt == 3) break;
+                    try { Thread.sleep(300); } catch (InterruptedException ignored) { break; }
                 }
-                reply(s.getOutputStream(), 200, error == null ? back() : page("Dropbox sign-in failed: " + error));
+                if (error != null && Relay.lastHttpError != null) error += " [" + Relay.lastHttpError + "]";
                 return error;
             } catch (java.net.SocketTimeoutException e) {
                 // one bad connection (a preconnect that never sends): wait for the next
@@ -224,7 +265,7 @@ final class DropboxAuth {
         String app = "intent://signed-in#Intent;scheme=acnhrecomp;package=io.github.acnhrecomp;end";
         return "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
                 + "<body style='font-family:sans-serif;padding:2em;background:#fffae8;color:#5c4632;text-align:center'>"
-                + "<h2>Signed in to Dropbox</h2><p>Go back to ACNH Recomp.</p>"
+                + "<h2>Returning to ACNH Recomp</h2><p>Go back to ACNH Recomp to finish signing in.</p>"
                 + "<p><a href='" + app + "' style='display:inline-block;padding:16px 28px;border-radius:26px;"
                 + "background:#5aaa5a;color:white;font-size:20px;text-decoration:none'>Back to ACNH Recomp</a></p>"
                 + "<script>location.replace('" + app + "')</script>";
