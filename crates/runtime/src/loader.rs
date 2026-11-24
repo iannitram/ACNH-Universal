@@ -182,7 +182,7 @@ fn copy_str_to_buf(s: &str, out: *mut c_char, cap: usize) -> usize {
         // SAFETY: `out` is valid for `cap` bytes per caller contract.
         unsafe {
             if n > 0 {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, n);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), n);
             }
             *out.add(n) = 0;
         }
