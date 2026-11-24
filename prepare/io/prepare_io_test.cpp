@@ -535,8 +535,9 @@ static void test_romfs_pak() {
         CHECK(Bytes(pak.begin() + it->second.first, pak.begin() + it->second.first + it->second.second) == b);
     }
 
-    // tools/pack_romfs.py: the same bytes, the same --size.
-    if (!g_python.empty()) {
+    // tools/pack_romfs.py: the same bytes, the same --size. 1.31 (#34) retired the script; the comparison runs only
+    // where a checkout still has it.
+    if (!g_python.empty() && fs::is_regular_file(g_src + "/tools/pack_romfs.py")) {
         const fs::path theirs = g_tmp / "romfs_py.pak", size_out = g_tmp / "romfs_py.size";
         CHECK(run_python({g_src + "/tools/pack_romfs.py", s(t), s(theirs)}));
         CHECK(read_all(theirs) == pak);
@@ -550,7 +551,7 @@ static void test_romfs_pak() {
         CHECK(read_all(g_tmp / "empty.pak") == read_all(g_tmp / "empty_py.pak") && fs::file_size(g_tmp / "empty.pak") == 12);
         std::printf("  pack_romfs.py: same %zu bytes\n", pak.size());
     } else {
-        std::printf("  SKIP pack_romfs.py comparison (no python)\n");
+        std::printf("  SKIP pack_romfs.py comparison (no python, or the script is retired)\n");
     }
 
     // Cancelled before it starts, and half way through a big file (the first progress call, at 16 MiB): nothing
@@ -622,7 +623,7 @@ static void test_spirv_pak() {
     CHECK(got.size() == 5 && got["results.tsv"] == want["results.tsv"] && got["0123456789abcdef"] == want["0123456789abcdef.spv"]);
     CHECK(got["dead"].empty() && got["Beef"] == want["Beef.spv"] && got["00ff"] == want["00ff.spv"]);
 
-    if (!g_python.empty()) {
+    if (!g_python.empty() && fs::is_regular_file(g_src + "/tools/pack_spirv.py")) {
         fs::remove(t / "results.tsv");
         CHECK(run_python({g_src + "/tools/pack_spirv.py", s(t), s(g_tmp / "spirv_nores_py.pak")}, g_tmp / "py.out"));
         CHECK(read_all(g_tmp / "spirv_nores_py.pak") == read_all(mine));
@@ -631,7 +632,7 @@ static void test_spirv_pak() {
         CHECK(read_all(g_tmp / "spirv_py.pak") == pak);
         std::printf("  pack_spirv.py: same %zu bytes\n", pak.size());
     } else {
-        std::printf("  SKIP pack_spirv.py comparison (no python)\n");
+        std::printf("  SKIP pack_spirv.py comparison (no python, or the script is retired)\n");
     }
 }
 
