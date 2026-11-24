@@ -166,6 +166,7 @@ impl ScriptRunner for Fake {
 fn stages_run_in_order_and_progress_sees_each_once() {
     let req = request("order", Os::Linux);
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = vec![];
     let out = prepare_with(
         &req,
@@ -187,6 +188,7 @@ fn a_stage_with_its_output_is_skipped() {
     std::fs::create_dir_all(&spirv).unwrap();
     std::fs::write(spirv.join("summary.txt"), "x").unwrap();
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = Vec::new();
     prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
         seen.push(s)
@@ -256,6 +258,7 @@ fn completed_tools_version_and_build_do_not_run_again() {
     std::fs::create_dir_all(req.out.join("build")).unwrap();
     std::fs::write(req.out.join("build/acnh"), "synthetic executable").unwrap();
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = Vec::new();
     prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
         seen.push(s)
@@ -276,6 +279,7 @@ fn incomplete_module_outputs_are_not_skipped() {
     std::fs::create_dir_all(req.out.join("gen/main")).unwrap();
     std::fs::write(req.out.join("gen/main/table.cpp"), "// synthetic table").unwrap();
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = Vec::new();
     prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
         seen.push(s)
@@ -297,6 +301,7 @@ fn incomplete_module_outputs_are_not_skipped() {
         .unwrap();
     }
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen2 = Vec::new();
     prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
         seen2.push(s)
@@ -307,18 +312,49 @@ fn incomplete_module_outputs_are_not_skipped() {
 }
 
 #[test]
-fn mobile_requests_never_fall_back_to_a_desktop_build() {
-    {
-        let (target, hub) = (Os::Android, Hub::StrixHalo);
-        let req = request(target.key(), target);
-        let mut fake = Fake::default();
-        let mut seen = Vec::new();
-        let error =
-            prepare_with(&req, hub, &mut fake, Path::new("/h"), &mut |s| seen.push(s)).unwrap_err();
-        assert!(matches!(error, Error::Unsupported(message) if message.contains(target.key())));
-        assert!(fake.ran.is_empty());
-        assert!(seen.is_empty());
-    }
+fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut req = request("android-deliver", Os::Android);
+    let delivery_root = tmp.path().join("Dropbox/_transfers/ACNH-Universal");
+    let delivery = delivery_root.join("android");
+    std::fs::create_dir_all(&delivery_root).unwrap();
+    req.delivery = Some(delivery.clone());
+
+    // Minimal prepared outputs so pack_stage and android_deliver can stage them.
+    let romfs = req.out.join("game-romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    std::fs::write(romfs.join("a.bin"), b"romfs-bytes").unwrap();
+    req.game.romfs = romfs;
+    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
+    std::fs::write(req.out.join("spirv/a.spv"), b"spv-bytes").unwrap();
+    std::fs::create_dir_all(req.out.join("analysis")).unwrap();
+    std::fs::write(req.out.join("analysis/main.bin"), b"main-bytes").unwrap();
+    std::fs::write(
+        req.out.join("version.ini"),
+        "build_id = FCD2BB238ABE99E925B4E452DF1F41F1\n",
+    )
+    .unwrap();
+    std::fs::write(req.out.join("libacnh_game.so"), b"elf-bytes").unwrap();
+
+    let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
+    let mut seen = Vec::new();
+    let out = prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap();
+
+    assert_eq!(out, delivery);
+    assert!(!seen.is_empty());
+    let manifest_bytes = std::fs::read(delivery.join("manifest.json")).unwrap();
+    let manifest = acnh_core::appgame::Manifest::from_json(&manifest_bytes).unwrap();
+    assert_eq!(manifest.build_id, "FCD2BB238ABE99E925B4E452DF1F41F1");
+    assert!(!manifest.nx_game_abi.is_empty());
+    let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(paths.contains(&"analysis/main.bin"));
+    assert!(paths.contains(&"libacnh_game.so"));
+    assert!(paths.contains(&"romfs.pak"));
+    assert!(paths.contains(&"spirv.pak"));
 }
 
 #[test]
@@ -906,6 +942,7 @@ fn a_packaged_source_is_copied_to_the_data_folder_and_the_runner_runs_there() {
     let req = request("installed-copy", Os::Linux);
     let (_base, exe, dirs) = installed("installed-copy", "abc123");
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = Vec::new();
     let out = prepare_installed(
         &req,
@@ -932,6 +969,7 @@ fn a_packaged_source_from_another_commit_is_refused() {
     let req = request("installed-other", Os::Linux);
     let (_base, exe, dirs) = installed("installed-other", "abc123");
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let error = prepare_installed(
         &req,
         Hub::StrixHalo,
@@ -1185,6 +1223,7 @@ fn the_delivery_folder_is_the_dropbox_keys_or_homes() {
     );
     assert_eq!(delivery_subfolder(Os::Ios), Some("ios"));
     assert_eq!(delivery_subfolder(Os::Mac), Some("mac"));
+    assert_eq!(delivery_subfolder(Os::Android), Some("android"));
     assert_eq!(delivery_subfolder(Os::Linux), None);
 }
 
@@ -1263,6 +1302,7 @@ fn ios_without_the_iphoneos_sdk_stops_before_the_first_stage() {
     let (req, _) = ios_request("ios-no-sdk");
     // The command-line tools alone: `xcrun` fails for the iphoneos SDK.
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = vec![];
     let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
         seen.push(s)
@@ -1640,6 +1680,7 @@ fn recompile_with_missing_hash_reruns_and_writes_hash() {
     assert!(!req.out.join("gen/.recomp-hash").exists());
 
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     prepare_with(
         &req,
         Hub::StrixHalo,
@@ -1663,6 +1704,7 @@ fn recompile_with_changed_hash_reruns_and_updates_hash() {
     std::fs::write(req.out.join("gen/.recomp-hash"), "stale-hash\n").unwrap();
 
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     prepare_with(
         &req,
         Hub::StrixHalo,
@@ -1688,6 +1730,7 @@ fn recompile_with_matching_hash_stays_cached() {
     std::fs::write(req.out.join("gen/.recomp-hash"), format!("{expected}\n")).unwrap();
 
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     prepare_with(
         &req,
         Hub::StrixHalo,
