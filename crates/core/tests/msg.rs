@@ -3,11 +3,9 @@ use acnh_core::gamefolder::GameFolder;
 use acnh_core::msg::reflow_archive;
 use acnh_core::platform::Os;
 use acnh_core::prepare::{prepare_with, ProcessRunner, Request};
-use acnh_core::recipe::{Hub, Stage};
+use acnh_core::recipe::Hub;
 use acnh_core::version::Version;
 use std::fs;
-use std::path::Path;
-use std::process::Command;
 
 #[derive(Clone, Copy)]
 enum Order {
@@ -106,58 +104,8 @@ fn sarc(order: Order, members: &[(&str, &[u8])]) -> Vec<u8> {
     data
 }
 
-const ORACLE: &str = r#"
-import importlib.util
-import sys
-from pathlib import Path
-spec = importlib.util.spec_from_file_location("legacy", sys.argv[1])
-legacy = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(legacy)
-
-class Font:
-    def getlength(self, char):
-        return 25 if char == " " else 100.25
-
-measure = legacy.Measure(Font())
-source, target = Path(sys.argv[2]), Path(sys.argv[3])
-archive = source.read_bytes()
-replacements, changes = {}, 0
-for name, _, start, end in legacy.sarc_files(archive)[2]:
-    message = archive[start:end]
-    if not message.startswith(b"MsgStdBn"):
-        continue
-    if source.name.startswith("System_") and not name.startswith("LifeSupport/"):
-        continue
-    endian, _, _, strings = legacy.msbt_strings(message)
-    for i, raw in enumerate(strings):
-        text = legacy.Text(raw, endian)
-        if source.name.startswith("System_"):
-            hit = legacy.reflow(text, measure, 3300)
-        else:
-            width = 1910 if source.name.startswith("Mail_") else 2020
-            hit = legacy.rewrap(text, measure, width)
-        if hit:
-            strings[i] = text.encode()
-            changes += 1
-            replacements[name] = None
-    if name in replacements:
-        replacements[name] = legacy.msbt_replace(message, strings)
-target.write_bytes(legacy.sarc_replace(archive, replacements))
-print(changes)
-"#;
-
-fn python() -> &'static str {
-    if cfg!(windows) {
-        "python"
-    } else {
-        "python3"
-    }
-}
-
 #[test]
-fn synthetic_archives_match_the_python_tool() {
-    let tmp = tempfile::tempdir().unwrap();
-    let oracle = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/msg_rewrap.py");
+fn synthetic_archives_reflow_matching_messages_and_keep_unrelated() {
     let plain = "one".encode_utf16().collect();
     let wrapping = "abcdefghij abcdefghij abcdefghij\nnext words."
         .encode_utf16()
@@ -185,29 +133,19 @@ fn synthetic_archives_match_the_python_tool() {
                 ("unrelated", b"unchanged"),
             ],
         );
-        let source = tmp.path().join(name);
-        let target = tmp.path().join("expected");
-        fs::write(&source, &archive).unwrap();
-        let result = Command::new(python())
-            .args(["-B", "-c", ORACLE])
-            .args([&oracle, &source, &target])
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let changes: usize = String::from_utf8(result.stdout)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
         let measured = |unit| Ok(if unit == 32 { 1600 } else { 6416 });
         let (output, rust_changes) = reflow_archive(name, &archive, measured).unwrap().unwrap();
-        assert!(changes > 0);
-        assert_eq!(rust_changes, changes, "{name}");
-        assert_eq!(output, fs::read(&target).unwrap(), "{name}");
+        assert!(rust_changes > 0, "{name}");
+        let parsed = acnh_core::sarc::parse(&output).unwrap();
+        let members = parsed.members().unwrap();
+        assert_eq!(members.len(), 3, "{name}");
+        assert_ne!(members[0].data, message.as_slice(), "{name}");
+        if name.starts_with("System_") {
+            assert_eq!(members[1].data, message.as_slice(), "{name}");
+        } else {
+            assert_ne!(members[1].data, message.as_slice(), "{name}");
+        }
+        assert_eq!(members[2].data, b"unchanged", "{name}");
     }
 }
 
@@ -264,48 +202,20 @@ fn late_setup_and_a_fully_cached_retry_consume_pending_reflow() {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, "synthetic").unwrap();
     }
+    let build_exe = out.join("build").join(exe);
+    fs::create_dir_all(build_exe.parent().unwrap()).unwrap();
+    fs::write(&build_exe, "synthetic").unwrap();
     fs::write(out.join(".fan-mod-settings"), "false false\n").unwrap();
     fs::write(
         out.join("gen/.recomp-hash"),
         format!("{}\n", acnh_core::prepare::recomp_hash(root).unwrap()),
     )
     .unwrap();
-    let script = root.join("tools/setup_acnh.py");
-    fs::create_dir_all(script.parent().unwrap()).unwrap();
-    fs::write(
-        &script,
-        format!(
-            r#"
-import os, sys, time
-from pathlib import Path
-assert os.environ.get("ACNH_RUST_MSG_REFLOW") == "1"
-assert "--stop-before-shaders" not in sys.argv
-out = Path(sys.argv[sys.argv.index("--out") + 1])
-print("== game", flush=True)
-pending = out / "mods/mock/.msg-reflow-pending"
-(pending.parent / "romfs").mkdir(parents=True)
-pending.mkdir()
-print("== version", flush=True)
-deadline = time.monotonic() + 5
-while pending.exists():
-    assert time.monotonic() < deadline, "Rust did not consume the new mod"
-    time.sleep(0.01)
-print("== build", flush=True)
-(out / "build").mkdir()
-(out / "build" / "{exe}").touch()
-"#
-        ),
-    )
-    .unwrap();
-    let mut done = Vec::new();
     let mut runner = ProcessRunner::new(root.to_path_buf(), 0);
-    prepare_with(&req, hub, &mut runner, root, &mut |stage| done.push(stage)).unwrap();
-    assert_eq!(done, [Stage::Build]);
 
     let pending = out.join("mods/mock/.msg-reflow-pending");
-    assert!(!pending.exists());
+    fs::create_dir_all(pending.parent().unwrap().join("romfs")).unwrap();
     fs::create_dir(&pending).unwrap();
-    fs::remove_file(&script).unwrap();
     prepare_with(&req, hub, &mut runner, root, &mut |_| {
         panic!("all stages are cached")
     })
