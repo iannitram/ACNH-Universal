@@ -90,6 +90,9 @@ if(NX_TESTS AND NOT ANDROID)
     target_compile_definitions(gpu_pick_test PRIVATE NX_GPU_PICK_STANDALONE)
     target_include_directories(gpu_pick_test PRIVATE runtime/src/nvn)
     add_test(NAME gpu_pick COMMAND gpu_pick_test)
+    add_executable(aspect_test tests/aspect_test.cpp runtime/src/nvn/nvn_aspect.cpp)
+    target_include_directories(aspect_test PRIVATE runtime/src/nvn)
+    add_test(NAME aspect COMMAND aspect_test)
     add_executable(nextendo_test tests/nextendo_test.cpp runtime/src/nextendo.cpp runtime/src/nextendo_http.cpp)
     target_compile_definitions(nextendo_test PRIVATE NX_LAUNCHER_UI)
     target_include_directories(nextendo_test PRIVATE runtime/src)
@@ -122,12 +125,17 @@ if(NX_TESTS AND NOT ANDROID)
     if(EXISTS "${CMAKE_SOURCE_DIR}/private/wonder/spirv")  # the game's own shaders: never in the repository
         add_test(NAME shader_cache COMMAND shader_cache_test "${CMAKE_SOURCE_DIR}/private/wonder")
     endif()
-    if(APPLE AND NOT IOS)
-        add_executable(layout_test tests/layout_test.cpp runtime/src/memory.cpp runtime/src/compact_layout.cpp)
+    if(APPLE AND NOT IOS AND NX_RUNTIME_ARCHIVE)
+        add_executable(layout_test tests/layout_test.cpp runtime/src/memory_wrapper.cpp runtime/src/compact_layout.cpp)
         target_include_directories(layout_test PRIVATE runtime/include runtime/src)
         target_compile_definitions(layout_test PRIVATE NX_COMPACT_LAYOUT=1)
         target_compile_options(layout_test PRIVATE -UNDEBUG)
+        target_link_libraries(layout_test PRIVATE "${NX_RUNTIME_ARCHIVE}")
         add_test(NAME compact_layout COMMAND layout_test)
+        add_executable(desktop_layout_test tests/desktop_layout_test.cpp)
+        target_include_directories(desktop_layout_test PRIVATE runtime/include)
+        add_test(NAME desktop_layout COMMAND desktop_layout_test)
+    elseif(APPLE AND NOT IOS)
         add_executable(desktop_layout_test tests/desktop_layout_test.cpp)
         target_include_directories(desktop_layout_test PRIVATE runtime/include)
         add_test(NAME desktop_layout COMMAND desktop_layout_test)
@@ -138,9 +146,10 @@ if(NX_TESTS AND NOT ANDROID)
         target_link_libraries(ldn_net_test PRIVATE ws2_32)
     endif()
     add_test(NAME ldn_net COMMAND ldn_net_test)
-    if(WIN32)
-        add_executable(memguard_test tests/memguard_test.cpp)
-        target_link_libraries(memguard_test PRIVATE psapi)
+    if(WIN32 AND NX_RUNTIME_ARCHIVE)
+        add_executable(memguard_test tests/memguard_test.cpp runtime/src/memory_wrapper.cpp)
+        target_include_directories(memguard_test PRIVATE runtime/include runtime/src)
+        target_link_libraries(memguard_test PRIVATE "${NX_RUNTIME_ARCHIVE}" psapi userenv ntdll)
         add_test(NAME memguard COMMAND memguard_test)
     endif()
 endif()
@@ -288,49 +297,26 @@ set(NX_RUNTIME_SOURCES
     runtime/src/sampler.cpp
     runtime/src/loader.cpp
     runtime/src/bug_report.cpp
-    runtime/src/memory.cpp
-    runtime/src/kernel.cpp
-    runtime/src/kernel_watch.cpp
-    runtime/src/ipc.cpp
-    runtime/src/svc_hid.cpp
-    runtime/src/svc_am.cpp
-    runtime/src/svc_set.cpp
-    runtime/src/svc_misc.cpp
-    runtime/src/svc_process.cpp
-    runtime/src/svc_nfp.cpp
-    runtime/src/hle_ro.cpp
-    runtime/src/hle_vi.cpp
+    runtime/src/memory_wrapper.cpp
+    runtime/src/kernel_wrapper.cpp
+    runtime/src/services_wrapper.cpp
     runtime/src/input_wrapper.cpp
-    runtime/src/hle_hid_system_nfc.cpp
-    runtime/src/hle_net.cpp
-    runtime/src/hle_web.cpp
     runtime/src/hle_hostnet.cpp
-    runtime/src/hle_ldn.cpp
     runtime/src/hle_vsock.cpp
     runtime/src/ldn_link.cpp
     runtime/src/ldn_lan.cpp
     runtime/src/nextendo.cpp
     runtime/src/nextendo_http.cpp
     runtime/src/audio_wrapper.cpp
-    runtime/src/hle_pl.cpp
-    runtime/src/hle_album.cpp
-    runtime/src/hle_jpeg.cpp
-    runtime/src/hle_nfp.cpp
     runtime/src/nfp_host.cpp
     runtime/src/acnh_amiibo_hook.cpp
     runtime/src/amiibo_decode.cpp
-    runtime/src/hle_bcat.cpp
-    runtime/src/hle_movie.cpp
-    runtime/src/hle_friends.cpp
-    runtime/src/hle_ngc.cpp
     runtime/src/config_wrapper.cpp
     runtime/src/time_wrapper.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
-    runtime/src/perf_hint.cpp
-    runtime/src/thermal.cpp
+    runtime/src/platform_wrapper.cpp
     runtime/src/frame_stats.cpp
-    runtime/src/write_watch.cpp
     runtime/src/nvn/nvn_caps.cpp
     runtime/src/nvn/nvn_renderpass.cpp
     runtime/src/nvn/nvn_gpu_busy.cpp
@@ -380,6 +366,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nvn/nvn_spirv_motion.cpp
     runtime/src/nvn/nvn_screenshot.cpp
     runtime/src/nvn/nvn_vk_defer.cpp
+    runtime/src/nvn/nvn_aspect.cpp
     runtime/src/nvn/nvn_ultrawide.cpp
     runtime/src/nvn/nvn_present.cpp
     runtime/src/nvn/nvn_framegen.cpp
@@ -411,8 +398,8 @@ endif()
 if(ANDROID)
     # NativeActivity app: lib<game>.so, entry android_main (android_native_app_glue).
     set(GLUE "${ANDROID_NDK}/sources/android/native_app_glue")
-    add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
-        runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
+    add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android_wrapper.cpp
+        runtime/src/platform_android_input_wrapper.cpp runtime/src/platform_android_audio_wrapper.cpp
         runtime/src/hub_android.cpp runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
         "${GLUE}/android_native_app_glue.c")
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}"
@@ -508,8 +495,8 @@ elseif(IOS)
     if(NOT NX_RUNTIME_ARCHIVE)
         message(FATAL_ERROR "NX_RUNTIME_ARCHIVE is not set: run tools/build_ios.sh <sdk> (it builds libacnh_runtime.a)")
     endif()
-    add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp
-                   runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp)
+    add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac_wrapper.cpp
+                   runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp)
     if(NOT NX_IOS_SHORT_VERSION)
         set(NX_IOS_SHORT_VERSION "0.0.0")
     endif()
@@ -539,7 +526,7 @@ elseif(APPLE)
     # (brew install sdl3 vulkan-headers vulkan-loader molten-vk).
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS /opt/homebrew/include /usr/local/include)
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_mac_wrapper.cpp runtime/src/cpu_profile.cpp
                    runtime/src/app_icon.cpp)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3)
@@ -568,7 +555,7 @@ elseif(UNIX)
     find_package(SDL3 REQUIRED CONFIG)
     find_package(Threads REQUIRED)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/include" /usr/include /usr/local/include)
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_linux.cpp runtime/src/memguard_linux.cpp runtime/src/cpu_profile.cpp
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_linux_wrapper.cpp runtime/src/cpu_profile.cpp
                    runtime/src/app_icon.cpp)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 Threads::Threads ${CMAKE_DL_LIBS})
@@ -598,8 +585,8 @@ else()
     # Vulkan loader of the GPU driver. Vulkan headers: NX_VULKAN_INCLUDE (the setup's Vulkan-Headers) or the LunarG SDK.
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/Include")
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win.cpp runtime/src/platform_sdl.cpp
-                   runtime/src/app_icon.cpp assets/acnhrecomp.manifest runtime/src/memguard_win.cpp)
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win_wrapper.cpp runtime/src/platform_sdl_wrapper.cpp
+                   runtime/src/app_icon.cpp assets/acnhrecomp.manifest)
     nx_add_windows_rc(${NX_GAME} assets/acnhrecomp.rc)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 ole32 psapi winmm dxgi ws2_32 bcrypt)

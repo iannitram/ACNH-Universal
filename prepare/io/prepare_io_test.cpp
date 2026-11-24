@@ -119,8 +119,9 @@ static void test_nso() {
     CHECK(nso_to_flat(nn, img).error == NsoError::NotNso);
     CHECK(nso_to_flat(Bytes(nso.begin(), nso.begin() + 0x80), img).error == NsoError::NotNso);
 
-    // tools/nso2bin.py writes the same image (it needs Python's lz4).
-    if (!g_python.empty() && sh("\"" + g_python + "\" -c \"import lz4.block\" 2>" + kNull) == 0) {
+    // tools/nso2bin.py writes the same image (retired in #34; run only if present).
+    if (!g_python.empty() && fs::exists(fs::path(g_src) / "tools" / "nso2bin.py") &&
+        sh("\"" + g_python + "\" -c \"import lz4.block\" 2>" + kNull) == 0) {
         const fs::path in = g_tmp / "nso2bin" / "main", outp = g_tmp / "nso2bin" / "main.bin";
         write_file(in, nso);
         CHECK(sh("\"" + g_python + "\" \"" + g_src + "/tools/nso2bin.py\" \"" + s(in) + "\" \"" + s(outp) + "\" >" + kNull) == 0);
@@ -535,23 +536,24 @@ static void test_romfs_pak() {
         CHECK(Bytes(pak.begin() + it->second.first, pak.begin() + it->second.first + it->second.second) == b);
     }
 
-    // tools/pack_romfs.py: the same bytes, the same --size. 1.31 (#34) retired the script; the comparison runs only
-    // where a checkout still has it.
-    if (!g_python.empty() && fs::is_regular_file(g_src + "/tools/pack_romfs.py")) {
+    // An empty tree: the header alone.
+    fs::create_directories(g_tmp / "emptytree" / "sub");
+    CHECK(write_romfs_pak(s(g_tmp / "emptytree"), s(g_tmp / "empty.pak")).ok);
+    CHECK(fs::file_size(g_tmp / "empty.pak") == 12);
+
+    // tools/pack_romfs.py: the same bytes, the same --size (retired in #34; run only if present).
+    if (!g_python.empty() && fs::exists(fs::path(g_src) / "tools" / "pack_romfs.py")) {
         const fs::path theirs = g_tmp / "romfs_py.pak", size_out = g_tmp / "romfs_py.size";
         CHECK(run_python({g_src + "/tools/pack_romfs.py", s(t), s(theirs)}));
         CHECK(read_all(theirs) == pak);
         CHECK(run_python({g_src + "/tools/pack_romfs.py", s(t), "--size"}, size_out));
         const Bytes sz = read_all(size_out);
         CHECK(std::stoull(std::string(sz.begin(), sz.end())) == l.size);
-        // An empty tree: the header alone.
-        fs::create_directories(g_tmp / "emptytree" / "sub");
-        CHECK(write_romfs_pak(s(g_tmp / "emptytree"), s(g_tmp / "empty.pak")).ok);
         CHECK(run_python({g_src + "/tools/pack_romfs.py", s(g_tmp / "emptytree"), s(g_tmp / "empty_py.pak")}));
-        CHECK(read_all(g_tmp / "empty.pak") == read_all(g_tmp / "empty_py.pak") && fs::file_size(g_tmp / "empty.pak") == 12);
+        CHECK(read_all(g_tmp / "empty.pak") == read_all(g_tmp / "empty_py.pak"));
         std::printf("  pack_romfs.py: same %zu bytes\n", pak.size());
     } else {
-        std::printf("  SKIP pack_romfs.py comparison (no python, or the script is retired)\n");
+        std::printf("  SKIP pack_romfs.py comparison (no python or script retired)\n");
     }
 
     // Cancelled before it starts, and half way through a big file (the first progress call, at 16 MiB): nothing
@@ -623,7 +625,7 @@ static void test_spirv_pak() {
     CHECK(got.size() == 5 && got["results.tsv"] == want["results.tsv"] && got["0123456789abcdef"] == want["0123456789abcdef.spv"]);
     CHECK(got["dead"].empty() && got["Beef"] == want["Beef.spv"] && got["00ff"] == want["00ff.spv"]);
 
-    if (!g_python.empty() && fs::is_regular_file(g_src + "/tools/pack_spirv.py")) {
+    if (!g_python.empty() && fs::exists(fs::path(g_src) / "tools" / "pack_spirv.py")) {
         fs::remove(t / "results.tsv");
         CHECK(run_python({g_src + "/tools/pack_spirv.py", s(t), s(g_tmp / "spirv_nores_py.pak")}, g_tmp / "py.out"));
         CHECK(read_all(g_tmp / "spirv_nores_py.pak") == read_all(mine));
@@ -632,7 +634,7 @@ static void test_spirv_pak() {
         CHECK(read_all(g_tmp / "spirv_py.pak") == pak);
         std::printf("  pack_spirv.py: same %zu bytes\n", pak.size());
     } else {
-        std::printf("  SKIP pack_spirv.py comparison (no python, or the script is retired)\n");
+        std::printf("  SKIP pack_spirv.py comparison (no python or script retired)\n");
     }
 }
 

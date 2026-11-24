@@ -42,6 +42,27 @@
 
 #include "kernel.h"
 #include "platform.h"
+
+#ifdef NX_RUST_RUNTIME
+#include <acnh_runtime.h>
+#else
+extern "C" {
+void acnh_platform_window_set_minimized(bool minimized);
+void acnh_platform_window_set_size(uint32_t w, uint32_t h);
+void acnh_platform_window_set_refresh_hz(int32_t hz);
+void acnh_platform_pick_begin();
+void acnh_platform_pick_complete(const char* path);
+void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
+size_t acnh_platform_pad_kind(int32_t vendor, const char* name, char* out, size_t cap);
+size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, const char* name, char* out, size_t cap);
+bool acnh_platform_xbox_layout(const char* controller_kind);
+int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
+uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
+uint32_t acnh_platform_touch_label_code(const char* label);
+bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t now_ns, bool* was_run, uint64_t* past_ns);
+}
+#endif
+
 #include "platform_android.h"
 #include "config.h"
 #include "touch_layout.h"
@@ -85,40 +106,11 @@ uint64_t run_button() {
 // Razer Kishi: their bottom button is the one labelled A or cross). With "console" as the default, an Xbox-labelled
 // pad's A was the game's B: it went through dialogue (A or B) but chose nothing in a menu (A only).
 bool xbox_layout() {
-    static uint64_t gen = ~0ull;
-    static std::string layout;
-    if (uint64_t g = config_generation(); g != gen) {
-        gen = g;
-        layout = config_get("input.layout", "auto");
-    }
-    if (layout == "xbox") return true;
-    if (layout == "console") return false;
-    return controller_kind() != "switch";
+    return acnh_platform_xbox_layout(controller_kind().c_str());
 }
 
 uint64_t key_to_button(int32_t k) {
-    switch (k) {
-        // Android names the face buttons by position, as Xbox labels them: BUTTON_A is the bottom one, BUTTON_B the
-        // right one. Console layout: bottom = Nintendo B, right = Nintendo A; Xbox layout: the other way round.
-        case AKEYCODE_BUTTON_A: return xbox_layout() ? kA : kB;
-        case AKEYCODE_BUTTON_B: return xbox_layout() ? kB : kA;
-        case AKEYCODE_BUTTON_X: return kY;
-        case AKEYCODE_BUTTON_Y: return kX;
-        case AKEYCODE_BUTTON_L1: return kL;
-        case AKEYCODE_BUTTON_R1: return kR;
-        case AKEYCODE_BUTTON_L2: return kZL;
-        case AKEYCODE_BUTTON_R2: return kZR;
-        case AKEYCODE_BUTTON_START: return kPlus;
-        case AKEYCODE_BUTTON_SELECT: return kMinus;
-        case AKEYCODE_BUTTON_THUMBL: return kStickL;
-        case AKEYCODE_BUTTON_THUMBR: return kStickR;
-        case AKEYCODE_DPAD_LEFT: return kLeft;
-        case AKEYCODE_DPAD_UP: return kUp;
-        case AKEYCODE_DPAD_RIGHT: return kRight;
-        case AKEYCODE_DPAD_DOWN: return kDown;
-        case AKEYCODE_BACK: return kMinus;
-        default: return 0;
-    }
+    return acnh_platform_android_key_to_button(k, xbox_layout());
 }
 
 uint64_t touch_button(float x, float y) {
@@ -231,10 +223,7 @@ int32_t on_input(android_app*, AInputEvent* e) {
 uint64_t ui_taps() { return g_ui_taps.load(std::memory_order_relaxed); }
 bool ui_finger_down() { return g_ui_finger.load(std::memory_order_relaxed); }
 
-bool headless() {  // NX_HEADLESS (platform.h)
-    static const bool on = std::getenv("NX_HEADLESS") != nullptr;
-    return on;
-}
+
 
 bool read_player_pad(int, PadState&) { return false; }  // player 1 only on this host
 
@@ -269,14 +258,7 @@ void read_pad(PadState& p) {
             float dx = (t.x - t.x0) / radius, dy = (t.y - t.y0) / radius;
             p.lx = int32_t(std::clamp(dx, -1.f, 1.f) * kStickMax);
             p.ly = int32_t(std::clamp(-dy, -1.f, 1.f) * kStickMax);
-            const float d = std::hypot(dx, dy);
-            if (!can_run || (t.run ? d < kRunOff : d <= kRunOn)) {
-                t.run = false;
-                t.past_ns = 0;
-            } else if (!t.run) {
-                if (!t.past_ns) t.past_ns = now;
-                t.run = now - t.past_ns >= kRunDelayNs;
-            }
+            acnh_platform_touch_stick_run(dx, dy, can_run, now, &t.run, &t.past_ns);
             if (t.run) p.buttons |= run;
         } else {
             p.buttons |= t.button;
@@ -325,16 +307,7 @@ size_t touch_overlay(OverlayShape* out, size_t max) {
         held |= t.button | (t.run ? run_button() : 0);
     }
     // A button's letters ("A", "ZR", "+") in the glyphs present.frag draws: "ABXYRLZ+-"; nothing for the d-pad and gear.
-    auto label_code = [](const char* t) {
-        static const char kGlyphs[] = "ABXYRLZ+-";
-        uint32_t code = 0;
-        for (int c = 0; c < 2 && t[c]; c++) {
-            const char* at = std::strchr(kGlyphs, t[c]);
-            if (!at) return 0u;  // a letter there is no glyph for: none rather than half a label
-            code |= uint32_t(at - kGlyphs + 1) << (8 * c);
-        }
-        return code;
-    };
+    auto label_code = [](const char* t) { return acnh_platform_touch_label_code(t); };
     for (size_t i = 0; i < n && k < max; i++)
         out[k++] = {b[i].x, b[i].y, b[i].r, std::min(1.0f, (held & b[i].button ? 0.5f : 0.2f) * shade), label_code(touch_label(i))};
     if (stick && k + 2 <= max) {
