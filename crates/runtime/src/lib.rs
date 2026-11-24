@@ -64,6 +64,7 @@ pub fn ported(service: Service) -> bool {
             | Service::Files
             | Service::Input
             | Service::Audio
+            | Service::Services
     )
 }
 
@@ -88,4 +89,5 @@ pub mod files;
 pub mod hub_android;
 pub mod input;
 pub mod saves;
+pub mod services;
 pub mod time;
