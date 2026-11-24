@@ -377,10 +377,29 @@ fn run(
         Request::Pull(addr, name) => Event::Finished(
             (|| {
                 std::fs::create_dir_all(&dirs.data)?;
+                let id = device(dirs)?;
+                if Os::current() == Os::Android {
+                    let game_dir = crate::build_actions::BuildActions {
+                        dirs: dirs.clone(),
+                        os: Os::Android,
+                    }
+                    .pull_android_prepared(
+                        addr,
+                        &id,
+                        &name,
+                        &dirs.data,
+                        u64::MAX,
+                    )?;
+                    if !crate::build_actions::BuildActions::android_game_installed(&game_dir) {
+                        return Err(acnh_core::Error::Build(
+                            "the installed Android game could not be verified".into(),
+                        ));
+                    }
+                    return Ok(());
+                }
                 let staged = tempfile::Builder::new()
                     .prefix(".first-run-")
                     .tempdir_in(&dirs.data)?;
-                let id = device(dirs)?;
                 let bundle = hub::pull_hub(addr, dirs, &id, &name, Os::current(), staged.path())?;
                 if cancelled
                     .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)

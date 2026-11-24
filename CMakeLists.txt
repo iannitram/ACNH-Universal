@@ -283,7 +283,7 @@ endforeach()
 
 set(NX_RUNTIME_SOURCES
     runtime/src/compact_layout.cpp
-    runtime/src/game_folder.cpp
+    runtime/src/files_wrapper.cpp
     runtime/src/main.cpp
     runtime/src/sampler.cpp
     runtime/src/loader.cpp
@@ -297,11 +297,10 @@ set(NX_RUNTIME_SOURCES
     runtime/src/svc_set.cpp
     runtime/src/svc_misc.cpp
     runtime/src/svc_process.cpp
-    runtime/src/hle_fs.cpp
     runtime/src/svc_nfp.cpp
     runtime/src/hle_ro.cpp
     runtime/src/hle_vi.cpp
-    runtime/src/hle_hid.cpp
+    runtime/src/input_wrapper.cpp
     runtime/src/hle_hid_system_nfc.cpp
     runtime/src/hle_net.cpp
     runtime/src/hle_web.cpp
@@ -312,7 +311,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/ldn_lan.cpp
     runtime/src/nextendo.cpp
     runtime/src/nextendo_http.cpp
-    runtime/src/hle_audio.cpp
+    runtime/src/audio_wrapper.cpp
     runtime/src/hle_pl.cpp
     runtime/src/hle_album.cpp
     runtime/src/hle_jpeg.cpp
@@ -326,11 +325,8 @@ set(NX_RUNTIME_SOURCES
     runtime/src/hle_ngc.cpp
     runtime/src/config_wrapper.cpp
     runtime/src/time_wrapper.cpp
-    runtime/src/mod_fetch.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
-    runtime/src/input_script.cpp
-    runtime/src/touch_layout.cpp
     runtime/src/perf_hint.cpp
     runtime/src/thermal.cpp
     runtime/src/frame_stats.cpp
@@ -417,7 +413,7 @@ if(ANDROID)
     set(GLUE "${ANDROID_NDK}/sources/android/native_app_glue")
     add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
         runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
-        runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
+        runtime/src/hub_android.cpp runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
         "${GLUE}/android_native_app_glue.c")
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}"
         third_party/save-relay)

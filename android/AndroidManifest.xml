@@ -22,6 +22,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.RUN_USER_INITIATED_JOBS"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <!-- About: the Instagram and GitHub buttons open those apps when installed (platform_android open_url_in_app) -->
     <queries>
@@ -65,9 +67,13 @@
         <activity android:name="io.github.acnhrecomp.Picker" android:exported="false"
                   android:theme="@android:style/Theme.Translucent.NoTitleBar"
                   android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation"/>
-        <!-- The game download keeps going in the background with a progress notification (GameDownload.java) -->
+        <!-- The game download keeps going in the background with a progress notification (GameDownload.java,
+             and GameDownloadJob.java user-initiated data transfer job on Android 14+) -->
         <service android:name="io.github.acnhrecomp.GameDownload" android:exported="false"
                  android:foregroundServiceType="dataSync"/>
+        <service android:name="io.github.acnhrecomp.GameDownloadJob"
+                 android:permission="android.permission.BIND_JOB_SERVICE"
+                 android:exported="false"/>
         <!-- Nextendo's sign-in page (Online settings), in a WebView so the app stays in front: platform_android.cpp
              open_sign_in starts it. The return to 127.0.0.1 is the one plain-HTTP address (networkSecurityConfig). -->
         <activity android:name="io.github.acnhrecomp.SignIn" android:exported="false"

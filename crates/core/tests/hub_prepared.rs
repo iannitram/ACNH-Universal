@@ -197,3 +197,140 @@ fn unknown_key_receives_only_challenge_and_no_prepared_bytes() {
     });
     assert!(!root.join("game").exists());
 }
+
+fn app_fixture(root: &Path) {
+    fixture(root);
+    fs::create_dir_all(root.join("analysis")).unwrap();
+    fs::create_dir_all(root.join("aoc/1")).unwrap();
+    fs::write(root.join("analysis/main.bin"), "synthetic analysis").unwrap();
+    fs::write(root.join("aoc/1/data"), "synthetic dlc").unwrap();
+}
+
+#[test]
+fn paired_loopback_pull_prepared_app_installs_read_only_through_appgame_and_verifies() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = dirs(temp.path(), "server");
+    let client = dirs(temp.path(), "client");
+    pair(&server, &client);
+    let source = temp.path().join("source");
+    app_fixture(&source);
+    let packed = vec![0x65; CHUNK_SIZE + 17];
+    fs::write(source.join("romfs.pak"), &packed).unwrap();
+
+    let private_dir = temp.path().join("files");
+    fs::create_dir_all(private_dir.join("root")).unwrap();
+    fs::write(private_dir.join("root/config.ini"), "settings").unwrap();
+    fs::write(private_dir.join("root/save"), "island").unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let installed = std::thread::scope(|s| {
+        let worker = s.spawn(|| {
+            let (stream, _) = listener.accept().unwrap();
+            hub::serve_prepared(
+                &mut TcpTransport::from_stream(stream).unwrap(),
+                &server,
+                "client",
+                Os::Android,
+                &source,
+            )
+            .unwrap();
+        });
+        let mut transport = TcpTransport::connect(listener.local_addr().unwrap()).unwrap();
+        let out = hub::pull_prepared_app_with(
+            &mut transport,
+            &client,
+            "hub",
+            Os::Android,
+            &private_dir,
+            64 * 1024 * 1024,
+            false,
+        )
+        .unwrap();
+        worker.join().unwrap();
+        out
+    });
+
+    assert_eq!(installed, private_dir.join("game"));
+    for present in [
+        "analysis/main.bin",
+        "romfs.pak",
+        "spirv.pak",
+        "libacnh_game.so",
+        "fonts/shared_0.ttf",
+        "aoc/1/data",
+    ] {
+        let p = installed.join(present);
+        assert!(p.is_file(), "expected {present} in <files>/game/");
+        assert!(
+            fs::metadata(&p).unwrap().permissions().readonly(),
+            "expected {present} to be read-only"
+        );
+    }
+    assert_eq!(fs::read(installed.join("romfs.pak")).unwrap(), packed);
+    assert!(!installed.join("mods").exists());
+    assert!(!private_dir.join("game.partial").exists());
+    assert_eq!(
+        fs::read(private_dir.join("root/config.ini")).unwrap(),
+        b"settings"
+    );
+    assert_eq!(fs::read(private_dir.join("root/save")).unwrap(), b"island");
+}
+
+#[test]
+fn pull_prepared_app_refuses_missing_analysis_or_low_free_space() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = dirs(temp.path(), "server");
+    let client = dirs(temp.path(), "client");
+    pair(&server, &client);
+
+    let private_dir = temp.path().join("files");
+    fs::create_dir_all(private_dir.join("game")).unwrap();
+    fs::write(private_dir.join("game/old"), "keep").unwrap();
+
+    // Missing analysis/main.bin fails appgame::install and leaves existing game/ intact.
+    let incomplete = temp.path().join("incomplete");
+    fixture(&incomplete);
+    let (mut a, mut b) = MemoryTransport::pair();
+    let server_ref = &server;
+    std::thread::scope(|s| {
+        let worker = s.spawn(move || {
+            hub::serve_prepared(&mut a, server_ref, "client", Os::Android, &incomplete)
+        });
+        let err = hub::pull_prepared_app_with(
+            &mut b,
+            &client,
+            "hub",
+            Os::Android,
+            &private_dir,
+            64 * 1024 * 1024,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("analysis/main.bin"));
+        worker.join().unwrap().unwrap();
+    });
+    assert_eq!(fs::read(private_dir.join("game/old")).unwrap(), b"keep");
+
+    // Complete source with insufficient free_bytes fails appgame::install and keeps old game/.
+    let complete = temp.path().join("complete");
+    app_fixture(&complete);
+    let (mut a, mut b) = MemoryTransport::pair();
+    std::thread::scope(|s| {
+        let worker = s.spawn(move || {
+            hub::serve_prepared(&mut a, server_ref, "client", Os::Android, &complete)
+        });
+        let err = hub::pull_prepared_app_with(
+            &mut b,
+            &client,
+            "hub",
+            Os::Android,
+            &private_dir,
+            4,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not enough free space"));
+        worker.join().unwrap().unwrap();
+    });
+    assert_eq!(fs::read(private_dir.join("game/old")).unwrap(), b"keep");
+}
