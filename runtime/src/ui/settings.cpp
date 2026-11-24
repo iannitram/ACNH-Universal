@@ -1041,7 +1041,7 @@ void page_online() {
 void page_video() {
     // Essential settings stay visible. The Advanced toggle (session-only) reveals fine-tuning rows below.
     section("video.section.screen");
-#if !defined(__ANDROID__)  // a phone's game is always the whole screen
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)  // a phone's or tablet's game is always the whole screen
     row("video.display", nullptr, [&](float w) {
         combo("video.fullscreen", "0", {{"0", tr("video.display.windowed")}, {"1", tr("video.display.fullscreen")}}, w);
     });
@@ -1068,7 +1068,7 @@ void page_video() {
     row("video.resolution", PER_DEVICE("video.resolution.desc"), [&](float w) {
         combo("video.resolution", plat::kDefaultResolution, resolutions, w);
     });
-    row("video.aspect", "video.aspect.desc", [&](float w) {
+    row("video.aspect", PER_DEVICE("video.aspect.desc"), [&](float w) {
         combo("video.aspect", plat::kDefaultAspect,
               {{"auto", tr("video.aspect.screen")}, {"16:9", console("video.aspect.original")}, {"16:10", "16:10"},
                {"4:3", "4:3"}, {"21:9", "21:9"}, {"32:9", "32:9"}, {"20:9", trf("video.aspect.phone", "20:9")},
@@ -1235,7 +1235,7 @@ void page_video() {
     if (config_get("video.upscaler", plat::kDefaultUpscaler) == "fsr")
         row("video.sharpness", nullptr, [&](float w) { slider("video.fsr_sharpness_pct", 0, 100, 80, "%d%%", w); });
 
-#if !defined(__ANDROID__)  // one GPU in a phone
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)  // one GPU in a phone or tablet
     row("video.gpu", nullptr, [&](float w) {
         combo("video.gpu", "auto",
               {{"auto", tr("common.auto")}, {"discrete", tr("video.gpu.discrete")}, {"integrated", tr("video.gpu.integrated")}}, w);
@@ -1286,7 +1286,7 @@ void page_video() {
 void page_audio() {
     row("audio.volume", nullptr, [&](float w) { slider("audio.volume", 0, 100, 100, "%d%%", w); });
     row("audio.reverb", PER_DEVICE("audio.reverb.desc"), [&](float w) { toggle("audio.reverb", true, w); });
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)  // 5.1 outputs are a desktop's
     row("audio.surround", "audio.surround.desc", [&](float w) { toggle("audio.surround", false, w); });
 #endif
     row(PER_DEVICE("audio.background"), nullptr, [&](float w) { toggle("audio.mute_background", false, w); });

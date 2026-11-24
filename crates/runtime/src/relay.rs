@@ -695,6 +695,14 @@ impl Player<'_> {
     /// one playing, and a newer island on the server is left for the next start to settle.
     pub fn sync_now(&self) -> SyncNow {
         self.log("Sync now");
+        // The game is live: a save folder without an island would make save-relay's push pull
+        // the server's island into it (its plan for "local empty, server not"), under a running
+        // game. Nothing is sent or fetched until the game has written its first save.
+        let dir = saves::save_dir(&self.roots.data_root);
+        if !saves::REQUIRED.iter().all(|f| dir.join(f).is_file()) {
+            self.log("no Sync now: the game has not saved an island yet");
+            return SyncNow::NothingNew;
+        }
         self.push_island(true)
     }
 

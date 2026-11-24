@@ -499,6 +499,7 @@ const Entry kEn[] = {
     {"video.preset.desc.mobile", "Sets game mode, internal resolution, upscaling and audio reverb together. Low: drawn at 540p and upscaled with FSR 1, no reverb, for older phones and tablets."},
     {"video.preset.low.mobile", "Low (older devices)"},
     {"video.upscaler.desc.mobile", "FSR 1: sharpens the finished picture when the screen is larger than it. Bilinear only stretches it."},
+    {"video.aspect.desc.mobile", "Wider ratios show more of the island without stretching the picture or the menus. “Screen's own” takes the shape of the screen by itself."},
     {"video.resolution.desc.mobile", "The height the game is drawn at before it is fitted to the screen. “Screen's own” uses the screen's own pixels; lower is lighter for weak GPUs. Takes effect at once."},
     {"video.hdr.desc.mobile", "HDR output for a screen that shows HDR. HDR10 is the screen's own signal. Applies after a restart."},
     {"video.aniso.desc.mobile", "Anisotropic filtering keeps the ground, paths and walls sharp when seen at an angle and far away. Costs a little GPU time."},
@@ -805,6 +806,7 @@ const Entry kPtBr[] = {
     {"video.preset.desc.mobile", "Ajusta juntos o modo de jogo, a resolução interna, o upscaling e a reverberação do áudio. Baixa: desenhado em 540p e ampliado com FSR 1, sem reverberação, para celulares e tablets mais antigos."},
     {"video.preset.low.mobile", "Baixa (aparelhos mais antigos)"},
     {"video.upscaler.desc.mobile", "FSR 1: deixa mais nítida a imagem final quando a tela é maior que ela. O bilinear só a estica."},
+    {"video.aspect.desc.mobile", "Proporções mais largas mostram mais da ilha sem esticar a imagem nem os menus. “Da tela” usa o formato da própria tela."},
     {"video.resolution.desc.mobile", "A altura em que o jogo é desenhado antes de ser ajustado à tela. “Nativa da tela” usa os pixels da própria tela; menos é mais leve para GPUs fracas. Vale na hora."},
     {"video.hdr.desc.mobile", "Saída HDR para uma tela que mostra HDR. HDR10 é o sinal da própria tela. Vale depois de reiniciar."},
     {"video.aniso.desc.mobile", "A filtragem anisotrópica mantém nítidos o chão, os caminhos e as paredes vistos de lado e ao longe. Custa um pouco de GPU."},
@@ -1100,6 +1102,7 @@ const Entry kEs[] = {
     {"video.preset.desc.mobile", "Ajusta a la vez el modo de juego, la resolución interna, el escalado y la reverberación del audio. Baja: se dibuja a 540p y se escala con FSR 1, sin reverberación, para móviles y tabletas más antiguos."},
     {"video.preset.low.mobile", "Baja (dispositivos antiguos)"},
     {"video.upscaler.desc.mobile", "FSR 1: da nitidez a la imagen final cuando la pantalla es más grande que ella. Bilineal solo la estira."},
+    {"video.aspect.desc.mobile", "Las proporciones más anchas muestran más isla sin estirar la imagen ni los menús. «Propia de la pantalla» toma por sí sola la forma de la pantalla."},
     {"video.resolution.desc.mobile", "La altura a la que se dibuja el juego antes de ajustarlo a la pantalla. Los valores bajos alivian las GPU modestas. Se aplica al instante."},
     {"video.hdr.desc.mobile", "Salida HDR para una pantalla que muestra HDR. HDR10 es la señal propia de la pantalla. Se aplica tras reiniciar."},
     {"video.aniso.desc.mobile", "El filtrado anisotrópico mantiene nítidos el suelo, los caminos y las paredes vistos en ángulo y a lo lejos. Cuesta un poco de GPU."},
@@ -1385,6 +1388,7 @@ const Entry kFr[] = {
     {"video.preset.desc.mobile", "Règle ensemble le mode de jeu, la résolution interne, la mise à l'échelle et la réverbération audio. Faible : dessiné en 540p et agrandi avec FSR 1, sans réverbération, pour les téléphones et tablettes plus anciens."},
     {"video.preset.low.mobile", "Faible (appareils anciens)"},
     {"video.upscaler.desc.mobile", "FSR 1 : rend plus nette l'image finale quand l'écran est plus grand qu'elle. Bilinéaire se contente de l'étirer."},
+    {"video.aspect.desc.mobile", "Les formats plus larges montrent plus de l'île sans étirer l'image ni les menus. « Celui de l'écran » reprend tout seul la forme de l'écran."},
     {"video.resolution.desc.mobile", "La hauteur à laquelle le jeu est dessiné avant d'être adapté à l'écran. Les valeurs basses soulagent les GPU modestes. S'applique immédiatement."},
     {"video.hdr.desc.mobile", "Sortie HDR pour un écran qui affiche le HDR. HDR10 est le signal propre de l'écran. S'applique après un redémarrage."},
     {"video.aniso.desc.mobile", "Le filtrage anisotrope garde nets le sol, les chemins et les murs vus de biais et au loin. Coûte un peu de GPU."},
@@ -3238,6 +3242,17 @@ const char* tr(const char* key) {
     if (it == map.end()) return key;
     const char* text = it->second[g_current.load(std::memory_order_relaxed)];
     if (text && *text) return text;
+    // A "<key>.mobile" text this language does not have yet: the desktop key in this language, not English.
+    static const std::string_view kSuffix = ".mobile";
+    std::string_view k = key;
+    if (k.size() > kSuffix.size() && k.substr(k.size() - kSuffix.size()) == kSuffix) {
+        const std::string base(k.substr(0, k.size() - kSuffix.size()));
+        auto bt = map.find(base);
+        if (bt != map.end()) {
+            const char* b = bt->second[g_current.load(std::memory_order_relaxed)];
+            if (b && *b) return b;
+        }
+    }
     text = it->second[0];
     return text && *text ? text : key;
 }

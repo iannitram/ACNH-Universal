@@ -1204,6 +1204,20 @@ fn sync_now_uploads_keeps_the_ipad_playing_and_says_synced_then_nothing_new() {
 }
 
 #[test]
+fn sync_now_with_no_island_saved_yet_pulls_nothing_under_the_running_game() {
+    let fx = playing("ios-sync-now-empty");
+    let prompt = fx.no_prompt();
+    let player = fx.player(&prompt);
+    fs::remove_dir_all(fx.saves()).unwrap();
+    fs::create_dir_all(fx.saves()).unwrap();
+    assert_eq!(player.sync_now(), SyncNow::NothingNew);
+    assert!(
+        !fx.saves().join("main.dat").exists(),
+        "the server's island is not pulled mid-game"
+    );
+}
+
+#[test]
 fn sync_now_against_a_newer_island_overwrites_nothing_never_pulls_and_waits_for_the_next_start() {
     let fx = playing("ios-sync-now-newer");
     let prompt = fx.no_prompt();
