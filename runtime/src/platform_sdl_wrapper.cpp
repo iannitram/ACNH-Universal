@@ -32,6 +32,27 @@
 
 #include "config.h"
 #include "platform.h"
+
+#ifdef NX_RUST_RUNTIME
+#include <acnh_runtime.h>
+#else
+extern "C" {
+void acnh_platform_window_set_minimized(bool minimized);
+void acnh_platform_window_set_size(uint32_t w, uint32_t h);
+void acnh_platform_window_set_refresh_hz(int32_t hz);
+void acnh_platform_pick_begin();
+void acnh_platform_pick_complete(const char* path);
+void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
+size_t acnh_platform_pad_kind(int32_t vendor, const char* name, char* out, size_t cap);
+size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, const char* name, char* out, size_t cap);
+bool acnh_platform_xbox_layout(const char* controller_kind);
+int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
+uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
+uint32_t acnh_platform_touch_label_code(const char* label);
+bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t now_ns, bool* was_run, uint64_t* past_ns);
+}
+#endif
+
 #include "platform_sdl.h"
 #include "sdl_audio_frame.h"
 #include "sdl_audio_queue.h"
@@ -78,8 +99,7 @@ void run_on_main(std::function<void()> fn) {
 SDL_Window* g_window = nullptr;
 std::atomic<bool> g_held_back{false};  // made hidden, for picture_shown to show
 int g_held_x = 0, g_held_y = 0;        // where: a window made hidden was shown elsewhere than it was asked to be
-std::atomic<bool> g_minimized{false};
-std::atomic<uint32_t> g_pixel_w{0}, g_pixel_h{0};
+
 
 std::mutex g_pad_lock;
 PadState g_pad;
@@ -100,10 +120,7 @@ bool sdl_start() {
 
 // ---- window ---------------------------------------------------------------------------------------------------
 
-bool headless() {
-    static const bool on = std::getenv("NX_HEADLESS") != nullptr;
-    return on;
-}
+
 
 void* sdl_native_window() {
     SDL_Window* w = g_window;
@@ -150,7 +167,7 @@ void* create_window() {
         }
         int pw = 0, ph = 0;
         SDL_GetWindowSizeInPixels(g_window, &pw, &ph);
-        g_pixel_w = uint32_t(pw), g_pixel_h = uint32_t(ph);
+        acnh_platform_window_set_size(uint32_t(pw), uint32_t(ph));
         update_refresh_hz();
     });
     return g_window;  // the Vulkan surface is made from it (on the main thread, vulkan_create_surface)
@@ -171,12 +188,7 @@ void picture_shown() {
     });
 }
 uint64_t window_generation() { return 1; }
-bool window_minimized() { return g_minimized; }
 
-void window_size(uint32_t& w, uint32_t& h) {
-    w = g_pixel_w;
-    h = g_pixel_h;
-}
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 float default_render_scale() { return 1.0f; }
@@ -371,13 +383,11 @@ static void sample_input() {
 
 // The refresh rate of the window's display, read on the main thread when the window is made and when it moves to
 // another display (nvn_vk.cpp presents each game frame for that many vsyncs).
-std::atomic<int> g_refresh_hz{60};
 void update_refresh_hz() {
     if (!g_window) return;
     if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(g_window)); m && m->refresh_rate > 20)
-        g_refresh_hz = int(m->refresh_rate + 0.5f);
+        acnh_platform_window_set_refresh_hz(int32_t(m->refresh_rate + 0.5f));
 }
-int display_refresh_hz() { return g_refresh_hz.load(); }
 
 void show_fatal(const char* text) {
     if (headless()) return;
@@ -385,7 +395,7 @@ void show_fatal(const char* text) {
 }
 
 
-std::atomic<float> g_volume{-1.0f};  // master volume 0..1 (-1: not read from config.ini yet; audio_cb applies it)
+
 
 void set_fullscreen(bool on) {
     run_on_main([on] {
@@ -393,7 +403,7 @@ void set_fullscreen(bool on) {
     });
 }
 
-void set_master_volume(float v) { g_volume = std::clamp(v, 0.0f, 1.0f); }
+
 
 std::string controller_name() {
     SDL_Gamepad* pad = g_gamepad;
@@ -437,21 +447,13 @@ void open_path(const std::string& path) {
 }
 
 namespace {
-std::mutex g_pick_lock;
-bool g_pick_done = false;
-std::string g_pick_path;
 void SDLCALL picked(void*, const char* const* list, int) {
-    std::lock_guard lk(g_pick_lock);
-    g_pick_path = list && list[0] ? list[0] : "";
-    g_pick_done = true;
+    acnh_platform_pick_complete(list && list[0] ? list[0] : "");
 }
 }  // namespace
 
 void pick_path(bool zip, const std::string& title) {
-    {
-        std::lock_guard lk(g_pick_lock);
-        g_pick_done = false;
-    }
+    acnh_platform_pick_begin();
     run_on_main([zip, title] {
         SDL_PropertiesID props = SDL_CreateProperties();
         SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, g_window);
@@ -467,10 +469,7 @@ void pick_path(bool zip, const std::string& title) {
 }
 
 void pick_file(const std::string& title, const char* extension) {
-    {
-        std::lock_guard lk(g_pick_lock);
-        g_pick_done = false;
-    }
+    acnh_platform_pick_begin();
     run_on_main([title, extension] {
         SDL_PropertiesID props = SDL_CreateProperties();
         SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, g_window);
@@ -483,13 +482,7 @@ void pick_file(const std::string& title, const char* extension) {
     });
 }
 
-bool pick_result(std::string& path) {
-    std::lock_guard lk(g_pick_lock);
-    if (!g_pick_done) return false;
-    g_pick_done = false;
-    path = g_pick_path;
-    return true;
-}
+
 
 bool read_player_pad(int, PadState&) { return false; }  // player 1 only on this host
 
@@ -516,16 +509,8 @@ int g_audio_frame_bytes = 4;
 
 // Master volume (settings screen, live) and the mute while the window is in the background (audio.mute_background).
 void apply_gain(int16_t* pcm, int count) {
-    float v = g_volume.load(std::memory_order_relaxed);
-    if (v < 0) {
-        v = std::clamp(nx::config_get_int("audio.volume", 100), 0, 100) / 100.0f;
-        g_volume = v;
-    }
-    if (g_window && !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) &&
-        nx::config_get_bool("audio.mute_background", false))
-        v = 0;
-    if (v >= 0.999f) return;
-    for (int i = 0; i < count; i++) pcm[i] = int16_t(float(pcm[i]) * v);
+    const bool focused = !g_window || (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS);
+    acnh_platform_apply_gain(pcm, size_t(count), focused);
 }
 
 void SDLCALL audio_cb(void*, SDL_AudioStream* s, int additional, int) {
@@ -652,14 +637,14 @@ void sdl_main_loop() {
                 exit_process(0);
             case SDL_EVENT_WINDOW_MINIMIZED:
             case SDL_EVENT_WINDOW_HIDDEN:
-                g_minimized = true;
+                acnh_platform_window_set_minimized(true);
                 break;
             case SDL_EVENT_WINDOW_RESTORED:
             case SDL_EVENT_WINDOW_SHOWN:
-                g_minimized = false;
+                acnh_platform_window_set_minimized(false);
                 break;
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-                g_pixel_w = uint32_t(e.window.data1), g_pixel_h = uint32_t(e.window.data2);
+                acnh_platform_window_set_size(uint32_t(e.window.data1), uint32_t(e.window.data2));
                 break;
             case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
             case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:

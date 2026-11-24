@@ -309,8 +309,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/time_wrapper.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
-    runtime/src/perf_hint.cpp
-    runtime/src/thermal.cpp
+    runtime/src/platform_wrapper.cpp
     runtime/src/frame_stats.cpp
     runtime/src/write_watch.cpp
     runtime/src/nvn/nvn_caps.cpp
@@ -394,8 +393,8 @@ endif()
 if(ANDROID)
     # NativeActivity app: lib<game>.so, entry android_main (android_native_app_glue).
     set(GLUE "${ANDROID_NDK}/sources/android/native_app_glue")
-    add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
-        runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
+    add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android_wrapper.cpp
+        runtime/src/platform_android_input_wrapper.cpp runtime/src/platform_android_audio_wrapper.cpp runtime/src/memguard_android.cpp
         runtime/src/hub_android.cpp runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
         "${GLUE}/android_native_app_glue.c")
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}"
@@ -491,7 +490,7 @@ elseif(IOS)
     if(NOT NX_RUNTIME_ARCHIVE)
         message(FATAL_ERROR "NX_RUNTIME_ARCHIVE is not set: run tools/build_ios.sh <sdk> (it builds libacnh_runtime.a)")
     endif()
-    add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp
+    add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac_wrapper.cpp
                    runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp)
     if(NOT NX_IOS_SHORT_VERSION)
         set(NX_IOS_SHORT_VERSION "0.0.0")
@@ -522,7 +521,7 @@ elseif(APPLE)
     # (brew install sdl3 vulkan-headers vulkan-loader molten-vk).
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS /opt/homebrew/include /usr/local/include)
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_mac_wrapper.cpp runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp
                    runtime/src/app_icon.cpp)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3)
@@ -551,7 +550,7 @@ elseif(UNIX)
     find_package(SDL3 REQUIRED CONFIG)
     find_package(Threads REQUIRED)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/include" /usr/include /usr/local/include)
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_linux.cpp runtime/src/memguard_linux.cpp runtime/src/cpu_profile.cpp
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_linux_wrapper.cpp runtime/src/memguard_linux.cpp runtime/src/cpu_profile.cpp
                    runtime/src/app_icon.cpp)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 Threads::Threads ${CMAKE_DL_LIBS})
@@ -581,7 +580,7 @@ else()
     # Vulkan loader of the GPU driver. Vulkan headers: NX_VULKAN_INCLUDE (the setup's Vulkan-Headers) or the LunarG SDK.
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/Include")
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win.cpp runtime/src/platform_sdl.cpp
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win_wrapper.cpp runtime/src/platform_sdl_wrapper.cpp
                    runtime/src/app_icon.cpp assets/acnhrecomp.manifest runtime/src/memguard_win.cpp)
     nx_add_windows_rc(${NX_GAME} assets/acnhrecomp.rc)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
