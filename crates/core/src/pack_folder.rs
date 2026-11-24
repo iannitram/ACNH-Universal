@@ -23,34 +23,45 @@ const OLD_FOLDER: &str = ".ACNH-Universal.old";
 /// Default output parent folder for the contained app: `launcher.ini`'s `app_dir` key when
 /// set and non-empty, else `<home>/Applications`.
 pub fn app_out_dir(config: &Config, home: &Path) -> PathBuf {
+    app_out_dir_for(Os::Linux, config, home, home)
+}
+
+/// Default output parent folder for the contained app on `os`: `launcher.ini`'s `app_dir`
+/// key when set and non-empty, else `<data>/Programs` on Windows (`%LOCALAPPDATA%\Programs\`)
+/// and `<home>/Applications` elsewhere.
+pub fn app_out_dir_for(os: Os, config: &Config, data: &Path, home: &Path) -> PathBuf {
     match config.get("app_dir") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ if os == Os::Windows => data.join("Programs"),
         _ => home.join("Applications"),
     }
 }
 
 /// Dependencies and environment overrides for [`pack_folder_with`] (the seam tests use).
 pub struct PackContext<'a> {
+    pub os: Os,
     pub appdir: Option<&'a Path>,
     pub home: &'a Path,
     pub data_root: &'a Path,
     pub game_folder: Option<&'a Path>,
     pub dropbox: Option<&'a Path>,
+    pub onedrive: Option<&'a Path>,
     pub ci: bool,
     pub runner_temp: Option<&'a Path>,
     pub git_in_work_tree: &'a mut dyn FnMut(&Path) -> Result<bool>,
     pub copy_file: &'a mut dyn FnMut(&Path, &Path) -> Result<()>,
 }
 
-/// Pack `<out>/ACNH-Universal/` using the host environment (`HOME`, `APPDIR`, `CI`,
-/// `RUNNER_TEMP`, `launcher.ini`).
+/// Pack `<out>/ACNH-Universal/` using the host environment (`HOME`/`USERPROFILE`, `APPDIR`,
+/// `OneDrive`, `CI`, `RUNNER_TEMP`, `launcher.ini`).
 pub fn pack_folder(
     launcher: &Path,
     assembled: &Path,
     prepared: &Path,
     out: &Path,
 ) -> Result<PathBuf> {
-    let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
+    let os = Os::current();
+    let vars = Vars::from_lookup(os, |name| std::env::var(name).ok())?;
     let dirs = AppDirs::new(&vars);
     let launcher_cfg = match fs::read_to_string(dirs.config.join("launcher.ini")) {
         Ok(text) => Config::parse(&text)?,
@@ -61,6 +72,7 @@ pub fn pack_folder(
         .get("dropbox")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from);
+    let onedrive = env_path("OneDrive").or_else(|| env_path("ONEDRIVE"));
     let game_folder = launcher_cfg
         .get("game_folder")
         .filter(|path| !path.is_empty())
@@ -80,11 +92,13 @@ pub fn pack_folder(
     let mut copy = |from: &Path, to: &Path| host_copy_file(from, to);
 
     let mut ctx = PackContext {
+        os,
         appdir: appdir.as_deref(),
         home: &vars.home,
         data_root: &data_root,
         game_folder: game_folder.as_deref(),
         dropbox: dropbox.as_deref(),
+        onedrive: onedrive.as_deref(),
         ci,
         runner_temp: runner_temp.as_deref(),
         git_in_work_tree: &mut git_probe,
@@ -104,8 +118,8 @@ pub fn pack_folder_with(
     check_prepared(prepared, ctx)?;
     check_out_location(out, ctx)?;
 
-    let launcher_files = resolve_launcher_files(launcher, ctx.appdir)?;
-    let assembled_files = collect_assembled_files(assembled)?;
+    let launcher_files = resolve_launcher_files(launcher, ctx.appdir, ctx.os)?;
+    let assembled_files = collect_assembled_files(assembled, ctx.os)?;
 
     let final_dir = out.join(APP_FOLDER);
     let partial_dir = out.join(PARTIAL_FOLDER);
@@ -150,16 +164,17 @@ pub fn pack_folder_with(
 struct LauncherFiles {
     acnh_app: PathBuf,
     acnh_universal: PathBuf,
-    picture: PathBuf,
+    icon: Option<PathBuf>,
+    picture: Option<PathBuf>,
     source: Option<PathBuf>,
 }
 
-fn resolve_launcher_files(launcher: &Path, appdir: Option<&Path>) -> Result<LauncherFiles> {
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
+fn resolve_launcher_files(launcher: &Path, appdir: Option<&Path>, os: Os) -> Result<LauncherFiles> {
+    let suffix = if os == Os::Windows { ".exe" } else { "" };
     let app_name = format!("acnh-app{suffix}");
     let cli_name = format!("acnh-universal{suffix}");
 
-    let (acnh_app, acnh_universal, picture, source) = if let Some(appdir) = appdir {
+    let (acnh_app, acnh_universal, icon, picture, source) = if let Some(appdir) = appdir {
         let share = appdir.join("usr/share/acnh-universal");
         let source = share.join("source");
         if !source.is_dir() {
@@ -171,47 +186,57 @@ fn resolve_launcher_files(launcher: &Path, appdir: Option<&Path>) -> Result<Laun
         (
             appdir.join("usr/bin").join(&app_name),
             appdir.join("usr/bin").join(&cli_name),
-            share.join("acnhrecomp.png"),
+            None,
+            Some(share.join("acnhrecomp.png")),
             Some(source),
         )
     } else {
         let dir = launcher.parent().unwrap_or(Path::new("."));
+        let assets = assets_dir_for(launcher, None);
         let source = dir.join("source");
+        let ico = assets.join("acnhrecomp.ico");
+        let png = assets.join("acnhrecomp.png");
+        let (icon, picture) = if os == Os::Windows {
+            (Some(ico), png.is_file().then_some(png))
+        } else {
+            (None, Some(png))
+        };
         (
             dir.join(&app_name),
             dir.join(&cli_name),
-            assets_dir_for(launcher, None).join("acnhrecomp.png"),
+            icon,
+            picture,
             source.is_dir().then_some(source),
         )
     };
 
     for (label, path) in [
-        ("acnh-app", &acnh_app),
-        ("acnh-universal", &acnh_universal),
-        ("acnhrecomp.png", &picture),
+        ("acnh-app", Some(&acnh_app)),
+        ("acnh-universal", Some(&acnh_universal)),
+        ("acnhrecomp.ico", icon.as_ref()),
+        ("acnhrecomp.png", picture.as_ref()),
     ] {
-        if !path.is_file() {
-            return Err(Error::Build(format!(
-                "missing launcher file {label} at {}",
-                path.display()
-            )));
+        if let Some(path) = path {
+            if !path.is_file() {
+                return Err(Error::Build(format!(
+                    "missing launcher file {label} at {}",
+                    path.display()
+                )));
+            }
         }
     }
 
     Ok(LauncherFiles {
         acnh_app,
         acnh_universal,
+        icon,
         picture,
         source,
     })
 }
 
-fn collect_assembled_files(assembled: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let player_name = output(if cfg!(windows) {
-        Os::Windows
-    } else {
-        Os::Linux
-    });
+fn collect_assembled_files(assembled: &Path, os: Os) -> Result<Vec<(String, PathBuf)>> {
+    let player_name = output(os);
     if !assembled.join(player_name).is_file() {
         return Err(Error::Build(format!(
             "assembled player {player_name} is missing in {}",
@@ -315,6 +340,14 @@ fn check_out_location(out: &Path, ctx: &mut PackContext<'_>) -> Result<()> {
         )));
     }
 
+    if let Some(onedrive) = ctx.onedrive {
+        if abs_out.starts_with(normalize_abs(onedrive)?) {
+            return Err(Error::Build(format!(
+                "cannot pack into {redacted}: it is inside OneDrive (a synced folder)"
+            )));
+        }
+    }
+
     if ctx.ci {
         let Some(runner_temp) = ctx.runner_temp else {
             return Err(Error::Build(format!(
@@ -358,7 +391,12 @@ fn stage_folder(
     (ctx.copy_file)(&launcher.acnh_universal, &cli_dest)?;
     set_executable(&cli_dest)?;
 
-    (ctx.copy_file)(&launcher.picture, &partial.join("acnhrecomp.png"))?;
+    if let Some(icon) = &launcher.icon {
+        (ctx.copy_file)(icon, &partial.join("acnhrecomp.ico"))?;
+    }
+    if let Some(picture) = &launcher.picture {
+        (ctx.copy_file)(picture, &partial.join("acnhrecomp.png"))?;
+    }
 
     if let Some(source) = &launcher.source {
         copy_dir_files(source, &partial.join("source"), ctx.copy_file)?;

@@ -1,7 +1,7 @@
 use acnh_core::bundle;
 use acnh_core::config::Config;
 use acnh_core::platform::Os;
-use acnh_core::prepare::{app_out_dir, pack_folder_with, PackContext};
+use acnh_core::prepare::{app_out_dir, app_out_dir_for, pack_folder_with, PackContext};
 use acnh_core::Error;
 use std::collections::BTreeSet;
 use std::fs;
@@ -96,11 +96,13 @@ fn packs_appdir_assembled_and_read_only_game_only() {
     let mut git_probe = no_git;
     let mut copy = host_copy;
     let mut ctx = PackContext {
+        os: Os::Linux,
         appdir: Some(&appdir),
         home: &home,
         data_root: &data_root,
         game_folder: None,
         dropbox: None,
+        onedrive: None,
         ci: false,
         runner_temp: None,
         git_in_work_tree: &mut git_probe,
@@ -215,11 +217,13 @@ fn packs_from_beside_executable_when_appdir_unset() {
     let mut git_probe = no_git;
     let mut copy = host_copy;
     let mut ctx = PackContext {
+        os: Os::Linux,
         appdir: None,
         home: &home,
         data_root: &data_root,
         game_folder: None,
         dropbox: None,
+        onedrive: None,
         ci: false,
         runner_temp: None,
         git_in_work_tree: &mut git_probe,
@@ -288,11 +292,13 @@ fn refuses_unsafe_out_folders_and_invalid_prepared() {
         };
         let mut copy_fn = host_copy;
         let mut ctx = PackContext {
+            os: Os::Linux,
             appdir: Some(&appdir),
             home: &home,
             data_root: &data_root,
             game_folder: Some(&game_folder),
             dropbox: None,
+            onedrive: None,
             ci,
             runner_temp: rt,
             git_in_work_tree: &mut git_probe,
@@ -388,11 +394,13 @@ fn failed_copy_cleans_partial_and_preserves_existing_pack() {
     let mut git_probe = no_git;
     let mut copy = host_copy;
     let mut ctx = PackContext {
+        os: Os::Linux,
         appdir: Some(&appdir),
         home: &home,
         data_root: &data_root,
         game_folder: None,
         dropbox: None,
+        onedrive: None,
         ci: false,
         runner_temp: None,
         git_in_work_tree: &mut git_probe,
@@ -419,11 +427,13 @@ fn failed_copy_cleans_partial_and_preserves_existing_pack() {
         Ok(())
     };
     let mut ctx_fail = PackContext {
+        os: Os::Linux,
         appdir: Some(&appdir),
         home: &home,
         data_root: &data_root,
         game_folder: None,
         dropbox: None,
+        onedrive: None,
         ci: false,
         runner_temp: None,
         git_in_work_tree: &mut git_probe,
@@ -443,11 +453,13 @@ fn failed_copy_cleans_partial_and_preserves_existing_pack() {
 
     // Re-packing successfully replaces the earlier pack (even with read-only game/).
     let mut ctx_ok = PackContext {
+        os: Os::Linux,
         appdir: Some(&appdir),
         home: &home,
         data_root: &data_root,
         game_folder: None,
         dropbox: None,
+        onedrive: None,
         ci: false,
         runner_temp: None,
         git_in_work_tree: &mut git_probe,
@@ -473,4 +485,203 @@ fn app_out_dir_uses_app_dir_key_or_applications() {
     );
     let cfg = Config::parse("app_dir = /opt/games\n").unwrap();
     assert_eq!(app_out_dir(&cfg, home), PathBuf::from("/opt/games"));
+}
+
+#[test]
+fn packs_windows_folder_with_exe_dlls_and_read_only_game() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let data_root = root.path().join("data/root");
+    let launcher_dir = root.path().join("release");
+    let assembled = root.path().join("install");
+    let prepared = root.path().join("prepared");
+    let out = root.path().join("out");
+
+    write_empty(&launcher_dir.join("acnh-app.exe"));
+    write_empty(&launcher_dir.join("acnh-universal.exe"));
+    write_empty(&launcher_dir.join("acnhrecomp.ico"));
+    write_empty(&launcher_dir.join("source/SOURCE"));
+
+    write_empty(&assembled.join("acnh.exe"));
+    write_empty(&assembled.join("SDL3.dll"));
+    write_empty(&assembled.join("root/user/device_save/main.dat"));
+
+    make_stub_prepared(&prepared);
+    write_empty(&prepared.join("build/acnh.exe"));
+
+    let mut git_probe = no_git;
+    let mut copy = host_copy;
+    let mut ctx = PackContext {
+        os: Os::Windows,
+        appdir: None,
+        home: &home,
+        data_root: &data_root,
+        game_folder: None,
+        dropbox: None,
+        onedrive: None,
+        ci: false,
+        runner_temp: None,
+        git_in_work_tree: &mut git_probe,
+        copy_file: &mut copy,
+    };
+
+    let packed = pack_folder_with(
+        &launcher_dir.join("acnh-app.exe"),
+        &assembled,
+        &prepared,
+        &out,
+        &mut ctx,
+    )
+    .unwrap();
+    assert_eq!(packed, out.join("ACNH-Universal"));
+
+    let mut files = BTreeSet::new();
+    collect_rel_paths(&packed, &packed, &mut files);
+    let expected: BTreeSet<String> = [
+        "SDL3.dll",
+        "acnh-app.exe",
+        "acnh-universal.exe",
+        "acnh.exe",
+        "acnhrecomp.ico",
+        "game/analysis/main.bin",
+        "game/aoc/1/data",
+        "game/fonts/shared.ttf",
+        "game/romfs.pak",
+        "game/spirv.pak",
+        "source/SOURCE",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(files, expected);
+
+    for non_game in ["acnh-app.exe", "acnh-universal.exe", "acnh.exe", "SDL3.dll"] {
+        assert!(
+            !fs::metadata(packed.join(non_game))
+                .unwrap()
+                .permissions()
+                .readonly(),
+            "{non_game} must remain writable"
+        );
+    }
+    for game_file in [
+        "game/analysis/main.bin",
+        "game/aoc/1/data",
+        "game/fonts/shared.ttf",
+        "game/romfs.pak",
+        "game/spirv.pak",
+    ] {
+        assert!(
+            fs::metadata(packed.join(game_file))
+                .unwrap()
+                .permissions()
+                .readonly(),
+            "{game_file} must be read-only"
+        );
+    }
+
+    let err = bundle::manifest(&packed, Os::Windows, "1.0.0", "abc").unwrap_err();
+    assert!(
+        err.to_string().contains("game"),
+        "expected game in error: {err}"
+    );
+
+    // Restore write bits so tempdir cleanup succeeds on all platforms.
+    fn restore_write(dir: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(dir).unwrap().permissions();
+            perms.set_mode(perms.mode() | 0o700);
+            fs::set_permissions(dir, perms).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let mut perms = fs::metadata(dir).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            fs::set_permissions(dir, perms).unwrap();
+        }
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                restore_write(&path);
+            } else {
+                let mut perms = fs::metadata(&path).unwrap().permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    perms.set_mode(perms.mode() | 0o200);
+                }
+                #[cfg(not(unix))]
+                {
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    perms.set_readonly(false);
+                }
+                fs::set_permissions(&path, perms).unwrap();
+            }
+        }
+    }
+    restore_write(&packed.join("game"));
+}
+
+#[test]
+fn refuses_onedrive_out_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let data_root = root.path().join("data/root");
+    let onedrive = root.path().join("OneDrive");
+    let launcher_dir = root.path().join("release");
+    let assembled = root.path().join("install");
+    let prepared = root.path().join("prepared");
+
+    write_empty(&launcher_dir.join("acnh-app.exe"));
+    write_empty(&launcher_dir.join("acnh-universal.exe"));
+    write_empty(&launcher_dir.join("acnhrecomp.ico"));
+    write_empty(&assembled.join("acnh.exe"));
+    make_stub_prepared(&prepared);
+    fs::create_dir_all(&onedrive).unwrap();
+
+    let mut git_probe = no_git;
+    let mut copy = host_copy;
+    let mut ctx = PackContext {
+        os: Os::Windows,
+        appdir: None,
+        home: &home,
+        data_root: &data_root,
+        game_folder: None,
+        dropbox: None,
+        onedrive: Some(&onedrive),
+        ci: false,
+        runner_temp: None,
+        git_in_work_tree: &mut git_probe,
+        copy_file: &mut copy,
+    };
+
+    let out = onedrive.join("Games");
+    let err = pack_folder_with(
+        &launcher_dir.join("acnh-app.exe"),
+        &assembled,
+        &prepared,
+        &out,
+        &mut ctx,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("OneDrive"), "{err}");
+    assert!(!out.join("ACNH-Universal").exists());
+}
+
+#[test]
+fn app_out_dir_for_windows_uses_localappdata_programs_or_app_dir() {
+    let data = Path::new(r"C:\Users\user\AppData\Local");
+    let home = Path::new(r"C:\Users\user");
+    assert_eq!(
+        app_out_dir_for(Os::Windows, &Config::default(), data, home),
+        data.join("Programs")
+    );
+    let cfg = Config::parse(r"app_dir = D:\Games\ACNH").unwrap();
+    assert_eq!(
+        app_out_dir_for(Os::Windows, &cfg, data, home),
+        PathBuf::from(r"D:\Games\ACNH")
+    );
 }
