@@ -300,4 +300,10 @@ unzip -tq "$work/big.zip" > /dev/null || die "the 4.2 GB archive fails unzip -t"
 rm -f "$big/sparse.bin" "$work/big.zip"
 say "zip -qry past 4 GB makes an archive that unzip -t passes"
 
+[ "$(/usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$template")" = public.app-category.simulation-games ] \
+    || die "ios/Info.plist.in lacks LSApplicationCategoryType simulation-games (Game Mode)"
+[ -n "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$template")" ] \
+    || die "ios/Info.plist.in lacks NSLocalNetworkUsageDescription"
+say "Info.plist template has the Game Mode category and the local-network text"
+
 echo "package_ios tests passed"
