@@ -180,6 +180,7 @@ final class DropboxAuth {
                     return why != null ? why : err;
                 }
                 String error = null;
+                Relay.lastHttpError = null;
                 try {
                     // save-relay checks the state, exchanges the code with its PKCE verifier and files the token.
                     JSONObject done = new JSONObject(Relay.saveRelay(app).signInFinish("http://127.0.0.1:" + PORT + target));
@@ -191,6 +192,7 @@ final class DropboxAuth {
                 } catch (Exception e) {
                     error = e.getMessage() == null ? e.toString() : e.getMessage();
                 }
+                if (error != null && Relay.lastHttpError != null) error += " [" + Relay.lastHttpError + "]";
                 reply(s.getOutputStream(), 200, error == null ? back() : page("Dropbox sign-in failed: " + error));
                 return error;
             } catch (java.net.SocketTimeoutException e) {
