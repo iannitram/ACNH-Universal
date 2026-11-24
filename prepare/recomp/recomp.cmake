@@ -74,13 +74,10 @@ foreach(t nx_capstone nx_recomp acnh_recomp)
     endif()
 endforeach()
 
-# recomp_test: the analysis on a tiny hand-made module (no game code). recomp_source_test: recomp/*.py is still the
-# version this port was made from (SOURCE: tools/setup_acnh.py's recomp_hash()).
+# recomp_test: the analysis on a tiny hand-made module (no game code).
+# recomp_source_test was retired when recomp/ moved to crates/recomp (#49, #247).
 if(NX_TESTS)
     add_executable(recomp_test "${NX_RECOMP_DIR}/recomp_test.cpp")
     target_link_libraries(recomp_test PRIVATE nx_recomp)
     add_test(NAME recomp_test COMMAND recomp_test)
-    add_executable(recomp_source_test "${NX_RECOMP_DIR}/recomp_source_test.cpp")
-    target_include_directories(recomp_source_test PRIVATE "${NX_RECOMP_ROOT}/runtime/src")
-    add_test(NAME recomp_source_test COMMAND recomp_source_test "${NX_RECOMP_ROOT}" "${NX_RECOMP_DIR}/SOURCE")
 endif()

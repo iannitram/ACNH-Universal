@@ -767,7 +767,7 @@ int build(const Options& o, std::string& error) {
 
     // game_abi.cpp: the ABI string and the longjmp the player throws through
     std::vector<std::string> a = base;
-    a.insert(a.end(), {"-O2", std::string("-DNX_GAME_ABI=\"") + GL_GAME_ABI + "\"", "-c", u8s(work / "runtime" / "game_abi.cpp"), "-o",
+    a.insert(a.end(), {"-O2", "-DNX_GAME_ABI_ONLY", std::string("-DNX_GAME_ABI=\"") + GL_GAME_ABI + "\"", "-c", u8s(work / "runtime" / "game_abi.cpp"), "-o",
                        u8s(work / "game_abi.o")});
     if (step(a, u8s(work / "abi.log")) != 0) return error = failed("game_abi.cpp: " + slurp_tail(u8s(work / "abi.log"), 2000)), 1;
 
