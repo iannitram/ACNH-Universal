@@ -106,7 +106,8 @@ Scale wanted(uint64_t present) {
         aspect = window;
     else if ((std::sscanf(a.c_str(), "%lf:%lf", &n, &d) == 2 || std::sscanf(a.c_str(), "%lfx%lf", &n, &d) == 2) && n > 0 && d > 0)
         aspect = n / d;
-    double k = std::clamp(aspect / k169, 0.5, 3.0);
+    // 0.45: a Pixel Fold's inner screen held upright (1840x2208, 5:6, k 0.469) fills the screen; 0.5 left bars.
+    double k = std::clamp(aspect / k169, 0.45, 3.0);
     if (std::fabs(k - 1.0) < 0.02) k = 1.0;
     k = std::round(k * 256.0) / 256.0;  // a few distinct values: each makes its own UI pipelines
     const double native = config_is_handheld() ? 720.0 : 1080.0;

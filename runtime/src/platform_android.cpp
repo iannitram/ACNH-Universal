@@ -698,12 +698,15 @@ ANativeWindow* android_window() { return g_window.load(); }  // platform_android
 
 bool window_minimized() { return !g_visible || !g_window; }
 
+// The window's size as the app sees it: landscape as the game asks (sensorLandscape), or portrait when the screen
+// keeps the app upright anyway (a large screen may ignore the request: a Pixel Fold's inner screen held upright).
+// It was always reported landscape, so an upright window got a landscape picture with a black bar under it.
 void screen_size(uint32_t& w, uint32_t& h) {
     ANativeWindow* win = static_cast<ANativeWindow*>(create_window());
     int32_t a = ANativeWindow_getWidth(win), b = ANativeWindow_getHeight(win);
     ANativeWindow_release(win);
-    w = uint32_t(std::max(a, b));  // landscape
-    h = uint32_t(std::min(a, b));
+    w = uint32_t(std::max(0, a));
+    h = uint32_t(std::max(0, b));
 }
 
 // The render size: resolution=WxH if set, else the screen's size times the render scale (render_scale=0.5..1, or
@@ -721,7 +724,7 @@ void window_size(uint32_t& w, uint32_t& h) {
     std::string rs = setting("render_scale");
     float scale = rs.empty() ? default_render_scale() : std::strtof(rs.c_str(), nullptr);
     scale = std::clamp(scale, 0.25f, 1.0f);
-    scale = std::min(scale, 1080.0f / float(sh));
+    scale = std::min(scale, 1080.0f / float(std::min(sw, sh)));  // the short side: rows, or columns upright
     w = uint32_t(float(sw) * scale + 0.5f) & ~1u;
     h = uint32_t(float(sh) * scale + 0.5f) & ~1u;
 }
@@ -1297,6 +1300,11 @@ void on_cmd(android_app* app, int32_t cmd) {
             break;
         case APP_CMD_LOST_FOCUS:
             break;
+        case APP_CMD_CONFIG_CHANGED:  // folded or unfolded, turned: the orientation allowed follows the screen's size
+        case APP_CMD_WINDOW_RESIZED:
+            nx::log("android: %s", cmd == APP_CMD_CONFIG_CHANGED ? "configuration changed" : "window resized");
+            request_immersive();
+            break;
         case APP_CMD_PAUSE:  // home, app switcher, screen off: the game holds (no window), so does its sound
             audio_pause(true);
             thermal_pause(true);  // and the phone gets the system's clock caps back
@@ -1435,6 +1443,48 @@ void soft_keyboard(JNIEnv* env, jobject activity, bool show) {
     nx::log("android: system keyboard %s", show ? "asked for" : "put away");
 }
 
+// A large screen (the smallest side 600 dp or more: a Pixel Fold's inner screen, a tablet) may hold the game
+// upright: the manifest's sensorLandscape is for phones, where a portrait game would be a sliver. On the Fold held
+// upright the landscape request made Android show the game letterboxed at the top with a black bar under it; the
+// renderer takes any window shape (nvn_ultrawide: a taller view upright). Asked again with each new window, as the
+// folded cover screen (under 600 dp) goes back to landscape only.
+void apply_orientation(JNIEnv* env, jobject activity) {
+    // The activity's own configuration (Java's, current at once; the glue's copy is refreshed only on its event).
+    int32_t sw = -1;
+    jclass ac = env->GetObjectClass(activity);
+    jmethodID get_res = env->GetMethodID(ac, "getResources", "()Landroid/content/res/Resources;");
+    jobject res = get_res ? env->CallObjectMethod(activity, get_res) : nullptr;
+    if (res) {
+        jclass rc = env->GetObjectClass(res);
+        jmethodID get_cfg = env->GetMethodID(rc, "getConfiguration", "()Landroid/content/res/Configuration;");
+        jobject cfg = get_cfg ? env->CallObjectMethod(res, get_cfg) : nullptr;
+        if (cfg) {
+            jclass cc = env->GetObjectClass(cfg);
+            jfieldID f = env->GetFieldID(cc, "smallestScreenWidthDp", "I");
+            if (f) sw = env->GetIntField(cfg, f);
+            env->DeleteLocalRef(cc);
+            env->DeleteLocalRef(cfg);
+        }
+        env->DeleteLocalRef(rc);
+        env->DeleteLocalRef(res);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (sw <= 0) {
+        android_app* app = nx::plat::g_app;
+        if (app && app->config) sw = AConfiguration_getSmallestScreenWidthDp(app->config);
+    }
+    const int want = sw >= 600 ? 13 : 6;  // ActivityInfo SCREEN_ORIENTATION_FULL_USER, else SENSOR_LANDSCAPE
+    static int asked = -1;
+    if (want != asked) {
+        jmethodID m = env->GetMethodID(ac, "setRequestedOrientation", "(I)V");
+        if (m) env->CallVoidMethod(activity, m, want);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        asked = want;
+        nx::log("android: smallest side %d dp: orientation %s", sw, want == 13 ? "any (large screen)" : "landscape");
+    }
+    env->DeleteLocalRef(ac);
+}
+
 int on_ui_request(int fd, int, void*) {
     char buf[16];
     ssize_t n;
@@ -1449,6 +1499,7 @@ int on_ui_request(int fd, int, void*) {
     if (keyboard) soft_keyboard(g_activity->env, g_activity->clazz, keyboard == kUiKeyboardShow);
     // The keyboard can bring the navigation bar up with it: hidden again once it has gone.
     if (bars || keyboard == kUiKeyboardHide) hide_system_bars(g_activity->env, g_activity->clazz);
+    if (bars) apply_orientation(g_activity->env, g_activity->clazz);
     return 1;
 }
 
