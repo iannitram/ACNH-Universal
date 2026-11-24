@@ -19,7 +19,7 @@ use crate::platform::{AppDirs, Os, Vars};
 use crate::recipe::{hub_for, output, serves, Hub, Stage, STAGES};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::thread::JoinHandle;
@@ -198,24 +198,9 @@ const DOTNET: &str = "10.0.401";
 const FFX: &str = "v2.4.0";
 const DLSS: &str = "v310.9.16";
 
-/// How `stage` runs for `req`. Every stage except `Stage::Recompile` (`python3 -m recomp`
-/// until #49) runs in Rust (`Step::Rust`).
-pub fn step(stage: Stage, req: &Request) -> Step {
-    match stage {
-        Stage::Recompile => Step::Script(recomp_script(req)),
-        _ => Step::Rust,
-    }
-}
-
-/// The command for `Stage::Recompile` (`python3 -m recomp` until #49).
-fn recomp_script(req: &Request) -> Vec<String> {
-    vec![
-        script_python(req.target).to_owned(),
-        "-m".to_owned(),
-        "recomp".to_owned(),
-        "--out".to_owned(),
-        req.out.display().to_string(),
-    ]
+/// How `stage` runs for `req`. Every stage runs in Rust (`Step::Rust`).
+pub fn step(_stage: Stage, _req: &Request) -> Step {
+    Step::Rust
 }
 
 fn script_python(target: Os) -> &'static str {
@@ -247,14 +232,9 @@ pub trait ScriptRunner {
         rust_version(req, &self.root())
     }
 
-    /// The recompile stage (`python3 -m recomp` per module). The default delegates to `run`
-    /// so test runners only need to implement `run`.
-    fn recompile(
-        &mut self,
-        _req: &Request,
-        args: &[String],
-    ) -> std::result::Result<(), Vec<String>> {
-        self.run(Stage::Recompile, args)
+    /// The Rust recompile stage. The default runs it (`rust_recompile`).
+    fn recompile(&mut self, req: &Request) -> Result<()> {
+        rust_recompile(req, &self.root(), 0)
     }
 
     /// Wait for any first-pass setup child before shaders inspect its output.
@@ -540,12 +520,8 @@ impl ScriptRunner for ProcessRunner {
         self.follow(Some(stage))
     }
 
-    fn recompile(
-        &mut self,
-        req: &Request,
-        _args: &[String],
-    ) -> std::result::Result<(), Vec<String>> {
-        rust_recompile(req, &self.root, self.jobs).map_err(|error| vec![error.to_string()])
+    fn recompile(&mut self, req: &Request) -> Result<()> {
+        rust_recompile(req, &self.root, self.jobs)
     }
 
     fn build(&mut self, req: &Request) -> Result<()> {
@@ -1801,7 +1777,6 @@ fn prepared_gen(out: &Path, module: &str, profile: &str, expected_hash: &str) ->
 }
 
 fn rust_recompile(req: &Request, root: &Path, jobs: u32) -> Result<()> {
-    let stage = Stage::Recompile;
     let ver_ini = std::fs::read_to_string(req.out.join("version.ini"))
         .ok()
         .and_then(|s| Config::parse(&s).ok())
@@ -1813,14 +1788,6 @@ fn rust_recompile(req: &Request, root: &Path, jobs: u32) -> Result<()> {
         .map(|s| PathBuf::from(s.trim()))
         .unwrap_or_else(|| req.game.root.clone());
 
-    let py = {
-        let vp = venv_python(root);
-        if vp.is_file() {
-            vp
-        } else {
-            PathBuf::from(script_python(req.target))
-        }
-    };
     let jobs = default_jobs(jobs);
     let expected_hash = recomp_hash(root)?;
     let recorded_hash = std::fs::read_to_string(recomp_hash_file(req)).ok();
@@ -1828,28 +1795,22 @@ fn rust_recompile(req: &Request, root: &Path, jobs: u32) -> Result<()> {
         .as_deref()
         .is_some_and(|h| h.trim() == expected_hash);
 
-    let recomp_mtime = std::fs::read_dir(root.join("recomp"))
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "py"))
-        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
-        .max();
-
     let logs = req.out.join("logs");
     std::fs::create_dir_all(&logs)?;
 
     for (module, base) in [
-        ("sdk", "0x4010000000"),
-        ("subsdk0", "0x4018000000"),
-        ("main", "0x4000000000"),
+        ("sdk", 0x40_1000_0000u64),
+        ("subsdk0", 0x40_1800_0000u64),
+        ("main", 0x40_0000_0000u64),
     ] {
         let mut h = Vec::new();
-        if module == "main" && hooks != "-" {
+        let hooks_path = if module == "main" && hooks != "-" {
             h.push("--hooks".to_owned());
             h.push(hooks.clone());
-        }
+            Some(root.join(&hooks))
+        } else {
+            None
+        };
         let variant = speedfix_args(
             req.fan_mods.speedfix,
             module,
@@ -1869,14 +1830,12 @@ fn rust_recompile(req: &Request, root: &Path, jobs: u32) -> Result<()> {
         let gen = req.out.join("gen").join(module);
         let table = gen.join("table.cpp");
         let prof_file = gen.join("profile.txt");
-        let table_mtime = std::fs::metadata(&table).and_then(|m| m.modified()).ok();
         let prof_matches = std::fs::read_to_string(&prof_file)
             .ok()
             .is_some_and(|p| p.trim() == profile);
         let stale = !table.is_file()
             || !hash_matches
             || !prof_matches
-            || recomp_mtime.is_some_and(|rm| table_mtime.is_none_or(|tm| rm > tm))
             || (module == "main"
                 && req.fan_mods.speedfix
                 && pch
@@ -1893,28 +1852,25 @@ fn rust_recompile(req: &Request, root: &Path, jobs: u32) -> Result<()> {
             continue;
         }
 
-        let mut args = vec![
-            "-m".to_owned(),
-            "recomp".to_owned(),
-            req.out.join("exefs").join(module).display().to_string(),
-            gen.display().to_string(),
-            "--name".to_owned(),
-            module.to_owned(),
-            "--base".to_owned(),
-            base.to_owned(),
-            "--jobs".to_owned(),
-            jobs.to_string(),
-        ];
-        args.extend(h);
-        run_logged(
-            stage,
-            &py,
-            &args,
-            root,
-            &[],
-            &[],
-            Some(&logs.join(format!("recomp_{module}.log"))),
-        )?;
+        let log_path = logs.join(format!("recomp_{module}.log"));
+        let mut log_file = std::io::BufWriter::new(std::fs::File::create(&log_path)?);
+        let opts = acnh_recomp::RecompileOptions {
+            nso: req.out.join("exefs").join(module),
+            out: gen.clone(),
+            name: module.to_owned(),
+            base,
+            jobs: jobs as usize,
+            only: None,
+            hooks: hooks_path,
+            variant: pch.map(PathBuf::from),
+        };
+        let result = acnh_recomp::recompile(&opts, &mut |line| {
+            let _ = writeln!(log_file, "{line}");
+        });
+        let _ = log_file.flush();
+        if let Err(err) = result {
+            return Err(Error::Build(format!("stage recompile ({module}): {err}")));
+        }
         crate::platform::atomic_write(&prof_file, format!("{profile}\n").as_bytes())?;
     }
     Ok(())
@@ -2327,13 +2283,12 @@ fn run_stages(
         }
         progress(stage);
         match step(stage, req) {
-            Step::Script(args) => runner
-                .recompile(req, &args)
-                .map_err(|log| build_error(stage, &log, home))?,
+            Step::Script(_args) => runner.recompile(req)?,
             Step::Rust => match stage {
                 Stage::Tools => runner.tools(req)?,
                 Stage::Game => runner.game(req)?,
                 Stage::Version => runner.version(req)?,
+                Stage::Recompile => runner.recompile(req)?,
                 Stage::Shaders => {
                     runner
                         .before_shaders()
@@ -2342,7 +2297,6 @@ fn run_stages(
                 }
                 Stage::Fonts => runner.fonts(req)?,
                 Stage::Build => runner.build(req)?,
-                Stage::Recompile => {}
             },
         }
         if stage == Stage::Tools {

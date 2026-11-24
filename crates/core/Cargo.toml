@@ -22,6 +22,7 @@ hub = ["dep:mdns-sd", "dep:spake2", "dep:hmac", "dep:serde", "dep:serde_json", "
 # Pure-Rust dependencies keep the core portable across desktop and mobile platforms.
 # An issue may add a pure-Rust crate when it needs one (say why in the PR).
 [dependencies]
+acnh-recomp = { path = "../recomp" }
 # SHA-256 for bundles (`bundle::manifest`, `verify`).
 sha2 = "0.10"
 # Pure-Rust TrueType parsing and composite outline traversal for the fonts stage.

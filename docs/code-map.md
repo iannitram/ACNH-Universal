@@ -118,7 +118,7 @@ flowchart TD
 
 ## Modules: `crates/recomp` (`acnh_recomp`)
 
-Ported pass by pass (ADR 0002). Each pass's output must match `python3 -m recomp` byte for byte on the same hand-written AArch64 input (never game code); `tests/difftest.py` (Unicorn) stays the oracle. `prepare` keeps upstream's driver for the recompile stage until 3.05.
+Ported pass by pass (ADR 0002) and wired into `prepare`'s recompile stage (3.05, #49); `recomp/` (Python) is deleted, and `tests/difftest.py` (Unicorn) remains the execution oracle.
 
 | Pass | Status | Replaces (lines) | Order | Musts |
 |---|---|---|---|---|
@@ -127,7 +127,7 @@ Ported pass by pass (ADR 0002). Each pass's output must match `python3 -m recomp
 | `decode` (analysis helper) | present | Targeted AArch64 decoding for analysis, including branch targets and jump-table patterns | 3.02 | M13 |
 | `Emit` (integer, branches) | present in `crates/recomp/src/emit/` | Integer, memory and branch handlers in `recomp/emit.py`, plus `emit_int.py` and `regcache.py` (`integer.rs`, `memory.rs`, `regcache.rs`). Capstone 5 supplies operand details | 3.03 | M13 |
 | `Emit` (FP, NEON) | present in `crates/recomp/src/emit/` | Scalar FP and fixed-point conversion (`fp.rs`), NEON lane operations and widening/narrowing (`neon.rs`, `neon_wide.rs`), structured transfers (`structured.rs`), and atomic, crypto and SDK extensions (`extension.rs`) | 3.04 | M13 |
-| driver | planned | `recomp/__main__.py` (303), `stats.py` (48) | 3.05 (#49, after #34) | M13 |
+| `driver` + `stats` | present | `recomp/__main__.py` (303), `stats.py` (48) | 3.05 (#49) | M13 |
 
 The synthetic emitter check (`tests/recomp_emit.py`) compares the Rust translation unit with the Python driver in four cache and hook configurations, then runs the Rust statements through the Unicorn execution oracle. Linux CI runs it with Capstone 5.0.6, lz4 and Unicorn. The test creates its binary fixtures and generated C++ in a temporary directory.
 
@@ -235,7 +235,6 @@ Upstream's own preparation, ported from ACNHRecomp-Importer v1.0.7 (MIT): from t
 
 | Path | Removed when |
 |---|---|
-| `recomp/` (Python, about 3.8k lines) | the recompile stage runs `crates/recomp` (3.05, #49) |
 | `runtime/src` outside the renderer and the overlay | the `Loader` group is Rust and the game boots (4.12) |
 | `tools/package_release_*.sh`, `tools/release_readme.sh`, `.github/workflows/build.yml` | the release workflow builds the Rust app (2.09, done); the half a hub needs (the player with its libraries) is `assemble` (1.22b); retiring the rest is 2.09a (#174) |
 
