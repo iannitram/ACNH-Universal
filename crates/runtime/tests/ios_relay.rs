@@ -1115,6 +1115,23 @@ fn a_panic_shows_the_error_screen_and_never_boots_without_syncing() {
 }
 
 #[test]
+fn turn_off_on_the_panic_screen_forgets_the_setup_and_boots_with_sync_off() {
+    let fx = Fx::new("panic-turn-off");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    fx.connector.panic_once.store(true, Ordering::SeqCst);
+    run(&fx, |game| {
+        let Shown::Blocked(Blocked::Error(_)) = game.shown() else {
+            panic!("expected the error screen")
+        };
+        assert!(!game.returned());
+        game.reply(Reply::Blocked(BlockedAnswer::TurnOff));
+        game.finish();
+    });
+    turned_off(&fx);
+}
+
+#[test]
 fn not_now_leaves_a_config_ini_that_does_not_parse_exactly_as_it_was() {
     let fx = Fx::new("bad-ini");
     island(&fx.saves(), "v1");

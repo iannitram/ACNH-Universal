@@ -945,12 +945,14 @@ extern "C" bool nx_relay_remember_not_now() {
 }
 
 // The final push, once: the game thread's end, SDL_EVENT_QUIT and SDL_EVENT_TERMINATING can all get here, and the
-// first one wins (the others find it done or running, and the process ends under it). The push itself does nothing
+// first one runs it and the others wait until it has finished (call_once blocks them), so the process never ends under a
+// push in flight. The push itself does nothing
 // before the game booted or when it started with sync off, and a running checkpoint is waited for (PUSH_LOCK).
 static void relay_after_game() {
-    static std::atomic<bool> pushed{false};
-    if (pushed.exchange(true)) return;
-    if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
+    });
 }
 
 // The Saves page's Sync now (platform.h, SaveSync): the background push on a worker (relay_ios.rs), and what the page
