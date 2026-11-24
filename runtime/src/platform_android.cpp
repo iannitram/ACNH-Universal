@@ -51,6 +51,7 @@
 #include "game_clock.h"
 #include "kernel.h"
 #include "platform.h"
+#include "controller_kind.h"
 #include "config.h"
 #include "platform_android.h"
 #include "ui/ui.h"
@@ -1075,19 +1076,6 @@ std::string controller_kind() {
     std::lock_guard lk(g_pad_info_lock);
     return g_pad_kind;
 }
-
-// The kind by the maker's USB vendor id, else the name: "switch" (Nintendo's own pads), "xbox", "playstation", or
-// "generic" (a Razer Kishi, an 8BitDo in X-input mode, ...). The settings screen's glyphs and the automatic confirm
-// button (input.layout auto) follow it.
-std::string pad_kind(int vendor, const std::string& name) {
-    std::string n;
-    for (char ch : name) n += char(std::tolower(static_cast<unsigned char>(ch)));
-    auto has = [&](const char* s) { return n.find(s) != std::string::npos; };
-    if (vendor == 0x057e || has("nintendo") || has("pro controller") || has("joy-con")) return "switch";
-    if (vendor == 0x045e || has("xbox")) return "xbox";
-    if (vendor == 0x054c || has("dualsense") || has("dualshock") || has("playstation")) return "playstation";
-    return "generic";
-}
 void rumble(float, float, uint32_t) {}
 // The folder picker and "open folder" (the settings screen's Saves page) are android/java Picker: NativeActivity gets
 // no activity results, so the picked path comes back through a file in the app's own folder.
@@ -1335,7 +1323,7 @@ bool gamepad_connected(android_app* app) {
     env->DeleteLocalRef(dev);
     {
         std::lock_guard lk(nx::plat::g_pad_info_lock);
-        const std::string kind = found ? nx::plat::pad_kind(vendor, pad_name) : "";
+        const std::string kind = nx::plat::android_controller_kind(found, vendor, pad_name);
         if (pad_name != nx::plat::g_pad_name || kind != nx::plat::g_pad_kind)
             nx::log("input: controller %s (vendor %04x): %s", found ? pad_name.c_str() : "none", vendor,
                     found ? kind.c_str() : "-");

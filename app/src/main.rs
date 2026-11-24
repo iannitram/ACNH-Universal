@@ -609,6 +609,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Every frame: the gamepad's presses go in, and what the running job reported comes out.
     let mut gilrs = gilrs::Gilrs::new().ok();
     let mut stick = Stick::default();
+    #[cfg(target_os = "android")]
+    let mut android_hotplug = acnh_app::input::AndroidHotplug::default();
     let timer = Timer::default();
     let weak = window.as_weak();
     let mut was_first_open = window.get_first_run_open();
@@ -616,6 +618,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut recheck = RecheckWhenClosed::default();
     let mut fleet_tick = 0_u32;
     timer.start(TimerMode::Repeated, Duration::from_millis(16), move || {
+        #[cfg(target_os = "android")]
+        android_hotplug.poll_if_due(
+            std::time::Instant::now(),
+            &mut devices.borrow_mut(),
+            acnh_app::input::android::connected_devices,
+        );
         let navs = match gilrs.as_mut() {
             Some(gilrs) => poll_nav(gilrs, &mut stick, &mut devices.borrow_mut()),
             None => Vec::new(),

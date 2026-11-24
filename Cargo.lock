@@ -26,6 +26,8 @@ dependencies = [
  "arboard",
  "gilrs",
  "image",
+ "jni",
+ "ndk-context",
  "save-relay",
  "slint",
  "slint-build",
