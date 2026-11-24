@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "nvn_shaders.h"
+#include "nvn_aspect.h"
 #include "nvn_ultrawide.h"
 #include "nvn_vk.h"
 #include "ui/ui.h"
@@ -1315,9 +1316,9 @@ void present_image(const int32_t* crop, Record&& record) {
         // Fit with bars, as the present pass does (nvn_present.cpp): a picture of another shape than the window keeps
         // its own (a fixed aspect ratio setting, and while the window is being resized).
         const float cw = float(blit.srcOffsets[1].x - blit.srcOffsets[0].x), ch = float(blit.srcOffsets[1].y - blit.srcOffsets[0].y);
-        const float tw = float(g_sc_extent.width), th = float(g_sc_extent.height), fit = std::min(tw / cw, th / ch);
-        int32_t bw = std::min(int32_t(tw), int32_t(cw * fit + 0.5f)), bh = std::min(int32_t(th), int32_t(ch * fit + 0.5f));
-        int32_t bx = (int32_t(tw) - bw) / 2, by = (int32_t(th) - bh) / 2;
+        const float tw = float(g_sc_extent.width), th = float(g_sc_extent.height);
+        const LetterboxRect lb = compute_letterbox(cw, ch, tw, th);
+        const int32_t bw = lb.px_w, bh = lb.px_h, bx = lb.px_x, by = lb.px_y;
         blit.dstOffsets[0] = {bx, by, 0};
         blit.dstOffsets[1] = {bx + bw, by + bh, 1};
         if (bw < int32_t(tw) || bh < int32_t(th)) {
@@ -1332,7 +1333,7 @@ void present_image(const int32_t* crop, Record&& record) {
             p_vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0,
                                    nullptr, 0, nullptr);
         }
-        plat::set_picture_box(float(bx) / tw, float(by) / th, float(bw) / tw, float(bh) / th);  // mouse clicks (hle_hid.cpp)
+        plat::set_picture_box(lb.x, lb.y, lb.w, lb.h);  // mouse clicks (hle_hid.cpp)
         p_vkCmdBlitImage(g_cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
     }
