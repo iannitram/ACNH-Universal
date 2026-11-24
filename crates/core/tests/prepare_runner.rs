@@ -5,8 +5,8 @@ use acnh_core::gamefolder::GameFolder;
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{
     delivery_folder, delivery_subfolder, install_mod_archive, install_mods, prepare_installed,
-    prepare_with, recomp_hash, rust_version, speedfix_args, speedfix_patch, step, toolchain_with,
-    Missing, ProcessRunner, Request, ScriptRunner, Step,
+    prepare_with, recomp_hash, rust_build, rust_version, speedfix_args, speedfix_patch, step,
+    toolchain_with, Missing, ProcessRunner, Request, ScriptRunner, Step,
 };
 use acnh_core::recipe::{Hub, Stage, STAGES};
 use acnh_core::version::Version;
@@ -815,7 +815,14 @@ fn find<'a>(missing: &'a [Missing], what: &str) -> Option<&'a Missing> {
 fn mac_finds_homebrew_off_path_and_names_a_missing_molten_vk() {
     let base = toolchain_dir("mac-brew");
     let bin = base.join("app/usr/bin");
-    for tool in ["clang", "clang++", "curl", "python3", "xcode-select"] {
+    for tool in [
+        "clang",
+        "clang++",
+        "curl",
+        "python3",
+        "xcode-select",
+        "cargo",
+    ] {
         file(&bin.join(tool));
     }
     // No brew on PATH: the fake prefix is found through toolchain_with, as the Finder's
@@ -841,7 +848,7 @@ fn mac_finds_homebrew_off_path_and_names_a_missing_molten_vk() {
 fn linux_names_a_missing_clang_and_warns_about_missing_libvpx() {
     let base = toolchain_dir("linux-clang");
     let bin = base.join("usr/bin");
-    for tool in ["clang++", "curl", "python3"] {
+    for tool in ["clang++", "curl", "python3", "cargo"] {
         file(&bin.join(tool));
     }
     let prefix = base.join("usr");
@@ -859,10 +866,25 @@ fn linux_names_a_missing_clang_and_warns_about_missing_libvpx() {
 }
 
 #[test]
+fn a_missing_cargo_is_named_on_every_desktop_os() {
+    let base = toolchain_dir("no-cargo");
+    let bin = base.join("usr/bin");
+    for tool in ["clang", "clang++", "curl", "python3"] {
+        file(&bin.join(tool));
+    }
+    let missing = toolchain_with(Os::Linux, &bin, &[]);
+    let cargo = find(&missing, "cargo").expect("cargo is named");
+    assert!(!cargo.warning);
+    assert!(cargo.install.contains("rustup"), "{cargo:?}");
+    let missing = toolchain_with(Os::Windows, base.join("empty"), &[]);
+    assert!(find(&missing, "cargo").is_some(), "{missing:?}");
+}
+
+#[test]
 fn a_complete_toolchain_has_nothing_missing() {
     let base = toolchain_dir("linux-complete");
     let bin = base.join("usr/bin");
-    for tool in ["clang", "clang++", "curl", "python3"] {
+    for tool in ["clang", "clang++", "curl", "python3", "cargo"] {
         file(&bin.join(tool));
     }
     let prefix = base.join("usr");
@@ -881,7 +903,7 @@ fn linked_python(name: &str, with_venv: bool) -> Vec<Missing> {
     let base = toolchain_dir(name);
     let prefix = base.join("usr");
     let bin = prefix.join("bin");
-    for tool in ["clang", "clang++", "curl"] {
+    for tool in ["clang", "clang++", "curl", "cargo"] {
         file(&bin.join(tool));
     }
     file(&prefix.join("include/SDL3/SDL.h"));
@@ -1826,4 +1848,65 @@ fn recompile_hash_changes_when_recomp_python_file_changes() {
     let h2 = recomp_hash(&source).unwrap();
     assert_ne!(h1, h2);
     let _ = std::fs::remove_dir_all(&source);
+}
+
+/// Decoy `cargo`, `cmake` and `ninja` in the source's venv folder, where the build tools are
+/// found first. They log their arguments; the cargo decoy lays out what a runtime build leaves.
+#[cfg(unix)]
+#[test]
+fn the_desktop_build_builds_the_runtime_and_gives_cmake_its_archive_and_header() {
+    use std::os::unix::fs::PermissionsExt;
+    let req = request("rust-build-runtime", Os::current());
+    let root = req.out.join("src");
+    let bin = root.join("private/venv/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = req.out.join("calls.log");
+    let decoy = |name: &str, body: &str| {
+        let path = bin.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    decoy(
+        "cargo",
+        r#"while [ $# -gt 0 ]; do [ "$1" = --target-dir ] && t=$2; shift; done
+mkdir -p "$t/release/build/acnh-runtime/abc/out/include"
+: > "$t/release/libacnh_runtime.a"
+: > "$t/release/build/acnh-runtime/abc/out/include/acnh_runtime.h""#,
+    );
+    decoy("cmake", "exit 0");
+    decoy("ninja", "exit 0");
+
+    rust_build(&req, &root, 1).unwrap();
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = calls.lines().collect();
+    assert_eq!(lines.len(), 3, "{calls}");
+    assert!(
+        lines[0].starts_with("cargo build -p acnh-runtime --release"),
+        "{calls}"
+    );
+    let target = req.out.join("runtime-target/release");
+    assert!(lines[1].starts_with("cmake "), "{calls}");
+    assert!(
+        lines[1].contains(&format!(
+            "-DNX_RUNTIME_ARCHIVE={}",
+            target.join("libacnh_runtime.a").display()
+        )),
+        "{calls}"
+    );
+    assert!(
+        lines[1].contains(&format!(
+            "-DNX_RUNTIME_INCLUDE={}",
+            target.join("build/acnh-runtime/abc/out/include").display()
+        )),
+        "{calls}"
+    );
+    assert!(lines[2].starts_with("ninja "), "{calls}");
 }
