@@ -94,11 +94,6 @@ else()
         target_link_libraries(acnh_prepare PRIVATE shell32)  # CommandLineToArgvW (io/args_utf8.h)
     endif()
     set(NX_PREPARE_TARGETS nx_gamelib nx_prepare acnh_prepare)
-    # The launcher prepares the game folder itself (launcher/prepare_job.cpp): the stages on their worker thread.
-    if(TARGET acnhrecomp_launcher)
-        target_link_libraries(acnhrecomp_launcher PRIVATE nx_prepare)
-        target_compile_definitions(acnhrecomp_launcher PRIVATE NX_LAUNCHER_PREPARE)
-    endif()
 endif()
 
 foreach(t ${NX_PREPARE_TARGETS})
@@ -121,7 +116,6 @@ endforeach()
 #   prepare_e2e           the stages and acnh_prepare end to end, the recompile skipped and a fake shader tool
 #   prepare_e2e_zig       the Compile stage with a real zig (NX_PREPARE_ZIG_DIR, fetched there by tools/fetch_zig.py
 #                         when missing; skipped when it cannot be downloaded) on tools/make_fake_gen.py's stand-in
-#   prepare_launcher      the folders written, checked by launcher/files.cpp (with the player beside it, find_build)
 if(NX_TESTS AND NOT ANDROID)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     set(NX_PREPARE_ZIG_DIR "${CMAKE_BINARY_DIR}/zig" CACHE PATH "zig for prepare_e2e_zig (tools/fetch_zig.py)")
@@ -149,24 +143,4 @@ if(NX_TESTS AND NOT ANDROID)
     add_test(NAME prepare_e2e_zig COMMAND prepare_e2e_test zig "${NX_PREPARE_ROOT}" "${CMAKE_BINARY_DIR}/prepare_e2e_zig"
              $<TARGET_FILE:fake_shader_tool> "${NX_PREPARE_ZIG_DIR}" "${Python3_EXECUTABLE}" "${NX_ZIG_HOST}")
     set_tests_properties(prepare_e2e_zig PROPERTIES TIMEOUT 1800 SKIP_RETURN_CODE 77 RUN_SERIAL ON)
-
-    if(TARGET acnhrecomp_launcher)  # SDL3 found: launcher/files.cpp builds
-        add_executable(prepare_launcher_test "${NX_PREPARE_DIR}/prepare_launcher_test.cpp"
-                       "${NX_PREPARE_ROOT}/launcher/files.cpp" "${NX_PREPARE_ROOT}/runtime/src/ui/i18n.cpp")
-        target_include_directories(prepare_launcher_test PRIVATE "${NX_PREPARE_ROOT}/launcher" "${NX_PREPARE_ROOT}/runtime/src")
-        target_compile_definitions(prepare_launcher_test PRIVATE NX_HAVE_SDL3 NX_LAUNCHER_UI)
-        target_link_libraries(prepare_launcher_test PRIVATE SDL3::SDL3 Threads::Threads nx_prepare_io)
-        if(WIN32)
-            target_link_libraries(prepare_launcher_test PRIVATE ole32 shell32 uuid)
-        endif()
-        if(MSVC)
-            target_compile_options(prepare_launcher_test PRIVATE /utf-8)
-            target_compile_definitions(prepare_launcher_test PRIVATE _CRT_SECURE_NO_WARNINGS)
-        endif()
-        # in the build folder, beside the player (acnh): find_build takes the folder as a release does
-        set_target_properties(prepare_launcher_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-        add_test(NAME prepare_launcher COMMAND prepare_launcher_test "${CMAKE_BINARY_DIR}/prepare_e2e/out1"
-                 "${CMAKE_BINARY_DIR}/prepare_e2e_zig/out_zig" "${CMAKE_BINARY_DIR}/prepare_e2e/in/ACNH")
-        set_tests_properties(prepare_launcher PROPERTIES FIXTURES_REQUIRED prepare_folder DEPENDS prepare_e2e_zig)
-    endif()
 endif()
