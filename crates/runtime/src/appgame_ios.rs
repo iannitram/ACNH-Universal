@@ -13,7 +13,7 @@
 //!
 //! Strings returned to C are allocated here and freed with `acnh_appgame_free`.
 
-use super::appgame::{api_arg, done_json, finish_json, plan_json};
+use super::appgame::{api_arg, finish_json, installed_matches, plan_json};
 use super::relay::ios::KeychainStore;
 use save_relay::clients;
 use save_relay::creds::{CredentialStore, Secret};
@@ -94,13 +94,25 @@ pub unsafe extern "C" fn acnh_appgame_plan(
     ))
 }
 
-/// A file finished: checks its hash (`{"ok":true,"verified":bool}`).
+/// True when `root`'s downloaded game (`game/manifest.json`) is of a build and runtime this app
+/// plays (`abi`, `builds` as in `acnh_appgame_plan`).
+///
+/// # Safety
+/// The strings are null or NUL-terminated.
 #[no_mangle]
-pub extern "C" fn acnh_appgame_file_done(root: *const c_char, path: *const c_char) -> *mut c_char {
-    let (Some(root), Some(path)) = (text(root), text(path)) else {
-        return error("no folder or no file name");
+pub unsafe extern "C" fn acnh_appgame_installed_ok(
+    root: *const c_char,
+    abi: *const c_char,
+    builds: *const c_char,
+) -> bool {
+    let Some(root) = text(root) else {
+        return false;
     };
-    out(done_json(&PathBuf::from(root), &path))
+    installed_matches(
+        &PathBuf::from(root),
+        &text(abi).unwrap_or_default(),
+        &text(builds).unwrap_or_default(),
+    )
 }
 
 /// Every file checked: installs `game/` (read-only).

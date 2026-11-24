@@ -198,25 +198,6 @@ fn pending(root: &Path) -> Result<(Vec<u8>, Manifest), Error> {
     Ok((bytes, manifest))
 }
 
-/// A file the session finished: `{"ok":true,"verified":true}`, or `verified:false` after a wrong
-/// hash (the file is deleted, so the next plan fetches it again from 0).
-pub fn done_json(root: &Path, path: &str) -> Value {
-    let run = || -> Result<Value, Error> {
-        let (_, manifest) = pending(root)?;
-        let file = manifest
-            .files
-            .iter()
-            .find(|f| f.path == path)
-            .ok_or_else(|| Error::BadGameFolder(format!("{path} is not in the file list")))?;
-        let right = core::verify_partial(root, file)?;
-        if right {
-            mark_verified(root, file)?;
-        }
-        Ok(json!({"ok": true, "verified": right}))
-    };
-    run().unwrap_or_else(|e| from_error(&e))
-}
-
 /// Every file checked: `game/` replaces `game.partial/` in one rename, read-only.
 pub fn finish_json(root: &Path) -> Value {
     let run = || -> Result<Value, Error> {
@@ -243,4 +224,15 @@ pub fn finish_json(root: &Path) -> Value {
 /// True when `game/` holds a finished download (its `manifest.json`).
 pub fn installed(root: &Path) -> bool {
     root.join(GAME_DIR).join(MANIFEST_NAME).is_file()
+}
+
+/// True when the finished download in `root/game/` is a game this app can play: its `manifest.json`
+/// parses and names a build in `builds` and the runtime `abi` (empty accepts any, as in `plan_json`).
+/// A game from another build, an unreadable manifest or no `game/` is false. The player checks this
+/// at every start, since `game/` outlives an app update and the code linked into the player is of
+/// one build only.
+pub fn installed_matches(root: &Path, abi: &str, builds: &str) -> bool {
+    fs::read(root.join(GAME_DIR).join(MANIFEST_NAME))
+        .map(|bytes| parse(&bytes, abi, builds).is_ok())
+        .unwrap_or(false)
 }

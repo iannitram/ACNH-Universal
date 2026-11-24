@@ -147,12 +147,17 @@ runtime_header=$(find "$cargo_target/$rust_target/release/build" -name acnh_runt
 ios_short_version=${BASE_VER%%-*}
 ios_short_version=${ios_short_version%%+*}
 echo "iOS version $VNAME (CFBundleShortVersionString=$ios_short_version, CFBundleVersion=$VCODE)"
-# The game build the recompiled code is for (game.ini beside gen/): the small .ipa refuses a downloaded game of another
-# build, since the code is linked in. NX_APPGAME_BUILDS overrides; none known accepts any.
+# The game build the recompiled code is for (Prepare's version.ini beside gen/, else a game.ini there): the small .ipa
+# refuses a downloaded game of another build, since the code is linked in. NX_APPGAME_BUILDS overrides; none known
+# accepts any.
 appgame_builds=${NX_APPGAME_BUILDS:-}
-if [ -z "$appgame_builds" ] && [ -f "$gen/../game.ini" ]; then
-    appgame_builds=$(sed -n 's/^[[:space:]]*build_id[[:space:]]*=[[:space:]]*\([0-9A-Fa-f]\{32\}\)[[:space:]]*$/\1/p' "$gen/../game.ini" \
-        | head -n 1 | tr 'a-f' 'A-F')
+if [ -z "$appgame_builds" ]; then
+    for ini in "$gen/../version.ini" "$gen/../game.ini"; do
+        [ -f "$ini" ] || continue
+        appgame_builds=$(sed -n 's/^[[:space:]]*build_id[[:space:]]*=[[:space:]]*\([0-9A-Fa-f]\{32\}\)[[:space:]]*$/\1/p' "$ini" \
+            | head -n 1 | tr 'a-f' 'A-F')
+        [ -n "$appgame_builds" ] && break
+    done
 fi
 cmake -S "$root" -B "$build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \

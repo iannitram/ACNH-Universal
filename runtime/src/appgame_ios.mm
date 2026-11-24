@@ -34,6 +34,7 @@ void acnh_appgame_free(char*);
 char* acnh_appgame_plan(const char* root, const uint8_t* manifest, size_t manifest_len, const char* abi,
                         const char* builds, uint64_t free_bytes);
 char* acnh_appgame_finish(const char* root);
+bool acnh_appgame_installed_ok(const char* root, const char* abi, const char* builds);
 char* acnh_appgame_api_arg(const char* path);
 bool acnh_appgame_signed_in(void);
 char* acnh_appgame_sign_in_start(void);
@@ -724,4 +725,11 @@ extern "C" const char* nx_appgame_game_dir() {
     static std::string dir;
     if (dir.empty()) dir = std::string(game_path().UTF8String);
     return dir.c_str();
+}
+
+// Whether the downloaded game (Application Support/game/manifest.json) is of the build and runtime this app was compiled
+// for. game/ outlives an app update and a SideStore re-sign, and the game's code is linked into the player, so
+// platform_mac.cpp asks at every start and offers the matching download (nx_appgame_first_start) when it is not.
+extern "C" bool nx_appgame_game_matches() {
+    return acnh_appgame_installed_ok(support_root().UTF8String, kAbi, kBuilds);
 }

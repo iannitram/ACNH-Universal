@@ -58,16 +58,19 @@ case "$1" in
             esac
             shift 2
         done
-        # The prepared folder's game.ini names its build: take it when --build-id is not given, refuse a different one
-        # (the player's code is linked from one build, and a wrong game fails at boot).
+        # The prepared folder names its build in the version.ini Prepare writes (else a game.ini): take it when --build-id
+        # is not given, refuse a different one (the player's code is linked from one build, and a wrong game fails at boot).
         ini_id=
-        if [ -f "$game/game.ini" ]; then
-            ini_id=$(sed -n 's/^[[:space:]]*build_id[[:space:]]*=[[:space:]]*\([0-9A-Fa-f]\{32\}\)[[:space:]]*$/\1/p' "$game/game.ini" \
+        ini_name=
+        for ini_name in version.ini game.ini; do
+            [ -f "$game/$ini_name" ] || continue
+            ini_id=$(sed -n 's/^[[:space:]]*build_id[[:space:]]*=[[:space:]]*\([0-9A-Fa-f]\{32\}\)[[:space:]]*$/\1/p' "$game/$ini_name" \
                 | head -n 1 | tr 'a-f' 'A-F')
-        fi
+            [ -n "$ini_id" ] && break
+        done
         if [ -z "$build_id" ]; then build_id=$ini_id; fi
         if [ -n "$ini_id" ] && [ "$ini_id" != "$(printf '%s' "$build_id" | tr 'a-f' 'A-F')" ]; then
-            fail "--build-id $build_id is not the build of the prepared folder ($ini_id in its game.ini)"
+            fail "--build-id $build_id is not the build of the prepared folder ($ini_id in its $ini_name)"
         fi
         case "$build_id" in
             [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) ;;
