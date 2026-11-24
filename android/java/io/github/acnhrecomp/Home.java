@@ -89,7 +89,8 @@ public class Home extends Activity {
             finish();
             return;
         }
-        boolean ask = getIntent().getBooleanExtra("pick", false) || error != null;
+        boolean signedInReturn = getIntent().getData() != null && "acnhrecomp".equals(getIntent().getData().getScheme());
+        boolean ask = getIntent().getBooleanExtra("pick", false) || error != null || signedInReturn;
         if (ask) GameDownload.finished = false;  // "Change game folder" or an error: no automatic start
         // While a download runs the game does not start by itself: leaving the game ends the app's process, and
         // the download with it.
@@ -117,6 +118,7 @@ public class Home extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        DropboxAuth.setForeground(true);
         Relay.attach(this);
         if (Relay.running()) return;
         // the game being prepared, or prepared and its end not seen yet: its screen (Android can bring this task to
@@ -137,6 +139,7 @@ public class Home extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        DropboxAuth.setForeground(false);
         ticks.removeCallbacksAndMessages(null);
     }
 

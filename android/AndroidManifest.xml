@@ -33,7 +33,7 @@
                  android:requestLegacyExternalStorage="true"
                  android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules"
                  android:networkSecurityConfig="@xml/network_security_config">
-        <activity android:name="io.github.acnhrecomp.Home" android:exported="true"
+        <activity android:name="io.github.acnhrecomp.Home" android:exported="true" android:launchMode="singleTask"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar"
                   android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation">
             <intent-filter>
