@@ -206,7 +206,7 @@ const std::vector<fs::path>& mod_roots() {
                 return value == "1" || value == "on" || value == "true";
             };
             if ((name == "ptbr" && !enabled("mods.ptbr")) ||
-                (name == "speedfix60" && !enabled("mods.speedfix"))) continue;
+                (name == "speedfix60" && !enabled("mods.speedfix") && config_get("video.frame_rate", "") != "60")) continue;
             fs::path root = data_root() / "mods" / fs::u8path(name) / "romfs";
             std::error_code ec;
             if (fs::is_directory(root, ec)) {

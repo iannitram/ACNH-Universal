@@ -514,7 +514,14 @@ public class Home extends Activity {
             return;
         }
         busy = true;
-        if (!quiet) {
+        if (quiet) {
+            box = Screen.page(this, "ACNH Recomp");
+            message = Screen.text(this, t("Starting the game...", "Abrindo o jogo..."), 16, Screen.TEXT);
+            box.addView(message);
+            ProgressBar p = new ProgressBar(this);
+            p.setTag("progress");
+            box.addView(p);
+        } else {
             if (message == null) show(null);
             say(t("Preparing the game...", "Preparando o jogo..."), false);
             ProgressBar p = new ProgressBar(this);
@@ -547,7 +554,7 @@ public class Home extends Activity {
                     return;
                 }
                 // The island first (save sync: Relay), then the game, which starts once the pull lets it.
-                if (!quiet) say(t("Syncing your island...", "Sincronizando a sua ilha..."), false);
+                say(t("Syncing your island with Dropbox...", "Sincronizando a sua ilha com o Dropbox..."), false);
                 Relay.beforeGame(this, folder);
             });
         }).start();
