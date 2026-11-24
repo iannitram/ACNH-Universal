@@ -69,6 +69,7 @@ VkSemaphore g_acquired = VK_NULL_HANDLE, g_rendered = VK_NULL_HANDLE;
 VkBool32 g_depth_clip_control = VK_FALSE;
 VkBool32 g_fragment_interlock = VK_FALSE;  // fragmentShaderPixelInterlock (vk_fragment_interlock)
 bool g_dynamic_rendering = true;  // vkCmdBeginRendering usable (core 1.3 or VK_KHR_dynamic_rendering)
+bool g_descriptor_update_template = false;  // core 1.1 or VK_KHR_descriptor_update_template
 // Intel's Windows driver of the 101.2xxx branch and older (Gen9, Skylake to Comet Lake: HD 530/620/630): it crashed in
 // its dynamic rendering (vk_intel_windows_legacy, nvn_renderpass.cpp).
 bool g_intel_windows_legacy = false;
@@ -310,6 +311,12 @@ bool init() {
     if (api < VK_API_VERSION_1_3 && has_extension(dext, "VK_KHR_dynamic_rendering")) {
         dexts.push_back("VK_KHR_dynamic_rendering");
         *tail = &fdyn, tail = &fdyn.pNext;
+    }
+    if (api < VK_API_VERSION_1_1 && has_extension(dext, "VK_KHR_descriptor_update_template")) {
+        dexts.push_back("VK_KHR_descriptor_update_template");
+        g_descriptor_update_template = true;
+    } else if (api >= VK_API_VERSION_1_1) {
+        g_descriptor_update_template = true;
     }
     if (has_extension(dext, "VK_EXT_fragment_shader_interlock")) {
         dexts.push_back("VK_EXT_fragment_shader_interlock");
@@ -764,6 +771,7 @@ uint32_t vk_queue_family() { return g_family; }
 bool vk_depth_clip_control() { return g_depth_clip_control; }
 bool vk_fragment_interlock() { return g_fragment_interlock; }
 bool vk_dynamic_rendering() { return g_dynamic_rendering; }
+bool vk_descriptor_update_template() { return g_descriptor_update_template; }
 bool vk_intel_windows_legacy() { return g_intel_windows_legacy; }
 const VkPhysicalDeviceFeatures& vk_features() { return g_features; }
 bool vk_robust_buffer_access2() { return g_robust2; }

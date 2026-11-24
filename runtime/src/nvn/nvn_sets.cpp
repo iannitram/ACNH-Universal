@@ -8,6 +8,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "nvn_draw_state.h"
 #include "nvn_ultrawide.h"
@@ -341,8 +342,13 @@ VkDescriptorBufferInfo buffer_of(VkCommandBuffer cb, const void* bytes, uint64_t
         return {u.buffer, u.offset, n};
     }
     Upload u = upload_alloc(n, 256);
-    std::memset(u.ptr, 0, n);
-    if (bytes && size) std::memcpy(u.ptr, bytes, size);
+    if (bytes && size) {
+        const uint64_t copy = std::min(size, n);
+        std::memcpy(u.ptr, bytes, copy);
+        if (n > copy) std::memset(u.ptr + copy, 0, n - copy);
+    } else {
+        std::memset(u.ptr, 0, n);
+    }
     // Only what a compute shader may have written goes back. Host scratch data came here too and was "written back"
     // after the submit to the stack address it had been built at (the support buffer and c[0] of every stage of every
     // draw, into a dead frame; with NX_ASYNC_GPU from whichever thread retired the submit). NX_DRAW_SLOW keeps that.
@@ -507,6 +513,93 @@ void resolve_sets(const ProgramLayout& layout) {
     for (size_t i = 0; i < d.writes.size(); i++)
         if (d.writes[i].dstSet) d.writes[kept++] = d.writes[i];
     d.writes.resize(kept);
+}
+
+// VK_KHR_descriptor_update_template / Vulkan 1.1 core: pre-compiled descriptor layout updates per
+// (VkDescriptorSetLayout, binding/type sequence) to avoid per-binding VkWriteDescriptorSet parsing.
+// NX_DESCRIPTOR_TEMPLATE=0 disables.
+struct TemplateSlot {
+    union {
+        VkDescriptorBufferInfo buf;
+        VkDescriptorImageInfo img;
+    };
+};
+
+struct TemplateBinding {
+    uint32_t binding = 0;
+    uint32_t type = 0;
+    bool operator==(const TemplateBinding& o) const { return binding == o.binding && type == o.type; }
+};
+
+struct TemplateCacheEntry {
+    uint64_t hash = 0;
+    std::vector<TemplateBinding> entries;
+    VkDescriptorUpdateTemplate tmpl = VK_NULL_HANDLE;
+};
+
+struct TemplateApi {
+    PFN_vkCreateDescriptorUpdateTemplate create = nullptr;
+    PFN_vkUpdateDescriptorSetWithTemplate update = nullptr;
+};
+
+const TemplateApi& template_api() {
+    static const TemplateApi api = [] {
+        TemplateApi t;
+        const char* e = std::getenv("NX_DESCRIPTOR_TEMPLATE");
+        if (e && e[0] == '0') return t;
+        const char* d = std::getenv("NX_VK_DEFER");
+        if (d && d[0] == '1') return t;
+        if (!vk_descriptor_update_template()) return t;
+        if (p_vkCreateDescriptorUpdateTemplate && p_vkUpdateDescriptorSetWithTemplate) {
+            t.create = p_vkCreateDescriptorUpdateTemplate;
+            t.update = p_vkUpdateDescriptorSetWithTemplate;
+        } else if (p_vkCreateDescriptorUpdateTemplateKHR && p_vkUpdateDescriptorSetWithTemplateKHR) {
+            t.create = p_vkCreateDescriptorUpdateTemplateKHR;
+            t.update = p_vkUpdateDescriptorSetWithTemplateKHR;
+        }
+        return t;
+    }();
+    return api;
+}
+
+PerThread<std::unordered_map<VkDescriptorSetLayout, std::vector<TemplateCacheEntry>>> g_tmpl_cache;
+PerThread<std::vector<TemplateBinding>> g_tmpl_keys;
+PerThread<std::vector<TemplateSlot>> g_tmpl_slots;
+PerThread<std::vector<VkDescriptorUpdateTemplateEntry>> g_tmpl_entries;
+
+VkDescriptorUpdateTemplate get_update_template(VkDescriptorSetLayout layout,
+                                               const std::vector<TemplateBinding>& keys) {
+    const TemplateApi& api = template_api();
+    if (!api.create || !api.update || !layout || keys.empty()) return VK_NULL_HANDLE;
+    uint64_t h = handle_bits(layout) * 0x9E3779B97F4A7C15ull;
+    for (const TemplateBinding& k : keys) {
+        uint64_t v = (uint64_t(k.binding) << 32) | k.type;
+        h = (h ^ v) * 0x100000001B3ull, h ^= h >> 31;
+    }
+    auto& bucket = (*g_tmpl_cache)[layout];
+    for (const TemplateCacheEntry& e : bucket)
+        if (e.hash == h && e.entries == keys) return e.tmpl;
+    auto& entries = *g_tmpl_entries;
+    entries.resize(keys.size());
+    for (size_t i = 0; i < keys.size(); i++) {
+        VkDescriptorUpdateTemplateEntry& te = entries[i];
+        te = {};
+        te.dstBinding = keys[i].binding;
+        te.dstArrayElement = 0;
+        te.descriptorCount = 1;
+        te.descriptorType = VkDescriptorType(keys[i].type);
+        te.offset = i * sizeof(TemplateSlot);
+        te.stride = sizeof(TemplateSlot);
+    }
+    VkDescriptorUpdateTemplateCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO};
+    ci.descriptorUpdateEntryCount = uint32_t(entries.size());
+    ci.pDescriptorUpdateEntries = entries.data();
+    ci.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET;
+    ci.descriptorSetLayout = layout;
+    VkDescriptorUpdateTemplate tmpl = VK_NULL_HANDLE;
+    if (api.create(vk_device(), &ci, nullptr, &tmpl) != VK_SUCCESS || !tmpl) return VK_NULL_HANDLE;
+    bucket.push_back({h, keys, tmpl});
+    return tmpl;
 }
 
 }  // namespace
@@ -752,14 +845,30 @@ uint32_t sets_set0_writes(BufferWrite* out, uint32_t max) {
 VkDescriptorSet sets_write_set(VkDescriptorSetLayout layout, const BufferWrite* w, uint32_t n) {
     VkDescriptorSet set = descriptor_set(layout);
     if (!set) return VK_NULL_HANDLE;
-    VkWriteDescriptorSet writes[64];
     n = std::min<uint32_t>(n, 64);
-    for (uint32_t i = 0; i < n; i++) {
-        writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        writes[i].dstSet = set, writes[i].dstBinding = w[i].binding, writes[i].descriptorCount = 1;
-        writes[i].descriptorType = w[i].type, writes[i].pBufferInfo = &w[i].info;
+    if (n) {
+        const TemplateApi& api = template_api();
+        if (api.update) {
+            auto& keys = *g_tmpl_keys;
+            auto& slots = *g_tmpl_slots;
+            keys.resize(n), slots.resize(n);
+            for (uint32_t i = 0; i < n; i++) {
+                keys[i] = {w[i].binding, uint32_t(w[i].type)};
+                slots[i].buf = w[i].info;
+            }
+            if (VkDescriptorUpdateTemplate tmpl = get_update_template(layout, keys)) {
+                api.update(vk_device(), set, tmpl, slots.data());
+                return set;
+            }
+        }
+        VkWriteDescriptorSet writes[64];
+        for (uint32_t i = 0; i < n; i++) {
+            writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[i].dstSet = set, writes[i].dstBinding = w[i].binding, writes[i].descriptorCount = 1;
+            writes[i].descriptorType = w[i].type, writes[i].pBufferInfo = &w[i].info;
+        }
+        p_vkUpdateDescriptorSets(vk_device(), n, writes, 0, nullptr);
     }
-    if (n) p_vkUpdateDescriptorSets(vk_device(), n, writes, 0, nullptr);
     return set;
 }
 void sets_keep_texture_set(VkDescriptorSet set) { *g_keep_set2 = set; }
@@ -776,7 +885,37 @@ void sets_resolve(const ProgramLayout& layout, ResolvedSets& r) {
     if (set_cache_on()) resolve_sets(layout);
     *g_keep_set2 = VK_NULL_HANDLE;
     draw_part(8);
-    if (!d.writes.empty()) p_vkUpdateDescriptorSets(vk_device(), uint32_t(d.writes.size()), d.writes.data(), 0, nullptr);
+    if (!d.writes.empty()) {
+        const TemplateApi& api = template_api();
+        if (api.update) {
+            auto& keys = *g_tmpl_keys;
+            auto& slots = *g_tmpl_slots;
+            for (uint32_t k = 0; k < 4; k++) {
+                if (!d.sets[k] || !layout.sets[k]) continue;
+                keys.clear(), slots.clear();
+                for (const VkWriteDescriptorSet& w : d.writes) {
+                    if (w.dstSet != d.sets[k]) continue;
+                    keys.push_back({w.dstBinding, uint32_t(w.descriptorType)});
+                    TemplateSlot s{};
+                    if (w.pBufferInfo) s.buf = *w.pBufferInfo;
+                    else if (w.pImageInfo) s.img = *w.pImageInfo;
+                    slots.push_back(s);
+                }
+                if (keys.empty()) continue;
+                if (VkDescriptorUpdateTemplate tmpl = get_update_template(layout.sets[k], keys)) {
+                    api.update(vk_device(), d.sets[k], tmpl, slots.data());
+                } else {
+                    std::vector<VkWriteDescriptorSet> fb;
+                    fb.reserve(keys.size());
+                    for (const VkWriteDescriptorSet& w : d.writes)
+                        if (w.dstSet == d.sets[k]) fb.push_back(w);
+                    p_vkUpdateDescriptorSets(vk_device(), uint32_t(fb.size()), fb.data(), 0, nullptr);
+                }
+            }
+        } else {
+            p_vkUpdateDescriptorSets(vk_device(), uint32_t(d.writes.size()), d.writes.data(), 0, nullptr);
+        }
+    }
     draw_part(9);
     std::memcpy(r.sets, d.sets, sizeof r.sets);
     // Set 0's dynamic offsets, in binding order (every dynamic binding of the layout; one no stage wrote: 0).

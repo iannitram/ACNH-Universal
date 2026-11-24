@@ -4,6 +4,9 @@
 // clocks when a frame runs late instead of guessing from load, which on phones keeps a steady 60 fps cooler and faster
 // than the default governor. The API is looked up with dlsym, so older Android versions just go without.
 // The target and the duration reported follow the thermal mode (thermal.cpp). NX_ADPF=0: off. Other platforms: nothing.
+// WSI-time exclusion and APerformanceHint_getPreferredUpdateRateNanos rate-limiting adapted from Timqt/d2r-android
+// (performance_hint.c, MIT): nvn_queue.cpp measures outside QueuePresentTexture and nvn_vk.cpp excludes present_ns
+// from frame_replay_work_ns(), and reports are throttled to the manager's preferred update rate.
 #include "platform.h"
 
 #if defined(__ANDROID__)
@@ -41,6 +44,7 @@ using ReportActual = int (*)(void*, int64_t);
 using CloseSession = void (*)(void*);
 using UpdateTarget = int (*)(void*, int64_t);
 using PreferEfficiency = int (*)(void*, bool);  // Android 15
+using PreferredRate = int64_t (*)(void*);
 
 struct Api {
     GetManager get_manager = nullptr;
@@ -49,6 +53,7 @@ struct Api {
     CloseSession close = nullptr;
     UpdateTarget update = nullptr;
     PreferEfficiency efficiency = nullptr;
+    PreferredRate preferred_rate = nullptr;
     bool ok = false;
 };
 
@@ -65,6 +70,7 @@ const Api& api() {
         x.close = reinterpret_cast<CloseSession>(dlsym(lib, "APerformanceHint_closeSession"));
         x.update = reinterpret_cast<UpdateTarget>(dlsym(lib, "APerformanceHint_updateTargetWorkDuration"));
         x.efficiency = reinterpret_cast<PreferEfficiency>(dlsym(lib, "APerformanceHint_setPreferPowerEfficiency"));
+        x.preferred_rate = reinterpret_cast<PreferredRate>(dlsym(lib, "APerformanceHint_getPreferredUpdateRateNanos"));
         x.ok = x.get_manager && x.create && x.report && x.close;
         return x;
     }();
@@ -77,6 +83,9 @@ void* g_session = nullptr;
 bool g_dirty = false;
 int64_t g_target = 0;
 uint64_t g_target_at = 0;
+int64_t g_preferred_rate_ns = 0;
+uint64_t g_last_report_at = 0;
+int64_t g_pending_max_ns = 0;
 int g_efficiency = -1;  // what the session was told (-1: nothing yet)
 // Clock keeper (NX_CLOCK_KEEPER, off by default). On the Galaxy Tab S10+ (Dimensity 9300+, Mali) a frame is a chain
 // of many guest threads that each keep a core busy for a fraction of the time, so the governor kept every cluster
@@ -207,14 +216,19 @@ void perf_hint_frame(int64_t ns) {
     std::lock_guard lk(g_lock);
     if (g_dirty && !g_tids.empty()) {  // a new thread made part of the frame: a session with all of them
         if (g_session) a.close(g_session);
-        g_session = a.create(a.get_manager(), g_tids.data(), g_tids.size(), target);
+        void* mgr = a.get_manager();
+        g_session = a.create(mgr, g_tids.data(), g_tids.size(), target);
+        g_preferred_rate_ns = a.preferred_rate && mgr ? a.preferred_rate(mgr) : 0;
+        g_last_report_at = 0, g_pending_max_ns = 0;
         g_dirty = false, g_target = target, g_efficiency = -1;
-        log("adpf: %s for %zu threads, target %.1f ms", g_session ? "session made" : "no session", g_tids.size(),
-            double(target) / 1e6);
+        log("adpf: %s for %zu threads, target %.1f ms, preferred rate %.1f ms",
+            g_session ? "session made" : "no session", g_tids.size(), double(target) / 1e6,
+            g_preferred_rate_ns > 0 ? double(g_preferred_rate_ns) / 1e6 : 0.0);
     }
     if (!g_session) return;
+    const uint64_t now = monotonic_ns();
     // A new target at most once a second: the game can switch between 30 and 60 fps often.
-    if (uint64_t now = monotonic_ns(); target != g_target && a.update && now - g_target_at > 1'000'000'000ull) {
+    if (target != g_target && a.update && now - g_target_at > 1'000'000'000ull) {
         a.update(g_session, target);
         static int logged = 0;
         if (logged++ < 20) log("adpf: target %.1f -> %.1f ms", double(g_target) / 1e6, double(target) / 1e6);
@@ -222,7 +236,16 @@ void perf_hint_frame(int64_t ns) {
     }
     // Cool: the system may pick efficient cores and clocks over meeting the target early (Android 15).
     if (int eff = mode == 2; a.efficiency && eff != g_efficiency) a.efficiency(g_session, eff != 0), g_efficiency = eff;
-    a.report(g_session, mode == 0 ? ns : std::max(ns, frame_replay_work_ns()));
+    // WSI time is already excluded from ns (nvn_queue.cpp) and frame_replay_work_ns() (nvn_vk.cpp).
+    const int64_t report_ns = mode == 0 ? ns : std::max(ns, frame_replay_work_ns());
+    if (g_preferred_rate_ns > 0 && g_last_report_at != 0 && now - g_last_report_at < uint64_t(g_preferred_rate_ns)) {
+        g_pending_max_ns = std::max(g_pending_max_ns, report_ns);
+        return;
+    }
+    const int64_t send_ns = std::max(report_ns, g_pending_max_ns);
+    g_pending_max_ns = 0;
+    g_last_report_at = now;
+    a.report(g_session, send_ns);
 }
 #else
 void gpu_turbo() {}
