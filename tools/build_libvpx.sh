@@ -17,9 +17,13 @@ TAG=v1.16.0
 target=${1:-}
 case "$target" in android|iphoneos|iphonesimulator) ;; *) sed -n 7,10p "$0"; exit 2 ;; esac
 
-src=$root/private/third_party/libvpx-src-$TAG
+# NX_VPX_DIR moves the clone, the builds and the results out of the checkout: Prepare keeps them beside the prepared
+# folder, as its copy of the source is made anew every time. Default: private/third_party.
+work=${NX_VPX_DIR:-$root/private/third_party}
+src=$work/libvpx-src-$TAG
 if [ ! -d "$src/.git" ]; then
     rm -rf "$src"
+    mkdir -p "$work"
     git clone --quiet --depth 1 --branch "$TAG" https://chromium.googlesource.com/webm/libvpx "$src"
 fi
 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
@@ -33,28 +37,29 @@ if [ "$target" = android ]; then
     [ -d "$NDK" ] || { echo "NDK not found: $NDK"; exit 1; }
     host=$( [ "$(uname)" = Darwin ] && echo darwin-x86_64 || echo linux-x86_64 )
     bin=$NDK/toolchains/llvm/prebuilt/$host/bin
-    out=$root/private/third_party/libvpx-android
+    out=$work/libvpx-android
     vpxtarget=arm64-android-gcc
     export CC=$bin/aarch64-linux-android29-clang CXX=$bin/aarch64-linux-android29-clang++ AR=$bin/llvm-ar
     export AS=$CC LD=$CC STRIP=$bin/llvm-strip NM=$bin/llvm-nm
     extra=()
 else
     sdk=$target
+    extra=()
     sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
-    out=$root/private/third_party/libvpx-ios/$target
+    out=$work/libvpx-ios/$target
     if [ "$target" = iphoneos ]; then
         vpxtarget=arm64-darwin-gcc
         minflag=-miphoneos-version-min=15.0
+        extra=(--extra-cflags=-miphoneos-version-min=15.0)  # configure adds its own -miphoneos-version-min=7.0 first
     else
         vpxtarget=generic-gnu  # libvpx has no simulator target: plain C (the Simulator is for checking, not speed)
         minflag=-mios-simulator-version-min=15.0
     fi
     export CC="$(xcrun --sdk "$sdk" -f clang) -isysroot $sysroot $minflag" CXX="$(xcrun --sdk "$sdk" -f clang++) -isysroot $sysroot $minflag"
     export AR=$(xcrun --sdk "$sdk" -f ar) LD="$CC" AS="$CC"
-    extra=()
 fi
 
-build=$root/private/third_party/libvpx-build-$target
+build=$work/libvpx-build-$target
 rm -rf "$build" "$out"
 mkdir -p "$build"
 (
