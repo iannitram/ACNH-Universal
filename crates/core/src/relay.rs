@@ -112,6 +112,55 @@ impl SaveRelay {
     }
 }
 
+impl SaveRelay {
+    /// A push while the game keeps running (the app went to the background): the island goes up
+    /// as a quit's push would, but this device stays the one playing. save-relay's push is the
+    /// quit's (`Intent::Exit`): once synced it removes this device's `playing.json` and ends the
+    /// play session. A checkpoint puts both back right after: the mark (with the session's start
+    /// as its `since`) and the session start, so another device still sees the island held and
+    /// the quit's card still counts the whole session's play time. A push that did not sync
+    /// (offline, a conflict) touched neither, and neither is touched here.
+    pub fn checkpoint(&self, save_dir: &Path) -> Result<Sync> {
+        let manifest = self.parse_manifest()?;
+        let id = manifest.id.clone();
+        let session = self.store.load_session(&id).map_err(map_err)?;
+        let layout = Layout::new(&self.root).map_err(|e| Error::Saves(e.to_string()))?;
+        let s = self.session(layout.clone());
+        let game = Game {
+            manifest,
+            saves_dir: save_dir.to_path_buf(),
+        };
+        let report = sync::push(&s, &game, &self.store, None).map_err(map_err)?;
+        let synced = matches!(
+            report.sync.action,
+            Action::Noop | Action::Adopted | Action::Pulled | Action::Pushed
+        );
+        if synced {
+            let started = session.as_ref().map_or(s.now, |session| session.started);
+            let mark = save_relay::presence::Mark {
+                format: save_relay::presence::FORMAT,
+                device: self.device.clone(),
+                since: save_relay::stamp::rfc3339(started),
+                revision_read: report.sync.revision,
+            };
+            save_relay::remote::ensure_dir(&*self.remote, &layout.game_dir(&id))
+                .map_err(map_err)?;
+            self.remote
+                .put(
+                    &layout.playing_path(&id),
+                    mark.to_json().as_bytes(),
+                    &save_relay::remote::Precondition::Any,
+                )
+                .map_err(map_err)?;
+            if let Some(session) = &session {
+                self.store.save_session(session).map_err(map_err)?;
+            }
+        }
+        persist_card(save_dir, &report, self.version)?;
+        Ok(map_sync_with_local(report, save_dir))
+    }
+}
+
 impl Relay for SaveRelay {
     fn pull(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
         self.pull_with(save_dir, resolve, false)
@@ -521,19 +570,43 @@ pub fn finish_sign_in_cancellable(
 }
 
 /// Remove save-relay's config and every secret this machine stored for it: Settings' "Turn off
-/// save sync". A machine that was never set up is `Ok(())`.
+/// save sync". A machine that was never set up is `Ok(())`. Best effort: every secret is tried
+/// and the config file is removed even when a secret could not be deleted (an unreadable
+/// credential store must not keep save sync on), and the first failure is returned after.
 pub fn forget(dirs: &AppDirs, creds: &dyn CredentialStore) -> Result<()> {
     let store = LocalStore::new(dirs.clone());
-    if let Some(config) = store.load_config().map_err(map_err)? {
-        for account in service::credential_accounts(&config).map_err(map_err)? {
-            creds.delete(&account).map_err(map_err)?;
+    let mut first: Option<Error> = None;
+    match store.load_config() {
+        Ok(Some(config)) => match service::credential_accounts(&config) {
+            Ok(accounts) => {
+                for account in accounts {
+                    if let Err(error) = creds.delete(&account) {
+                        first.get_or_insert(map_err(error));
+                    }
+                }
+            }
+            Err(error) => {
+                first.get_or_insert(map_err(error));
+            }
+        },
+        Ok(None) => {}
+        Err(error) => {
+            first.get_or_insert(map_err(error));
         }
     }
-    *platform_lock()? = None;
+    if let Ok(mut pending) = platform_lock() {
+        *pending = None;
+    }
     match std::fs::remove_file(dirs.config.join("config.json")) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::Io(error.to_string())),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            first.get_or_insert(Error::Io(error.to_string()));
+        }
+    }
+    match first {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 

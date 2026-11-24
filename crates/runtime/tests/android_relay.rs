@@ -13,9 +13,10 @@ use acnh_core::launch::{Keep, Relay as _};
 use acnh_core::relay::SaveRelay;
 use acnh_core::{saves, Error};
 use relay::{
-    android_credentials, android_vars, describe_card, header_lines, parse_wire,
-    sign_in_again_message, BridgePrompt, CallbackTransport, Connector, FileSettings, FileStore,
-    Player, Prompt, Roots, Settings, SignInAnswer, SignInForm, ANDROID_DEVICE,
+    android_credentials, android_vars, describe_card, for_android, forget_android, header_lines,
+    parse_wire, sign_in_again_message, sign_out_android, BridgePrompt, CallbackTransport,
+    Connector, FileSettings, FileStore, Player, Prompt, Roots, Settings, SignInAnswer, SignInForm,
+    ANDROID_DEVICE, DOWNLOAD_ACCOUNT,
 };
 use save_relay::creds::{CredentialStore, Secret};
 use save_relay::http::{Request, Transport};
@@ -225,7 +226,7 @@ fn the_transport_sends_header_lines_and_bounds_the_answer() {
     assert_eq!(transport.send(&request).unwrap().body, b"0123456789");
     assert_eq!(
         *seen.lock().unwrap(),
-        "GET https://api.example.test/x Authorization: Bearer abc\nAccept: */*\n"
+        "GET https://api.example.test/x Authorization: Bearer abc\nAccept: */*\nAccept-Encoding: identity\n"
     );
     let mut bounded = request.clone();
     bounded.max_response_bytes = Some(4);
@@ -348,7 +349,8 @@ fn each_screen_goes_to_the_home_screen_as_its_json_request() {
     );
     assert_eq!(
         requests[3],
-        serde_json::json!({"kind": "blocked", "why": "sign_in_cancelled", "message": null})
+        serde_json::json!({"kind": "blocked", "why": "sign_in_cancelled", "message": null,
+                           "can_turn_off": true})
     );
     // The account's user name never goes to the screens.
     assert!(!java.all().contains(EMAIL));
@@ -729,7 +731,8 @@ fn offline_refuses_the_game_until_retry_reaches_dropbox() {
     let requests = java.requests.lock().unwrap().clone();
     assert_eq!(
         requests[0],
-        serde_json::json!({"kind": "blocked", "why": "offline", "message": null})
+        serde_json::json!({"kind": "blocked", "why": "offline", "message": null,
+                           "can_turn_off": false})
     );
     assert!(fx.booted.load(Ordering::SeqCst));
 }
@@ -757,4 +760,195 @@ fn a_push_before_the_game_booted_does_nothing_and_a_failed_push_waits() {
     assert!(fx.log_text().contains("sent the push that was waiting"));
     assert!(none.kinds().is_empty());
     fx.assert_no_leaks();
+}
+
+// ---- the review's fixes: the outgoing headers, the background push, the ways out ---------------
+
+#[test]
+fn a_post_without_a_content_type_goes_out_as_octet_stream_for_dropbox() {
+    // save-relay's Dropbox download: POST, empty body, arguments in a header. Android would add
+    // `application/x-www-form-urlencoded`, which Dropbox refuses with 400.
+    let download = Request::new("POST", "https://content.dropboxapi.com/2/files/download")
+        .header("Dropbox-API-Arg", "{\"path\":\"/x\"}");
+    let sent = for_android(&download);
+    assert_eq!(
+        sent.header_value("Content-Type"),
+        Some("application/octet-stream")
+    );
+    assert_eq!(sent.header_value("Accept-Encoding"), Some("identity"));
+    // A Content-Type already set (the token form, an upload) is kept; a GET gets none.
+    let form = Request::new("POST", "https://api.dropboxapi.com/oauth2/token")
+        .header("Content-Type", "application/x-www-form-urlencoded");
+    assert_eq!(
+        for_android(&form).header_value("Content-Type"),
+        Some("application/x-www-form-urlencoded")
+    );
+    let get = Request::new("GET", "https://example.test/");
+    assert_eq!(for_android(&get).header_value("Content-Type"), None);
+    // And that is what the Java host is handed.
+    let seen = Mutex::new(String::new());
+    let transport = CallbackTransport(|_: &Request, headers: &str| {
+        *seen.lock().unwrap() = headers.to_string();
+        Some(wire(200, "", b""))
+    });
+    transport.send(&download).unwrap();
+    let headers = seen.lock().unwrap().clone();
+    assert!(
+        headers.contains("Content-Type: application/octet-stream\n"),
+        "{headers}"
+    );
+    assert!(headers.contains("Accept-Encoding: identity\n"), "{headers}");
+}
+
+impl Fx {
+    fn mark(&self) -> Option<save_relay::presence::Mark> {
+        let manifest = save_relay::manifest::Manifest::from_json(&saves::relay_manifest()).unwrap();
+        let layout = save_relay::layout::Layout::new(save_relay::cli::DEFAULT_ROOT).unwrap();
+        let (bytes, _) = self
+            .connector
+            .remote
+            .get(&layout.playing_path(&manifest.id))
+            .ok()?;
+        save_relay::presence::Mark::from_json(&String::from_utf8_lossy(&bytes)).ok()
+    }
+
+    fn session_start(&self) -> Option<u64> {
+        let manifest = save_relay::manifest::Manifest::from_json(&saves::relay_manifest()).unwrap();
+        LocalStore::new(self.roots.dirs())
+            .load_session(&manifest.id)
+            .unwrap()
+            .map(|s| s.started)
+    }
+}
+
+#[test]
+fn the_background_push_keeps_this_device_playing_and_the_quit_ends_it() {
+    let fx = Fx::new("checkpoint");
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    island(&fx.saves(), "phone");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    player.before_game();
+    let mark = fx.mark().expect("the pull marks this device as playing");
+    assert_eq!(mark.device, "android");
+    let started = fx.session_start().expect("the pull starts the session");
+
+    // The app goes to the background: the island goes up, the game goes on.
+    island(&fx.saves(), "phone, played a bit");
+    player.checkpoint();
+    assert!(fx
+        .log_text()
+        .contains("pushed the island (the game goes on)"));
+    let kept = fx
+        .mark()
+        .expect("still marked as playing after the background push");
+    assert_eq!(kept.device, "android");
+    assert_eq!(fx.session_start(), Some(started), "the session goes on");
+    // Another device sees the island held.
+    let dir = fx.root.join("switch3");
+    let other = SaveRelay::new(
+        fx.connector.remote.clone(),
+        LocalStore::new(AppDirs {
+            config: dir.join("config"),
+            data: dir.join("data"),
+        }),
+        "switch",
+    );
+    assert!(matches!(
+        other.pull(&dir.join("saves"), None).unwrap(),
+        acnh_core::launch::Sync::Held { .. }
+    ));
+
+    // The real quit: pushed, the mark and the session end.
+    island(&fx.saves(), "phone, played more");
+    player.after_game();
+    assert!(fx.mark().is_none());
+    assert_eq!(fx.session_start(), None);
+    other.pull(&dir.join("saves"), None).unwrap();
+    assert_eq!(read_main(&dir.join("saves")), "main phone, played more");
+    assert!(none.kinds().is_empty());
+}
+
+#[test]
+fn a_lost_sign_in_can_be_turned_off_on_the_blocked_screen_and_the_game_boots() {
+    let fx = Fx::new("turn-off");
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    // Dropbox no longer takes the token; the person cancels the new sign-in, then turns sync off.
+    *fx.connector.accepted.lock().unwrap() = SECOND.into();
+    let java = FakeJava::new(&[Some("cancel"), Some("turn_off")]);
+    let prompt = bridge(&java);
+    fx.player(&prompt).before_game();
+    assert!(fx.booted.load(Ordering::SeqCst));
+    assert_eq!(java.kinds(), ["sign_in", "blocked"]);
+    assert_eq!(java.requests.lock().unwrap()[1]["can_turn_off"], true);
+    assert!(!fx.roots.dirs().config.join("config.json").exists());
+    assert!(
+        fx.settings.ask_off(),
+        "the offer does not come straight back"
+    );
+    assert!(fx
+        .log_text()
+        .contains("save sync turned off on this device"));
+}
+
+#[test]
+fn turning_sync_off_keeps_the_dropbox_sign_in_for_the_download_and_sign_out_ends_both() {
+    let fx = Fx::new("keep-download");
+    let dirs = fx.roots.dirs();
+    sign_in(&dirs, &fx.creds, REFRESH);
+    forget_android(&dirs, &fx.creds).unwrap();
+    assert!(!dirs.config.join("config.json").exists());
+    let account = token_account(Service::Dropbox, EMAIL).unwrap();
+    assert_eq!(
+        fx.creds.get(&account).unwrap(),
+        None,
+        "save-relay's account is gone"
+    );
+    assert_eq!(
+        fx.creds.get(DOWNLOAD_ACCOUNT).unwrap().unwrap().expose(),
+        REFRESH,
+        "the download keeps the same sign-in"
+    );
+    sign_out_android(&dirs, &fx.creds).unwrap();
+    assert_eq!(fx.creds.get(DOWNLOAD_ACCOUNT).unwrap(), None);
+    fx.assert_no_leaks();
+}
+
+#[test]
+fn turning_off_with_a_damaged_credential_file_still_turns_sync_off() {
+    let fx = Fx::new("damaged-off");
+    let dirs = fx.roots.dirs();
+    sign_in(&dirs, &fx.creds, REFRESH);
+    fs::write(fx.creds.path(), b"not json").unwrap();
+    forget_android(&dirs, &fx.creds).unwrap();
+    assert!(!dirs.config.join("config.json").exists());
+    assert!(!fx.creds.path().exists(), "the unreadable file is cleared");
+    // Sign-out over a damaged file too.
+    sign_in(&dirs, &fx.creds, REFRESH);
+    fs::write(fx.creds.path(), b"{").unwrap();
+    sign_out_android(&dirs, &fx.creds).unwrap();
+    assert!(!fx.creds.path().exists());
+    assert!(!dirs.config.join("config.json").exists());
+}
+
+#[test]
+fn offline_offers_no_turn_off_and_the_blocked_answer_maps() {
+    let java = FakeJava::new(&[Some("turn_off"), Some("turn_off"), Some("turn_off")]);
+    let prompt = bridge(&java);
+    assert_eq!(
+        prompt.blocked(&relay::Blocked::Offline),
+        relay::BlockedAnswer::Retry
+    );
+    assert_eq!(
+        prompt.blocked(&relay::Blocked::Error("x".into())),
+        relay::BlockedAnswer::TurnOff
+    );
+    assert_eq!(
+        prompt.blocked(&relay::Blocked::SignInCancelled),
+        relay::BlockedAnswer::TurnOff
+    );
+    let requests = java.requests.lock().unwrap().clone();
+    assert_eq!(requests[0]["can_turn_off"], false);
+    assert_eq!(requests[1]["can_turn_off"], true);
 }

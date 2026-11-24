@@ -151,6 +151,10 @@ pub enum BlockedAnswer {
     Retry,
     /// Only offered after a cancelled sign-in.
     SignInAgain,
+    /// Turn save sync off on this device and boot with sync off (`relay.ask = 0` too). Offered
+    /// after a cancelled sign-in and on an error (an unreadable credential store, a token that is
+    /// gone), never when offline: the person chose it, nothing chose it for them.
+    TurnOff,
 }
 
 /// What the person chose on a held island.
@@ -160,14 +164,16 @@ pub enum HeldAnswer {
     CheckAgain,
 }
 
-/// The screens. UIKit alerts on the iPad (`relay_ios.rs`), the home screen's dialogs on Android (`BridgePrompt`); a fake in the tests. Every method
-/// blocks until it is answered, on the game's thread.
+/// The screens. UIKit alerts on the iPad (`relay_ios.rs`), the home screen's dialogs on Android
+/// (`BridgePrompt`); a fake in the tests. Every method blocks until it is answered, on the game's
+/// thread (Android: the home screen's worker).
 pub trait Prompt: std::marker::Sync {
     fn sign_in(&self, form: &SignInForm) -> SignInAnswer;
     /// Both islands side by side; `Keep::Local` is this iPad's.
     fn conflict(&self, server: &SaveCard, local: &SaveCard) -> Keep;
     fn held(&self, device: &str, since: &str) -> HeldAnswer;
-    /// The game does not boot; offer Retry (and Sign in again when `SignInCancelled`).
+    /// The game does not boot; offer Retry (and Sign in again when `SignInCancelled`; Turn off
+    /// save sync when `SignInCancelled` or `Error`, where the platform offers it).
     fn blocked(&self, why: &Blocked) -> BlockedAnswer;
 }
 
@@ -190,6 +196,12 @@ pub trait Connector: std::marker::Sync {
         Err(Error::Saves(
             "this app signs in to its save sync in the browser, not with an app password".into(),
         ))
+    }
+
+    /// "Turn off save sync": `acnh_core::relay::forget` (best effort: the config goes even when a
+    /// secret could not be deleted). The Android app also clears a credential file it cannot read.
+    fn forget(&self, dirs: &AppDirs, creds: &dyn CredentialStore) -> Result<()> {
+        acnh_core::relay::forget(dirs, creds)
     }
 }
 
@@ -420,7 +432,8 @@ impl Player<'_> {
                 Err(error) => {
                     let message = self.say(&error, None);
                     self.log(&format!("save sync could not be opened: {message}"));
-                    self.prompt.blocked(&Blocked::Error(message));
+                    let answer = self.prompt.blocked(&Blocked::Error(message));
+                    self.answered(answer);
                 }
                 Ok(Opened::Off) => {
                     if !self.first_start() {
@@ -438,9 +451,45 @@ impl Player<'_> {
         }
     }
 
-    /// Push the island: when the game quits, and when the app goes to the background. A push
-    /// that does not go (offline, a conflict, any error) is left waiting for the next start.
+    /// What a blocked screen's answer asks beyond going round again.
+    fn answered(&self, answer: BlockedAnswer) {
+        if answer == BlockedAnswer::TurnOff {
+            self.turn_off();
+        }
+    }
+
+    /// The person turned save sync off on a blocked screen: save-relay's config and secrets go
+    /// (best effort), a waiting push is dropped, and Not now is remembered so the first start's
+    /// offer does not come straight back. The loop then finds sync off and boots.
+    fn turn_off(&self) {
+        match self.connector.forget(&self.roots.dirs(), self.creds) {
+            Ok(()) => self.log("save sync turned off on this device"),
+            Err(error) => {
+                let message = self.say(&error, None);
+                self.log(&format!("save sync turned off, not cleanly: {message}"));
+            }
+        }
+        self.set_waiting(false);
+        if !self.settings.remember_not_now() {
+            self.log("Not now could not be remembered");
+        }
+    }
+
+    /// Push the island when the game quits. A push that does not go (offline, a conflict, any
+    /// error) is left waiting for the next start.
     pub fn after_game(&self) {
+        self.push_island(false);
+    }
+
+    /// Push the island while the game keeps running (the app went to the background): as
+    /// `after_game`, but this device stays marked as the one playing and its play session goes
+    /// on (`SaveRelay::checkpoint`), so the held-island guard holds and the quit's card counts
+    /// the whole session.
+    pub fn checkpoint(&self) {
+        self.push_island(true);
+    }
+
+    fn push_island(&self, checkpoint: bool) {
         if !self.booted.load(Ordering::SeqCst) {
             self.log("no push yet: the game has not booted");
             return;
@@ -466,11 +515,19 @@ impl Player<'_> {
             }
         };
         let dir = saves::save_dir(&self.roots.data_root);
-        let result = relay.push(&dir, None);
+        let result = if checkpoint {
+            relay.checkpoint(&dir)
+        } else {
+            relay.push(&dir, None)
+        };
         match decide(&result) {
             Action::Play | Action::PlaySyncOff => {
                 self.set_waiting(false);
-                self.log("pushed the island");
+                self.log(if checkpoint {
+                    "pushed the island (the game goes on)"
+                } else {
+                    "pushed the island"
+                });
             }
             other => {
                 self.set_waiting(true);
@@ -520,9 +577,10 @@ impl Player<'_> {
                 Attempt::Again
             }
             Action::AskHeld { .. } => {
-                self.prompt.blocked(&Blocked::Error(
+                let answer = self.prompt.blocked(&Blocked::Error(
                     "save-relay answered that another device has the island open.".into(),
                 ));
+                self.answered(answer);
                 Attempt::Again
             }
             Action::SignInAgain => {
@@ -538,7 +596,8 @@ impl Player<'_> {
             Action::ShowError(text) => {
                 let message = self.redact(&text, None);
                 self.log(&format!("save sync error: {message}"));
-                self.prompt.blocked(&Blocked::Error(message));
+                let answer = self.prompt.blocked(&Blocked::Error(message));
+                self.answered(answer);
                 Attempt::Again
             }
         }
@@ -628,6 +687,10 @@ impl Player<'_> {
                     match self.prompt.blocked(&Blocked::SignInCancelled) {
                         BlockedAnswer::Retry => return,
                         BlockedAnswer::SignInAgain => {}
+                        BlockedAnswer::TurnOff => {
+                            self.turn_off();
+                            return;
+                        }
                     }
                 }
             }
@@ -778,6 +841,17 @@ impl FileStore {
         &self.path
     }
 
+    /// Removes the whole file (every secret in it): "Turn off save sync" when the file cannot be
+    /// read, so a damaged file does not keep save sync on. A missing file is fine.
+    pub fn remove(&self) -> save_relay::Result<()> {
+        let _one = FILE_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(store_error("cannot be removed")),
+        }
+    }
+
     fn load(&self) -> save_relay::Result<BTreeMap<String, String>> {
         match std::fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| store_error("does not read")),
@@ -846,6 +920,66 @@ impl CredentialStore for FileStore {
     }
 }
 
+/// Where the Android app keeps the Dropbox refresh token for the game download alone, once save
+/// sync is turned off (the same `FileStore`): one sign-in serves both, and turning sync off
+/// stops the syncing only.
+pub const DOWNLOAD_ACCOUNT: &str = "download:dropbox";
+
+/// The Android app's "Turn off save sync" (the home screen's button and the blocked screens'):
+/// save sync stops on this device, the Dropbox sign-in stays for the game download. The token
+/// moves from save-relay's account to `DOWNLOAD_ACCOUNT` first (when it can be read), then
+/// `acnh_core::relay::forget` runs, best effort. When a secret could not be deleted (the credential
+/// file does not read), the whole credential file goes: it holds save-relay's and the download's
+/// secrets only, and a file that does not read serves neither. An error comes back only when
+/// something is still left behind.
+pub fn forget_android(dirs: &AppDirs, creds: &FileStore) -> Result<()> {
+    keep_for_download(dirs, creds);
+    forget_android_all(dirs, creds)
+}
+
+/// "Sign out of Dropbox": save sync and the game download both end on this device (the
+/// download's token goes too).
+pub fn sign_out_android(dirs: &AppDirs, creds: &FileStore) -> Result<()> {
+    let forgot = forget_android_all(dirs, creds);
+    let download = creds
+        .delete(DOWNLOAD_ACCOUNT)
+        .or_else(|_| creds.remove())
+        .map_err(|e| Error::Saves(e.to_string()));
+    forgot.and(download)
+}
+
+/// save-relay's Dropbox refresh token, kept for the download under `DOWNLOAD_ACCOUNT`.
+fn keep_for_download(dirs: &AppDirs, creds: &FileStore) {
+    let Ok(Some(config)) = LocalStore::new(dirs.clone()).load_config() else {
+        return;
+    };
+    let Ok(service) = save_relay::service::Service::from_server(&config.server) else {
+        return;
+    };
+    if service != save_relay::service::Service::Dropbox {
+        return;
+    }
+    let Ok(account) = save_relay::service::token_account(service, &config.user) else {
+        return;
+    };
+    if let Ok(Some(token)) = creds.get(&account) {
+        let _ = creds.set(DOWNLOAD_ACCOUNT, &token);
+    }
+}
+
+fn forget_android_all(dirs: &AppDirs, creds: &FileStore) -> Result<()> {
+    let Err(error) = acnh_core::relay::forget(dirs, creds) else {
+        return Ok(());
+    };
+    creds
+        .remove()
+        .map_err(|e| Error::Saves(format!("{error}; {e}")))?;
+    match std::fs::metadata(dirs.config.join("config.json")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(error),
+    }
+}
+
 /// The home screen's side of `BridgePrompt`: a request's JSON in, the answer's JSON out.
 type Ask<'a> = dyn Fn(&str) -> Option<String> + std::marker::Sync + 'a;
 
@@ -861,7 +995,8 @@ type Ask<'a> = dyn Fn(&str) -> Option<String> + std::marker::Sync + 'a;
 /// - `{"kind": "conflict", "server": text, "local": text}` (`describe_card`): `server`, `local`
 /// - `{"kind": "held", "device": text, "since": text}`: `play_anyway`, `check_again`
 /// - `{"kind": "blocked", "why": "offline" or "error" or "sign_in_cancelled", "message": text
-///   or null}`: `retry`, `sign_in_again`
+///   or null, "can_turn_off": bool}`: `retry`, `sign_in_again` (after a cancelled sign-in),
+///   `turn_off` (where `can_turn_off`)
 ///
 /// The reply is `{"answer": "<one of those>"}`.
 pub struct BridgePrompt<'a> {
@@ -938,9 +1073,12 @@ impl Prompt for BridgePrompt<'_> {
             Blocked::Error(message) => ("error", Some(message.as_str())),
             Blocked::SignInCancelled => ("sign_in_cancelled", None),
         };
-        let request = serde_json::json!({"kind": "blocked", "why": kind, "message": message});
+        let can_turn_off = *why != Blocked::Offline;
+        let request = serde_json::json!({"kind": "blocked", "why": kind, "message": message,
+                                         "can_turn_off": can_turn_off});
         match self.answer(&request).as_deref() {
             Some("sign_in_again") if *why == Blocked::SignInCancelled => BlockedAnswer::SignInAgain,
+            Some("turn_off") if *why != Blocked::Offline => BlockedAnswer::TurnOff,
             Some(_) => BlockedAnswer::Retry,
             None => {
                 std::thread::sleep(self.pause);
@@ -989,6 +1127,23 @@ pub fn parse_wire(wire: &[u8]) -> save_relay::Result<save_relay::http::Response>
     Ok(response)
 }
 
+/// A request as Android's `HttpURLConnection` must send it. A POST without a `Content-Type` (save-
+/// relay's Dropbox download and list calls: an empty body, the arguments in a header) would go out
+/// with `application/x-www-form-urlencoded`, which Dropbox refuses with 400 ("Bad HTTP
+/// Content-Type header"): it gets `application/octet-stream`. Every request asks for
+/// `Accept-Encoding: identity`, so the body comes back as sent and its length is the real one.
+pub fn for_android(request: &save_relay::http::Request) -> save_relay::http::Request {
+    let mut request = request.clone();
+    if request.method.eq_ignore_ascii_case("POST") && request.header_value("Content-Type").is_none()
+    {
+        request = request.header("Content-Type", "application/octet-stream");
+    }
+    if request.header_value("Accept-Encoding").is_none() {
+        request = request.header("Accept-Encoding", "identity");
+    }
+    request
+}
+
 /// save-relay's `Transport` over the app's own network call (Android: the Java host's `http`,
 /// the same one save-relay's C interface uses for the sign-in), given the request and its
 /// `header_lines`, answering in `parse_wire`'s format, or `None` for a connection failure.
@@ -1002,6 +1157,7 @@ where
         &self,
         request: &save_relay::http::Request,
     ) -> save_relay::Result<save_relay::http::Response> {
+        let request = &for_android(request);
         let wire = (self.0)(request, &header_lines(request)).ok_or_else(|| {
             save_relay::Error::Unreachable("the app's network call failed".into())
         })?;

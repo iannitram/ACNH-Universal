@@ -491,7 +491,8 @@ pub extern "C" fn acnh_relay_after_game(data_root: *const c_char) {
 /// When the app has gone to the background (`SDL_EVENT_DID_ENTER_BACKGROUND`, from SDL's event
 /// watch on the main thread): begins a background task here, pushes on a worker thread and
 /// returns at once, so the main thread keeps its run loop. The worker, or the expiration
-/// handler, ends the task. Does nothing before the game has booted.
+/// handler, ends the task. The game goes on, so it is a checkpoint (`Player::checkpoint`): the
+/// iPad stays marked as the one playing. Does nothing before the game has booted.
 #[no_mangle]
 pub extern "C" fn acnh_relay_background(data_root: *const c_char) {
     let Some(root) = self::data_root(data_root) else {
@@ -506,7 +507,7 @@ pub extern "C" fn acnh_relay_background(data_root: *const c_char) {
     let spawned = std::thread::Builder::new()
         .name("relay push".into())
         .spawn(move || {
-            with_player(&root, |player| player.after_game());
+            with_player(&root, |player| player.checkpoint());
             worker.end();
         });
     if spawned.is_err() {

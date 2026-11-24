@@ -50,7 +50,9 @@ final class Relay {
     // 0: not set up; 1: set up with its token; 2: set up, the token gone (a new sign-in is needed)
     static native int nativeState(String files);
 
-    private static native boolean nativeForget(String files);
+    private static native boolean nativeForget(String files, String dataRoot);
+
+    private static native boolean nativeSignOut(String files);
 
     private static native byte[] nativeCredGet(String files, String account);
 
@@ -115,15 +117,24 @@ final class Relay {
                 c.setReadTimeout(60000);
                 c.setInstanceFollowRedirects(false);
                 c.setRequestMethod(method);
+                boolean contentType = false, encoding = false;
                 if (headers != null)
                     for (String line : headers.split("\n")) {
                         int colon = line.indexOf(':');
                         if (colon <= 0) continue;
                         String name = line.substring(0, colon).trim(), value = line.substring(colon + 1).trim();
                         if (name.equalsIgnoreCase("Content-Length") || name.equalsIgnoreCase("Host")) continue;
+                        if (name.equalsIgnoreCase("Content-Type")) contentType = true;
+                        if (name.equalsIgnoreCase("Accept-Encoding")) encoding = true;
                         c.setRequestProperty(name, value);
                     }
-                if (body != null && (body.length > 0 || method.equals("POST") || method.equals("PUT"))) {
+                // HttpURLConnection gives a POST without a Content-Type "application/x-www-form-urlencoded", which
+                // Dropbox's download and list calls refuse with 400 (their arguments are in a header, the body is
+                // empty): octet-stream, as GameDownload does. No transparent gzip: the body comes back as sent.
+                if (method.equalsIgnoreCase("POST") && !contentType)
+                    c.setRequestProperty("Content-Type", "application/octet-stream");
+                if (!encoding) c.setRequestProperty("Accept-Encoding", "identity");
+                if (body != null && body.length > 0) {  // an empty body is sent as none (no doOutput)
                     c.setDoOutput(true);
                     c.setFixedLengthStreamingMode(body.length);
                     try (OutputStream o = c.getOutputStream()) { o.write(body); }
@@ -167,10 +178,10 @@ final class Relay {
         }
     }
 
-    // save-relay's Dropbox refresh token, for the game download (one sign-in serves both), or null.
-    static String dropboxRefresh(Context c) {
-        String account = account(c);
-        if (account == null) return null;
+    // Where the download's token waits once save sync is turned off (crates/runtime DOWNLOAD_ACCOUNT).
+    private static final String DOWNLOAD_ACCOUNT = "download:dropbox";
+
+    private static String secret(Context c, String account) {
         try {
             byte[] secret = nativeCredGet(files(c), account);
             return secret == null ? null : new String(secret, StandardCharsets.UTF_8);
@@ -179,14 +190,41 @@ final class Relay {
         }
     }
 
-    // Dropbox no longer accepts the token: it goes, save sync stays set up and asks for a new sign-in.
+    // The Dropbox refresh token for the game download: save-relay's (one sign-in serves both), or the one kept for
+    // the download when save sync was turned off; null when signed out.
+    static String dropboxRefresh(Context c) {
+        String account = account(c);
+        String token = account == null ? null : secret(c, account);
+        return token != null ? token : secret(c, DOWNLOAD_ACCOUNT);
+    }
+
+    // A new sign-in replaced the token kept for the download alone.
+    static void signedIn(Context c) {
+        try { nativeCredDelete(files(c), DOWNLOAD_ACCOUNT); } catch (Throwable ignored) {}
+    }
+
+    // Dropbox no longer accepts the token: it goes (save sync stays set up and asks for a new sign-in).
     static void dropDropboxToken(Context c) {
         String account = account(c);
         if (account != null) nativeCredDelete(files(c), account);
+        nativeCredDelete(files(c), DOWNLOAD_ACCOUNT);
     }
 
-    // "Turn off save sync": save-relay's config and every secret it filed here. The island on this device stays.
-    static boolean turnOff(Context c) { return nativeForget(files(c)); }
+    // "Turn off save sync": the syncing stops here (save-relay's config and secrets go), the Dropbox sign-in stays for
+    // the game download. The island on this device stays. False when something was left behind.
+    static boolean turnOff(Context c) { return nativeForget(files(c), dataRoot(c)); }
+
+    // The game folder of the last start (Home writes <files>/data_root.txt), whose config.ini keeps relay.ask; "" if none.
+    private static String dataRoot(Context c) {
+        try {
+            return new String(Files.readAllBytes(new File(files(c), "data_root.txt").toPath()), StandardCharsets.UTF_8).trim();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    // "Sign out of Dropbox": save sync and the game download both end here. False when something was left behind.
+    static boolean signOut(Context c) { return nativeSignOut(files(c)); }
 
     // ---- the pull before the game ----------------------------------------------------------------------------------
 
@@ -350,6 +388,10 @@ final class Relay {
                         .setPositiveButton(t("Retry", "Tentar de novo"), (d, w) -> answer("retry"));
                 if (why.equals("sign_in_cancelled"))
                     b.setNegativeButton(t("Sign in again", "Entrar de novo"), (d, w) -> answer("sign_in_again"));
+                // The way out when the sign-in is gone or unreadable: sync off here, the game starts with this
+                // device's island (the Dropbox sign-in stays for the download).
+                if (r.optBoolean("can_turn_off"))
+                    b.setNeutralButton(t("Turn off save sync", "Desligar a sincronização"), (d, w) -> answer("turn_off"));
         }
         try {
             shown = b.show();

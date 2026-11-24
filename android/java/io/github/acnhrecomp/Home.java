@@ -183,8 +183,10 @@ public class Home extends Activity {
             return;
         }
         if (url != null) {
-            say(t("Sign in to Dropbox in the browser, allow ACNH Recomp's access, then come back here.",
-                    "Entre no Dropbox no navegador, permita o acesso do ACNH Recomp e volte aqui."), false);
+            say(t("Sign in to Dropbox in the browser, allow ACNH Recomp's access, then come back here. The same "
+                            + "sign-in turns save sync on: your island then goes through your Dropbox too.",
+                    "Entre no Dropbox no navegador, permita o acesso do ACNH Recomp e volte aqui. O mesmo login liga "
+                            + "a sincronização: a sua ilha passa a ir pelo seu Dropbox também."), false);
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
         }
         tick();
@@ -256,13 +258,18 @@ public class Home extends Activity {
                     v -> check(GameDownload.gameDir(this).getAbsolutePath(), false)));
         showSync();
         if (DropboxAuth.signedIn(this))
-            box.addView(Screen.button(this, t("Sign out of Dropbox", "Sair do Dropbox"), Screen.WHITE, v -> {
+            box.addView(Screen.button(this, t("Sign out of Dropbox (ends save sync and the download)",
+                    "Sair do Dropbox (encerra a sincronização e o download)"), Screen.WHITE, v -> {
                 if (GameDownload.running) {
                     say(t("Wait for the download to finish first.", "Espere o download terminar."), true);
                     return;
                 }
-                DropboxAuth.signOutAll(this);  // the download's sign-in and save sync's are one
+                boolean done = DropboxAuth.signOutAll(this);  // the download's sign-in and save sync's are one
                 show(null);
+                if (done) say(t("Signed out of Dropbox: save sync and the download are off on this device.",
+                        "Saiu do Dropbox: a sincronização e o download estão desligados neste aparelho."), false);
+                else say(t("The Dropbox sign-out could not remove everything. Try again.",
+                        "Não foi possível remover tudo ao sair do Dropbox. Tente de novo."), true);
             }));
 
         for (final String f : found())
@@ -286,19 +293,22 @@ public class Home extends Activity {
                         : t("Off. Set it up to keep your island in your Dropbox and play it on your other devices.",
                             "Desligada. Ligue para guardar a sua ilha no seu Dropbox e jogar nos seus outros aparelhos."),
                 15, Screen.TEXT));
-        if (state == Relay.ON) {
-            box.addView(Screen.button(this, t("Turn off save sync", "Desligar a sincronização"), Screen.WHITE, v -> {
-                if (GameDownload.running) {
-                    say(t("Wait for the download to finish first.", "Espere o download terminar."), true);
-                    return;
-                }
-                if (!Relay.turnOff(this)) say(t("Save sync could not be turned off.", "Não foi possível desligar."), true);
+        if (state == Relay.SIGN_IN_AGAIN)
+            box.addView(Screen.button(this, t("Sign in to Dropbox again", "Entrar no Dropbox de novo"), Screen.BLUE,
+                    v -> setUpSync()));
+        else if (state == Relay.OFF)
+            box.addView(Screen.button(this, t("Set up save sync (Dropbox)", "Ligar a sincronização (Dropbox)"),
+                    Screen.BLUE, v -> setUpSync()));
+        if (state != Relay.OFF)  // also the way out when the sign-in is gone: the game then starts with sync off
+            box.addView(Screen.button(this, t("Turn off save sync (the download stays signed in)",
+                    "Desligar a sincronização (o download continua com login)"), Screen.WHITE, v -> {
+                boolean done = Relay.turnOff(this);
                 show(null);
+                if (done) say(t("Save sync is off on this device. Your island here stays as it is.",
+                        "A sincronização está desligada neste aparelho. A sua ilha aqui fica como está."), false);
+                else say(t("Save sync is off, but not everything could be removed. Try again.",
+                        "A sincronização foi desligada, mas nem tudo pôde ser removido. Tente de novo."), true);
             }));
-            return;
-        }
-        box.addView(Screen.button(this, state == Relay.SIGN_IN_AGAIN ? t("Sign in to Dropbox again", "Entrar no Dropbox de novo")
-                : t("Set up save sync (Dropbox)", "Ligar a sincronização (Dropbox)"), Screen.BLUE, v -> setUpSync()));
     }
 
     private void setUpSync() {

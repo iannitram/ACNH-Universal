@@ -26,6 +26,7 @@ extern "C" {
 void acnh_relay_android_before_game(const char* data_root, const char* files);
 int acnh_relay_android_state(const char* files);
 bool acnh_relay_android_forget(const char* files);
+bool acnh_relay_android_sign_out(const char* files);
 int acnh_relay_android_cred_get(const char* files, const char* account, uint8_t* buf, size_t cap, size_t* len);
 int acnh_relay_android_cred_set(const char* files, const char* account, const char* secret);
 int acnh_relay_android_cred_delete(const char* files, const char* account);
@@ -171,8 +172,22 @@ extern "C" JNIEXPORT jint JNICALL Java_io_github_acnhrecomp_Relay_nativeState(JN
     return acnh_relay_android_state(str(env, files).c_str());
 }
 
-extern "C" JNIEXPORT jboolean JNICALL Java_io_github_acnhrecomp_Relay_nativeForget(JNIEnv* env, jclass, jstring files) {
-    return acnh_relay_android_forget(str(env, files).c_str());
+// "Turn off save sync" on the home screen: save-relay's config and secrets go (the download keeps its sign-in), and,
+// as on the blocked screens, relay.ask = 0 in the game folder's config.ini, so the first start's offer does not come
+// straight back.
+extern "C" JNIEXPORT jboolean JNICALL Java_io_github_acnhrecomp_Relay_nativeForget(JNIEnv* env, jclass, jstring files,
+                                                                                jstring data_root) {
+    bool done = acnh_relay_android_forget(str(env, files).c_str());
+    if (std::string root = str(env, data_root); !root.empty()) {
+        if (g_data_root.empty()) g_data_root = root;
+        nx::plat::android_set_data_root(root);
+        nx_relay_remember_not_now();
+    }
+    return done;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_io_github_acnhrecomp_Relay_nativeSignOut(JNIEnv* env, jclass, jstring files) {
+    return acnh_relay_android_sign_out(str(env, files).c_str());
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL Java_io_github_acnhrecomp_Relay_nativeCredGet(JNIEnv* env, jclass, jstring files,

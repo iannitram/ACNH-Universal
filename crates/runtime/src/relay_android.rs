@@ -13,8 +13,8 @@
 //! `Context.getFilesDir()`), catches panics, and never logs a secret, the account or a path.
 
 use super::{
-    android_credentials, BridgePrompt, CallbackTransport, Connector, FileStore, Player, Roots,
-    Settings,
+    android_credentials, forget_android, sign_out_android, BridgePrompt, CallbackTransport,
+    Connector, FileStore, Player, Roots, Settings,
 };
 use acnh_core::relay::SaveRelay;
 use acnh_core::Result;
@@ -106,12 +106,19 @@ fn transport() -> Arc<dyn save_relay::http::Transport> {
     Arc::new(CallbackTransport(http))
 }
 
-/// save-relay over the Java host's network.
-struct AndroidLive;
+/// save-relay over the Java host's network; its turn-off also clears a credential file that
+/// does not read (`forget_android`).
+struct AndroidLive<'a> {
+    creds: &'a FileStore,
+}
 
-impl Connector for AndroidLive {
+impl Connector for AndroidLive<'_> {
     fn open(&self, dirs: &AppDirs, creds: &dyn CredentialStore) -> Result<Option<SaveRelay>> {
         acnh_core::relay::open(dirs, creds, transport())
+    }
+
+    fn forget(&self, dirs: &AppDirs, _creds: &dyn CredentialStore) -> Result<()> {
+        forget_android(dirs, self.creds)
     }
 }
 
@@ -157,7 +164,7 @@ fn with_player(data_root: &Path, files: &Path, work: impl FnOnce(&Player<'_>)) {
         let player = Player {
             roots: Roots::android(data_root, files),
             creds: &creds,
-            connector: &AndroidLive,
+            connector: &AndroidLive { creds: &creds },
             prompt: &prompt,
             booted: &BOOTED,
             settings: &PlayerSettings,
@@ -207,7 +214,8 @@ pub unsafe extern "C" fn acnh_relay_android_after_game(
 }
 
 /// When the app goes to the background (`APP_CMD_PAUSE`): pushes on a worker thread and returns
-/// at once. Does nothing before the game has booted.
+/// at once. The game goes on, so it is a checkpoint (`Player::checkpoint`): this device stays
+/// marked as the one playing and its session goes on. Does nothing before the game has booted.
 ///
 /// # Safety
 /// As `acnh_relay_android_before_game`.
@@ -225,7 +233,7 @@ pub unsafe extern "C" fn acnh_relay_android_background(
     }
     let spawned = std::thread::Builder::new()
         .name("relay push".into())
-        .spawn(move || with_player(&root, &files, |player| player.after_game()));
+        .spawn(move || with_player(&root, &files, |player| player.checkpoint()));
     if spawned.is_err() {
         log("relay: the background push could not start");
     }
@@ -287,7 +295,7 @@ pub unsafe extern "C" fn acnh_relay_android_forget(files: *const c_char) -> bool
     };
     std::panic::catch_unwind(|| {
         let dirs = Roots::android(&files, &files).dirs();
-        match acnh_core::relay::forget(&dirs, &store(&files)) {
+        match forget_android(&dirs, &store(&files)) {
             Ok(()) => {
                 log("relay: save sync turned off on this device");
                 true
@@ -297,6 +305,29 @@ pub unsafe extern "C" fn acnh_relay_android_forget(files: *const c_char) -> bool
                 false
             }
         }
+    })
+    .unwrap_or(false)
+}
+
+/// "Sign out of Dropbox" on the home screen: save sync and the game download's sign-in both end
+/// here (`sign_out_android`). The island on this device stays.
+///
+/// # Safety
+/// `files` is a NUL-terminated path.
+#[no_mangle]
+pub unsafe extern "C" fn acnh_relay_android_sign_out(files: *const c_char) -> bool {
+    let Some(files) = path(files) else {
+        return false;
+    };
+    std::panic::catch_unwind(|| {
+        let dirs = Roots::android(&files, &files).dirs();
+        let done = sign_out_android(&dirs, &store(&files)).is_ok();
+        log(if done {
+            "relay: signed out of Dropbox on this device (save sync and the download)"
+        } else {
+            "relay: the Dropbox sign-out left something behind"
+        });
+        done
     })
     .unwrap_or(false)
 }

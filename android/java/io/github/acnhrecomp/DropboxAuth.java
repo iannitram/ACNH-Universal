@@ -6,7 +6,9 @@
 // scopes (account_info.read, files.metadata.read/write, files.content.read/write), the browser coming back to the
 // redirect save-relay registered, http://127.0.0.1:53710/, which a small server in this app answers and hands to
 // save-relay. save-relay exchanges the code and files the refresh token in the app's credential store (Relay); the
-// game download reads it from there too, so one sign-in serves both. An install signed in before this, for the
+// game download reads it from there too. One sign-in serves both (owner's decision, 2026-11-23): signing in for the
+// download turns save sync on too, so the player never signs in twice. "Turn off save sync" stops the syncing only
+// (the token stays for the download); "Sign out of Dropbox" ends both. An install signed in before this, for the
 // download only (read-only scopes, its refresh token in the private preferences), keeps downloading with that token;
 // save sync asks it to sign in once more. Nothing of the sign-in leaves the device but the calls to Dropbox.
 package io.github.acnhrecomp;
@@ -55,10 +57,11 @@ final class DropboxAuth {
         Relay.dropDropboxToken(c);
     }
 
-    // Home's "Sign out of Dropbox": the download's sign-in and save sync both end on this device.
-    static void signOutAll(Context c) {
+    // Home's "Sign out of Dropbox": the download's sign-in and save sync both end on this device. False when
+    // something was left behind (the home screen says so).
+    static boolean signOutAll(Context c) {
         prefs(c).edit().clear().apply();
-        Relay.turnOff(c);
+        return Relay.signOut(c);
     }
 
     private static String enc(String s) {
@@ -181,7 +184,10 @@ final class DropboxAuth {
                     // save-relay checks the state, exchanges the code with its PKCE verifier and files the token.
                     JSONObject done = new JSONObject(Relay.saveRelay(app).signInFinish("http://127.0.0.1:" + PORT + target));
                     if (!done.optBoolean("ok")) error = envelopeError(done);
-                    else prefs(app).edit().clear().apply();  // an older download-only sign-in: replaced
+                    else {  // an older download-only sign-in, or one kept after sync was turned off: replaced
+                        prefs(app).edit().clear().apply();
+                        Relay.signedIn(app);
+                    }
                 } catch (Exception e) {
                     error = e.getMessage() == null ? e.toString() : e.getMessage();
                 }
