@@ -293,7 +293,6 @@ set(NX_RUNTIME_SOURCES
     runtime/src/svc_am.cpp
     runtime/src/svc_set.cpp
     runtime/src/svc_misc.cpp
-    runtime/src/svc_time.cpp
     runtime/src/svc_process.cpp
     runtime/src/hle_fs.cpp
     runtime/src/svc_account.cpp
@@ -320,13 +319,12 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nfp_host.cpp
     runtime/src/acnh_amiibo_hook.cpp
     runtime/src/amiibo_decode.cpp
-    runtime/src/hle_time.cpp
     runtime/src/hle_bcat.cpp
     runtime/src/hle_movie.cpp
     runtime/src/hle_friends.cpp
     runtime/src/hle_ngc.cpp
     runtime/src/config_wrapper.cpp
-    runtime/src/game_clock.cpp
+    runtime/src/time_wrapper.cpp
     runtime/src/mod_fetch.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
