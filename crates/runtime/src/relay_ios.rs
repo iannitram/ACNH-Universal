@@ -11,7 +11,7 @@
 
 use super::{
     Blocked, BlockedAnswer, Connector, HeldAnswer, Live, Player, Prompt, Roots, Settings,
-    SignInAnswer, SignInForm,
+    SignInAnswer, SignInForm, StatusOut, SyncNow, SyncNowSlot, SyncReady,
 };
 use acnh_core::launch::Keep;
 use acnh_core::savecard::SaveCard;
@@ -31,11 +31,11 @@ use security_framework::passwords::{
 };
 use security_framework::passwords_options::PasswordOptions;
 use std::cell::RefCell;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, c_int, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 
@@ -436,6 +436,12 @@ static BOOTED: AtomicBool = AtomicBool::new(false);
 /// True when that start pulled (sync on): a game started with sync off never pushes.
 static PULLED: AtomicBool = AtomicBool::new(false);
 
+/// When the island last synced in this process (Unix seconds; `Player::synced`).
+static SYNCED: AtomicU64 = AtomicU64::new(0);
+
+/// The Saves page's Sync now: one at a time, on a worker (`acnh_relay_sync_now`).
+static SYNC_NOW: SyncNowSlot = SyncNowSlot::new();
+
 fn data_root(raw: *const c_char) -> Option<PathBuf> {
     if raw.is_null() {
         return None;
@@ -445,8 +451,8 @@ fn data_root(raw: *const c_char) -> Option<PathBuf> {
     Some(PathBuf::from(text))
 }
 
-fn with_player(data_root: &Path, work: impl FnOnce(&Player<'_>) + std::panic::UnwindSafe) {
-    let result = std::panic::catch_unwind(|| {
+fn with_player(data_root: &Path, work: impl FnOnce(&Player<'_>)) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let connector: &dyn Connector = &Live;
         let player = Player {
             roots: Roots::for_data_root(data_root),
@@ -456,10 +462,11 @@ fn with_player(data_root: &Path, work: impl FnOnce(&Player<'_>) + std::panic::Un
             booted: &BOOTED,
             pulled: &PULLED,
             settings: &PlayerSettings,
+            synced: &SYNCED,
             log: Box::new(log),
         };
         work(&player);
-    });
+    }));
     if result.is_err() {
         log("relay: stopped by a panic");
     }
@@ -534,4 +541,58 @@ pub extern "C" fn acnh_relay_foreground(data_root: *const c_char) {
     let _ = std::thread::Builder::new()
         .name("relay mark".into())
         .spawn(move || with_player(&root, |player| player.resume()));
+}
+
+/// The Saves page's Sync now (issue #260), from the settings screen: the background push
+/// (`Player::sync_now`) on a worker thread, inside a background task so leaving the app does not
+/// cut it short; returns at once. False when it did not start (one is running, or no data root).
+/// The outcome comes from `acnh_relay_sync_status`.
+#[no_mangle]
+pub extern "C" fn acnh_relay_sync_now(data_root: *const c_char) -> bool {
+    let Some(root) = self::data_root(data_root) else {
+        return false;
+    };
+    SYNC_NOW.start(move || {
+        let task = BackgroundTask::begin();
+        let mut outcome = SyncNow::Error;
+        with_player(&root, |player| outcome = player.sync_now());
+        task.end();
+        outcome
+    })
+}
+
+/// What the Saves page shows of save sync, without the network: `*ready` a `SyncReady` code,
+/// `*outcome` the last Sync now's (-1 running, 0 none yet), `*last` when the island last synced
+/// (Unix seconds, 0 not yet), and the service's name ("Nextcloud") in `service` (`cap` bytes,
+/// NUL-terminated; empty when unknown). Reads the Keychain: the screen asks about once a second.
+///
+/// # Safety
+/// `data_root` is NUL-terminated; the out pointers are valid (or null); `service` holds `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn acnh_relay_sync_status(
+    data_root: *const c_char,
+    ready: *mut c_int,
+    outcome: *mut c_int,
+    last: *mut u64,
+    service: *mut c_char,
+    cap: usize,
+) {
+    let mut code = SyncReady::Off.code();
+    let mut label = "";
+    if let Some(root) = self::data_root(data_root) {
+        with_player(&root, |player| {
+            code = player
+                .sync_now_ready(SYNC_NOW.running() || super::sync_running())
+                .code();
+            label = player.service_label().unwrap_or("");
+        });
+    }
+    let out = StatusOut {
+        ready,
+        outcome,
+        last,
+        service,
+        cap,
+    };
+    out.write(code, SYNC_NOW.poll(), SYNCED.load(Ordering::SeqCst), label);
 }
