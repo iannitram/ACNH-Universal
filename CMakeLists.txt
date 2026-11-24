@@ -311,7 +311,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/ldn_lan.cpp
     runtime/src/nextendo.cpp
     runtime/src/nextendo_http.cpp
-    runtime/src/hle_audio.cpp
+    runtime/src/audio_wrapper.cpp
     runtime/src/hle_pl.cpp
     runtime/src/hle_album.cpp
     runtime/src/hle_jpeg.cpp
