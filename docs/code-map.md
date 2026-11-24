@@ -212,7 +212,7 @@ Upstream's own preparation, ported from ACNHRecomp-Importer v1.0.7 (MIT): from t
 | `prepare/io/` | the probe of the picks, the NSOs, `romfs.pak` and `spirv.pak` (`prepare_io_test`) |
 | `prepare/gamelib/` | the game library from `gen/` with zig, for windows-x64, linux-x64, macos-arm64 and android-arm64 |
 | `prepare/recomp/` | `nx_recomp` and `acnh_recomp`: `recomp/*.py` ported to C++ with Capstone 5.0.7; `SOURCE` is the hash of the `recomp/*.py` it matches, which `recomp_source_test` checks; `acnh/speedfix-3.0.2.pchtxt` and `speedfix-3.0.3.pchtxt` are tmouh's SpeedFix (CC BY-NC 4.0, `acnh/SPEEDFIX.md`). It lags our `recomp/*.py` (the iOS jump-table fix), so `recomp_source_test` is left out of CI until #247 |
-| `prepare/prepare_e2e_test.cpp`, `prepare_launcher_test.cpp`, `fake_shader_tool.cpp` | the end-to-end and launcher tests on synthetic input; CI leaves them out (they need zig or the launcher) |
+| `prepare/prepare_e2e_test.cpp`, `fake_shader_tool.cpp` | the end-to-end prepare tests on synthetic input; CI leaves them out (they need zig) |
 
 ## Other tools, tests and docs
 
@@ -235,7 +235,6 @@ Upstream's own preparation, ported from ACNHRecomp-Importer v1.0.7 (MIT): from t
 
 | Path | Removed when |
 |---|---|
-| `launcher/` (C++, SDL3 + ImGui: `main.cpp`, `desktop.cpp`, `pages.cpp`, `pipeline.cpp`, `files.cpp`, `prepare_job.cpp` (upstream's Prepare page, from the sync), `cpu_check.cpp`, `save_log_stub.cpp`, `launcher.h`, `launcher.cmake`), `tools/launcher.sh` | the Slint app has parity: Continue, first run, Settings, Add to Steam, update (2.10, #44) |
 | `tools/setup_acnh.py` (732), `tools/setup_acnh.sh`, and the scripts it runs: `acnh_version.py`, `nso2bin.py`, `pack_romfs.py`, `pack_spirv.py`, `extract_shaders.py`, `sarc_endian.py`, `msg_rewrap.py` | the setup stages move into Rust (1.31, #34). The Python recompiler route stays until 3.05 |
 | `recomp/` (Python, about 3.8k lines) | the recompile stage runs `crates/recomp` (3.05, #49) |
 | `runtime/src` outside the renderer and the overlay | the `Loader` group is Rust and the game boots (4.12) |
