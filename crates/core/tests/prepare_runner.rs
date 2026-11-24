@@ -5,8 +5,8 @@ use acnh_core::gamefolder::GameFolder;
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{
     delivery_folder, delivery_subfolder, install_mod_archive, install_mods, prepare_installed,
-    prepare_with, recomp_hash, rust_build, rust_version, speedfix_args, speedfix_patch, step,
-    toolchain_with, Missing, ProcessRunner, Request, ScriptRunner, Step,
+    prepare_with, recomp_hash, rust_version, speedfix_args, speedfix_patch, step, toolchain_with,
+    Missing, ProcessRunner, Request, ScriptRunner, Step,
 };
 use acnh_core::recipe::{Hub, Stage, STAGES};
 use acnh_core::version::Version;
@@ -1784,6 +1784,7 @@ fn recompile_hash_changes_when_recomp_python_file_changes() {
 #[cfg(unix)]
 #[test]
 fn the_desktop_build_builds_the_runtime_and_gives_cmake_its_archive_and_header() {
+    use acnh_core::prepare::rust_build;
     use std::os::unix::fs::PermissionsExt;
     let req = request("rust-build-runtime", Os::current());
     let root = req.out.join("src");
