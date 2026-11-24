@@ -295,9 +295,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/svc_misc.cpp
     runtime/src/svc_process.cpp
     runtime/src/hle_fs.cpp
-    runtime/src/svc_account.cpp
     runtime/src/svc_nfp.cpp
-    runtime/src/users.cpp
     runtime/src/hle_ro.cpp
     runtime/src/hle_vi.cpp
     runtime/src/hle_hid.cpp
@@ -715,7 +713,7 @@ else()
     message(STATUS "Dear ImGui not found in ${NX_IMGUI_DIR}: no settings screen")
     target_sources(${NX_GAME} PRIVATE runtime/src/ui/ui_stub.cpp runtime/src/ui/i18n.cpp)
 endif()
-target_sources(${NX_GAME} PRIVATE runtime/src/saves.cpp)
+target_sources(${NX_GAME} PRIVATE runtime/src/saves_wrapper.cpp)
 target_link_libraries(${NX_GAME} PRIVATE nx_save_storage)
 target_sources(${NX_GAME} PRIVATE runtime/src/hle_olsc.cpp)  # the Island Backup, kept with the saves (saves.cpp)
 
