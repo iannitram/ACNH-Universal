@@ -1,6 +1,6 @@
 //! Assemble (SPEC.md M1, M4, M11, M14; docs/adr/0004-build-hubs.md): after the build stage,
 //! the player with the libraries it needs, so it runs on a device that did not build it. The
-//! half of upstream's `tools/package_release_{linux,win,mac}.sh` a hub needs, without their
+//! half of upstream's per-OS release packaging scripts a hub needs, without their
 //! launcher parts:
 //!
 //! - **Linux:** `<install>/acnh` and the libraries a stock system may lack (SDL3, libvpx,
@@ -218,6 +218,18 @@ pub fn assemble_with(plan: &Plan, tools: &mut dyn Tools) -> Result<PathBuf> {
 /// executable when there is one (the contained app), else the one in the app under `install`;
 /// elsewhere `<install>/<recipe::output>`.
 pub fn player(os: Os, launcher: &Path, install: &Path) -> PathBuf {
+    if matches!(os, Os::Linux | Os::Windows) {
+        if let Some(beside) = launcher.parent().and_then(|folder| {
+            folder
+                .join("game/analysis/main.bin")
+                .is_file()
+                .then(|| folder.join(output(os)))
+                .filter(|path| path.is_file())
+        }) {
+            return beside;
+        }
+        return install.join(output(os));
+    }
     if os != Os::Mac {
         return install.join(output(os));
     }

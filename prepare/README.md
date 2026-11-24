@@ -75,7 +75,7 @@ From the Importer's `src/gamelib/` (its runtime copies were identical to `runtim
 - The shader tool: `tools/build_shader_tool.py <rid> <dest>` builds `tools/maxwell/spirv_harness` NativeAOT (one
   executable of about 5 MB, no .NET needed where it runs; .NET 10 SDK to build it), carried as `tools/shaders/`
   (in ACNHRecomp.app: `Contents/Resources/tools/shaders/`; Android: `linux-bionic-arm64`, `libspirv_harness.so` in the
-  APK). `tools/package_release_*.sh` put both there.
+  APK). Upstream's retired release scripts put both there.
 
 ## On Android (`prepare_jni.cpp`)
 

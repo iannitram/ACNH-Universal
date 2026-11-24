@@ -19,7 +19,7 @@ It needs Python 3, Xvfb, xauth, and a Vulkan driver; Mesa lavapipe works without
 The original CMake path remains available without Rust or the fixture:
 
 ```sh
-cmake -S . -B build -G Ninja -DNX_GAME=acnh -DNX_GAME_FROM_FOLDER=ON -DNX_LAUNCHER=OFF -DNX_TESTS=ON
+cmake -S . -B build -G Ninja -DNX_GAME=acnh -DNX_GAME_FROM_FOLDER=ON -DNX_TESTS=ON
 cmake --build build --target acnh gpu_pick_test tiling_test astc_test --parallel 2
 ctest --test-dir build --output-on-failure
 ```

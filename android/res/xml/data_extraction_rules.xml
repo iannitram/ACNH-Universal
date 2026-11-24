@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Nothing of the app's storage goes into cloud backup or a device-to-device transfer: the game downloaded into
-     <files>/gamedata stays on this device and inside the app (SPEC M18). -->
+<!-- Nothing of the app's storage goes into cloud backup or a device-to-device transfer: the game in
+     <files>/game/ stays on this device and inside the app (SPEC M18, #192). -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="root" path="."/>
         <exclude domain="file" path="."/>
+        <exclude domain="file" path="game"/>
         <exclude domain="database" path="."/>
         <exclude domain="sharedpref" path="."/>
         <exclude domain="external" path="."/>
@@ -12,6 +13,7 @@
     <device-transfer>
         <exclude domain="root" path="."/>
         <exclude domain="file" path="."/>
+        <exclude domain="file" path="game"/>
         <exclude domain="database" path="."/>
         <exclude domain="sharedpref" path="."/>
         <exclude domain="external" path="."/>

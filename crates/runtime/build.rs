@@ -42,13 +42,7 @@ fn player(manifest: &Path, out: &Path) -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-env-changed=ACNH_BOOT_SMOKE");
     println!("cargo:rerun-if-env-changed=CMAKE_PREFIX_PATH");
     println!("cargo:rerun-if-changed=tests/fake_game");
-    for path in [
-        "CMakeLists.txt",
-        "runtime",
-        "games",
-        "assets",
-        "launcher/launcher.cmake",
-    ] {
+    for path in ["CMakeLists.txt", "runtime", "games", "assets"] {
         println!("cargo:rerun-if-changed=../../{path}");
     }
     println!("cargo:rerun-if-changed=../../Cargo.lock");
@@ -95,11 +89,12 @@ fn player(manifest: &Path, out: &Path) -> Result<(), Box<dyn Error>> {
         Ok(game) => game,
         Err(_) => String::from("acnh"),
     };
-    cmake::Config::new(manifest.join("../.."))
-        .out_dir(out.join("player"))
+    println!("cargo:rerun-if-env-changed=CMAKE_LINKER");
+    println!("cargo:rerun-if-env-changed=NX_VULKAN_INCLUDE");
+    let mut cfg = cmake::Config::new(manifest.join("../.."));
+    cfg.out_dir(out.join("player"))
         .generator("Ninja")
         .define("NX_GAME", &game)
-        .define("NX_LAUNCHER", "OFF")
         .define("NX_GAME_FROM_FOLDER", "ON")
         .define(
             "NX_BOOT_SMOKE",
@@ -111,7 +106,17 @@ fn player(manifest: &Path, out: &Path) -> Result<(), Box<dyn Error>> {
         )
         .define("NX_RUNTIME_ARCHIVE", archive)
         .define("NX_RUNTIME_INCLUDE", out.join("include"))
-        .build_target(&game)
-        .build();
+        .build_target(&game);
+    if target.contains("msvc") {
+        // Rust's windows-msvc target always links the release CRT (/MD); match it in CMake.
+        cfg.profile("Release");
+    }
+    if let Ok(linker) = env::var("CMAKE_LINKER") {
+        cfg.define("CMAKE_LINKER", linker);
+    }
+    if let Ok(vk) = env::var("NX_VULKAN_INCLUDE") {
+        cfg.define("NX_VULKAN_INCLUDE", vk);
+    }
+    cfg.build();
     Ok(())
 }

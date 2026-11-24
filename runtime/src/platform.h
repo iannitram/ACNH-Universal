@@ -9,6 +9,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include "game_root.h"
 
@@ -77,8 +80,8 @@ bool read_asset(const std::string& path, std::string& out);  // a file of the AP
 // ---- output ----
 void log_line(const char* line);  // stderr / logcat
 std::string data_root();
-#if defined(__APPLE__)
-// Where the game's files are read from: NX_GAME_ROOT, else the app's game/ folder, else the data root (platform_mac.cpp).
+#if defined(__APPLE__) || defined(__ANDROID__)
+// Where the game's files are read from: NX_GAME_ROOT, else the app's game/ folder, else "" on Android / data_root on Apple.
 std::string game_root();
 #else
 // NX_GAME_ROOT when set, else the data root: the other hosts read the game as they always have (game_root.h).
@@ -159,6 +162,10 @@ float dynamic_render_scale();
 inline constexpr const char* kDefaultResolution = "auto";
 inline constexpr const char* kDefaultUpscaler = "fsr";
 inline constexpr const char* kDefaultAspect = "auto";  // the whole phone screen (20:9 ...), no side bars
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+inline constexpr const char* kDefaultResolution = "native";
+inline constexpr const char* kDefaultUpscaler = "linear";
+inline constexpr const char* kDefaultAspect = "auto";  // iPad / iPhone screen's own shape
 #else
 inline constexpr const char* kDefaultResolution = "native";
 inline constexpr const char* kDefaultUpscaler = "linear";
