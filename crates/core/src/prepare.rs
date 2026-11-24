@@ -1913,6 +1913,76 @@ fn brew_prefix() -> String {
     .unwrap_or_else(|| "/opt/homebrew".to_owned())
 }
 
+/// Builds `libacnh_runtime` (release, host target) into `<out>/runtime-target` and returns the
+/// static library and the folder holding the `acnh_runtime.h` cbindgen generated for it.
+fn build_runtime(
+    req: &Request,
+    root: &Path,
+    env: &[(String, String)],
+    logs: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let stage = Stage::Build;
+    let target = req.out.join("runtime-target");
+    let cargo = find_cargo(root);
+    run_logged(
+        stage,
+        &cargo,
+        &[
+            "build".to_owned(),
+            "-p".to_owned(),
+            "acnh-runtime".to_owned(),
+            "--release".to_owned(),
+            "--target-dir".to_owned(),
+            target.display().to_string(),
+        ],
+        root,
+        env,
+        &[],
+        Some(&logs.join("runtime.log")),
+    )?;
+    let release = target.join("release");
+    let lib = release.join(if cfg!(windows) {
+        "acnh_runtime.lib"
+    } else {
+        "libacnh_runtime.a"
+    });
+    if !lib.is_file() {
+        return Err(stage_err(stage, format!("{} was not built", lib.display())));
+    }
+    // build/<crate>-<hash>/out/include/acnh_runtime.h: take the newest if there are several.
+    let header = std::fs::read_dir(release.join("build"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join("out/include/acnh_runtime.h"))
+        .filter(|p| p.is_file())
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    let include = header
+        .and_then(|h| h.parent().map(Path::to_path_buf))
+        .ok_or_else(|| stage_err(stage, "cbindgen did not generate acnh_runtime.h".to_owned()))?;
+    Ok((lib, include))
+}
+
+/// `cargo`: the build tools' search, then the rustup home, which is not always on a GUI's PATH.
+fn find_cargo(root: &Path) -> PathBuf {
+    let found = find_build_tool(root, "cargo");
+    if found.is_file() {
+        return found;
+    }
+    let name = executable(Os::current(), "cargo");
+    let homes = [
+        std::env::var_os("CARGO_HOME").map(PathBuf::from),
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(|h| PathBuf::from(h).join(".cargo")),
+    ];
+    homes
+        .into_iter()
+        .flatten()
+        .map(|h| h.join("bin").join(&name))
+        .find(|p| p.is_file())
+        .unwrap_or(found)
+}
+
 /// The Rust build stage: configures CMake with Ninja and builds the `acnh` target.
 pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
     let stage = Stage::Build;
@@ -1974,6 +2044,15 @@ pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
             ("CXX".to_owned(), "clang++".to_owned()),
         ]
     };
+
+    // The C++ player needs the Rust runtime (config, saves, files, kernel ...): build it for the
+    // host, then hand CMake the archive and cbindgen's header, as tools/build_ios.sh does.
+    let (runtime_lib, runtime_include) = build_runtime(req, root, &env, &logs)?;
+    cmake_args.push(format!("-DNX_RUNTIME_ARCHIVE={}", runtime_lib.display()));
+    cmake_args.push(format!(
+        "-DNX_RUNTIME_INCLUDE={}",
+        runtime_include.display()
+    ));
 
     run_logged(
         stage,

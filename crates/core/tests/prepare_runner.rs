@@ -5,8 +5,8 @@ use acnh_core::gamefolder::GameFolder;
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{
     delivery_folder, delivery_subfolder, install_mod_archive, install_mods, prepare_installed,
-    prepare_with, recomp_hash, rust_version, speedfix_args, speedfix_patch, step, toolchain_with,
-    Missing, ProcessRunner, Request, ScriptRunner, Step,
+    prepare_with, recomp_hash, rust_build, rust_version, speedfix_args, speedfix_patch, step,
+    toolchain_with, Missing, ProcessRunner, Request, ScriptRunner, Step,
 };
 use acnh_core::recipe::{Hub, Stage, STAGES};
 use acnh_core::version::Version;
@@ -1755,4 +1755,65 @@ fn recompile_hash_changes_when_recomp_python_file_changes() {
     let h2 = recomp_hash(&source).unwrap();
     assert_ne!(h1, h2);
     let _ = std::fs::remove_dir_all(&source);
+}
+
+/// Decoy `cargo`, `cmake` and `ninja` in the source's venv folder, where the build tools are
+/// found first. They log their arguments; the cargo decoy lays out what a runtime build leaves.
+#[cfg(unix)]
+#[test]
+fn the_desktop_build_builds_the_runtime_and_gives_cmake_its_archive_and_header() {
+    use std::os::unix::fs::PermissionsExt;
+    let req = request("rust-build-runtime", Os::current());
+    let root = req.out.join("src");
+    let bin = root.join("private/venv/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = req.out.join("calls.log");
+    let decoy = |name: &str, body: &str| {
+        let path = bin.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\necho \"{name} $*\" >> '{}'\n{body}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    decoy(
+        "cargo",
+        r#"while [ $# -gt 0 ]; do [ "$1" = --target-dir ] && t=$2; shift; done
+mkdir -p "$t/release/build/acnh-runtime-abc/out/include"
+: > "$t/release/libacnh_runtime.a"
+: > "$t/release/build/acnh-runtime-abc/out/include/acnh_runtime.h""#,
+    );
+    decoy("cmake", "exit 0");
+    decoy("ninja", "exit 0");
+
+    rust_build(&req, &root, 1).unwrap();
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = calls.lines().collect();
+    assert_eq!(lines.len(), 3, "{calls}");
+    assert!(
+        lines[0].starts_with("cargo build -p acnh-runtime --release"),
+        "{calls}"
+    );
+    let target = req.out.join("runtime-target/release");
+    assert!(lines[1].starts_with("cmake "), "{calls}");
+    assert!(
+        lines[1].contains(&format!(
+            "-DNX_RUNTIME_ARCHIVE={}",
+            target.join("libacnh_runtime.a").display()
+        )),
+        "{calls}"
+    );
+    assert!(
+        lines[1].contains(&format!(
+            "-DNX_RUNTIME_INCLUDE={}",
+            target.join("build/acnh-runtime-abc/out/include").display()
+        )),
+        "{calls}"
+    );
+    assert!(lines[2].starts_with("ninja "), "{calls}");
 }
