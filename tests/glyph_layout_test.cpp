@@ -22,6 +22,13 @@ int main() {
         expect("xbox", kind, "xbox");
         expect("console", kind, "console");
     }
+    // Nintendo's vendor id counts even when SDL types the pad "standard" (a GameCube adapter, 057e:0337).
+    if (!nx::nintendo_pad_by("standard", 0x057e) || !nx::nintendo_pad_by("switchpro", 0) ||
+        !nx::nintendo_pad_by("joyconleft", 0) || nx::nintendo_pad_by("standard", 0x045e) ||
+        nx::nintendo_pad_by("ps5", 0x054c)) {
+        std::printf("FAIL: nintendo_pad_by\n");
+        failures++;
+    }
     if (failures == 0) std::printf("glyph_layout: ok\n");
     return failures ? 1 : 0;
 }

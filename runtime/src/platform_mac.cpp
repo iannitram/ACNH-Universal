@@ -64,6 +64,7 @@
 #include "ui/amiibo_importer.h"
 #include "ui/ui.h"
 #include "bug_report.h"
+#include "glyph_layout.h"
 #include "platform.h"
 #include "sdl_audio_frame.h"
 #include "sdl_audio_queue.h"
@@ -373,10 +374,14 @@ const char* const kKeyNames[22][2] = {
 };
 // Nintendo's own pads (a Switch Pro Controller, Joy-Cons) keep A on the right face button; every other keeps confirm
 // on the bottom one (input.layout auto).
+// One test for "Nintendo's own pad", used for both the button mapping and the icon layout so they never differ: SDL's
+// type name (switchpro, joyconleft, ...) or Nintendo's USB vendor id (adapters and licensed pads typed "standard").
+static bool nintendo_type(SDL_GamepadType type, Uint16 vendor) {
+    const char* t = SDL_GetGamepadStringForType(type);
+    return nx::nintendo_pad_by(t ? t : "", vendor);
+}
 static bool nintendo_pad(SDL_Gamepad* pad) {
-    const char* t = pad ? SDL_GetGamepadStringForType(SDL_GetGamepadType(pad)) : nullptr;
-    const std::string s = t ? t : "";
-    return s.rfind("switch", 0) == 0 || s.rfind("joycon", 0) == 0 || (pad && SDL_GetGamepadVendor(pad) == 0x057e);
+    return pad && nintendo_type(SDL_GetGamepadType(pad), SDL_GetGamepadVendor(pad));
 }
 
 const InputOptions& input_options() {
@@ -406,18 +411,15 @@ SDL_Gamepad* g_gamepad = nullptr;  // player 1's controller: the settings screen
 
 // The kind of a pad from SDL's type for it: "xbox", "playstation", "switch" (the console's own pads, by SDL's name
 // for their type: "switchpro", "joyconleft", ...) or "generic".
-static std::string kind_of_type(SDL_GamepadType type) {
+static std::string kind_of_type(SDL_GamepadType type, Uint16 vendor) {
+    if (nintendo_type(type, vendor)) return "switch";
     switch (type) {
         case SDL_GAMEPAD_TYPE_XBOX360:
         case SDL_GAMEPAD_TYPE_XBOXONE: return "xbox";
         case SDL_GAMEPAD_TYPE_PS3:
         case SDL_GAMEPAD_TYPE_PS4:
         case SDL_GAMEPAD_TYPE_PS5: return "playstation";
-        default: {
-            const char* t = SDL_GetGamepadStringForType(type);
-            std::string s = t ? t : "";
-            return s.rfind("switch", 0) == 0 || s.rfind("joycon", 0) == 0 ? "switch" : "generic";
-        }
+        default: return "generic";
     }
 }
 
@@ -432,7 +434,7 @@ bool g_pad_info_set = false;  // the main thread has looked (an empty kind then 
 static void cache_pad_info(SDL_Gamepad* pad) {
     std::string kind, name;
     if (pad) {
-        kind = kind_of_type(SDL_GetGamepadType(pad));
+        kind = kind_of_type(SDL_GetGamepadType(pad), SDL_GetGamepadVendor(pad));
         const char* n = SDL_GetGamepadName(pad);
         name = n ? n : "";
     }
@@ -451,7 +453,7 @@ bool g_player_on[kMaxPlayers] = {};
 }  // namespace
 
 // One controller's buttons and sticks, in the layout chosen in the settings.
-static void read_gamepad(SDL_Gamepad* pad, const InputOptions& opt, PadState& p) {
+static void read_gamepad(SDL_Gamepad* pad, const InputOptions& opt, PadState& p, bool guide_opens_settings = false) {
     // SDL names buttons by position (south/east/...). Console layout: the game's A is the east button, as on a
     // Switch controller. Xbox layout: A is the bottom one (confirm where Xbox and PlayStation players expect it).
     struct Map {
@@ -468,8 +470,9 @@ static void read_gamepad(SDL_Gamepad* pad, const InputOptions& opt, PadState& p)
     };
     for (const Map& m : map)
         if (SDL_GetGamepadButton(pad, m.b)) p.buttons |= m.bit;
-    // The Guide/Home button opens the settings screen, as Minus+Plus does (ui_pad).
-    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_GUIDE)) p.buttons |= kPlus | kMinus;
+    // The Guide/Home button opens the settings screen, as Minus+Plus does (ui_pad). Player 1's pad only: ui_pad and
+    // ui_filter_game_buttons act on that one, so on another player's pad the chord would reach the game.
+    if (guide_opens_settings && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_GUIDE)) p.buttons |= kPlus | kMinus;
     bool east = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST), south = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH);
     const bool bottom_confirm = opt.layout_auto ? !nintendo_pad(pad) : opt.xbox_layout;
     if (bottom_confirm ? south : east) p.buttons |= kA;
@@ -545,7 +548,7 @@ static void sample_gamepads(const InputOptions& opt, PadState (&players)[kMaxPla
     }
     for (int k = 0; k < kMaxPlayers; k++) {
         if (!g_pads[k]) continue;
-        read_gamepad(g_pads[k], opt, players[k]);
+        read_gamepad(g_pads[k], opt, players[k], k == 0);
         if (joining[k] && players[k].buttons) players[k] = PadState{};
         else joining[k] = false;
     }
@@ -704,7 +707,7 @@ std::string controller_kind() {
     std::string kind;
     int n = 0;
     if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
-        if (n > 0) kind = kind_of_type(SDL_GetGamepadTypeForID(ids[0]));
+        if (n > 0) kind = kind_of_type(SDL_GetGamepadTypeForID(ids[0]), SDL_GetGamepadVendorForID(ids[0]));
         SDL_free(ids);
     }
     return kind;
