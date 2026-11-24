@@ -51,6 +51,27 @@
 #include "game_clock.h"
 #include "kernel.h"
 #include "platform.h"
+
+#ifdef NX_RUST_RUNTIME
+#include <acnh_runtime.h>
+#else
+extern "C" {
+void acnh_platform_window_set_minimized(bool minimized);
+void acnh_platform_window_set_size(uint32_t w, uint32_t h);
+void acnh_platform_window_set_refresh_hz(int32_t hz);
+void acnh_platform_pick_begin();
+void acnh_platform_pick_complete(const char* path);
+void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
+size_t acnh_platform_pad_kind(int32_t vendor, const char* name, char* out, size_t cap);
+size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, const char* name, char* out, size_t cap);
+bool acnh_platform_xbox_layout(const char* controller_kind);
+int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
+uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
+uint32_t acnh_platform_touch_label_code(const char* label);
+bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t now_ns, bool* was_run, uint64_t* past_ns);
+}
+#endif
+
 #include "controller_kind.h"
 #include "config.h"
 #include "platform_android.h"
@@ -539,11 +560,7 @@ uint64_t read_at(FILE* f, int64_t off, void* buf, uint64_t size) {
     }
     return done;
 }
-bool make_dirs(const std::string& path) {
-    std::error_code ec;
-    std::filesystem::create_directories(path, ec);
-    return !ec;
-}
+
 
 void log_line(const char* line) { __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line); }
 
@@ -1062,9 +1079,9 @@ void set_fullscreen(bool) {}
 // a 120 Hz screen a 30 fps frame was shown for 2 refreshes instead of 4 (nvn_vk.cpp's repeats): 60 fps where the game
 // was light enough, interiors running twice as fast (Discord, 0.10.0). The frame's threads only load it.
 std::atomic<int> g_refresh_hz{60};
-int display_refresh_hz() { return g_refresh_hz.load(std::memory_order_relaxed); }
+
 void show_fatal(const char*) {}  // the app's own screens explain (Home.java reads nx.log's FATAL line)
-void set_master_volume(float) {}
+
 // The connected controller's name and kind, from gamepad_connected's poll (every 2 s; android_main's loop).
 std::mutex g_pad_info_lock;
 std::string g_pad_name, g_pad_kind;
@@ -1788,7 +1805,7 @@ extern "C" void android_main(android_app* app) {
             next_refresh_poll = now + 1'000'000'000;
             if (const int hz = read_refresh_rate(app); hz && hz != nx::plat::g_refresh_hz.load(std::memory_order_relaxed)) {
                 nx::log("display: %d Hz", hz);
-                nx::plat::g_refresh_hz.store(hz, std::memory_order_relaxed);
+                ::acnh_platform_window_set_refresh_hz(hz);
             }
         }
         // Every 2 s: whether a game controller is connected (the touch controls hide while one is).

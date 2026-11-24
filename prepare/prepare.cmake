@@ -43,7 +43,7 @@ nx_embed(NX_GL_DATA
     nx/cpu.h "${NX_PREPARE_ROOT}/runtime/include/nx/cpu.h"
     nx/module.h "${NX_PREPARE_ROOT}/runtime/include/nx/module.h"
     nx/runtime.h "${NX_PREPARE_ROOT}/runtime/include/nx/runtime.h"
-    game_abi.cpp "${NX_PREPARE_ROOT}/runtime/src/game_abi.cpp"
+    game_abi.cpp "${NX_PREPARE_ROOT}/runtime/src/loader_wrapper.cpp"
     cpu_model.c "${NX_PREPARE_DIR}/gamelib/cpu_model.c")
 set(NX_GL_INC "${CMAKE_BINARY_DIR}/prepare_gamelib")
 file(WRITE "${NX_GL_INC}/gamelib_data.inc.tmp" "${NX_GL_DATA}")

@@ -1,9 +1,24 @@
-// The Windows memory guard's helpers (runtime/src/memguard_win.cpp): the limit parsing, and that the footprint it
-// reads follows this process's own commits. Built by CMake with -DNX_TESTS=ON (ctest). Exit code 0: passed.
-#define NX_MEMGUARD_STANDALONE
-#include "../runtime/src/memguard_win.cpp"
+// The Windows memory guard's helpers (memory_wrapper.cpp -> crates/runtime/src/memory.rs): the limit parsing,
+// and that the footprint it reads follows this process's own commits. Built by CMake with -DNX_TESTS=ON (ctest).
+#include <windows.h>
 
+#include <cstdio>
 #include <vector>
+
+#include "platform.h"
+
+namespace nx {
+void log(const char*, ...) {}
+[[noreturn]] void fatal(const char*, ...) { std::abort(); }
+namespace plat {
+bool reserve(uint64_t, uint64_t) { return false; }
+bool commit(uint64_t, uint64_t) { return false; }
+void decommit(uint64_t, uint64_t) {}
+uint64_t monotonic_ns() { return 0; }
+double memory_limit_gb(const char* env);
+uint64_t memory_footprint();
+}  // namespace plat
+}  // namespace nx
 
 int main() {
     using namespace nx::plat;
