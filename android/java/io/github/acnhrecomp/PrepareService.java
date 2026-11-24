@@ -212,16 +212,10 @@ public class PrepareService extends Service {
         f.delete();
     }
 
-    // The end: the game folder saved for Home when it is ready, the notification of how it went, the service gone.
+    // The end: the notification of how it went, the service gone (Prepare hands the folder to Home to copy into <files>/game/).
     private void done(JSONObject st, String why) {
         String title, text;
         if (st != null && st.optInt("rc", -1) == 0) {
-            String folder = st.optString("out");
-            try (OutputStream o = new FileOutputStream(new File(getFilesDir(), "data_root.txt"))) {
-                o.write((folder + "\n").getBytes(StandardCharsets.UTF_8));
-            } catch (Exception e) {
-                // Prepare's Play button hands the folder to Home as well
-            }
             delete(new File(getCacheDir(), "zig-cache"));
             title = t("The game is ready", "O jogo está pronto");
             text = t("Tap to play", "Toque para jogar");

@@ -79,6 +79,7 @@ std::string g_cache_dir;       // the app's own internal folder
 namespace {
 android_app* g_app = nullptr;
 std::string g_root;
+std::string g_game_root;
 std::atomic<ANativeWindow*> g_window{nullptr};
 std::atomic<uint64_t> g_window_gen{0};  // bumped for every new window
 std::atomic<bool> g_visible{false};
@@ -558,47 +559,6 @@ using LongJmpFn = void (*)(uint64_t, uint64_t);
 LongJmpFn g_game_longjmp = nullptr;
 
 std::string game_lib_name() { return std::string("lib") + nx::game::kInfo.id + "_game.so"; }
-
-// Copies src to dst unless dst already is a copy of it (size and modification time, kept in dst + ".from").
-bool copy_if_changed(const std::string& src, const std::string& dst, std::string& err) {
-    struct stat ss{};
-    if (stat(src.c_str(), &ss) != 0) return err = "missing " + src, false;
-    char stamp[64];
-    std::snprintf(stamp, sizeof stamp, "%lld %lld", (long long)ss.st_size, (long long)ss.st_mtime);
-    {
-        std::ifstream f(dst + ".from");
-        std::string have;
-        std::getline(f, have);
-        struct stat ds{};
-        if (have == stamp && stat(dst.c_str(), &ds) == 0 && ds.st_size == ss.st_size) return true;
-    }
-    make_dirs(dst.substr(0, dst.rfind('/')));
-    std::string tmp = dst + ".part";
-    int in = open(src.c_str(), O_RDONLY | O_CLOEXEC), out = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
-    bool ok = in >= 0 && out >= 0;
-    std::vector<char> buf(8 << 20);
-    while (ok) {
-        ssize_t n = read(in, buf.data(), buf.size());
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) {
-            ok = n == 0;
-            break;
-        }
-        for (ssize_t done = 0; ok && done < n;) {
-            ssize_t w = write(out, buf.data() + done, size_t(n - done));
-            if (w < 0 && errno == EINTR) continue;
-            ok = w > 0, done += w;
-        }
-    }
-    if (in >= 0) close(in);
-    if (out >= 0 && close(out) != 0) ok = false;
-    if (!ok || rename(tmp.c_str(), dst.c_str()) != 0) {
-        unlink(tmp.c_str());
-        return err = "could not copy " + src + " (" + std::strerror(errno) + ")", false;
-    }
-    std::ofstream(dst + ".from") << stamp << "\n";
-    return true;
-}
 }  // namespace
 
 // The folder whose game this process loaded (Home.java has it loaded before the game's activity starts), or "".
@@ -607,23 +567,19 @@ std::string loaded_game_folder() {
     return g_game_lib ? g_game_from : std::string();
 }
 
-std::string load_game(const std::string& folder, const std::string& own_dir) {
+std::string load_game(const std::string& folder, const std::string&) {
 #ifndef NX_GAME_DYNAMIC
     return "";  // linked in (NX_ANDROID_GAME_IN_APP)
 #endif
     std::lock_guard lk(g_game_mx);
-    // One game library per process. The same folder may come spelled another way (/sdcard, /storage/emulated/0):
-    // compared as real paths, else the app asked to restart for the folder it already had.
     auto same_folder = [](const std::string& a, const std::string& b) {
         std::error_code ec;
-        return a == b || std::filesystem::equivalent(a, b, ec);  // same device and inode; false when one is missing
+        return a == b || std::filesystem::equivalent(a, b, ec);
     };
     if (g_game_lib) return same_folder(g_game_from, folder) ? "" : "restart";
-    std::string err, lib = own_dir + "/game/" + game_lib_name();
-    // the game folder ACNHRecomp-Importer prepares: game/android-arm64/; one tools/android_install.sh filled: its top
-    std::string src = folder + "/game/android-arm64/" + game_lib_name();
-    if (access(src.c_str(), R_OK) != 0) src = folder + "/" + game_lib_name();
-    if (!copy_if_changed(src, lib, err)) return err;
+    // Loaded in place from <files>/game/libacnh_game.so, with no copy.
+    std::string lib = folder + "/" + game_lib_name();
+    if (access(lib.c_str(), R_OK) != 0) return "missing " + lib;
     void* h = dlopen(lib.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!h) return std::string("dlopen: ") + dlerror();
     auto abi = reinterpret_cast<const char* (*)()>(dlsym(h, "nx_game_abi"));
@@ -652,6 +608,7 @@ const nx::ModuleInfo* game_module(const char* name) {
 }
 
 std::string data_root() { return g_root; }
+std::string game_root() { return g_game_root; }
 
 bool read_asset(const std::string& path, std::string& out) {
     out.clear();
@@ -1667,31 +1624,6 @@ extern "C" JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, vo
     glue_ANativeActivity_onCreate(activity, saved, size);
 }
 
-// All-files access (Android 11+): needed to read Internal storage/<game title>. Asks for it by opening the system page.
-static bool has_all_files_access(android_app* app) {
-    JNIEnv* env = nullptr;
-    app->activity->vm->AttachCurrentThread(&env, nullptr);
-    jclass envc = env->FindClass("android/os/Environment");
-    jmethodID m = env->GetStaticMethodID(envc, "isExternalStorageManager", "()Z");
-    bool ok = m && env->CallStaticBooleanMethod(envc, m);
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    return ok;
-}
-
-static void request_all_files_access(android_app* app) {
-    JNIEnv* env = nullptr;
-    app->activity->vm->AttachCurrentThread(&env, nullptr);
-    jclass uric = env->FindClass("android/net/Uri");
-    jobject uri = env->CallStaticObjectMethod(uric, env->GetStaticMethodID(uric, "parse", "(Ljava/lang/String;)Landroid/net/Uri;"),
-                                              env->NewStringUTF((std::string("package:") + nx::game::kInfo.android_package).c_str()));
-    jclass intentc = env->FindClass("android/content/Intent");
-    jobject intent = env->NewObject(intentc, env->GetMethodID(intentc, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V"),
-                                    env->NewStringUTF("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION"), uri);
-    jclass actc = env->GetObjectClass(app->activity->clazz);
-    env->CallVoidMethod(app->activity->clazz, env->GetMethodID(actc, "startActivity", "(Landroid/content/Intent;)V"), intent);
-    if (env->ExceptionCheck()) env->ExceptionClear();
-}
-
 static std::string native_library_dir(android_app* app) {
     JNIEnv* env = nullptr;
     app->activity->vm->AttachCurrentThread(&env, nullptr);
@@ -1704,33 +1636,6 @@ static std::string native_library_dir(android_app* app) {
     std::string out;
     if (const char* cs = js ? env->GetStringUTFChars(js, nullptr) : nullptr) out = cs, env->ReleaseStringUTFChars(js, cs);
     return out;
-}
-
-static bool has_data(const std::string& root) { return access((root + "/analysis/main.bin").c_str(), R_OK) == 0; }
-
-// The app's own folders on every storage volume, the phone's first and then memory cards
-// (Context.getExternalFilesDirs(null)): the app may not list /storage, but it reads these without any permission.
-static std::vector<std::string> external_files_dirs(android_app* app) {
-    std::vector<std::string> out;
-    JNIEnv* env = nullptr;
-    app->activity->vm->AttachCurrentThread(&env, nullptr);
-    jobject act = app->activity->clazz;
-    jclass c = env->GetObjectClass(act);
-    jmethodID m = env->GetMethodID(c, "getExternalFilesDirs", "(Ljava/lang/String;)[Ljava/io/File;");
-    auto dirs = m ? static_cast<jobjectArray>(env->CallObjectMethod(act, m, nullptr)) : nullptr;
-    if (env->ExceptionCheck()) env->ExceptionClear(), dirs = nullptr;
-    for (jsize i = 0; dirs && i < env->GetArrayLength(dirs); i++) {
-        jobject f = env->GetObjectArrayElement(dirs, i);
-        if (!f) continue;  // a volume not mounted now
-        jmethodID path = env->GetMethodID(env->GetObjectClass(f), "getAbsolutePath", "()Ljava/lang/String;");
-        auto js = static_cast<jstring>(env->CallObjectMethod(f, path));
-        if (const char* cs = js ? env->GetStringUTFChars(js, nullptr) : nullptr) {
-            out.emplace_back(cs);
-            env->ReleaseStringUTFChars(js, cs);
-        }
-        env->DeleteLocalRef(f);
-    }
-    return out;  // the thread stays attached, as for the other calls here
 }
 
 #ifdef NX_PGO_GENERATE
@@ -1754,49 +1659,14 @@ static void pgo_writer(void*) {
 extern "C" void android_main(android_app* app) {
     using namespace nx::plat;
     g_app = app;
-    // Game data: Internal storage/<game title> (put there by the player, needs all-files access) or the app's own
-    // external files folder (adb push).
-    // The folder picked on the home screen (games/<game>/java Home.java writes <files>/data_root.txt) comes first.
+    // The game lives inside the app's private storage (<files>/game/, read-only) and saves/settings/logs live
+    // beside it (<files>/root/). No external folder lookup and no all-files access at start (#192).
     g_native_lib_dir = native_library_dir(app);
     g_cache_dir = app->activity->internalDataPath ? app->activity->internalDataPath : "";
-    std::string chosen;
-    if (app->activity->internalDataPath) {
-        std::ifstream f(std::string(app->activity->internalDataPath) + "/data_root.txt");
-        std::getline(f, chosen);
-        while (!chosen.empty() && (chosen.back() == '\r' || chosen.back() == '\n' || chosen.back() == ' ')) chosen.pop_back();
-    }
-    const std::string shared = !chosen.empty() ? chosen : std::string("/storage/emulated/0/") + nx::game::kInfo.title;
-    std::string own = app->activity->externalDataPath ? app->activity->externalDataPath : shared;
-    // The app's folder on a memory card, where the data (10 GB for ACNH) usually goes: the phone's own storage is
-    // smaller. The first folder that has the data wins, the phone's own first.
-    if (!has_data(own))
-        for (const std::string& d : external_files_dirs(app))
-            if (has_data(d)) {
-                own = d;
-                break;
-            }
-    // A folder inside the app (the game downloaded into <files>/gamedata) needs no all-files access.
-    if (!has_data(chosen) && !has_data(own) && !has_all_files_access(app)) {
-        request_all_files_access(app);
-        while (!has_all_files_access(app)) {  // keep the app responsive until the switch is turned on
-            int events;
-            android_poll_source* src;
-            while (ALooper_pollOnce(100, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0) {
-                if (src) src->process(app, src);
-                if (app->destroyRequested) nx::log_flush(), _exit(0);
-            }
-        }
-    }
-    // The picked folder wins over the app's own one; else the own one (adb push), else Internal storage/<title>.
-    g_root = !chosen.empty() && has_data(chosen) ? chosen : has_data(own) ? own : shared;
-    // The home screen loaded the game from the folder it was given just before: that folder wins. Choosing another
-    // here (data_root.txt not written, its main.bin not readable from here, a copy in the app's own folder) only made
-    // load_game ask for a restart, which came back on every start (Discord, 0.9.0).
-    std::string passed_over;  // logged below, once the log is opened in the right folder (its first line opens it)
-    if (std::string loaded = loaded_game_folder(); !loaded.empty() && loaded != g_root) {
-        passed_over = g_root;
-        g_root = loaded;
-    }
+    g_game_root = choose_android_game_root(std::getenv("NX_GAME_ROOT"), g_cache_dir,
+                                           [](const std::string& p) { return access(p.c_str(), R_OK) == 0; });
+    g_root = !g_cache_dir.empty() ? (g_cache_dir + "/root") : "";
+    if (!g_root.empty()) make_dirs(g_root);
     // config.txt's NX_* lines become environment variables (the NVN layer reads its switches with getenv), without
     // overriding a variable already set. Android defaults: handheld (720p, the lighter GPU load).
     {
@@ -1845,10 +1715,20 @@ extern "C" void android_main(android_app* app) {
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     for (int s : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) sigaction(s, &sa, &g_previous[s]);
 
-    nx::log("%s (Switch recomp) on Android, data at %s (own folder %s: %s)", nx::game::kInfo.title, g_root.c_str(),
-            own.c_str(), has_data(own) ? "has the data" : "no analysis/main.bin");
-    if (!passed_over.empty())
-        nx::log("app: the folder the home screen loaded, not %s (data_root.txt or its access disagreed)", passed_over.c_str());
+    nx::log("%s (Switch recomp) on Android, game at %s, data at %s", nx::game::kInfo.title, g_game_root.c_str(),
+            g_root.c_str());
+    // With no game in <files>/game/, open the first-start copy on the home screen.
+    if (g_game_root.empty()) {
+        nx::log("app: no game in <files>/game/, opening home screen");
+        open_home(app, "");
+        ANativeActivity_finish(app->activity);
+        while (!app->destroyRequested) {
+            int events;
+            android_poll_source* src;
+            if (ALooper_pollOnce(100, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0 && src) src->process(app, src);
+        }
+        return;
+    }
     // Save sync set up, but no pull in this process (Android brought the game screen back in a new process, past the
     // home screen): back to the home screen, which pulls and starts the game again.
     if (!acnh_relay_android_ready(g_cache_dir.c_str())) {
@@ -1862,7 +1742,7 @@ extern "C" void android_main(android_app* app) {
         }
         return;
     }
-    std::string why = load_game(g_root, g_cache_dir);
+    std::string why = load_game(g_game_root, g_cache_dir);
     if (why.empty()) why = vulkan_preflight();  // a plain message, not a black screen, when the GPU cannot
     if (!why.empty()) {
         nx::log("cannot start: %s", why.c_str());

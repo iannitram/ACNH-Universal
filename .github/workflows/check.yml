@@ -219,6 +219,8 @@ jobs:
             echo "AR_aarch64_linux_android=$ARCHIVER"
           } >> "$GITHUB_ENV"
       - run: cargo build --workspace --target aarch64-linux-android
+      - name: Android private-storage checks (#192)
+        run: bash tests/android_app_check.sh
 
   rust-macos:
     name: Rust (macOS)
