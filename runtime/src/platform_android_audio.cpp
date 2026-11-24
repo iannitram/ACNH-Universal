@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cerrno>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -63,6 +64,14 @@ AudioDone g_done = nullptr;
 std::atomic<AAudioStream*> g_stream{nullptr};
 std::mutex g_stream_lock;  // opening, closing, pausing the stream
 bool g_paused = false;     // under g_stream_lock
+
+// Dedicated reopen worker: AAudio forbids closing a stream from its own error callback, and audio_shutdown joins
+// this thread cleanly instead of detaching it.
+std::mutex g_reopen_mu;
+std::condition_variable g_reopen_cv;
+AAudioStream* g_reopen_target = nullptr;
+bool g_shutting_down = false;
+std::thread g_reopen_thread;
 
 aaudio_data_callback_result_t audio_cb(AAudioStream*, void*, void* out, int32_t frames) {
     auto* dst = static_cast<uint8_t*>(out);
@@ -112,27 +121,64 @@ AAudioStream* open_stream() {
 }
 
 // The output changed (headphones or a USB device plugged in or out, Bluetooth connected): Android disconnects the
-// stream, which then stays silent for good. It was never opened again: sound stopped once a Razer Kishi (USB audio)
-// or headphones came in. Reopened on the new default output, from a thread of its own (AAudio forbids closing a
-// stream in its own callback); the queued buffers carry on into the new stream.
+// stream, which then stays silent for good. Reopen on the new default output from the dedicated worker thread
+// (AAudio forbids closing a stream in its own callback); the queued buffers carry on into the new stream.
+bool shutting_down() {
+    std::lock_guard lk(g_reopen_mu);
+    return g_shutting_down;
+}
+
+void reopen_loop() {
+    for (;;) {
+        AAudioStream* target = nullptr;
+        {
+            std::unique_lock lk(g_reopen_mu);
+            g_reopen_cv.wait(lk, [] { return g_shutting_down || g_reopen_target != nullptr; });
+            if (g_shutting_down) return;
+            target = g_reopen_target;
+            g_reopen_target = nullptr;
+        }
+
+        {
+            std::lock_guard lk(g_stream_lock);
+            if (g_stream.load() != target) continue;  // already replaced or closed
+            log("audio: output changed: opening the stream again");
+            AAudioStream_requestStop(target);
+            AAudioStream_close(target);
+            g_stream = nullptr;
+        }
+
+        for (int attempt = 0; attempt < 5; attempt++) {
+            if (attempt) {
+                std::unique_lock lk(g_reopen_mu);
+                if (g_reopen_cv.wait_for(lk, std::chrono::milliseconds(200 * attempt),
+                                         [] { return g_shutting_down; })) {
+                    return;
+                }
+            }
+            std::lock_guard lk(g_stream_lock);
+            if (shutting_down()) return;
+            if (g_stream.load()) break;  // already reopened
+            if (AAudioStream* next = open_stream()) {
+                g_stream = next;
+                break;
+            }
+        }
+        if (!g_stream.load() && !shutting_down()) log("audio: no output after the change");
+    }
+}
+
 void audio_error(AAudioStream* s, void*, aaudio_result_t error) {
     if (error != AAUDIO_ERROR_DISCONNECTED) {
         log("audio: stream error %d", int(error));
         return;
     }
-    std::thread([s] {
-        std::lock_guard lk(g_stream_lock);
-        if (g_stream.load() != s) return;  // already replaced
-        log("audio: output changed: opening the stream again");
-        AAudioStream_requestStop(s);
-        AAudioStream_close(s);
-        g_stream = nullptr;
-        for (int attempt = 0; attempt < 5 && !g_stream.load(); attempt++) {
-            if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(200 * attempt));
-            g_stream = open_stream();
-        }
-        if (!g_stream.load()) log("audio: no output after the change");
-    }).detach();
+    {
+        std::lock_guard lk(g_reopen_mu);
+        if (g_shutting_down) return;
+        g_reopen_target = s;
+    }
+    g_reopen_cv.notify_one();
 }
 }  // namespace
 
@@ -140,9 +186,33 @@ bool audio_open(AudioDone done, int) {
     g_done = done;
     // NX_MUTE=1 (and headless test runs): no device, the callers pace themselves with a timer (as on Windows and macOS).
     if (headless() || std::getenv("NX_MUTE")) return false;
+    {
+        std::lock_guard lk(g_reopen_mu);
+        g_shutting_down = false;
+        g_reopen_target = nullptr;
+        if (!g_reopen_thread.joinable()) g_reopen_thread = std::thread(reopen_loop);
+    }
     std::lock_guard lk(g_stream_lock);
     g_stream = open_stream();
     return g_stream.load() != nullptr;
+}
+
+void audio_shutdown() {
+    std::thread to_join;
+    {
+        std::lock_guard lk(g_reopen_mu);
+        g_shutting_down = true;
+        g_reopen_target = nullptr;
+        to_join = std::move(g_reopen_thread);
+    }
+    g_reopen_cv.notify_all();
+    if (to_join.joinable()) to_join.join();
+
+    std::lock_guard lk(g_stream_lock);
+    if (AAudioStream* s = g_stream.exchange(nullptr)) {
+        AAudioStream_requestStop(s);
+        AAudioStream_close(s);
+    }
 }
 
 void audio_pause(bool paused) {
