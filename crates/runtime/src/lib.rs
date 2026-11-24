@@ -58,7 +58,7 @@ pub const APPLE_GUEST_SHIFT: u64 = 0xC0_0000_0000;
 pub fn ported(service: Service) -> bool {
     matches!(
         service,
-        Service::Config | Service::Time | Service::Saves | Service::Files
+        Service::Config | Service::Time | Service::Saves | Service::Files | Service::Input
     )
 }
 
@@ -78,5 +78,6 @@ pub mod relay;
 
 pub mod config;
 pub mod files;
+pub mod input;
 pub mod saves;
 pub mod time;

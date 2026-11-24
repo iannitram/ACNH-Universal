@@ -300,7 +300,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/svc_nfp.cpp
     runtime/src/hle_ro.cpp
     runtime/src/hle_vi.cpp
-    runtime/src/hle_hid.cpp
+    runtime/src/input_wrapper.cpp
     runtime/src/hle_hid_system_nfc.cpp
     runtime/src/hle_net.cpp
     runtime/src/hle_web.cpp
@@ -327,8 +327,6 @@ set(NX_RUNTIME_SOURCES
     runtime/src/time_wrapper.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
-    runtime/src/input_script.cpp
-    runtime/src/touch_layout.cpp
     runtime/src/perf_hint.cpp
     runtime/src/thermal.cpp
     runtime/src/frame_stats.cpp
