@@ -1,12 +1,9 @@
-// The app's first screen: asks for the game folder, checks it and starts the game (android.app.NativeActivity,
-// lib<game>.so). The APK holds no game: the folder is one prepared from the player's own copy, on the phone itself
-// (Prepare.java, from the ExeFS and RomFS they extracted with their emulator), by ACNHRecomp on a computer or by
-// ACNHRecomp-Importer (game/android-arm64/libacnh_game.so, romfs.pak, spirv.pak, ...; docs/ANDROID.md). A folder
-// holding exefs/ and romfs/ that is no game folder yet opens Prepare. The folder chosen is kept in
-// <files>/data_root.txt, which platform_android.cpp reads; next time the game starts right away. The launcher icon's
-// shortcut "Change game folder" (res/xml/shortcuts.xml) asks again.
-// Or the game comes from the owner's own Dropbox (issue #230): "Download the game" signs in (DropboxAuth) and
-// GameDownload fetches it into the app's private storage, <files>/gamedata, which then is the game folder.
+// The app's first screen: copies the prepared game into the app's private storage (<files>/game/, read-only)
+// and starts the game (android.app.NativeActivity, lib<game>.so), with saves/settings/logs in <files>/root/.
+// The APK holds no game: the game comes from the owner's own Dropbox (GameDownload) or a prepared folder on
+// the device (on-phone Prepare.java, a computer, or ACNHRecomp-Importer). A folder holding exefs/ and romfs/
+// that is no game folder yet opens Prepare. The launcher icon's shortcut "Change game folder" (res/xml/shortcuts.xml)
+// opens this screen again.
 // Save sync (issue #81, Relay): before the game starts, the island is pulled from the owner's Dropbox through
 // save-relay, with its dialogs here; "Set up save sync" signs in (the first start also offers it once).
 package io.github.acnhrecomp;
@@ -27,9 +24,10 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -89,24 +87,24 @@ public class Home extends Activity {
             finish();
             return;
         }
+        String installFrom = getIntent().getStringExtra("install_from");
+        if (installFrom != null && !installFrom.isEmpty()) {
+            check(installFrom, false);
+            return;
+        }
         boolean signedInReturn = getIntent().getData() != null && "acnhrecomp".equals(getIntent().getData().getScheme());
         boolean ask = getIntent().getBooleanExtra("pick", false) || error != null || signedInReturn;
         if (ask) GameDownload.finished = false;  // "Change game folder" or an error: no automatic start
         // While a download runs the game does not start by itself: leaving the game ends the app's process, and
         // the download with it.
-        String saved = ask || GameDownload.running ? "" : readSaved();
-        if (!saved.isEmpty() && hasPackage(new File(saved)) && canRead(saved)
-                && (!saved.equals(GameDownload.gameDir(this).getAbsolutePath()) || GameDownload.downloaded(this))) {
-            check(saved, true);  // the folder of last time: straight into the game
-            return;
-        }
-        File downloaded = GameDownload.gameDir(this);
-        if (!ask && !GameDownload.running && GameDownload.downloaded(this)) {
-            check(downloaded.getAbsolutePath(), true);  // the game downloaded from Dropbox
+        File gameDir = privateGameDir();
+        if (!ask && !GameDownload.running && hasPackage(gameDir)
+                && (!new File(gameDir, "manifest.json").isFile() || GameDownload.downloaded(this))) {
+            check(gameDir.getAbsolutePath(), true);  // game in <files>/game/: straight into the game
             return;
         }
         show(error != null ? explain(error) : null);
-        if (error != null) offerAgain(readSaved(), error);
+        if (error != null) offerAgain(gameDir.getAbsolutePath(), error);
     }
 
     @Override
@@ -453,10 +451,16 @@ public class Home extends Activity {
                 Screen.GREEN, v -> openPrepare(folder, folder)));
     }
 
+    private File privateGameDir() {
+        return new File(getFilesDir(), "game");
+    }
+
     private static boolean hasPackage(File f) {
         // the game folder ACNHRecomp-Importer prepares (game/android-arm64/), or one tools/android_install.sh filled
         return (new File(f, "game/android-arm64/" + GAME_LIB).isFile() || new File(f, GAME_LIB).isFile())
-                && new File(f, "analysis/main.bin").isFile();
+                && new File(f, "analysis/main.bin").isFile()
+                && new File(f, "romfs.pak").isFile()
+                && new File(f, "spirv.pak").isFile();
     }
 
     // The app's own folders (phone and memory card) where tools/android_install.sh puts the game: readable without
@@ -476,15 +480,6 @@ public class Home extends Activity {
 
     private boolean canRead(String path) {
         return path.startsWith(getFilesDir().getAbsolutePath()) || ownFolder(path) || Environment.isExternalStorageManager();
-    }
-
-    private String readSaved() {
-        try {
-            return new String(Files.readAllBytes(new File(getFilesDir(), "data_root.txt").toPath()),
-                    StandardCharsets.UTF_8).trim();
-        } catch (Exception e) {
-            return "";
-        }
     }
 
     private void pick() {
@@ -549,6 +544,8 @@ public class Home extends Activity {
             return;
         }
         busy = true;
+        final File gameDir = privateGameDir();
+        final boolean fromDevice = !new File(folder).getAbsolutePath().equals(gameDir.getAbsolutePath());
         if (quiet) {
             box = Screen.page(this, "ACNH Recomp");
             message = Screen.text(this, t("Starting the game...", "Abrindo o jogo..."), 16, Screen.TEXT);
@@ -558,40 +555,157 @@ public class Home extends Activity {
             box.addView(p);
         } else {
             if (message == null) show(null);
-            say(t("Preparing the game...", "Preparando o jogo..."), false);
+            say(fromDevice
+                    ? t("Copying the game into the app...", "Copiando o jogo para o app...")
+                    : t("Preparing the game...", "Preparando o jogo..."), false);
             ProgressBar p = new ProgressBar(this);
             p.setTag("progress");
             box.addView(p);
         }
         new Thread(() -> {
-            final String why = nativeLoadGame(folder, getFilesDir().getAbsolutePath());
-            runOnUiThread(() -> {
-                busy = false;
-                if (box != null) {
-                    View p = box.findViewWithTag("progress");
-                    if (p != null) box.removeView(p);
-                }
-                if (!why.isEmpty() && !why.equals("restart")) {
+            String copyErr = fromDevice ? copyGameToPrivate(new File(folder), gameDir) : "";
+            if (!copyErr.isEmpty()) {
+                runOnUiThread(() -> {
+                    busy = false;
+                    removeProgress();
                     if (message == null) show(null);
-                    say(explain(why), true);
-                    offerAgain(folder, why);
-                    return;
-                }
-                boolean saved = true;
-                try (FileOutputStream o = new FileOutputStream(new File(getFilesDir(), "data_root.txt"))) {
-                    o.write((folder + "\n").getBytes(StandardCharsets.UTF_8));
-                } catch (Exception e) {
-                    saved = false;  // the game still starts; next time the folder is asked for again
-                }
-                if (why.equals("restart")) {  // this process has another folder's game loaded: a new one takes this folder
-                    if (saved) restartProcess();
-                    else say(explain(why), true);  // not saved: a new process would not know the folder
-                    return;
-                }
-                // The island first (save sync: Relay), then the game, which starts once the pull lets it.
-                say(t("Syncing your island with Dropbox...", "Sincronizando a sua ilha com o Dropbox..."), false);
-                Relay.beforeGame(this, folder);
-            });
+                    say(copyErr, true);
+                });
+                return;
+            }
+            if (fromDevice) {
+                runOnUiThread(() -> {
+                    busy = false;
+                    removeProgress();
+                    askDeleteSource(folder, gameDir.getAbsolutePath());
+                });
+                return;
+            }
+            startPrivateGame(gameDir.getAbsolutePath());
         }).start();
+    }
+
+    private void removeProgress() {
+        if (box != null) {
+            View p = box.findViewWithTag("progress");
+            if (p != null) box.removeView(p);
+        }
+    }
+
+    private void startPrivateGame(final String gamePath) {
+        final String why = nativeLoadGame(gamePath, getFilesDir().getAbsolutePath());
+        runOnUiThread(() -> {
+            busy = false;
+            removeProgress();
+            if (!why.isEmpty() && !why.equals("restart")) {
+                if (message == null) show(null);
+                say(explain(why), true);
+                offerAgain(gamePath, why);
+                return;
+            }
+            if (why.equals("restart")) {
+                restartProcess();
+                return;
+            }
+            // The island first (save sync: Relay), then the game, which starts once the pull lets it.
+            say(t("Syncing your island with Dropbox...", "Sincronizando a sua ilha com o Dropbox..."), false);
+            Relay.beforeGame(this, Relay.dataRoot(this));
+        });
+    }
+
+    private void askDeleteSource(final String sourceFolder, final String gamePath) {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(t("Game copied into the app", "Jogo copiado para o app"))
+                .setMessage(t("The folder it copied from is no longer needed:\n" + sourceFolder,
+                        "A pasta de onde foi copiado não é mais necessária:\n" + sourceFolder))
+                .setPositiveButton(t("Delete", "Apagar"), (d, w) -> {
+                    deleteRecursive(new File(sourceFolder));
+                    busy = true;
+                    new Thread(() -> startPrivateGame(gamePath)).start();
+                })
+                .setNegativeButton(t("Keep", "Manter"), (d, w) -> {
+                    busy = true;
+                    new Thread(() -> startPrivateGame(gamePath)).start();
+                })
+                .setCancelable(false)
+                .show();
+    }
+
+    // Copies only the 6 prepared game entries into <files>/game.partial/ (resuming over matching-size files),
+    // marks them read-only, and atomically renames to <files>/game/.
+    private String copyGameToPrivate(File source, File dest) {
+        try {
+            File partial = new File(getFilesDir(), "game.partial");
+            List<File[]> plan = new ArrayList<>();
+            long needed = 0;
+            for (String dirName : new String[] {"analysis", "fonts", "aoc"}) {
+                File dir = new File(source, dirName);
+                if (dir.isDirectory()) collectCopyPlan(dir, new File(partial, dirName), plan);
+            }
+            for (String fileName : new String[] {"romfs.pak", "spirv.pak"}) {
+                File src = new File(source, fileName);
+                if (!src.isFile()) return explain("missing") + "\n" + fileName;
+                plan.add(new File[] {src, new File(partial, fileName)});
+            }
+            File lib = new File(source, GAME_LIB);
+            if (!lib.isFile()) lib = new File(source, "game/android-arm64/" + GAME_LIB);
+            if (!lib.isFile()) return explain("missing") + "\n" + GAME_LIB;
+            plan.add(new File[] {lib, new File(partial, GAME_LIB)});
+
+            for (File[] pair : plan) {
+                if (!pair[1].isFile() || pair[1].length() != pair[0].length()) {
+                    needed += pair[0].length();
+                }
+            }
+            long free = getFilesDir().getUsableSpace();
+            if (free < needed) {
+                return t("Not enough free space: need " + needed + " bytes (" + free + " bytes available).",
+                        "Espaço insuficiente: precisa de " + needed + " bytes (" + free + " bytes disponíveis).");
+            }
+            if (!partial.exists() && !partial.mkdirs()) return "cannot create " + partial;
+            byte[] buf = new byte[1 << 20];
+            for (File[] pair : plan) {
+                File src = pair[0], dst = pair[1];
+                if (dst.isFile() && dst.length() == src.length()) continue;
+                File parent = dst.getParentFile();
+                if (parent != null && !parent.exists() && !parent.mkdirs()) return "cannot create " + parent;
+                if (dst.exists()) dst.setWritable(true);
+                try (InputStream in = new FileInputStream(src); OutputStream out = new FileOutputStream(dst)) {
+                    for (int n; (n = in.read(buf)) > 0;) out.write(buf, 0, n);
+                }
+            }
+            setReadOnlyRecursive(partial);
+            if (dest.exists()) deleteRecursive(dest);
+            if (!partial.renameTo(dest)) return "cannot rename " + partial + " to " + dest;
+            return "";
+        } catch (Exception e) {
+            return e.getMessage() != null ? e.getMessage() : "copy failed";
+        }
+    }
+
+    private static void collectCopyPlan(File srcDir, File dstDir, List<File[]> plan) {
+        File[] items = srcDir.listFiles();
+        if (items == null) return;
+        for (File item : items) {
+            if (item.isDirectory()) collectCopyPlan(item, new File(dstDir, item.getName()), plan);
+            else if (item.isFile()) plan.add(new File[] {item, new File(dstDir, item.getName())});
+        }
+    }
+
+    private static void setReadOnlyRecursive(File f) {
+        File[] items = f.isDirectory() ? f.listFiles() : null;
+        if (items != null) {
+            for (File c : items) setReadOnlyRecursive(c);
+        }
+        f.setReadOnly();
+    }
+
+    private static void deleteRecursive(File f) {
+        if (f.exists()) f.setWritable(true);
+        File[] items = f.isDirectory() ? f.listFiles() : null;
+        if (items != null) {
+            for (File c : items) deleteRecursive(c);
+        }
+        f.delete();
     }
 }

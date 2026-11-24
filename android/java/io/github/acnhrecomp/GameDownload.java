@@ -1,6 +1,6 @@
 // The in-app game download (issue #230; SPEC M18): fetches the prepared game from the owner's own Dropbox (the
 // app folder of save-relay's Dropbox app, acnh-universal-game/android/) into the app's private storage,
-// <files>/gamedata, with nothing of it outside the app. A foreground service with a progress notification, so it
+// <files>/game, with nothing of it outside the app. A foreground service with a progress notification, so it
 // keeps going with the app in the background or swiped away; a partial wake lock keeps the device from sleeping
 // under it. It is started before the browser opens for the Dropbox sign-in, which also keeps the app's process
 // from being frozen while the browser comes back to DropboxAuth's loopback server; it waits for the sign-in and
@@ -59,7 +59,7 @@ import java.util.concurrent.Executors;
 public class GameDownload extends Service {
     // Where the game waits, inside save-relay's Dropbox app folder.
     static final String REMOTE = "/acnh-universal-game/android";
-    static final String DIR = "gamedata";
+    static final String DIR = "game";
     private static final String CHANNEL = "download";
     private static final int NOTE = 1;
     static final int DONE_NOTE = 2;  // the "ready" or "stopped" note, which outlives the service

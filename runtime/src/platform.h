@@ -77,8 +77,8 @@ bool read_asset(const std::string& path, std::string& out);  // a file of the AP
 // ---- output ----
 void log_line(const char* line);  // stderr / logcat
 std::string data_root();
-#if defined(__APPLE__)
-// Where the game's files are read from: NX_GAME_ROOT, else the app's game/ folder, else the data root (platform_mac.cpp).
+#if defined(__APPLE__) || defined(__ANDROID__)
+// Where the game's files are read from: NX_GAME_ROOT, else the app's game/ folder, else "" on Android / data_root on Apple.
 std::string game_root();
 #else
 // NX_GAME_ROOT when set, else the data root: the other hosts read the game as they always have (game_root.h).

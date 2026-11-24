@@ -27,4 +27,19 @@ inline std::string choose_game_root(const char* env_game_root, bool apple, const
     return data_root;
 }
 
+// Android (#192): NX_GAME_ROOT wins; else <files>/game when it holds analysis/main.bin; else "" (never a folder
+// outside the app and never the data root, so the app opens on the first-start copy).
+template <class FileExists>
+inline std::string choose_android_game_root(const char* env_game_root, const std::string& files_dir,
+                                            FileExists file_exists) {
+    if (env_game_root && env_game_root[0]) return env_game_root;
+    if (!files_dir.empty()) {
+        std::string game = files_dir;
+        if (game.back() != '/') game += '/';
+        game += "game";
+        if (file_exists(game + "/analysis/main.bin")) return game;
+    }
+    return {};
+}
+
 }  // namespace nx::plat
