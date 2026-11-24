@@ -412,6 +412,7 @@ struct Gate {
     inner: Arc<MemoryRemote>,
     token_ok: bool,
     offline: Arc<AtomicBool>,
+    fail_mark_puts: Arc<AtomicUsize>,
 }
 
 impl Gate {
@@ -436,6 +437,18 @@ impl Remote for Gate {
         self.inner.get(path)
     }
     fn put(&self, path: &str, bytes: &[u8], pre: &Precondition) -> save_relay::Result<String> {
+        let failing = self.fail_mark_puts.load(Ordering::SeqCst);
+        if path.ends_with("playing.json")
+            && failing > 0
+            && self
+                .fail_mark_puts
+                .compare_exchange(failing, failing - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            return Err(save_relay::Error::Unreachable(
+                "the connection dropped".into(),
+            ));
+        }
         self.check()?;
         self.inner.put(path, bytes, pre)
     }
@@ -463,6 +476,8 @@ struct FakeDropbox {
     remote: Arc<MemoryRemote>,
     accepted: Mutex<String>,
     offline: Arc<AtomicBool>,
+    /// The next puts of `playing.json` fail as a dropped connection.
+    fail_mark_puts: Arc<AtomicUsize>,
 }
 
 impl Connector for FakeDropbox {
@@ -489,6 +504,7 @@ impl Connector for FakeDropbox {
             inner: self.remote.clone(),
             token_ok: token.expose() == *self.accepted.lock().unwrap(),
             offline: self.offline.clone(),
+            fail_mark_puts: self.fail_mark_puts.clone(),
         };
         Ok(Some(
             SaveRelay::new(Arc::new(gate), store, config.device).with_root(config.root),
@@ -521,6 +537,7 @@ struct Fx {
     creds: FileStore,
     connector: FakeDropbox,
     booted: AtomicBool,
+    pulled: AtomicBool,
     settings: FileSettings,
     log: Mutex<Vec<String>>,
 }
@@ -540,8 +557,10 @@ impl Fx {
                 remote: Arc::new(MemoryRemote::new()),
                 accepted: Mutex::new(REFRESH.into()),
                 offline: Arc::new(AtomicBool::new(false)),
+                fail_mark_puts: Arc::new(AtomicUsize::new(0)),
             },
             booted: AtomicBool::new(false),
+            pulled: AtomicBool::new(false),
             settings: FileSettings(game.join("config.ini")),
             log: Mutex::new(Vec::new()),
             root,
@@ -555,6 +574,7 @@ impl Fx {
             connector: &self.connector,
             prompt,
             booted: &self.booted,
+            pulled: &self.pulled,
             settings: &self.settings,
             log: Box::new(|line| self.log.lock().unwrap().push(line.to_string())),
         }
@@ -951,4 +971,237 @@ fn offline_offers_no_turn_off_and_the_blocked_answer_maps() {
     let requests = java.requests.lock().unwrap().clone();
     assert_eq!(requests[0]["can_turn_off"], false);
     assert_eq!(requests[1]["can_turn_off"], true);
+}
+
+// ---- the second review: the mark, a failed re-mark, waiting pushes, broken settings --------------
+
+impl Fx {
+    /// Another device on the same server, by name, with its own saves folder.
+    fn device(&self, name: &str) -> (SaveRelay, PathBuf) {
+        let dir = self.root.join(name);
+        let relay = SaveRelay::new(
+            self.connector.remote.clone(),
+            LocalStore::new(AppDirs {
+                config: dir.join("config"),
+                data: dir.join("data"),
+            }),
+            name,
+        );
+        (relay, dir.join("saves"))
+    }
+}
+
+#[test]
+fn a_checkpoint_never_overwrites_another_devices_mark_and_says_it_was_taken_over() {
+    let fx = Fx::new("takeover");
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    island(&fx.saves(), "phone");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    player.before_game();
+    player.checkpoint();
+    assert_eq!(fx.mark().unwrap().device, "android");
+    // The Switch takes the island over with Play anyway while the phone's game is paused.
+    let (switch, dir) = fx.device("switch");
+    assert!(matches!(
+        switch.pull(&dir, None).unwrap(),
+        acnh_core::launch::Sync::Held { .. }
+    ));
+    switch.pull_anyway(&dir, None).unwrap();
+    assert_eq!(fx.mark().unwrap().device, "switch");
+    // The phone comes back and goes to the background again: the Switch's mark stays.
+    player.checkpoint();
+    assert_eq!(fx.mark().unwrap().device, "switch");
+    assert!(
+        fx.log_text().contains("another device (switch"),
+        "{}",
+        fx.log_text()
+    );
+}
+
+#[test]
+fn a_mark_that_cannot_be_written_back_still_reports_the_push_and_is_retried_on_resume() {
+    let fx = Fx::new("remark-failed");
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    island(&fx.saves(), "phone");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    player.before_game();
+    let started = fx.session_start().unwrap();
+    island(&fx.saves(), "phone, played");
+    // Both tries at the mark fail after the push went.
+    fx.connector.fail_mark_puts.store(2, Ordering::SeqCst);
+    player.checkpoint();
+    let log = fx.log_text();
+    assert!(
+        log.contains("could not be marked as playing again"),
+        "{log}"
+    );
+    assert!(!log.contains("the push is waiting"), "{log}");
+    assert!(!fx.roots.dirs().data.join("push-waiting").exists());
+    assert!(fx.roots.dirs().data.join("mark-waiting").exists());
+    assert_eq!(fx.session_start(), Some(started), "the session is kept");
+    assert!(fx.mark().is_none());
+    // The push did go: another device gets the island.
+    let (switch, dir) = fx.device("switch");
+    switch.pull_anyway(&dir, None).unwrap();
+    assert_eq!(read_main(&dir), "main phone, played");
+    // Another device's mark is now there: the retry leaves it alone.
+    player.resume();
+    assert_eq!(fx.mark().unwrap().device, "switch");
+    assert!(!fx.roots.dirs().data.join("mark-waiting").exists());
+}
+
+#[test]
+fn a_failed_mark_is_written_back_when_the_app_is_back() {
+    let fx = Fx::new("remark-resume");
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    island(&fx.saves(), "phone");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    player.before_game();
+    // One try fails, the second goes: no retry needed.
+    fx.connector.fail_mark_puts.store(1, Ordering::SeqCst);
+    player.checkpoint();
+    assert_eq!(fx.mark().unwrap().device, "android");
+    // Both fail; the app comes back to the front and writes it.
+    fx.connector.fail_mark_puts.store(2, Ordering::SeqCst);
+    player.checkpoint();
+    assert!(fx.mark().is_none());
+    player.resume();
+    assert_eq!(fx.mark().unwrap().device, "android");
+    assert!(!fx.roots.dirs().data.join("mark-waiting").exists());
+}
+
+#[test]
+fn a_checkpoint_with_nothing_new_keeps_the_mark_and_one_against_a_newer_server_touches_nothing() {
+    let fx = Fx::new("noop-newer");
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    island(&fx.saves(), "phone");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    player.before_game();
+    let started = fx.session_start().unwrap();
+    // Nothing changed: a no-op push, the mark and the session stay.
+    player.checkpoint();
+    assert_eq!(fx.mark().unwrap().device, "android");
+    assert_eq!(fx.session_start(), Some(started));
+    // Another device pushes a newer island meanwhile, and the phone changes its own: a conflict,
+    // nothing is pushed, the phone stays marked, the push waits for the next start.
+    let (switch, dir) = fx.device("switch");
+    switch.pull_anyway(&dir, None).unwrap();
+    island(&dir, "switch, newer");
+    switch.push(&dir, None).unwrap();
+    island(&fx.saves(), "phone, also changed");
+    player.checkpoint();
+    assert!(fx.log_text().contains("the push is waiting"));
+    assert_eq!(fx.session_start(), Some(started));
+    let (other, odir) = fx.device("pc");
+    other.pull_anyway(&odir, None).unwrap();
+    assert_eq!(
+        read_main(&odir),
+        "main switch, newer",
+        "the newer island is not overwritten"
+    );
+}
+
+#[test]
+fn turning_off_or_signing_out_drops_a_waiting_push_so_the_next_sign_in_pulls_first() {
+    let fx = Fx::new("waiting-dropped");
+    let dirs = fx.roots.dirs();
+    sign_in(&dirs, &fx.creds, REFRESH);
+    fs::create_dir_all(&dirs.data).unwrap();
+    fs::write(relay::push_waiting_file(&dirs), b"1").unwrap();
+    fs::write(dirs.data.join("mark-waiting"), b"1").unwrap();
+    forget_android(&dirs, &fx.creds).unwrap();
+    assert!(!relay::push_waiting_file(&dirs).exists());
+    assert!(!dirs.data.join("mark-waiting").exists());
+    sign_in(&dirs, &fx.creds, REFRESH);
+    fs::write(relay::push_waiting_file(&dirs), b"1").unwrap();
+    sign_out_android(&dirs, &fx.creds).unwrap();
+    assert!(!relay::push_waiting_file(&dirs).exists());
+}
+
+#[test]
+fn the_first_sync_after_a_sign_in_is_a_pull_whatever_push_was_left_waiting() {
+    let fx = Fx::new("pull-first");
+    // The server has a newer island; this phone has an old one and a push left from an older setup.
+    let (switch, dir) = fx.device("switch");
+    island(&dir, "on the server");
+    switch.push(&dir, None).unwrap();
+    island(&fx.saves(), "old phone");
+    let dirs = fx.roots.dirs();
+    fs::create_dir_all(&dirs.data).unwrap();
+    fs::write(relay::push_waiting_file(&dirs), b"1").unwrap();
+    // The pull finds both islands changed: the conflict screen, never a push over the server's.
+    let java = fx.java(&[Some("signed_in"), Some("server")], REFRESH);
+    let prompt = bridge(&java);
+    fx.player(&prompt).before_game();
+    let log = fx.log_text();
+    assert!(!log.contains("sent the push that was waiting"), "{log}");
+    assert_eq!(java.kinds(), ["sign_in", "conflict"]);
+    assert_eq!(read_main(&fx.saves()), "main on the server");
+}
+
+#[test]
+fn settings_that_do_not_read_offer_turn_off_and_keep_the_download_token() {
+    let fx = Fx::new("broken-config");
+    let dirs = fx.roots.dirs();
+    sign_in(&dirs, &fx.creds, REFRESH);
+    fx.creds
+        .set(DOWNLOAD_ACCOUNT, &Secret::new(SECOND))
+        .unwrap();
+    fs::write(dirs.config.join("config.json"), b"{ not json").unwrap();
+    // The start shows the error with Turn off (never "sync off" by itself), and Turn off boots.
+    let java = FakeJava::new(&[Some("turn_off")]);
+    let prompt = bridge(&java);
+    fx.player(&prompt).before_game();
+    let requests = java.requests.lock().unwrap().clone();
+    assert_eq!(requests[0]["kind"], "blocked");
+    assert_eq!(requests[0]["why"], "error");
+    assert_eq!(requests[0]["can_turn_off"], true);
+    assert!(fx.booted.load(Ordering::SeqCst));
+    assert!(!dirs.config.join("config.json").exists());
+    // The Android turn-off over such settings (forget_android): the relay's token goes (the config
+    // no longer names it), the download's stays.
+    sign_in(&dirs, &fx.creds, REFRESH);
+    fs::write(dirs.config.join("config.json"), b"{ not json").unwrap();
+    forget_android(&dirs, &fx.creds).unwrap();
+    assert!(!dirs.config.join("config.json").exists());
+    let account = token_account(Service::Dropbox, EMAIL).unwrap();
+    assert_eq!(fx.creds.get(&account).unwrap(), None);
+    assert_eq!(
+        fx.creds.get(DOWNLOAD_ACCOUNT).unwrap().unwrap().expose(),
+        SECOND
+    );
+}
+
+#[test]
+fn a_game_started_with_sync_off_never_pushes_even_if_sync_is_set_up_while_it_runs() {
+    let fx = Fx::new("armed-later");
+    island(&fx.saves(), "phone");
+    let java = FakeJava::new(&[Some("cancel")]);
+    let prompt = bridge(&java);
+    let player = fx.player(&prompt);
+    player.before_game();
+    assert!(fx.booted.load(Ordering::SeqCst));
+    assert!(!fx.pulled.load(Ordering::SeqCst));
+    // The home screen signs in while the game runs; the pause and the quit push nothing.
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    player.checkpoint();
+    player.after_game();
+    assert!(fx
+        .log_text()
+        .contains("this game started with save sync off"));
+    assert!(fx.mark().is_none());
+    let (switch, dir) = fx.device("switch");
+    assert!(matches!(
+        switch.pull(&dir, None).unwrap(),
+        acnh_core::launch::Sync::Done(_)
+    ));
+    assert!(!dir.join("main.dat").exists(), "nothing was pushed");
 }

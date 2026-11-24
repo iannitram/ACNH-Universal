@@ -433,6 +433,9 @@ impl Settings for PlayerSettings {
 /// True once `before_game` has returned: the push waits for it.
 static BOOTED: AtomicBool = AtomicBool::new(false);
 
+/// True when that start pulled (sync on): a game started with sync off never pushes.
+static PULLED: AtomicBool = AtomicBool::new(false);
+
 fn data_root(raw: *const c_char) -> Option<PathBuf> {
     if raw.is_null() {
         return None;
@@ -451,6 +454,7 @@ fn with_player(data_root: &Path, work: impl FnOnce(&Player<'_>) + std::panic::Un
             connector,
             prompt: &UiPrompt,
             booted: &BOOTED,
+            pulled: &PULLED,
             settings: &PlayerSettings,
             log: Box::new(log),
         };

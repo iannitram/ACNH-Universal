@@ -60,7 +60,7 @@ final class Relay {
 
     private static native boolean nativeCredDelete(String files, String account);
 
-    static final int OFF = 0, ON = 1, SIGN_IN_AGAIN = 2;
+    static final int OFF = 0, ON = 1, SIGN_IN_AGAIN = 2, BROKEN = 3;  // BROKEN: its settings do not read
 
     private static String files(Context c) { return c.getApplicationContext().getFilesDir().getAbsolutePath(); }
 
@@ -201,6 +201,10 @@ final class Relay {
     // A new sign-in replaced the token kept for the download alone.
     static void signedIn(Context c) {
         try { nativeCredDelete(files(c), DOWNLOAD_ACCOUNT); } catch (Throwable ignored) {}
+        // The first sync after a sign-in is a pull: a push an older setup left waiting goes (crates/runtime
+        // push_waiting_file), as does a mark a background push could not write back.
+        new File(files(c), "relay-data/save-relay/push-waiting").delete();
+        new File(files(c), "relay-data/save-relay/mark-waiting").delete();
     }
 
     // Dropbox no longer accepts the token: it goes (save sync stays set up and asks for a new sign-in).

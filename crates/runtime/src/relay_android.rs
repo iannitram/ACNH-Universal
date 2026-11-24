@@ -13,8 +13,8 @@
 //! `Context.getFilesDir()`), catches panics, and never logs a secret, the account or a path.
 
 use super::{
-    android_credentials, forget_android, sign_out_android, BridgePrompt, CallbackTransport,
-    Connector, FileStore, Player, Roots, Settings,
+    android_ask_off_file, android_credentials, forget_android, sign_out_android, BridgePrompt,
+    CallbackTransport, Connector, FileStore, Player, Roots, Settings,
 };
 use acnh_core::relay::SaveRelay;
 use acnh_core::Result;
@@ -123,22 +123,44 @@ impl Connector for AndroidLive<'_> {
 }
 
 /// `relay.ask` through the player's settings: the C++ side is the only writer of `config.ini`.
-struct PlayerSettings;
+/// `relay.ask` on Android: a file in the app's private folder (`android_ask_off_file`), which the
+/// home screen's Turn off can write before any game folder is known, and the game folder's
+/// `config.ini` too (the player's own settings, as on the iPad) when there is one.
+struct PlayerSettings<'a> {
+    files: &'a Path,
+}
 
-impl Settings for PlayerSettings {
+impl Settings for PlayerSettings<'_> {
     fn ask_off(&self) -> bool {
-        // SAFETY: plain calls into the app, no pointers.
-        unsafe { nx_relay_ask_off() }
+        // SAFETY: a plain call into the app, no pointers.
+        android_ask_off_file(self.files).exists() || unsafe { nx_relay_ask_off() }
     }
     fn remember_not_now(&self) -> bool {
+        let kept = remember_not_now(self.files);
         // SAFETY: as above.
-        unsafe { nx_relay_remember_not_now() }
+        if !unsafe { nx_relay_remember_not_now() } {
+            log("relay: relay.ask could not be written to the game folder's config.ini");
+        }
+        kept
     }
+}
+
+/// Not now (or Turn off) remembered in the app's private folder; false when it could not be.
+fn remember_not_now(files: &Path) -> bool {
+    let written = std::fs::create_dir_all(files)
+        .and_then(|()| std::fs::write(android_ask_off_file(files), b"relay.ask = 0\n"));
+    if written.is_err() {
+        log("relay: Not now could not be remembered in the app's folder");
+    }
+    written.is_ok()
 }
 
 /// True once `before_game` has returned in this process: the push waits for it, and the game
 /// screen sends the app back to the home screen without it (`acnh_relay_android_ready`).
 static BOOTED: AtomicBool = AtomicBool::new(false);
+
+/// True when that start pulled (sync on); a game started with sync off never pushes.
+static PULLED: AtomicBool = AtomicBool::new(false);
 
 fn path(raw: *const c_char) -> Option<PathBuf> {
     text(raw).filter(|t| !t.is_empty()).map(PathBuf::from)
@@ -167,7 +189,8 @@ fn with_player(data_root: &Path, files: &Path, work: impl FnOnce(&Player<'_>)) {
             connector: &AndroidLive { creds: &creds },
             prompt: &prompt,
             booted: &BOOTED,
-            settings: &PlayerSettings,
+            pulled: &PULLED,
+            settings: &PlayerSettings { files },
             log: Box::new(log),
         };
         work(&player);
@@ -240,11 +263,16 @@ pub unsafe extern "C" fn acnh_relay_android_background(
 }
 
 /// 0: save sync is not set up; 1: set up, with its token; 2: set up, but the token is gone or
-/// cannot be read (the next start asks to sign in again). Reads files only, no network.
+/// cannot be read (the next start asks to sign in again); 3: its config does not read (the next
+/// start shows the error, with Turn off). Reads files only, no network.
 fn state(files: &Path) -> c_int {
     let dirs = Roots::android(files, files).dirs();
-    let Ok(Some(config)) = LocalStore::new(dirs).load_config() else {
-        return 0;
+    let config = match LocalStore::new(dirs).load_config() {
+        Ok(Some(config)) => config,
+        Ok(None) => return 0,
+        // A config that does not read is not "off": the game waits for the pull (which shows the
+        // error with Turn off), and the home screen keeps Turn off within reach.
+        Err(_) => return 3,
     };
     let Ok(accounts) = save_relay::service::credential_accounts(&config) else {
         return 2;
@@ -274,13 +302,33 @@ pub unsafe extern "C" fn acnh_relay_android_state(files: *const c_char) -> c_int
 /// `files` is a NUL-terminated path.
 #[no_mangle]
 pub unsafe extern "C" fn acnh_relay_android_ready(files: *const c_char) -> bool {
-    if BOOTED.load(Ordering::SeqCst) {
+    if PULLED.load(Ordering::SeqCst) {
         return true;
     }
     let Some(files) = path(files) else {
         return true;
     };
+    // Not pulled in this process: the game starts only with save sync plainly off (a config that
+    // does not read is not off).
     std::panic::catch_unwind(|| state(&files) == 0).unwrap_or(false)
+}
+
+/// The app is back in front (`APP_CMD_RESUME`): a "playing here" mark a background push could
+/// not write back is written now, on a worker (`Player::resume`).
+///
+/// # Safety
+/// As `acnh_relay_android_before_game`.
+#[no_mangle]
+pub unsafe extern "C" fn acnh_relay_android_resume(data_root: *const c_char, files: *const c_char) {
+    let (Some(root), Some(files)) = (path(data_root), path(files)) else {
+        return;
+    };
+    if !PULLED.load(Ordering::SeqCst) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("relay mark".into())
+        .spawn(move || with_player(&root, &files, |player| player.resume()));
 }
 
 /// "Turn off save sync" on the home screen: save-relay's config and every secret it filed here
@@ -295,10 +343,11 @@ pub unsafe extern "C" fn acnh_relay_android_forget(files: *const c_char) -> bool
     };
     std::panic::catch_unwind(|| {
         let dirs = Roots::android(&files, &files).dirs();
+        let remembered = remember_not_now(&files);
         match forget_android(&dirs, &store(&files)) {
             Ok(()) => {
                 log("relay: save sync turned off on this device");
-                true
+                remembered
             }
             Err(_) => {
                 log("relay: save sync could not be turned off");

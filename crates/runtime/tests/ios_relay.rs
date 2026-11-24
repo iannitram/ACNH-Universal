@@ -302,6 +302,7 @@ struct Fx {
     remote: Arc<MemoryRemote>,
     creds: Creds,
     booted: AtomicBool,
+    pulled: AtomicBool,
     settings: FileSettings,
     failures: Failures,
     connector: FakeConnector,
@@ -333,6 +334,7 @@ impl Fx {
                 unreadable: AtomicBool::new(false),
             },
             booted: AtomicBool::new(false),
+            pulled: AtomicBool::new(false),
             settings: FileSettings(data_root.join("config.ini")),
             failures: Failures::default(),
             log: Mutex::new(Vec::new()),
@@ -357,6 +359,7 @@ impl Fx {
             connector: &self.connector,
             prompt,
             booted: &self.booted,
+            pulled: &self.pulled,
             settings: &self.settings,
             log: Box::new(|line| self.log.lock().unwrap().push(line.to_string())),
         }
@@ -1040,4 +1043,42 @@ fn the_sign_in_answer_never_prints_its_password() {
     };
     let shown = format!("{answer:?} {:?}", Reply::SignIn(answer.clone()));
     assert!(!shown.contains(PASSWORD), "{shown}");
+}
+
+// ---- the background push (a checkpoint): the iPad stays the one playing ------------------------
+
+fn ipad_mark(fx: &Fx) -> Option<String> {
+    let manifest = save_relay::manifest::Manifest::from_json(&saves::relay_manifest()).unwrap();
+    let layout = save_relay::layout::Layout::new(save_relay::cli::DEFAULT_ROOT).unwrap();
+    let (bytes, _) = fx.remote.get(&layout.playing_path(&manifest.id)).ok()?;
+    save_relay::presence::Mark::from_json(&String::from_utf8_lossy(&bytes))
+        .ok()
+        .map(|mark| mark.device)
+}
+
+#[test]
+fn a_background_push_keeps_the_ipad_playing_and_leaves_another_devices_mark_alone() {
+    let fx = Fx::new("checkpoint");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("ipad"));
+    // To the background: pushed, still marked.
+    fs::write(fx.saves().join("main.dat"), "main paused").unwrap();
+    fx.player(&fx.no_prompt()).checkpoint();
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("ipad"));
+    let (desktop, desktop_saves) = fx.other("desktop");
+    assert!(matches!(
+        desktop.pull(&desktop_saves, None).unwrap(),
+        RelaySync::Held { .. }
+    ));
+    // The desktop takes it over with Play anyway; the iPad's next background push leaves its mark.
+    desktop.pull_anyway(&desktop_saves, None).unwrap();
+    assert_eq!(read_main(&desktop_saves), "main paused");
+    fx.player(&fx.no_prompt()).checkpoint();
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("desktop"));
+    assert!(fx.log_text().contains("another device (desktop"));
+    // The quit clears only the iPad's own mark: the desktop's stays.
+    fx.player(&fx.no_prompt()).after_game();
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("desktop"));
 }

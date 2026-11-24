@@ -112,20 +112,46 @@ impl SaveRelay {
     }
 }
 
+/// What a checkpoint did with this device's `playing.json` (the "playing here" mark).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Remark {
+    /// This device is marked as playing again.
+    Kept,
+    /// Another device holds the mark (it took the island over, say with Play anyway): it is left
+    /// as it is.
+    Elsewhere { device: String, since: String },
+    /// The mark could not be written back (the network, the token): the caller retries later
+    /// (`SaveRelay::remark`). The push itself went.
+    Failed(String),
+    /// The push did not sync (offline, a conflict), so save-relay left the mark as it was.
+    Untouched,
+}
+
+/// A checkpoint's outcome: the push's answer, and what became of the mark.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpointed {
+    pub sync: Sync,
+    pub remark: Remark,
+}
+
 impl SaveRelay {
     /// A push while the game keeps running (the app went to the background): the island goes up
     /// as a quit's push would, but this device stays the one playing. save-relay's push is the
-    /// quit's (`Intent::Exit`): once synced it removes this device's `playing.json` and ends the
-    /// play session. A checkpoint puts both back right after: the mark (with the session's start
-    /// as its `since`) and the session start, so another device still sees the island held and
-    /// the quit's card still counts the whole session's play time. A push that did not sync
-    /// (offline, a conflict) touched neither, and neither is touched here.
-    pub fn checkpoint(&self, save_dir: &Path) -> Result<Sync> {
+    /// quit's (`Intent::Exit`; save-relay has no checkpoint push): once synced it removes this
+    /// device's `playing.json` (only if it is this device's) and ends the play session. A
+    /// checkpoint puts both back right after, best effort and in this order: the session start
+    /// (so the quit's card counts the whole session), the launcher card, then the mark
+    /// (`remark`), which is written only where no mark is or this device's is, never over another
+    /// device's. Once the push went, the answer is the push's, whatever the mark: a mark that could
+    /// not be written back is `Remark::Failed`, for the caller to retry. A push that did not sync
+    /// touched neither, and neither is touched here.
+    pub fn checkpoint(&self, save_dir: &Path) -> Result<Checkpointed> {
         let manifest = self.parse_manifest()?;
         let id = manifest.id.clone();
-        let session = self.store.load_session(&id).map_err(map_err)?;
+        // An unreadable session is no session: the push must not wait on it.
+        let session = self.store.load_session(&id).ok().flatten();
         let layout = Layout::new(&self.root).map_err(|e| Error::Saves(e.to_string()))?;
-        let s = self.session(layout.clone());
+        let s = self.session(layout);
         let game = Game {
             manifest,
             saves_dir: save_dir.to_path_buf(),
@@ -135,29 +161,92 @@ impl SaveRelay {
             report.sync.action,
             Action::Noop | Action::Adopted | Action::Pulled | Action::Pushed
         );
-        if synced {
-            let started = session.as_ref().map_or(s.now, |session| session.started);
-            let mark = save_relay::presence::Mark {
-                format: save_relay::presence::FORMAT,
-                device: self.device.clone(),
-                since: save_relay::stamp::rfc3339(started),
-                revision_read: report.sync.revision,
-            };
-            save_relay::remote::ensure_dir(&*self.remote, &layout.game_dir(&id))
-                .map_err(map_err)?;
-            self.remote
-                .put(
-                    &layout.playing_path(&id),
-                    mark.to_json().as_bytes(),
-                    &save_relay::remote::Precondition::Any,
-                )
-                .map_err(map_err)?;
+        let remark = if synced {
             if let Some(session) = &session {
-                self.store.save_session(session).map_err(map_err)?;
+                // Best effort: a session that cannot be saved costs the card its play time only.
+                let _ = self.store.save_session(session);
+            }
+            let since = session.as_ref().map_or(s.now, |session| session.started);
+            Some((since, report.sync.revision))
+        } else {
+            None
+        };
+        // Best effort too: the card is the launcher's picture of the island, not the island.
+        let _ = persist_card(save_dir, &report, self.version);
+        let sync = map_sync_with_local(report, save_dir);
+        let remark = match remark {
+            Some((since, revision)) => self.write_mark(&id, since, revision),
+            None => Remark::Untouched,
+        };
+        Ok(Checkpointed { sync, remark })
+    }
+
+    /// This device's mark written back, as `checkpoint` does: for a later retry after
+    /// `Remark::Failed` (the app came back to the front). The session's start and the last synced
+    /// revision are read again here.
+    pub fn remark(&self) -> Result<Remark> {
+        let manifest = self.parse_manifest()?;
+        let session = self.store.load_session(&manifest.id).ok().flatten();
+        let revision = self
+            .store
+            .load_last(&manifest.id)
+            .ok()
+            .flatten()
+            .map(|last| last.revision);
+        let since = session.map_or(self.now(), |session| session.started);
+        Ok(self.write_mark(&manifest.id, since, revision))
+    }
+
+    /// `playing.json` for this device, only where there is none (`Precondition::Absent`) or this
+    /// device's (`Precondition::Match` on its etag): another device's mark stays, and is named.
+    /// Tried twice, reading the mark again each time (another device may write it meanwhile).
+    fn write_mark(&self, id: &str, since: u64, revision_read: Option<u64>) -> Remark {
+        use save_relay::presence::Mark;
+        use save_relay::remote::Precondition;
+        let layout = match Layout::new(&self.root) {
+            Ok(layout) => layout,
+            Err(error) => return Remark::Failed(error.to_string()),
+        };
+        let path = layout.playing_path(id);
+        let mark = Mark {
+            format: save_relay::presence::FORMAT,
+            device: self.device.clone(),
+            since: save_relay::stamp::rfc3339(since),
+            revision_read,
+        };
+        let mut last = String::from("the mark was not written");
+        for _ in 0..2 {
+            let pre = match self.remote.get(&path) {
+                Ok((bytes, etag)) => match Mark::from_json(&String::from_utf8_lossy(&bytes)) {
+                    Ok(other) if other.device != self.device => {
+                        return Remark::Elsewhere {
+                            device: other.device,
+                            since: other.since,
+                        };
+                    }
+                    // This device's own, or a broken mark (no mark): replaced, if still that one.
+                    _ => Precondition::Match(etag),
+                },
+                Err(save_relay::Error::NotFound(_)) => {
+                    if let Err(error) =
+                        save_relay::remote::ensure_dir(&*self.remote, &layout.game_dir(id))
+                    {
+                        last = error.to_string();
+                        continue;
+                    }
+                    Precondition::Absent
+                }
+                Err(error) => {
+                    last = error.to_string();
+                    continue;
+                }
+            };
+            match self.remote.put(&path, mark.to_json().as_bytes(), &pre) {
+                Ok(_) => return Remark::Kept,
+                Err(error) => last = error.to_string(),
             }
         }
-        persist_card(save_dir, &report, self.version)?;
-        Ok(map_sync_with_local(report, save_dir))
+        Remark::Failed(last)
     }
 }
 

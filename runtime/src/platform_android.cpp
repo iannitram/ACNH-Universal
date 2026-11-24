@@ -69,6 +69,7 @@ void boot();
 extern "C" void acnh_relay_android_after_game(const char* data_root, const char* files);
 extern "C" void acnh_relay_android_background(const char* data_root, const char* files);
 extern "C" bool acnh_relay_android_ready(const char* files);
+extern "C" void acnh_relay_android_resume(const char* data_root, const char* files);
 
 namespace nx::plat {
 
@@ -152,9 +153,14 @@ void start_thread(ThreadFn fn, void* arg, size_t stack_size) {
 }
 
 void exit_thread() { pthread_exit(nullptr); }
-// The game has quit (code 0: the player's quit, a restart for a setting): push the island first. A failure exit
-// (the game could not load) pushes nothing.
-void relay_after_game() { acnh_relay_android_after_game(g_root.c_str(), g_cache_dir.c_str()); }
+// The game has quit (code 0: the player's quit, a restart for a setting): push the island first, once. A failure
+// exit (the game could not load) pushes nothing. The quit can come by several ways in turn (restart_app pushes, then
+// exit_process; the activity's destroy): the first one pushes, the others find it done.
+void relay_after_game() {
+    static std::atomic<bool> done{false};
+    if (done.exchange(true)) return;
+    acnh_relay_android_after_game(g_root.c_str(), g_cache_dir.c_str());
+}
 
 void exit_process(int code) {
     if (code == 0) relay_after_game();
@@ -169,6 +175,11 @@ void android_set_data_root(const std::string& root) {
 }
 
 void restart_app() {
+    // The island goes up before the new launcher is asked for: it starts in this process (the home screen and the game
+    // share it) and would pull while the push runs; _exit below then ends this process, and Android starts the
+    // launcher afresh. exit_process does not push a second time.
+    nx::log("relay: pushing the island before the restart");
+    relay_after_game();
     JNIEnv* env = nullptr;
     if (g_app && g_app->activity->vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) {
         jobject act = g_app->activity->clazz;
@@ -1376,6 +1387,7 @@ void on_cmd(android_app* app, int32_t cmd) {
             break;
         case APP_CMD_RESUME:
             keep_signal_handlers();  // back from Nextendo's sign-in screen, whose WebView may have set its own
+            acnh_relay_android_resume(g_root.c_str(), g_cache_dir.c_str());  // a mark the pause could not write back
             audio_pause(false);
             thermal_pause(false);
             break;

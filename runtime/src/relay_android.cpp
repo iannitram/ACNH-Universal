@@ -172,16 +172,16 @@ extern "C" JNIEXPORT jint JNICALL Java_io_github_acnhrecomp_Relay_nativeState(JN
     return acnh_relay_android_state(str(env, files).c_str());
 }
 
-// "Turn off save sync" on the home screen: save-relay's config and secrets go (the download keeps its sign-in), and,
-// as on the blocked screens, relay.ask = 0 in the game folder's config.ini, so the first start's offer does not come
-// straight back.
+// "Turn off save sync" on the home screen: save-relay's config and secrets go (the download keeps its sign-in), and
+// relay.ask = 0 is remembered in the app's own folder (the Rust side; it works before any game start), so the first
+// start's offer does not come straight back. When a game folder is known, its config.ini gets the key as well.
 extern "C" JNIEXPORT jboolean JNICALL Java_io_github_acnhrecomp_Relay_nativeForget(JNIEnv* env, jclass, jstring files,
                                                                                 jstring data_root) {
     bool done = acnh_relay_android_forget(str(env, files).c_str());
     if (std::string root = str(env, data_root); !root.empty()) {
         if (g_data_root.empty()) g_data_root = root;
         nx::plat::android_set_data_root(root);
-        nx_relay_remember_not_now();
+        if (!nx_relay_remember_not_now()) nx_relay_log("relay: relay.ask could not be written to the game folder's config.ini");
     }
     return done;
 }

@@ -290,10 +290,15 @@ public class Home extends Activity {
                         : state == Relay.SIGN_IN_AGAIN
                         ? t("Dropbox needs a new sign-in on this device before the game can start.",
                             "O Dropbox precisa de um novo login neste aparelho antes de o jogo começar.")
+                        : state == Relay.BROKEN
+                        ? t("Save sync's settings on this device cannot be read. Turn save sync off to play with "
+                                + "the island on this device, or sign in to Dropbox again.",
+                            "As configurações da sincronização neste aparelho não podem ser lidas. Desligue a "
+                                + "sincronização para jogar com a ilha deste aparelho, ou entre no Dropbox de novo.")
                         : t("Off. Set it up to keep your island in your Dropbox and play it on your other devices.",
                             "Desligada. Ligue para guardar a sua ilha no seu Dropbox e jogar nos seus outros aparelhos."),
                 15, Screen.TEXT));
-        if (state == Relay.SIGN_IN_AGAIN)
+        if (state == Relay.SIGN_IN_AGAIN || state == Relay.BROKEN)
             box.addView(Screen.button(this, t("Sign in to Dropbox again", "Entrar no Dropbox de novo"), Screen.BLUE,
                     v -> setUpSync()));
         else if (state == Relay.OFF)

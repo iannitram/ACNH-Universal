@@ -256,6 +256,20 @@ pub fn android_vars(files: &Path) -> (PathBuf, PathBuf) {
     (files.join("relay-config"), files.join("relay-data"))
 }
 
+/// The file a push that did not go leaves in save-relay's data folder; the next start sends it
+/// before it pulls, unless save sync was turned off or signed in to anew since (both remove it:
+/// the first sync after a sign-in is always a pull).
+pub fn push_waiting_file(dirs: &AppDirs) -> PathBuf {
+    dirs.data.join("push-waiting")
+}
+
+/// The Android app's "Not now" (`relay.ask = 0`), kept in its private files folder: it works
+/// before any game folder is known (the home screen's Turn off), and the game folder's
+/// `config.ini` gets the same key as well when one is known.
+pub fn android_ask_off_file(files: &Path) -> PathBuf {
+    files.join("relay-ask-off")
+}
+
 /// The Android app's credential store file (`FileStore`), in its private files folder.
 pub fn android_credentials(files: &Path) -> PathBuf {
     files.join("save-relay-credentials.json")
@@ -302,7 +316,13 @@ impl Roots {
     /// A push that did not go (offline, a conflict, an error) leaves this file; the next start
     /// sends it before it pulls.
     fn push_waiting(&self) -> PathBuf {
-        self.dirs().data.join("push-waiting")
+        push_waiting_file(&self.dirs())
+    }
+
+    /// A checkpoint pushed but could not mark this device as playing again; `Player::resume`
+    /// retries it.
+    fn mark_waiting(&self) -> PathBuf {
+        self.dirs().data.join("mark-waiting")
     }
 }
 
@@ -370,6 +390,11 @@ pub struct Player<'a> {
     /// False until `before_game` has returned; `after_game` does nothing before that (the player
     /// is not playing yet, and its island may be unsynced).
     pub booted: &'a AtomicBool,
+    /// True when `before_game` let the game start after a pull (sync on), false when it started
+    /// with sync off. Only a game that was pulled pushes: one started with sync off and set up
+    /// meanwhile (the home screen's sign-in while it runs) syncs from its next start, which
+    /// pulls first.
+    pub pulled: &'a AtomicBool,
     /// Where `relay.ask` lives.
     pub settings: &'a dyn Settings,
     /// One line per event, never holding a password.
@@ -404,9 +429,9 @@ impl Player<'_> {
     /// Returns only when the game may boot: after a pull has succeeded, with save sync not set
     /// up, or after Play anyway on a held island. Every other answer comes back to the prompt.
     pub fn before_game(&self) {
-        loop {
+        let pulled = loop {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.sync_first())) {
-                Ok(()) => break,
+                Ok(pulled) => break pulled,
                 Err(_) => {
                     // Refuse until synced: a panic never boots the game. Show it and go again;
                     // with no prompt to show it on, stop the app rather than boot.
@@ -420,11 +445,13 @@ impl Player<'_> {
                     }
                 }
             }
-        }
+        };
+        self.pulled.store(pulled, Ordering::SeqCst);
         self.booted.store(true, Ordering::SeqCst);
     }
 
-    fn sync_first(&self) {
+    /// True once a pull let the game start, false when it starts with sync off.
+    fn sync_first(&self) -> bool {
         let mut resolve = None;
         let mut anyway = false;
         loop {
@@ -438,12 +465,12 @@ impl Player<'_> {
                 Ok(Opened::Off) => {
                     if !self.first_start() {
                         self.log("save sync is off");
-                        return;
+                        return false;
                     }
                 }
                 Ok(Opened::NeedsSignIn { server, user }) => self.sign_in_again(&server, &user),
                 Ok(Opened::Sync(relay)) => match self.attempt(&relay, &mut resolve, &mut anyway) {
-                    Attempt::Boot => return,
+                    Attempt::Boot => return true,
                     Attempt::Again => {}
                     Attempt::SignIn { server, user } => self.sign_in_again(&server, &user),
                 },
@@ -494,6 +521,12 @@ impl Player<'_> {
             self.log("no push yet: the game has not booted");
             return;
         }
+        if !self.pulled.load(Ordering::SeqCst) {
+            // Sync was off when this game started (and may have been set up since): its island
+            // was never pulled, so it is not pushed either; the next start pulls first.
+            self.log("no push: this game started with save sync off");
+            return;
+        }
         let _one_at_a_time = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let relay = match self.opened() {
             Ok(Opened::Sync(relay)) => relay,
@@ -516,8 +549,12 @@ impl Player<'_> {
         };
         let dir = saves::save_dir(&self.roots.data_root);
         let result = if checkpoint {
-            relay.checkpoint(&dir)
+            relay.checkpoint(&dir).map(|done| {
+                self.remarked(&done.remark);
+                done.sync
+            })
         } else {
+            self.set_flag(&self.roots.mark_waiting(), false);
             relay.push(&dir, None)
         };
         match decide(&result) {
@@ -538,10 +575,54 @@ impl Player<'_> {
         }
     }
 
+    /// What became of this device's "playing here" mark after a checkpoint.
+    fn remarked(&self, remark: &acnh_core::relay::Remark) {
+        use acnh_core::relay::Remark;
+        match remark {
+            Remark::Kept | Remark::Untouched => self.set_flag(&self.roots.mark_waiting(), false),
+            Remark::Elsewhere { device, since } => {
+                self.set_flag(&self.roots.mark_waiting(), false);
+                self.log(&format!(
+                    "another device ({device}, since {since}) has taken the island over while this game runs"
+                ));
+            }
+            Remark::Failed(why) => {
+                self.set_flag(&self.roots.mark_waiting(), true);
+                let why = self.redact(why, None);
+                self.log(&format!(
+                    "pushed, but this device could not be marked as playing again ({why}): retried when the app is back"
+                ));
+            }
+        }
+    }
+
+    /// The app is back in front: a "playing here" mark a checkpoint could not write back is
+    /// written now (only where no other device's is). Nothing else happens here.
+    pub fn resume(&self) {
+        if !self.booted.load(Ordering::SeqCst)
+            || !self.pulled.load(Ordering::SeqCst)
+            || !self.roots.mark_waiting().exists()
+        {
+            return;
+        }
+        let _one_at_a_time = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ok(Opened::Sync(relay)) = self.opened() {
+            match relay.remark() {
+                Ok(remark) => self.remarked(&remark),
+                Err(error) => {
+                    let message = self.say(&error, None);
+                    self.log(&format!("the mark is still waiting: {message}"));
+                }
+            }
+        }
+    }
+
     fn attempt(&self, relay: &SaveRelay, resolve: &mut Option<Keep>, anyway: &mut bool) -> Attempt {
         let dir = saves::save_dir(&self.roots.data_root);
         let waiting = self.roots.push_waiting().exists();
         // A push still waiting from the last game goes first; then the pull.
+        // One sync at a time in the process: a quit's push still running (a restart) finishes first.
+        let one_at_a_time = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let result = if waiting {
             relay.push(&dir, *resolve)
         } else {
@@ -549,6 +630,7 @@ impl Player<'_> {
             relay.pull_with(&dir, *resolve, *anyway)
         };
         *resolve = None;
+        drop(one_at_a_time);
         match decide(&result) {
             Action::Play | Action::PlaySyncOff if waiting => {
                 self.set_waiting(false);
@@ -625,6 +707,8 @@ impl Player<'_> {
                 // Closed without an answer: sync stays off for this start, and it asks again.
                 SignInAnswer::Cancel => return false,
                 SignInAnswer::SignedIn => {
+                    // A new sign-in starts with a pull, whatever push an older setup left.
+                    self.set_waiting(false);
                     self.log("save sync is set up");
                     return true;
                 }
@@ -634,6 +718,7 @@ impl Player<'_> {
                     password,
                 } => match self.setup(&server, &user, &password) {
                     Ok(()) => {
+                        self.set_waiting(false);
                         self.log("save sync is set up");
                         return true;
                     }
@@ -662,6 +747,7 @@ impl Player<'_> {
         loop {
             match self.prompt.sign_in(&form) {
                 SignInAnswer::SignedIn => {
+                    self.set_waiting(false);
                     self.log("signed in again");
                     return;
                 }
@@ -671,6 +757,7 @@ impl Player<'_> {
                     password,
                 } => match self.setup(&server, &user, &password) {
                     Ok(()) => {
+                        self.set_waiting(false);
                         self.log("a new app password is set up");
                         return;
                     }
@@ -725,8 +812,12 @@ impl Player<'_> {
     }
 
     fn set_waiting(&self, waiting: bool) {
-        let path = self.roots.push_waiting();
-        if waiting {
+        self.set_flag(&self.roots.push_waiting(), waiting);
+    }
+
+    fn set_flag(&self, path: &Path, on: bool) {
+        let path = path.to_path_buf();
+        if on {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -841,6 +932,19 @@ impl FileStore {
         &self.path
     }
 
+    /// Keeps only `accounts` (the download's token on a turn-off whose forget left something). A
+    /// file that does not read is an error here, for the caller to remove.
+    pub fn retain(&self, accounts: &[&str]) -> save_relay::Result<()> {
+        let _one = FILE_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.load()?;
+        let before = all.len();
+        all.retain(|account, _| accounts.contains(&account.as_str()));
+        if all.len() == before {
+            return Ok(());
+        }
+        self.save(&all)
+    }
+
     /// Removes the whole file (every secret in it): "Turn off save sync" when the file cannot be
     /// read, so a damaged file does not keep save sync on. A missing file is fine.
     pub fn remove(&self) -> save_relay::Result<()> {
@@ -934,18 +1038,27 @@ pub const DOWNLOAD_ACCOUNT: &str = "download:dropbox";
 /// something is still left behind.
 pub fn forget_android(dirs: &AppDirs, creds: &FileStore) -> Result<()> {
     keep_for_download(dirs, creds);
-    forget_android_all(dirs, creds)
+    clear_waiting(dirs);
+    forget_android_all(dirs, creds, false)
 }
 
 /// "Sign out of Dropbox": save sync and the game download both end on this device (the
 /// download's token goes too).
 pub fn sign_out_android(dirs: &AppDirs, creds: &FileStore) -> Result<()> {
-    let forgot = forget_android_all(dirs, creds);
+    clear_waiting(dirs);
+    let forgot = forget_android_all(dirs, creds, true);
     let download = creds
         .delete(DOWNLOAD_ACCOUNT)
         .or_else(|_| creds.remove())
         .map_err(|e| Error::Saves(e.to_string()));
     forgot.and(download)
+}
+
+/// A push or a mark an older setup left waiting goes with it: the next sign-in starts with a
+/// pull, never with that push.
+fn clear_waiting(dirs: &AppDirs) {
+    let _ = std::fs::remove_file(push_waiting_file(dirs));
+    let _ = std::fs::remove_file(dirs.data.join("mark-waiting"));
 }
 
 /// save-relay's Dropbox refresh token, kept for the download under `DOWNLOAD_ACCOUNT`.
@@ -967,13 +1080,22 @@ fn keep_for_download(dirs: &AppDirs, creds: &FileStore) {
     }
 }
 
-fn forget_android_all(dirs: &AppDirs, creds: &FileStore) -> Result<()> {
+/// `acnh_core::relay::forget`, then, when that left something (a secret it could not delete, a
+/// config it could not read for the accounts), what is left in the credential file: every
+/// account but the download's on a turn-off, and the whole file on a sign-out or when it does
+/// not read at all.
+fn forget_android_all(dirs: &AppDirs, creds: &FileStore, everything: bool) -> Result<()> {
     let Err(error) = acnh_core::relay::forget(dirs, creds) else {
         return Ok(());
     };
-    creds
-        .remove()
-        .map_err(|e| Error::Saves(format!("{error}; {e}")))?;
+    let cleared = if everything {
+        creds.remove()
+    } else {
+        creds
+            .retain(&[DOWNLOAD_ACCOUNT])
+            .or_else(|_| creds.remove())
+    };
+    cleared.map_err(|e| Error::Saves(format!("{error}; {e}")))?;
     match std::fs::metadata(dirs.config.join("config.json")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         _ => Err(error),

@@ -178,6 +178,15 @@ rm -rf "${OUT:?}/assets"
 tools/bundle_mods.sh "$OUT/assets"
 # Mbed TLS is linked into the game library (Nextendo Online): Apache 2.0 asks for its licence text in the package.
 mkdir -p "$OUT/assets/licenses" && cp "$BUILD/_deps/mbedtls-src/LICENSE" "$OUT/assets/licenses/LICENSE-mbedtls.txt"
+# save-relay (MIT: its C interface and JNI glue in lib<game>.so, its Java wrapper ported in android/java/org/saverelay)
+# and the Rust crates linked into lib<game>.so with the runtime library: each crate, its version and its licence, from
+# cargo's own lock (offline; local paths and sources left out).
+cp third_party/save-relay/LICENSE "$OUT/assets/licenses/LICENSE-save-relay.txt"
+{
+  echo "The Rust crates in lib$GAME.so (crates/runtime for aarch64-linux-android), with their licences:"
+  cargo tree -p acnh-runtime --target aarch64-linux-android -e normal --prefix none --format '{p} {l}' --offline |
+    sed -E 's# \((/|https?://|registry\+)[^)]*\)##; s/ \(\*\)$//' | sort -u
+} > "$OUT/assets/licenses/rust-crates.txt"
 # Capstone (BSD 3-clause, LLVM's licence for its tables) and tmouh's SpeedFix (CC BY-NC 4.0: its attribution) are built
 # into libacnh_prepare.so (the recompiler): their notices
 cp third_party/capstone/LICENSE.TXT "$OUT/assets/licenses/LICENSE-capstone.txt"
