@@ -1084,7 +1084,7 @@ int main(int argc, char** argv) {
                 if (g_window) {
                     int pw = 0, ph = 0;
                     if (SDL_GetWindowSizeInPixels(g_window, &pw, &ph) && pw > 0 && ph > 0)
-                        g_pixel_w = uint32_t(pw), g_pixel_h = uint32_t(ph);
+                        acnh_platform_window_set_size(uint32_t(pw), uint32_t(ph));
                 }
                 break;
             case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
