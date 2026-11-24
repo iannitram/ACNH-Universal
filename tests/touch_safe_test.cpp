@@ -46,12 +46,11 @@ int main() {
     r = safe_region(0, 0, {});
     assert(r.w > 0 && r.h > 0);
 
-    // The hide rule: shown with the setting on and no controller; hidden while any controller is connected; back
-    // when the last one leaves; never shown with the setting off.
+    // The hide rule (the behaviour around it, hot plug included, is tests/touch_input_test.cpp): shown with the setting
+    // on and no controller; hidden while any controller is connected; never shown with the setting off.
     assert(controls_visible(true, 0));
     assert(!controls_visible(true, 1));
     assert(!controls_visible(true, 3));
-    assert(controls_visible(true, 0));  // hot plug: the last controller left
     assert(!controls_visible(false, 0));
     assert(!controls_visible(false, 2));
     return 0;

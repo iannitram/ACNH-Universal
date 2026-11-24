@@ -21,6 +21,9 @@ namespace nx::plat {
 void touch_input_screen(float width, float height, touch::Insets insets);
 // How many game controllers are connected (waiting or joined). Any: the controls hide, fingers down are let go.
 void touch_input_set_controllers(int connected);
+// The shape (width / height) of the area the controls are laid out in: the safe area, not the window. The layout editor
+// (settings.cpp) uses it so what it shows and clamps is what the game draws.
+float touch_input_layout_aspect();
 // True while the controls are drawn and take fingers: the setting is on, no controller, and the game has a layout.
 bool touch_input_active();
 // One finger (an id of the touch device), at fx, fy: 0..1 across the window. Returns whether the controls took it.

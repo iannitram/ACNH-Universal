@@ -66,6 +66,11 @@ void touch_input_set_controllers(int connected) {
     g_controllers = connected;
 }
 
+float touch_input_layout_aspect() {
+    std::lock_guard lk(g_lock);
+    return region().aspect();
+}
+
 bool touch_input_active() {
     std::lock_guard lk(g_lock);
     return visible_locked() && has_layout(region().aspect());

@@ -36,6 +36,9 @@
 #include "bug_report.h"
 #include "config.h"
 #include "touch_layout.h"
+#if NX_TOUCH_IOS
+#include "touch_input.h"
+#endif
 #include "game_clock.h"
 #include "platform.h"
 #include "saves.h"
@@ -447,7 +450,12 @@ bool g_touch_edit = false;
 
 void touch_layout_editor() {
     ImGuiIO& io = ImGui::GetIO();
-    const float aspect = io.DisplaySize.y > 0 ? io.DisplaySize.x / io.DisplaySize.y : 16.0f / 9.0f;
+    float aspect = io.DisplaySize.y > 0 ? io.DisplaySize.x / io.DisplaySize.y : 16.0f / 9.0f;
+#if NX_TOUCH_IOS
+    // The game lays the buttons out inside the safe area (touch_input.cpp): preview, hit test and clamp use its shape,
+    // so the stored offsets mean the same thing in the editor and in play (and acnh_buttons keeps one cached aspect).
+    aspect = plat::touch_input_layout_aspect();
+#endif
     const float w = ImGui::GetContentRegionAvail().x, h = w / aspect;
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("##touch_layout", ImVec2(w, h));
