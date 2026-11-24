@@ -1761,7 +1761,7 @@ extern "C" void android_main(android_app* app) {
         android_poll_source* src;
         while (ALooper_pollOnce(started ? 0 : 50, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0) {
             if (src) src->process(app, src);
-            if (app->destroyRequested) relay_after_game(), nx::log_flush(), _exit(0);  // the island first
+            if (app->destroyRequested) audio_shutdown(), relay_after_game(), nx::log_flush(), _exit(0);  // the island first
         }
         if (!started && g_window) {
             started = true;
