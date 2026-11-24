@@ -280,6 +280,26 @@ public class Home extends Activity {
                             + (f.startsWith("/storage/emulated") ? t("phone", "celular") : t("memory card", "cartão de memória"))
                             + ")", Screen.GREEN, v -> check(f, false)));
         box.addView(Screen.button(this, t("Choose the game folder", "Escolher a pasta do jogo"), Screen.BLUE, v -> pick()));
+
+        String ver = buildVersion();
+        if (!ver.isEmpty()) {
+            TextView v = Screen.text(this, ver, 12, Screen.TEXT);
+            v.setAlpha(0.7f);
+            v.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
+            v.setPadding(0, Screen.dp(this, 14), 0, 0);
+            box.addView(v);
+        }
+    }
+
+    private String buildVersion() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            String name = info.versionName != null ? info.versionName : "";
+            long code = info.getLongVersionCode();
+            return name.isEmpty() ? ("#" + code) : (name + " (" + code + ")");
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     // Save sync: its state, and the sign-in (or turning it off). The pull itself runs when the game starts.

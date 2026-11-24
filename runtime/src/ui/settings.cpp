@@ -2050,7 +2050,19 @@ bool settings_draw(float scale, ImFont* title, float opening) {
             }
         }
         float qw = ImGui::CalcTextSize(tr("common.quit_game")).x + 30 * scale;
-        ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - qw);
+        float right_x = ImGui::GetWindowContentRegionMax().x - qw;
+        const char* ver = NX_VERSION_STRING;
+        if (ver && *ver) {
+            float vw = ImGui::CalcTextSize(ver).x;
+            float vx = right_x - vw - 14.0f * scale;
+            if (vx > ImGui::GetCursorPosX() + 8.0f * scale) {
+                ImGui::SetCursorPosX(vx);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(ImVec4(0.50f, 0.45f, 0.38f, 0.85f), "%s", ver);
+                ImGui::SameLine();
+            }
+        }
+        ImGui::SetCursorPosX(right_x);
         ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(232, 115, 122, 255));
         ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
         if (ImGui::Button(tr("common.quit_game"), ImVec2(qw, 0))) g_quit_confirm = true;

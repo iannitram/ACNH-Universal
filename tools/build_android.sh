@@ -121,10 +121,12 @@ RUNTIME_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_runtime.a
 RUNTIME_HEADER=$(find "$CARGO_OUT/aarch64-linux-android/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
 [ -n "$RUNTIME_HEADER" ] || { echo "acnh_runtime.h was not generated"; exit 1; }
 
-echo "== configure ($BUILD)"
+. tools/build_version.sh
+echo "== configure ($BUILD) [version $VNAME ($VCODE)]"
 cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_STL=c++_shared \
   -DANDROID_PLATFORM=android-29 -DNX_GAME=$GAME -DNX_GEN_DIR="$GEN" -DNX_LAUNCHER=OFF \
+  -DNX_BUILD_VERSION="$VNAME" \
   -DNX_VULKAN_SDK="$PWD/private/third_party/Vulkan-Headers-1.4.357" \
   -DNX_RUNTIME_ARCHIVE="$RUNTIME_LIB" -DNX_RUNTIME_INCLUDE="$(dirname "$RUNTIME_HEADER")" > "$OUT.cmake.log" 2>&1 ||
   { tail -20 "$OUT.cmake.log"; exit 1; }
@@ -163,13 +165,7 @@ TURNIP=private/third_party/mesa/build-android/src/freedreno/vulkan/libvulkan_fre
 # The icons are in git: drawn again only when missing (each Pillow writes other bytes for the same pixels).
 [ -f android/res/mipmap-xxxhdpi/ic_launcher.png ] || python3 tools/make_android_icon.py 2>/dev/null || true
 "$BT/aapt2" compile --dir android/res -o "$OUT/res.zip"
-# The version comes from the git tag (v0.7.0 -> versionName 0.7.0, versionCode 700), so Android and app stores
-# such as Obtainium see the real release number.
-VNAME=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//'); VNAME=${VNAME:-0.0.0}
-# NX_RELEASE_VERSION=v0.8.1 names it when the tag does not exist yet (the version the release will have).
-[[ ${NX_RELEASE_VERSION:-} =~ ^v?[0-9]+\.[0-9]+ ]] && VNAME=${NX_RELEASE_VERSION#v}
-IFS=. read -r VMAJ VMIN VPAT <<<"${VNAME%%-*}"
-VCODE=$(( ${VMAJ:-0} * 10000 + ${VMIN:-0} * 100 + ${VPAT:-0} ))
+# VNAME and VCODE come from tools/build_version.sh (sourced before configure so CMake's NX_VERSION_STRING matches).
 echo "APK version $VNAME ($VCODE)"
 "$BT/aapt2" link -o "$OUT/base.apk" --manifest android/AndroidManifest.xml -I "$PLATFORM" "$OUT/res.zip" \
   --version-name "$VNAME" --version-code "$VCODE" --replace-version

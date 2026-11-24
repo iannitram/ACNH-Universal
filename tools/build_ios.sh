@@ -143,11 +143,17 @@ runtime_lib=$cargo_target/$rust_target/release/libacnh_runtime.a
 runtime_header=$(find "$cargo_target/$rust_target/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
 
 # ---- the app ----------------------------------------------------------------------------------------------------
+. "$root/tools/build_version.sh"
+ios_short_version=${BASE_VER%%-*}
+ios_short_version=${ios_short_version%%+*}
+echo "iOS version $VNAME (CFBundleShortVersionString=$ios_short_version, CFBundleVersion=$VCODE)"
 cmake -S "$root" -B "$build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$sdk" -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
     -DNX_GAME=acnh -DNX_GEN_DIR="$gen" -DNX_LAUNCHER=OFF -DNX_GAME_FROM_FOLDER=OFF \
+    -DNX_BUILD_VERSION="$VNAME" \
+    -DNX_IOS_SHORT_VERSION="$ios_short_version" -DNX_IOS_BUNDLE_VERSION="$VCODE" \
     -DNX_VULKAN_INCLUDE="$vulkan" -DNX_IOS_MOLTENVK="$mv_prefix/lib/libMoltenVK.a" \
     -DNX_RUNTIME_ARCHIVE="$runtime_lib" ${runtime_header:+-DNX_RUNTIME_INCLUDE="$(dirname "$runtime_header")"} \
     -DCMAKE_PREFIX_PATH="$sdl_prefix" -DSDL3_DIR="$sdl_prefix/lib/cmake/SDL3"

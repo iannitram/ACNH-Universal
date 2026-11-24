@@ -519,9 +519,17 @@ elseif(IOS)
     endif()
     add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp
                    runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp)
+    if(NOT NX_IOS_SHORT_VERSION)
+        set(NX_IOS_SHORT_VERSION "0.0.0")
+    endif()
+    if(NOT NX_IOS_BUNDLE_VERSION)
+        set(NX_IOS_BUNDLE_VERSION "1")
+    endif()
     set_target_properties(${NX_GAME} PROPERTIES
         OUTPUT_NAME ACNH
-        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/ios/Info.plist.in")
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/ios/Info.plist.in"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${NX_IOS_SHORT_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${NX_IOS_BUNDLE_VERSION}")
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     # MoltenVK is whole-archived (SDL looks it up, so no symbol reference would pull it in) and needs Metal and its
     # surroundings; SDL3's static target names the rest (UIKit, GameController, AVFoundation, ...).
@@ -753,7 +761,9 @@ if(ZLIB_FOUND)
 endif()
 # A release build (.github/workflows/build.yml) names its version: git describe would give the previous tag when the
 # packages are built before the release's tag exists, and 0.8.0 then called itself 0.7.0 (issue #76).
-if("$ENV{NX_RELEASE_VERSION}" MATCHES "^v?[0-9]+\\.[0-9]+")
+if(NX_BUILD_VERSION)
+    set(NX_GIT_DESCRIBE "${NX_BUILD_VERSION}")
+elseif("$ENV{NX_RELEASE_VERSION}" MATCHES "^v?[0-9]+\\.[0-9]+")
     set(NX_GIT_DESCRIBE "$ENV{NX_RELEASE_VERSION}")
 else()
     execute_process(COMMAND git describe --always --dirty WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
