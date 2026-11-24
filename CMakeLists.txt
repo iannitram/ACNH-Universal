@@ -90,6 +90,9 @@ if(NX_TESTS AND NOT ANDROID)
     target_compile_definitions(gpu_pick_test PRIVATE NX_GPU_PICK_STANDALONE)
     target_include_directories(gpu_pick_test PRIVATE runtime/src/nvn)
     add_test(NAME gpu_pick COMMAND gpu_pick_test)
+    add_executable(aspect_test tests/aspect_test.cpp runtime/src/nvn/nvn_aspect.cpp)
+    target_include_directories(aspect_test PRIVATE runtime/src/nvn)
+    add_test(NAME aspect COMMAND aspect_test)
     add_executable(nextendo_test tests/nextendo_test.cpp runtime/src/nextendo.cpp runtime/src/nextendo_http.cpp)
     target_compile_definitions(nextendo_test PRIVATE NX_LAUNCHER_UI)
     target_include_directories(nextendo_test PRIVATE runtime/src)
@@ -289,9 +292,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/loader.cpp
     runtime/src/bug_report.cpp
     runtime/src/memory.cpp
-    runtime/src/kernel.cpp
-    runtime/src/kernel_watch.cpp
-    runtime/src/ipc.cpp
+    runtime/src/kernel_wrapper.cpp
     runtime/src/services_wrapper.cpp
     runtime/src/input_wrapper.cpp
     runtime/src/hle_hostnet.cpp
@@ -361,6 +362,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nvn/nvn_spirv_motion.cpp
     runtime/src/nvn/nvn_screenshot.cpp
     runtime/src/nvn/nvn_vk_defer.cpp
+    runtime/src/nvn/nvn_aspect.cpp
     runtime/src/nvn/nvn_ultrawide.cpp
     runtime/src/nvn/nvn_present.cpp
     runtime/src/nvn/nvn_framegen.cpp
