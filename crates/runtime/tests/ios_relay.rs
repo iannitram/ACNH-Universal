@@ -1,18 +1,18 @@
 //! The iPad's save-relay flow (issue #172) with fakes, on every runner: save-relay's in-memory
 //! remote and credential store, a temporary data root, and a prompt that blocks until the test
 //! answers it, so "the game has not booted" is checked as "`before_game` has not returned".
-//! Only the Keychain, UIKit and the C exports are iOS-only (`apple_ios.rs`).
+//! Only the Keychain, UIKit and the C exports are iOS-only (`relay_ios.rs`).
 #![cfg(not(any(target_os = "ios", target_os = "android")))]
 
 #[allow(dead_code)] // `Live` is the iPad's connector; the tests bring a fake
-#[path = "../src/apple.rs"]
-mod apple;
+#[path = "../src/relay.rs"]
+mod relay;
 
 use acnh_core::launch::{Keep, Relay, Sync as RelaySync};
 use acnh_core::relay::SaveRelay;
 use acnh_core::savecard::SaveCard;
 use acnh_core::{saves, Error};
-use apple::{
+use relay::{
     decide, describe_card, Action, Blocked, BlockedAnswer, Connector, FileSettings, HeldAnswer,
     Player, Prompt, Roots, SignInAnswer, SignInForm,
 };
@@ -176,7 +176,7 @@ impl Connector for FakeConnector {
                 server: server.to_string(),
                 user: user.to_string(),
                 root: save_relay::cli::DEFAULT_ROOT.to_string(),
-                device: save_relay::layout::device_slug(apple::DEVICE),
+                device: save_relay::layout::device_slug(relay::DEVICE),
             })
             .map_err(|e| Error::Saves(e.to_string()))
     }

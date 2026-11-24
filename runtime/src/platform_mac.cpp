@@ -920,7 +920,7 @@ void thread_cpu_watch() {
 }  // namespace
 
 #if TARGET_OS_IPHONE
-// save-relay inside the player (crates/runtime, apple.rs; issue #172). The Rust half pulls the island before the game
+// save-relay inside the player (crates/runtime, relay.rs; issue #172). The Rust half pulls the island before the game
 // boots (it returns only when the game may boot) and pushes it when the game quits or the app goes to the background.
 extern "C" void acnh_relay_before_game(const char* data_root);
 extern "C" void acnh_relay_after_game(const char* data_root);   // synchronous: the game has quit

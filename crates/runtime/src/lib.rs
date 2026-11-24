@@ -66,8 +66,10 @@ pub extern "C" fn acnh_runtime_abi_version() -> u32 {
     1
 }
 
-/// save-relay inside the iPad's player: pull before the game, push after, Nextcloud setup,
-/// the conflict and held prompts (issue #172; `apple.rs`, UIKit and Keychain in `apple_ios.rs`).
-/// The tests run the platform-free half on every runner (`tests/apple_relay.rs`).
-#[cfg(target_os = "ios")]
-pub mod apple;
+/// save-relay inside the iPad's player and the Android app: pull before the game, push after,
+/// the setup, the conflict and held prompts (issues #172 and #81; `relay.rs`, UIKit and the
+/// Keychain in `relay_ios.rs`, the JNI bridge and the file credential store in
+/// `relay_android.rs`). The tests run the platform-free half on every runner
+/// (`tests/ios_relay.rs`, `tests/android_relay.rs`).
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub mod relay;

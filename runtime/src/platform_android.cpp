@@ -63,6 +63,13 @@ namespace nx {
 void boot();
 }
 
+// Save sync (issue #81; crates/runtime relay_android.rs, the JNI side in relay_android.cpp): the home screen pulls the
+// island before it starts the game; the game pushes it when it quits (synchronously, before the process ends) and
+// when the app goes to the background (on a worker). Nothing is pushed before the pull has let the game start.
+extern "C" void acnh_relay_android_after_game(const char* data_root, const char* files);
+extern "C" void acnh_relay_android_background(const char* data_root, const char* files);
+extern "C" bool acnh_relay_android_ready(const char* files);
+
 namespace nx::plat {
 
 std::string g_native_lib_dir;  // ApplicationInfo.nativeLibraryDir: Turnip and libadrenotools' hooks
@@ -145,9 +152,20 @@ void start_thread(ThreadFn fn, void* arg, size_t stack_size) {
 }
 
 void exit_thread() { pthread_exit(nullptr); }
+// The game has quit (code 0: the player's quit, a restart for a setting): push the island first. A failure exit
+// (the game could not load) pushes nothing.
+void relay_after_game() { acnh_relay_android_after_game(g_root.c_str(), g_cache_dir.c_str()); }
+
 void exit_process(int code) {
+    if (code == 0) relay_after_game();
     nx::log_flush();
     _exit(code);
+}
+
+// The home screen's pull names the game folder before android_main does (relay_android.cpp): its config.ini holds
+// relay.ask, its logs/ the relay's lines.
+void android_set_data_root(const std::string& root) {
+    if (!root.empty()) g_root = root;
 }
 
 void restart_app() {
@@ -1354,6 +1372,7 @@ void on_cmd(android_app* app, int32_t cmd) {
             audio_pause(true);
             thermal_pause(true);  // and the phone gets the system's clock caps back
             nx::game_clock_save();  // a faster clock's gained time: Android may end the app from the background
+            acnh_relay_android_background(g_root.c_str(), g_cache_dir.c_str());  // the island, on a worker
             break;
         case APP_CMD_RESUME:
             keep_signal_handlers();  // back from Nextendo's sign-in screen, whose WebView may have set its own
@@ -1583,9 +1602,10 @@ static void open_home(android_app* app, const std::string& why) {
                                                    "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
                           env->NewStringUTF(nx::game::kInfo.android_package),
                           env->NewStringUTF("io.github.acnhrecomp.Home"));
-    env->CallObjectMethod(intent, env->GetMethodID(intentc, "putExtra",
-                                                   "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
-                          env->NewStringUTF("error"), env->NewStringUTF(why.c_str()));
+    if (!why.empty())  // none: the home screen starts the game itself (after its save sync pull)
+        env->CallObjectMethod(intent, env->GetMethodID(intentc, "putExtra",
+                                                       "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
+                              env->NewStringUTF("error"), env->NewStringUTF(why.c_str()));
     jclass actc = env->GetObjectClass(app->activity->clazz);
     env->CallVoidMethod(app->activity->clazz, env->GetMethodID(actc, "startActivity", "(Landroid/content/Intent;)V"), intent);
     if (env->ExceptionCheck()) env->ExceptionClear();
@@ -1784,6 +1804,19 @@ extern "C" void android_main(android_app* app) {
             own.c_str(), has_data(own) ? "has the data" : "no analysis/main.bin");
     if (!passed_over.empty())
         nx::log("app: the folder the home screen loaded, not %s (data_root.txt or its access disagreed)", passed_over.c_str());
+    // Save sync set up, but no pull in this process (Android brought the game screen back in a new process, past the
+    // home screen): back to the home screen, which pulls and starts the game again.
+    if (!acnh_relay_android_ready(g_cache_dir.c_str())) {
+        nx::log("relay: the game waits for the home screen's pull");
+        open_home(app, "");
+        ANativeActivity_finish(app->activity);
+        while (!app->destroyRequested) {
+            int events;
+            android_poll_source* src;
+            if (ALooper_pollOnce(100, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0 && src) src->process(app, src);
+        }
+        return;
+    }
     std::string why = load_game(g_root, g_cache_dir);
     if (why.empty()) why = vulkan_preflight();  // a plain message, not a black screen, when the GPU cannot
     if (!why.empty()) {
@@ -1803,7 +1836,7 @@ extern "C" void android_main(android_app* app) {
         android_poll_source* src;
         while (ALooper_pollOnce(started ? 0 : 50, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0) {
             if (src) src->process(app, src);
-            if (app->destroyRequested) nx::log_flush(), _exit(0);
+            if (app->destroyRequested) relay_after_game(), nx::log_flush(), _exit(0);  // the island first
         }
         if (!started && g_window) {
             started = true;

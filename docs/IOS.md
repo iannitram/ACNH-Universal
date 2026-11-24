@@ -18,7 +18,7 @@ Roadmap step 8.05a (#172) adds the prepared game (about 12 GB) to the IPA. The p
 
 ## Save sync on the iPad
 
-The player carries save-relay through its Rust API (`crates/runtime`, module `apple`). `tools/build_ios.sh` also builds the Rust library (`cargo build -p acnh-runtime --release --target aarch64-apple-ios`; `rustup target add aarch64-apple-ios` once) and fails unless the iOS SDL3 it built defines `SDL_JOYSTICK_MFI`, which the controllers need.
+The player carries save-relay through its Rust API (`crates/runtime`, module `relay`). `tools/build_ios.sh` also builds the Rust library (`cargo build -p acnh-runtime --release --target aarch64-apple-ios`; `rustup target add aarch64-apple-ios` once) and fails unless the iOS SDL3 it built defines `SDL_JOYSTICK_MFI`, which the controllers need.
 
 - **First start.** An alert asks for the Nextcloud server, user and an app password (Nextcloud: Settings, Security). The app password is kept only in the iOS Keychain. Not now leaves save sync off and is remembered as `relay.ask = 0` in `Documents/config.ini`. save-relay's own settings are under `Library/`, not Documents, so Files does not show them.
 - **Every start.** The game boots only after the island has synced. If save-relay cannot be reached, the alert says so and offers Retry (a push still waiting from the last game is sent first). A conflict shows both islands (device, saved time, play time) and nothing plays until one is picked. A held island names the other device and plays only on Play anyway. A refused sign-in (a revoked app password) shows the sign-in alert again with the server and user filled in; there is no Not now then.

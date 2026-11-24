@@ -1,37 +1,53 @@
-//! save-relay inside the iPad's player (issue #172, ADR 0006): the app asks save-relay for the
-//! island before the game boots and pushes it when the game quits or the app goes to the
-//! background. The adapter is `acnh_core::relay` (save-relay's Rust API), as on the Mac and PC.
+//! save-relay inside the iPad's player (issue #172, ADR 0006) and the Android app (issue #81):
+//! the app asks save-relay for the island before the game boots and pushes it when the game
+//! quits or the app goes to the background. The adapter is `acnh_core::relay` (save-relay's Rust
+//! API), as on the Mac and PC.
 //!
-//! This file holds everything that does not touch UIKit or the Keychain, so the tests run it on
-//! every runner (`tests/apple_relay.rs` includes it with `#[path]`): the pure decision
-//! (`decide`: a pull's answer in, an action out), the prompt and connector traits, and the
-//! loop (`Player::before_game`, `Player::after_game`). The UIKit alerts, the Keychain store and
-//! the C exports `acnh_relay_before_game` / `acnh_relay_after_game` are in `apple_ios.rs`, iOS
-//! only. Nothing here may use `crate::`: the tests compile this file as one of their modules.
+//! This file holds everything that does not touch UIKit, the Keychain or JNI, so the tests run
+//! it on every runner (`tests/ios_relay.rs` and `tests/android_relay.rs` include it with
+//! `#[path]`): the pure decision (`decide`: a pull's answer in, an action out), the prompt and
+//! connector traits, the loop (`Player::before_game`, `Player::after_game`), and the Android
+//! app's parts that need no JNI (`FileStore`, the prompt bridge's JSON in `BridgePrompt`, the
+//! wire format of its network answers in `parse_wire`). The UIKit alerts, the Keychain store and
+//! the iPad's C exports are in `relay_ios.rs`; the Android C exports in `relay_android.rs`.
+//! Nothing here may use `crate::`: the tests compile this file as one of their modules.
 //!
 //! The rules (the owner's answers of 2026-11-18, "Refuse until synced" and "Show sign-in
 //! again"): the game boots only after a pull has succeeded, with save sync not set up, or after
-//! Play anyway on a held island. The app password is only ever in the credential store; no
-//! file, log line or message holds it.
+//! Play anyway on a held island. The app password and the Dropbox tokens are only ever in the
+//! credential store; no other file, log line or message holds them.
 
 use acnh_core::config::Config;
 use acnh_core::launch::{Keep, Relay, Sync};
 use acnh_core::relay::SaveRelay;
 use acnh_core::savecard::SaveCard;
 use acnh_core::{saves, Error, Result};
-use save_relay::creds::CredentialStore;
+use save_relay::creds::{CredentialStore, Secret};
 use save_relay::local::LocalStore;
 use save_relay::platform::AppDirs;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 #[cfg(target_os = "ios")]
-#[path = "apple_ios.rs"]
+#[path = "relay_ios.rs"]
 pub mod ios;
 
-/// The name this iPad goes by in save-relay's history ("ipad"; never the owner's device name).
+#[cfg(target_os = "android")]
+#[path = "relay_android.rs"]
+pub mod android;
+
+/// The name this device goes by in save-relay's history ("ipad", "android"; never the owner's
+/// device name).
+#[cfg(not(target_os = "android"))]
 pub const DEVICE: &str = "iPad";
+/// The name this device goes by in save-relay's history ("ipad", "android"; never the owner's
+/// device name).
+#[cfg(target_os = "android")]
+pub const DEVICE: &str = "Android";
+/// The Android app's name in save-relay's history, on every target (the tests check it).
+pub const ANDROID_DEVICE: &str = "Android";
 
 /// What one pull or push means for the app. Pure: `decide` makes it, the loop acts on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +108,10 @@ pub enum SignInAnswer {
         user: String,
         password: String,
     },
+    /// The app's own sign-in finished and set save sync up itself (Android: Dropbox in the
+    /// browser, through save-relay's `save_relay_sign_in_start` / `_finish`). No secret passes
+    /// through here: save-relay filed the refresh token in the credential store.
+    SignedIn,
     /// First start only: leave save sync off, and do not ask again (`relay.ask = 0`).
     NotNow,
     /// Close the form (only the sign-in-again form has no Not now).
@@ -107,6 +127,7 @@ impl std::fmt::Debug for SignInAnswer {
                 .field("user", user)
                 .field("password", &"***")
                 .finish(),
+            SignInAnswer::SignedIn => f.write_str("SignedIn"),
             SignInAnswer::NotNow => f.write_str("NotNow"),
             SignInAnswer::Cancel => f.write_str("Cancel"),
         }
@@ -139,7 +160,7 @@ pub enum HeldAnswer {
     CheckAgain,
 }
 
-/// The screens. UIKit alerts on the iPad (`apple_ios.rs`); a fake in the tests. Every method
+/// The screens. UIKit alerts on the iPad (`relay_ios.rs`), the home screen's dialogs on Android (`BridgePrompt`); a fake in the tests. Every method
 /// blocks until it is answered, on the game's thread.
 pub trait Prompt: std::marker::Sync {
     fn sign_in(&self, form: &SignInForm) -> SignInAnswer;
@@ -155,7 +176,8 @@ pub trait Prompt: std::marker::Sync {
 pub trait Connector: std::marker::Sync {
     /// `acnh_core::relay::open`: nothing set up is `Ok(None)`.
     fn open(&self, dirs: &AppDirs, creds: &dyn CredentialStore) -> Result<Option<SaveRelay>>;
-    /// `acnh_core::relay::setup_nextcloud`: the password goes to `creds` only.
+    /// `acnh_core::relay::setup_nextcloud`: the password goes to `creds` only. The Android app
+    /// signs in to Dropbox instead (`SignInAnswer::SignedIn`) and keeps this refusal.
     fn setup(
         &self,
         server: &str,
@@ -163,18 +185,25 @@ pub trait Connector: std::marker::Sync {
         password: &str,
         dirs: &AppDirs,
         creds: &dyn CredentialStore,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        let _ = (server, user, password, dirs, creds);
+        Err(Error::Saves(
+            "this app signs in to its save sync in the browser, not with an app password".into(),
+        ))
+    }
 }
 
 /// The real network: ureq with rustls through save-relay's `http` feature.
+#[cfg(not(target_os = "android"))]
 pub struct Live;
 
+#[cfg(not(target_os = "android"))]
 impl Connector for Live {
     fn open(&self, dirs: &AppDirs, creds: &dyn CredentialStore) -> Result<Option<SaveRelay>> {
         acnh_core::relay::open(
             dirs,
             creds,
-            Arc::new(save_relay::http::UreqTransport::new()),
+            std::sync::Arc::new(save_relay::http::UreqTransport::new()),
         )
     }
 
@@ -193,39 +222,69 @@ impl Connector for Live {
             DEVICE,
             dirs,
             creds,
-            Arc::new(save_relay::http::UreqTransport::new()),
+            std::sync::Arc::new(save_relay::http::UreqTransport::new()),
         )
     }
 }
 
-/// Where the player keeps things. `data_root` is the app's Documents folder (saves, settings,
-/// logs: what Files shows). save-relay's own config and state go under `library`, never into
-/// Documents.
+/// Where the player keeps things. `data_root` is the game folder (saves, settings, logs: on the
+/// iPad the app's Documents folder, what Files shows). save-relay's own config and state go under
+/// `library`, never into the data root.
 #[derive(Debug, Clone)]
 pub struct Roots {
     pub data_root: PathBuf,
     pub library: PathBuf,
+    relay: AppDirs,
+}
+
+/// The folders the Android app hands save-relay's C interface as its `config` and `data`
+/// (`SaveRelayHost`), under the app's private files folder: save-relay keeps its config and
+/// state in `<these>/save-relay` (`AppDirs::from_vars`), where `Roots::android` looks too.
+pub fn android_vars(files: &Path) -> (PathBuf, PathBuf) {
+    (files.join("relay-config"), files.join("relay-data"))
+}
+
+/// The Android app's credential store file (`FileStore`), in its private files folder.
+pub fn android_credentials(files: &Path) -> PathBuf {
+    files.join("save-relay-credentials.json")
 }
 
 impl Roots {
-    /// The iPad's: `<container>/Documents` and `<container>/Library`.
+    /// The iPad's: `<container>/Documents` and `<container>/Library`; save-relay's folders are
+    /// both under `Library/save-relay`.
     pub fn for_data_root(data_root: &Path) -> Roots {
         let library = data_root
             .parent()
             .map_or_else(|| data_root.join("Library"), |p| p.join("Library"));
+        let base = library.join("save-relay");
         Roots {
             data_root: data_root.to_path_buf(),
+            relay: AppDirs {
+                config: base.join("config"),
+                data: base.join("data"),
+            },
             library,
         }
     }
 
-    /// save-relay's folders, both under `Library/save-relay`.
-    pub fn dirs(&self) -> AppDirs {
-        let base = self.library.join("save-relay");
-        AppDirs {
-            config: base.join("config"),
-            data: base.join("data"),
+    /// The Android app's: the game folder it plays from, and its private files folder
+    /// (`Context.getFilesDir()`), where save-relay's folders are the ones its C interface uses
+    /// (`android_vars`), so a sign-in through that interface is what the loop opens.
+    pub fn android(data_root: &Path, files: &Path) -> Roots {
+        let (config, data) = android_vars(files);
+        Roots {
+            data_root: data_root.to_path_buf(),
+            library: files.to_path_buf(),
+            relay: AppDirs {
+                config: config.join("save-relay"),
+                data: data.join("save-relay"),
+            },
         }
+    }
+
+    /// save-relay's folders.
+    pub fn dirs(&self) -> AppDirs {
+        self.relay.clone()
     }
 
     /// A push that did not go (offline, a conflict, an error) leaves this file; the next start
@@ -506,6 +565,10 @@ impl Player<'_> {
                 }
                 // Closed without an answer: sync stays off for this start, and it asks again.
                 SignInAnswer::Cancel => return false,
+                SignInAnswer::SignedIn => {
+                    self.log("save sync is set up");
+                    return true;
+                }
                 SignInAnswer::Submit {
                     server,
                     user,
@@ -535,12 +598,14 @@ impl Player<'_> {
             server: server.to_string(),
             user: user.to_string(),
             allow_not_now: false,
-            message: Some(
-                "The server refused the sign-in. Enter a new app password to play.".into(),
-            ),
+            message: Some(sign_in_again_message(server)),
         };
         loop {
             match self.prompt.sign_in(&form) {
+                SignInAnswer::SignedIn => {
+                    self.log("signed in again");
+                    return;
+                }
                 SignInAnswer::Submit {
                     server,
                     user,
@@ -662,4 +727,290 @@ fn utc(unix: u64) -> String {
         rest / 3600,
         rest % 3600 / 60
     )
+}
+
+/// What the sign-in form says when the service refused this device's sign-in: an app password
+/// for Nextcloud (the iPad), a new browser sign-in for Dropbox or Google Drive (Android).
+pub fn sign_in_again_message(server: &str) -> String {
+    match save_relay::service::Service::from_server(server) {
+        Ok(service) if service.uses_oauth() => format!(
+            "{} refused this device's sign-in. Sign in again to play.",
+            service.label()
+        ),
+        _ => "The server refused the sign-in. Enter a new app password to play.".into(),
+    }
+}
+
+// ---- the Android app's parts that need no JNI (relay_android.rs uses them) -------------------
+
+/// save-relay's `CredentialStore` as one JSON file (`{account: secret}`) in the Android app's
+/// private files folder: Android's per-app sandbox keeps other apps out, and the file is
+/// `0600` besides. It is the only place the Dropbox refresh token is written. Every change is a
+/// whole new file renamed over the old, so a crash leaves the old one or the new one. A file
+/// that does not read as that JSON is an error, never quietly emptied. `Debug` shows the path
+/// only.
+pub struct FileStore {
+    path: PathBuf,
+}
+
+/// One change at a time within the process (the sign-in on the home screen, a push on the
+/// game's background worker).
+static FILE_STORE_LOCK: Mutex<()> = Mutex::new(());
+
+impl std::fmt::Debug for FileStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileStore")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+fn store_error(what: &str) -> save_relay::Error {
+    save_relay::Error::Credentials(format!("the app's credential file {what}"))
+}
+
+impl FileStore {
+    pub fn new(path: impl Into<PathBuf>) -> FileStore {
+        FileStore { path: path.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn load(&self) -> save_relay::Result<BTreeMap<String, String>> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| store_error("does not read")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(_) => Err(store_error("cannot be read")),
+        }
+    }
+
+    fn save(&self, all: &BTreeMap<String, String>) -> save_relay::Result<()> {
+        use std::io::Write;
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|_| store_error("folder cannot be made"))?;
+        let partial = self.path.with_extension("json.partial");
+        let _ = std::fs::remove_file(&partial);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let written = (|| {
+            let mut file = options.open(&partial)?;
+            let text = serde_json::to_vec(all).map_err(std::io::Error::other)?;
+            file.write_all(&text)?;
+            file.sync_all()?;
+            std::fs::rename(&partial, &self.path)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&partial);
+            return Err(store_error("cannot be written"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+}
+
+impl CredentialStore for FileStore {
+    fn get(&self, account: &str) -> save_relay::Result<Option<Secret>> {
+        let _one = FILE_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(self.load()?.remove(account).map(Secret::new))
+    }
+
+    fn set(&self, account: &str, secret: &Secret) -> save_relay::Result<()> {
+        let _one = FILE_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.load()?;
+        all.insert(account.to_string(), secret.expose().to_string());
+        self.save(&all)
+    }
+
+    fn delete(&self, account: &str) -> save_relay::Result<()> {
+        let _one = FILE_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = self.load()?;
+        if all.remove(account).is_none() {
+            return Ok(());
+        }
+        self.save(&all)
+    }
+
+    fn kind(&self) -> &'static str {
+        "android-app-file"
+    }
+}
+
+/// The home screen's side of `BridgePrompt`: a request's JSON in, the answer's JSON out.
+type Ask<'a> = dyn Fn(&str) -> Option<String> + std::marker::Sync + 'a;
+
+/// The prompts as one JSON request each, answered by the app's own screens (Android: dialogs on
+/// the home screen, `Relay.ask` in android/java, reached through JNI). `ask` blocks until the
+/// person answers and gives the answer's JSON, or `None` when the screens cannot be reached;
+/// nothing is then decided for the person (the request is asked again a moment later, or the
+/// harmless answer is taken: Cancel, Check again, Retry). Requests never hold a secret, the
+/// account's user name or a path.
+///
+/// - `{"kind": "sign_in", "again": bool, "allow_not_now": bool, "message": text or null}`:
+///   `signed_in`, `not_now`, `cancel`
+/// - `{"kind": "conflict", "server": text, "local": text}` (`describe_card`): `server`, `local`
+/// - `{"kind": "held", "device": text, "since": text}`: `play_anyway`, `check_again`
+/// - `{"kind": "blocked", "why": "offline" or "error" or "sign_in_cancelled", "message": text
+///   or null}`: `retry`, `sign_in_again`
+///
+/// The reply is `{"answer": "<one of those>"}`.
+pub struct BridgePrompt<'a> {
+    ask: Box<Ask<'a>>,
+    /// How long to wait before asking again when the screens could not be reached.
+    pub pause: std::time::Duration,
+}
+
+impl<'a> BridgePrompt<'a> {
+    pub fn new(ask: impl Fn(&str) -> Option<String> + std::marker::Sync + 'a) -> BridgePrompt<'a> {
+        BridgePrompt {
+            ask: Box::new(ask),
+            pause: std::time::Duration::from_secs(1),
+        }
+    }
+
+    /// The `answer` field of the reply to `request`, or `None`.
+    fn answer(&self, request: &serde_json::Value) -> Option<String> {
+        let reply = (self.ask)(&request.to_string())?;
+        let reply: serde_json::Value = serde_json::from_str(&reply).ok()?;
+        reply
+            .get("answer")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }
+}
+
+impl Prompt for BridgePrompt<'_> {
+    fn sign_in(&self, form: &SignInForm) -> SignInAnswer {
+        let request = serde_json::json!({
+            "kind": "sign_in",
+            "again": !form.allow_not_now,
+            "allow_not_now": form.allow_not_now,
+            "message": form.message,
+        });
+        match self.answer(&request).as_deref() {
+            Some("signed_in") => SignInAnswer::SignedIn,
+            Some("not_now") if form.allow_not_now => SignInAnswer::NotNow,
+            _ => SignInAnswer::Cancel,
+        }
+    }
+
+    fn conflict(&self, server: &SaveCard, local: &SaveCard) -> Keep {
+        let request = serde_json::json!({
+            "kind": "conflict",
+            "server": describe_card(server),
+            "local": describe_card(local),
+        });
+        // Which island to keep is the person's choice alone: ask until one is picked.
+        loop {
+            match self.answer(&request).as_deref() {
+                Some("server") => return Keep::Server,
+                Some("local") => return Keep::Local,
+                _ => std::thread::sleep(self.pause),
+            }
+        }
+    }
+
+    fn held(&self, device: &str, since: &str) -> HeldAnswer {
+        let request = serde_json::json!({"kind": "held", "device": device, "since": since});
+        match self.answer(&request).as_deref() {
+            Some("play_anyway") => HeldAnswer::PlayAnyway,
+            Some(_) => HeldAnswer::CheckAgain,
+            None => {
+                std::thread::sleep(self.pause);
+                HeldAnswer::CheckAgain
+            }
+        }
+    }
+
+    fn blocked(&self, why: &Blocked) -> BlockedAnswer {
+        let (kind, message) = match why {
+            Blocked::Offline => ("offline", None),
+            Blocked::Error(message) => ("error", Some(message.as_str())),
+            Blocked::SignInCancelled => ("sign_in_cancelled", None),
+        };
+        let request = serde_json::json!({"kind": "blocked", "why": kind, "message": message});
+        match self.answer(&request).as_deref() {
+            Some("sign_in_again") if *why == Blocked::SignInCancelled => BlockedAnswer::SignInAgain,
+            Some(_) => BlockedAnswer::Retry,
+            None => {
+                std::thread::sleep(self.pause);
+                BlockedAnswer::Retry
+            }
+        }
+    }
+}
+
+/// A request's headers as save-relay's C interface hands them to the app's `http` callback:
+/// `Name: value` lines, each ended by `\n`.
+pub fn header_lines(request: &save_relay::http::Request) -> String {
+    let mut lines = String::new();
+    for (name, value) in &request.headers {
+        lines.push_str(name);
+        lines.push_str(": ");
+        lines.push_str(value);
+        lines.push('\n');
+    }
+    lines
+}
+
+/// The app's answer to one request in save-relay's Android wire format (`SaveRelayResponse.toWire`
+/// in its bindings): the status and the headers' length as big-endian `u32`s, the `Name: value`
+/// header lines, then the body. Anything shorter or malformed is `Unreachable`, as a network
+/// failure is.
+pub fn parse_wire(wire: &[u8]) -> save_relay::Result<save_relay::http::Response> {
+    let bad = || save_relay::Error::Unreachable("the app's network answer is malformed".into());
+    if wire.len() < 8 {
+        return Err(bad());
+    }
+    let status = u32::from_be_bytes([wire[0], wire[1], wire[2], wire[3]]);
+    let header_len = u32::from_be_bytes([wire[4], wire[5], wire[6], wire[7]]) as usize;
+    let status = u16::try_from(status).map_err(|_| bad())?;
+    let rest = &wire[8..];
+    if rest.len() < header_len {
+        return Err(bad());
+    }
+    let headers = std::str::from_utf8(&rest[..header_len]).map_err(|_| bad())?;
+    let mut response = save_relay::http::Response::new(status, rest[header_len..].to_vec());
+    for line in headers.lines() {
+        if let Some((name, value)) = line.split_once(':') {
+            response = response.header(name.trim(), value.trim());
+        }
+    }
+    Ok(response)
+}
+
+/// save-relay's `Transport` over the app's own network call (Android: the Java host's `http`,
+/// the same one save-relay's C interface uses for the sign-in), given the request and its
+/// `header_lines`, answering in `parse_wire`'s format, or `None` for a connection failure.
+pub struct CallbackTransport<F>(pub F);
+
+impl<F> save_relay::http::Transport for CallbackTransport<F>
+where
+    F: Fn(&save_relay::http::Request, &str) -> Option<Vec<u8>> + Send + std::marker::Sync,
+{
+    fn send(
+        &self,
+        request: &save_relay::http::Request,
+    ) -> save_relay::Result<save_relay::http::Response> {
+        let wire = (self.0)(request, &header_lines(request)).ok_or_else(|| {
+            save_relay::Error::Unreachable("the app's network call failed".into())
+        })?;
+        let response = parse_wire(&wire)?;
+        match request.max_response_bytes {
+            Some(max) if response.body.len() > max => Err(save_relay::Error::Unreachable(
+                "the answer is larger than allowed".into(),
+            )),
+            _ => Ok(response),
+        }
+    }
 }

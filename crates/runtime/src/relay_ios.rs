@@ -1,4 +1,4 @@
-//! The iPad-only half of `apple.rs` (issue #172): the Keychain credential store, the UIKit
+//! The iPad-only half of `relay.rs` (issue #172): the Keychain credential store, the UIKit
 //! alerts, the background task around the push, and the C exports the player calls.
 //!
 //! The alerts are `UIAlertController`s presented on the main thread from the game's thread,
@@ -238,7 +238,7 @@ fn present(alert: &Alert, tx: Sender<Answer>) -> bool {
     true
 }
 
-/// The alerts, as the `Prompt` of `apple.rs`.
+/// The alerts, as the `Prompt` of `relay.rs`.
 pub struct UiPrompt;
 
 impl Prompt for UiPrompt {

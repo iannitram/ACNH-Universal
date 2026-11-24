@@ -20,9 +20,9 @@ player = ["dep:cmake"]
 
 [dependencies]
 
-# The save-relay adapter in the iPad's player (`src/apple.rs`, issue #172): the same
-# `acnh_core::relay` as the Mac and the PC. iOS only, so the Android cross-build is unchanged.
-# `keyring` stays off (the Keychain store is `apple_ios.rs`); `http` is ureq with rustls.
+# The save-relay adapter in the iPad's player (`src/relay.rs`, issue #172): the same
+# `acnh_core::relay` as the Mac and the PC. `keyring` stays off (the Keychain store is
+# `relay_ios.rs`); `http` is ureq with rustls.
 [target.'cfg(target_os = "ios")'.dependencies]
 acnh-core = { path = "../core", features = ["relay"] }
 save-relay = { git = "https://github.com/iannitram/save-relay", default-features = false, features = ["http"] }
@@ -32,11 +32,23 @@ objc2-foundation = "0.3"
 objc2-ui-kit = "0.3"
 block2 = "0.6"
 dispatch2 = { version = "0.3", features = ["objc2"] }
+# The platform-free half (`relay.rs`) carries the Android app's JSON prompt bridge and credential file too.
+serde_json = "1"
 
-# The tests include `src/apple.rs` and run it with fakes on every desktop runner.
+# The same loop in the Android app (`src/relay_android.rs`, issue #81). save-relay's C interface
+# (`ffi`: its JNI glue and its host, ported to Java in android/java/org/saverelay) brings the
+# app's network and credential store, so neither `http` nor `keyring`: the Rust side has no C or
+# TLS of its own to cross-compile.
+[target.'cfg(target_os = "android")'.dependencies]
+acnh-core = { path = "../core", features = ["relay"] }
+save-relay = { git = "https://github.com/iannitram/save-relay", default-features = false, features = ["ffi"] }
+serde_json = "1"
+
+# The tests include `src/relay.rs` and run it with fakes on every desktop runner.
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dev-dependencies]
 acnh-core = { path = "../core", features = ["relay"] }
 save-relay = { git = "https://github.com/iannitram/save-relay" }
+serde_json = "1"
 
 [build-dependencies]
 cbindgen = { version = "0.27", default-features = false }
