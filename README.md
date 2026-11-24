@@ -238,77 +238,39 @@ has .NET 10), the Ryubing shader translator source and Dear ImGui.
 
 ### Downloads
 
-The [releases](https://github.com/Nycolazs/ACNHRecomp/releases) are ready to play: none of them has any part of the
-game, and none needs a compiler. You need two things:
-
-1. **The ExeFS and RomFS of your own copy** (update 3.0.3), extracted with your emulator's Extract feature
-   ([how](#your-game-folder)). The launcher prepares the game folder from them, once (a folder prepared before, by
-   ACNHRecomp or ACNHRecomp-Importer, works as it is).
-2. **The package for your system** from the [latest release](https://github.com/Nycolazs/ACNHRecomp/releases/latest):
+The releases hold the launcher (`acnh-app`), the CLI (`acnh-universal`), and the packaged source (`source/`) — no game
+data and no player. Each hub builds the game from your own game folder (update 3.0.3 or another supported version,
+extracted with your emulator's Extract feature; see [how](#your-game-folder)).
 
 | File | System |
 |---|---|
-| `ACNHRecomp-<version>-windows-x64.zip` | Windows 10/11, x64 |
-| `ACNHRecomp-<version>-macOS-arm64.zip` | macOS 15 or newer, Apple Silicon (M1 or newer) |
-| `ACNHRecomp-<version>-linux-x64.tar.gz` | Linux x86-64, glibc 2.35+ (Ubuntu 22.04, Fedora 36, Debian 12 and newer) |
-| `ACNHRecomp-<version>-android.apk` | Android 10+, Snapdragon (Adreno 6xx or newer): see [docs/ANDROID.md](docs/ANDROID.md) |
-| `libvulkan_freedreno.so` | The Turnip Vulkan driver (Mesa, MIT), already inside the APK; for `tools/android_install.sh` |
+| `ACNH-Universal-<version>-windows-x64.zip` | Windows 10/11, x64 |
+| `ACNH-Universal-<version>-mac.zip` | macOS 15 or newer, Apple Silicon (M1 or newer) |
+| `ACNH-Universal-<version>-linux-x86_64.AppImage` | Linux x86-64 |
 
 #### Windows
 
-1. Unzip `ACNHRecomp-<version>-windows-x64.zip` into a folder of your own (for example `Documents\ACNHRecomp`), not
-   inside the zip viewer.
-2. Double-click **`ACNHRecomp Launcher.exe`** (or `Start ACNHRecomp.bat`). If SmartScreen warns about an unknown
-   app: *More info* > *Run anyway*.
-3. **Prepare the game from your extracted files** (or choose a game folder prepared before). The game starts.
-4. On the launcher's home page, **Add to desktop** puts a shortcut with the ACNHRecomp icon on the desktop and in the
-   Start menu (search for "ACNHRecomp"). Keep the unzipped folder where it is: the shortcut points into it.
+1. Unzip `ACNH-Universal-<version>-windows-x64.zip` into a folder of your own (for example `Documents\ACNH-Universal`),
+   not inside the zip viewer.
+2. Run **`acnh-app.exe`** (or `acnh-universal.exe` from the command line). If SmartScreen warns about an unknown app:
+   *More info* > *Run anyway*.
+3. Use Prepare to build the game from your own game folder.
 
 #### macOS
 
-1. Unzip `ACNHRecomp-<version>-macOS-arm64.zip`. It holds **`ACNHRecomp.app`** and `Start ACNHRecomp.command`.
-2. The first time, double-click **`Start ACNHRecomp.command`**: the app is not signed by Apple, and this lets macOS
-   open it (it removes the download quarantine) and then opens it. If macOS still refuses, right-click
-   `ACNHRecomp.app` > *Open* > *Open*, or *System Settings* > *Privacy & Security* > *Open Anyway*.
-3. **Prepare the game from your extracted files** (or choose a game folder prepared before). The game starts.
-4. On the launcher's home page, **Install in Applications** copies `ACNHRecomp.app` into Applications (or
-   `~/Applications` without administrator rights) and puts it on the desktop. From then on open it from Launchpad,
-   Spotlight or the Dock like any app; the downloaded folder can be deleted.
+1. Unzip `ACNH-Universal-<version>-mac.zip`. It holds **`ACNH-Universal.app`**.
+2. Open **`ACNH-Universal.app`** (if macOS blocks an unsigned app, right-click > *Open* > *Open*, or *System Settings* >
+   *Privacy & Security* > *Open Anyway*).
+3. Prepare builds the one contained **`ACNH-Universal.app`** with your prepared game inside and delivers it to your own
+   Dropbox.
 
 #### Linux
 
-1. Extract the package: `tar -xzf ACNHRecomp-<version>-linux-x64.tar.gz`.
-2. Run **`./Start ACNHRecomp.sh`** in the `ACNHRecomp` folder (or double-click it in your file manager). You need a
+1. Make the AppImage executable (`chmod +x ACNH-Universal-<version>-linux-x86_64.AppImage`) and run it. You need a
    Vulkan driver: `sudo apt install mesa-vulkan-drivers` (or your distribution's, or NVIDIA's).
-3. **Prepare the game from your extracted files** (or choose a game folder prepared before). The game starts.
-4. On the launcher's home page, **Add to desktop** adds ACNHRecomp, with its icon, to the applications menu and to
-   the desktop (`~/.local/share/applications/io.github.acnhrecomp.desktop`). Keep the extracted folder where it is.
+2. Use Prepare to build the game from your own game folder.
 
-#### The first start, updates and versions
-
-- **Brazilian Portuguese and 60 FPS** come with the package: the first start copies the pt-BR fan translation and
-  the files of tmouh's 60 FPS SpeedFix into your game folder (no download). Português (Brasil) is then in the game's
-  languages (chosen by itself on a Portuguese system). *Settings* > *Video* > *Frame rate* > *60* then plays at 60 FPS
-  at the game's normal speed (30 is the default); it needs a game folder prepared with *Native 60 FPS* (on by
-  default; a folder from ACNHRecomp-Importer 1.0.6 or newer has it too), which builds the SpeedFix into the game's
-  code (an older folder stays at 30). A new package with newer files copies
-  them again; `game.mod_fetch = off` in `config.ini` turns the copy off.
-- **New versions:** the launcher looks for a newer release on GitHub each time it opens and says so on its home page,
-  with a button to its download page. *Settings* > *Look for new versions when the launcher opens* turns it off. To
-  update, download the new package and replace the old folder (or app): your game folder, saves and settings are
-  not in it, so nothing is lost.
-- **The version in use** is at the bottom of the launcher's *Settings*, and in the game's settings (F1) > *About*.
-- **The icon:** the launcher, the game's window, the taskbar / Dock and the shortcuts all show the ACNHRecomp icon.
-
-The launcher prepares the game folder from what you extracted (or takes one prepared before) and starts the game;
-the player beside it (`acnh`) loads the game's code from that folder (`game/<platform>/`, see
-[Building from source](#building-from-source)). The preparation's tools come in the package: `tools/zig/` (the zig
-compiler, trimmed, that builds the game's code) and `tools/shaders/` (the shader converter), beside the launcher
-(inside `ACNHRecomp.app/Contents/Resources/` on macOS), with `acnh_prepare`, its command line. A new version of
-ACNHRecomp whose runtime changed asks to **Prepare again** on the home page: only the game's code is built again.
-Each package carries what it needs (SDL3, and on macOS the Vulkan loader and MoltenVK); a GPU with a Vulkan 1.3
-driver is the one requirement. The packages are made by the repository's **Build** workflow (`.github/workflows/build.yml`,
-`tools/package_release_*.sh`; the icons are in `assets/`).
+The release packages are built by `.github/workflows/release.yml` (the icons are in `assets/`).
 
 The sections below are for building from this repository instead (developers, other versions of the game).
 

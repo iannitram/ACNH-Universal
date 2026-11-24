@@ -1,13 +1,16 @@
 //! Translate gamepad and keyboard input into the launcher's shared navigation actions
 //! (docs/design/continue-screen.md, "Controller map").
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use gilrs::{Axis, Button, EventType, GamepadId, Gilrs};
 use slint::platform::Key;
 
 use crate::vm::{InputDevice, Nav};
+
+#[cfg(target_os = "android")]
+pub mod android;
 
 /// Identify a controller without depending on a particular input backend.
 /// IDs refer to USB vendor and product IDs; name disambiguates 8BitDo modes.
@@ -288,6 +291,136 @@ pub fn key_nav(text: &str) -> Option<Nav> {
         .map(|(_, nav)| nav)
 }
 
+/// Android `InputDevice.SOURCE_GAMEPAD` (0x401) and `SOURCE_JOYSTICK` (0x1000010).
+pub const ANDROID_SOURCE_GAMEPAD: i32 = 0x401;
+pub const ANDROID_SOURCE_JOYSTICK: i32 = 0x1000010;
+
+/// Android `KeyEvent.KEYCODE_*` values used by controller navigation.
+pub const AKEYCODE_BACK: i32 = 4;
+pub const AKEYCODE_DPAD_UP: i32 = 19;
+pub const AKEYCODE_DPAD_DOWN: i32 = 20;
+pub const AKEYCODE_DPAD_LEFT: i32 = 21;
+pub const AKEYCODE_DPAD_RIGHT: i32 = 22;
+pub const AKEYCODE_BUTTON_A: i32 = 96;
+pub const AKEYCODE_BUTTON_B: i32 = 97;
+pub const AKEYCODE_BUTTON_L1: i32 = 102;
+pub const AKEYCODE_BUTTON_R1: i32 = 103;
+pub const AKEYCODE_BUTTON_START: i32 = 108;
+
+/// Description of an Android `InputDevice`, independent of JNI so tests run on every host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndroidDevice {
+    pub id: i32,
+    pub vendor: Option<u16>,
+    pub product: Option<u16>,
+    pub name: String,
+    pub sources: i32,
+    pub is_virtual: bool,
+}
+
+impl AndroidDevice {
+    /// True when the device is a physical gamepad or joystick (not virtual, not keyboard-only).
+    pub fn is_physical_pad(&self) -> bool {
+        !self.is_virtual
+            && ((self.sources & ANDROID_SOURCE_GAMEPAD) == ANDROID_SOURCE_GAMEPAD
+                || (self.sources & ANDROID_SOURCE_JOYSTICK) == ANDROID_SOURCE_JOYSTICK)
+    }
+
+    pub fn device_id(&self) -> usize {
+        self.id as u32 as usize
+    }
+
+    /// Classify this device using 2.04b's pad table, or `None` if it is virtual / not a pad.
+    pub fn layout(&self) -> Option<InputDevice> {
+        self.is_physical_pad()
+            .then(|| controller_layout(self.vendor, self.product, &self.name))
+    }
+}
+
+/// Tracks connected Android pads across 2-second `InputDevice.getDeviceIds()` snapshots
+/// and feeds connect/disconnect/use transitions into `Devices`.
+#[derive(Debug, Default)]
+pub struct AndroidHotplug {
+    known: HashSet<i32>,
+    last_poll: Option<Instant>,
+}
+
+impl AndroidHotplug {
+    const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+    /// Reconcile `devices` with a fresh snapshot of Android `InputDevice`s.
+    pub fn apply_snapshot(&mut self, snapshot: &[AndroidDevice], devices: &mut Devices) {
+        let physical: Vec<&AndroidDevice> =
+            snapshot.iter().filter(|d| d.is_physical_pad()).collect();
+        let active_ids: HashSet<i32> = physical.iter().map(|d| d.id).collect();
+
+        let removed: Vec<i32> = self
+            .known
+            .iter()
+            .copied()
+            .filter(|id| !active_ids.contains(id))
+            .collect();
+        for id in removed {
+            self.known.remove(&id);
+            devices.apply(DeviceEvent::Disconnected(id as u32 as usize));
+        }
+
+        for dev in physical {
+            if self.known.insert(dev.id) {
+                devices.apply(DeviceEvent::Connected {
+                    id: dev.device_id(),
+                    vendor: dev.vendor,
+                    product: dev.product,
+                    name: dev.name.clone(),
+                });
+            }
+        }
+    }
+
+    /// Mark an Android pad as having produced an input event.
+    pub fn record_used(&self, device_id: i32, devices: &mut Devices) {
+        if self.known.contains(&device_id) {
+            devices.apply(DeviceEvent::Used(device_id as u32 as usize));
+        }
+    }
+
+    /// Poll `fetch` at most once every 2 seconds and apply any hot-plug changes.
+    pub fn poll_if_due(
+        &mut self,
+        now: Instant,
+        devices: &mut Devices,
+        fetch: impl FnOnce() -> Vec<AndroidDevice>,
+    ) -> bool {
+        let due = self
+            .last_poll
+            .is_none_or(|prev| now.duration_since(prev) >= Self::POLL_INTERVAL);
+        if !due {
+            return false;
+        }
+        self.last_poll = Some(now);
+        let snapshot = fetch();
+        self.apply_snapshot(&snapshot, devices);
+        true
+    }
+}
+
+/// Map an Android gamepad/D-pad keycode to `Nav` by physical button position
+/// (`KEYCODE_BUTTON_A` is always the bottom face button in AOSP `.kl` files).
+pub fn android_keycode_nav(keycode: i32) -> Option<Nav> {
+    match keycode {
+        AKEYCODE_DPAD_UP => Some(Nav::Up),
+        AKEYCODE_DPAD_DOWN => Some(Nav::Down),
+        AKEYCODE_DPAD_LEFT => Some(Nav::Left),
+        AKEYCODE_DPAD_RIGHT => Some(Nav::Right),
+        AKEYCODE_BUTTON_A => Some(Nav::Accept),
+        AKEYCODE_BUTTON_B | AKEYCODE_BACK => Some(Nav::Back),
+        AKEYCODE_BUTTON_START => Some(Nav::Menu),
+        AKEYCODE_BUTTON_L1 => Some(Nav::Prev),
+        AKEYCODE_BUTTON_R1 => Some(Nav::Next),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +583,172 @@ mod tests {
         assert_eq!(key_nav(&text(Key::PageDown)), Some(Nav::Next));
         assert_eq!(key_nav("a"), None);
         assert_eq!(key_nav(""), None);
+    }
+
+    fn android_pad(
+        id: i32,
+        vendor: Option<u16>,
+        product: Option<u16>,
+        name: &str,
+    ) -> AndroidDevice {
+        AndroidDevice {
+            id,
+            vendor,
+            product,
+            name: name.into(),
+            sources: ANDROID_SOURCE_GAMEPAD | ANDROID_SOURCE_JOYSTICK,
+            is_virtual: false,
+        }
+    }
+
+    #[test]
+    fn android_device_classification_and_filtering() {
+        assert_eq!(
+            android_pad(1, Some(0x045e), Some(0x02ea), "Xbox Wireless Controller").layout(),
+            Some(InputDevice::Xbox)
+        );
+        assert_eq!(
+            android_pad(
+                2,
+                Some(0x054c),
+                Some(0x0ce6),
+                "DualSense Wireless Controller"
+            )
+            .layout(),
+            Some(InputDevice::PlayStation)
+        );
+        assert_eq!(
+            android_pad(3, Some(0x057e), Some(0x2009), "Pro Controller").layout(),
+            Some(InputDevice::Switch)
+        );
+        assert_eq!(
+            android_pad(4, Some(0x28de), Some(0x1205), "Steam Deck").layout(),
+            Some(InputDevice::SteamDeck)
+        );
+        assert_eq!(
+            android_pad(5, Some(0x1234), Some(0x5678), "Generic Gamepad").layout(),
+            Some(InputDevice::Generic)
+        );
+        // Joystick-only source (no GAMEPAD bit) is still a physical pad.
+        let mut joystick = android_pad(6, Some(0x045e), Some(0x02ea), "Xbox");
+        joystick.sources = ANDROID_SOURCE_JOYSTICK;
+        assert_eq!(joystick.layout(), Some(InputDevice::Xbox));
+
+        // Virtual devices and keyboard-only devices are ignored.
+        let mut virt = android_pad(7, Some(0x045e), Some(0x02ea), "Virtual");
+        virt.is_virtual = true;
+        assert_eq!(virt.layout(), None);
+
+        let mut kb = android_pad(8, Some(0x045e), Some(0x02ea), "Keyboard");
+        kb.sources = 0x101; // SOURCE_KEYBOARD
+        assert_eq!(kb.layout(), None);
+    }
+
+    #[test]
+    fn android_hotplug_transitions_and_poll_interval() {
+        let mut devices = Devices::default();
+        let mut hotplug = AndroidHotplug::default();
+        let pad_a = android_pad(10, Some(0x045e), Some(0x02ea), "Xbox");
+        let pad_b = android_pad(20, Some(0x054c), Some(0x0ce6), "DualSense");
+
+        let t0 = Instant::now();
+        assert!(hotplug.poll_if_due(t0, &mut devices, || vec![pad_a.clone()]));
+        // Within 2 seconds, poll_if_due is a no-op.
+        assert!(
+            !hotplug.poll_if_due(t0 + Duration::from_secs(1), &mut devices, || {
+                panic!("should not poll before 2s interval")
+            })
+        );
+
+        hotplug.record_used(10, &mut devices);
+        assert_eq!(devices.current(), InputDevice::Xbox);
+
+        // Pad B connects and is used -> switches to B's set.
+        assert!(
+            hotplug.poll_if_due(t0 + Duration::from_secs(2), &mut devices, || {
+                vec![pad_a.clone(), pad_b.clone()]
+            })
+        );
+        hotplug.record_used(20, &mut devices);
+        assert_eq!(devices.current(), InputDevice::PlayStation);
+
+        // Pad B disconnects -> falls back to A's set.
+        assert!(
+            hotplug.poll_if_due(t0 + Duration::from_secs(4), &mut devices, || {
+                vec![pad_a.clone()]
+            })
+        );
+        assert_eq!(devices.current(), InputDevice::Xbox);
+
+        // Tap sets Touch.
+        devices.apply(DeviceEvent::Touch);
+        assert_eq!(devices.current(), InputDevice::Touch);
+    }
+
+    #[test]
+    fn android_aosp_key_layouts_map_bottom_to_accept_and_right_to_back() {
+        // AOSP frameworks/base/data/keyboards/:
+        // - Vendor_057e_Product_2009.kl (Switch Pro): swaps Linux 0x130 (B) -> BUTTON_A,
+        //   0x131 (A) -> BUTTON_B so bottom face button is BUTTON_A and right is BUTTON_B.
+        // - Vendor_054c_Product_05c4.kl, Vendor_054c_Product_09cc.kl, Vendor_054c_Product_0ce6.kl
+        //   (DualShock 4 / DualSense): Cross (bottom) -> BUTTON_A, Circle (right) -> BUTTON_B.
+        // - Vendor_045e_Product_02ea.kl (Xbox) & Generic.kl: bottom -> BUTTON_A, right -> BUTTON_B.
+        for (vendor, product, name, bottom_keycode, right_keycode) in [
+            (
+                0x28de,
+                0x1205,
+                "Valve Steam Deck",
+                AKEYCODE_BUTTON_A,
+                AKEYCODE_BUTTON_B,
+            ),
+            (
+                0x17ef,
+                0x6182,
+                "Legion Go Controller",
+                AKEYCODE_BUTTON_A,
+                AKEYCODE_BUTTON_B,
+            ),
+            (0x045e, 0x02ea, "Xbox", AKEYCODE_BUTTON_A, AKEYCODE_BUTTON_B),
+            (
+                0x054c,
+                0x0ce6,
+                "DualSense",
+                AKEYCODE_BUTTON_A,
+                AKEYCODE_BUTTON_B,
+            ),
+            (
+                0x054c,
+                0x09cc,
+                "DualShock",
+                AKEYCODE_BUTTON_A,
+                AKEYCODE_BUTTON_B,
+            ),
+            (
+                0x057e,
+                0x2009,
+                "Switch Pro",
+                AKEYCODE_BUTTON_A,
+                AKEYCODE_BUTTON_B,
+            ),
+            (
+                0x057e,
+                0x200e,
+                "Joy-Con pair",
+                AKEYCODE_BUTTON_A,
+                AKEYCODE_BUTTON_B,
+            ),
+            (
+                0x2dc8,
+                0x6006,
+                "8BitDo Pro 2",
+                AKEYCODE_BUTTON_A,
+                AKEYCODE_BUTTON_B,
+            ),
+        ] {
+            let dev = android_pad(1, Some(vendor), Some(product), name);
+            assert!(dev.layout().is_some());
+            assert_eq!(android_keycode_nav(bottom_keycode), Some(Nav::Accept));
+            assert_eq!(android_keycode_nav(right_keycode), Some(Nav::Back));
+        }
     }
 }

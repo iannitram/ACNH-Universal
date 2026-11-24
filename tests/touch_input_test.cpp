@@ -1,12 +1,16 @@
-// The iPhone and iPad touch controls' behaviour (runtime/src/touch_input.cpp on the ACNH layout of touch_layout.cpp):
+// The iPhone and iPad touch controls' behaviour (runtime/src/touch_input.cpp on the ACNH layout of the Rust input module):
 // a finger on a button holds it, the left half's stick and its run delay and hysteresis, the controls going away while
 // a controller is connected, and the shapes the present pass draws. Config, log and the game's info are stubbed; no SDL.
+// The layout is the real one: this file forwards the touch_* calls to libacnh_runtime.a (the way input_wrapper.cpp does),
+// so the test links that archive (cargo build -p acnh-runtime).
 //   clang++ -std=c++20 -Iruntime/src -Iruntime/include tests/touch_input_test.cpp runtime/src/touch_input.cpp
-//           runtime/src/touch_layout.cpp  (or through CMake -DNX_TESTS=ON, ctest)
+//           libacnh_runtime.a  (or through CMake -DNX_TESTS=ON -DNX_RUNTIME_ARCHIVE=..., ctest)
 #include <cassert>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
+#include <cstdint>
 #include <map>
 #include <string>
 
@@ -39,7 +43,76 @@ namespace game {
 const Info kInfo = {"acnh", "ACNH", 0, "", "", 0};
 }
 }  // namespace nx
+// The layout lives in Rust (crates/runtime/src/input.rs); input_wrapper.cpp forwards to it, and so does this.
+extern "C" {
+struct AcnhTouchButton {
+    float x;
+    float y;
+    float r;
+    uint64_t button;
+};
+struct AcnhInputHost {
+    uint64_t (*frame)();
+    size_t (*data_root)(char*, size_t);
+    void (*log)(const char*);
+    size_t (*describe)(uint64_t, char*, size_t);
+    size_t (*hle_current_name)(char*, size_t);
+    bool (*live_files)();
+    void (*read_pad)(void*);
+    bool (*read_player_pad)(int32_t, void*);
+    void (*rumble)(float, float, uint32_t);
+    uint64_t (*monotonic_ns)();
+    size_t (*game_id)(char*, size_t);
+    uint32_t (*touch_y_bias)();
+};
+void acnh_input_set_host(const AcnhInputHost* host);
+bool acnh_input_touch_mirrored();
+float acnh_input_touch_opacity_scale();
+const AcnhTouchButton* acnh_input_touch_buttons(size_t* out_count, float aspect);
+void acnh_input_touch_stick_rest(float aspect, bool mirrored, float* out_x, float* out_y, float* out_r);
+uint64_t acnh_input_touch_hit(float x, float y, float aspect);
+const char* acnh_input_touch_label(size_t index);
+}
+static size_t host_none(char*, size_t) { return 0; }
+static size_t host_game_id(char* out, size_t cap) {
+    if (cap < 5) return 0;
+    std::memcpy(out, "acnh", 4);
+    return 4;
+}
+static void ensure_host() {
+    static const bool once = [] {
+        AcnhInputHost h{};
+        h.data_root = host_none;
+        h.describe = [](uint64_t, char*, size_t) -> size_t { return 0; };
+        h.hle_current_name = host_none;
+        h.game_id = host_game_id;
+        h.touch_y_bias = [] { return uint32_t(0); };
+        acnh_input_set_host(&h);
+        return true;
+    }();
+    (void)once;
+}
+
 namespace nx::plat {
+bool touch_enabled() { return nx::config_get_bool("input.touch_controls", true); }
+bool touch_mirrored() { return acnh_input_touch_mirrored(); }
+float touch_opacity_scale() { return acnh_input_touch_opacity_scale(); }
+const TouchButton* touch_buttons(size_t& count, float aspect) {
+    ensure_host();
+    return reinterpret_cast<const TouchButton*>(acnh_input_touch_buttons(&count, aspect));
+}
+void touch_stick_rest(float aspect, bool mirrored, float& x, float& y, float& r) {
+    ensure_host();
+    acnh_input_touch_stick_rest(aspect, mirrored, &x, &y, &r);
+}
+uint64_t touch_hit(float x, float y, float aspect) {
+    ensure_host();
+    return acnh_input_touch_hit(x, y, aspect);
+}
+const char* touch_label(size_t index) {
+    ensure_host();
+    return acnh_input_touch_label(index);
+}
 bool keyboard_typing() { return false; }
 bool keyboard_state_known() { return false; }
 }  // namespace nx::plat

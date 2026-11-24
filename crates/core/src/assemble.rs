@@ -1,6 +1,6 @@
 //! Assemble (SPEC.md M1, M4, M11, M14; docs/adr/0004-build-hubs.md): after the build stage,
 //! the player with the libraries it needs, so it runs on a device that did not build it. The
-//! half of upstream's `tools/package_release_{linux,win,mac}.sh` a hub needs, without their
+//! half of upstream's per-OS release packaging scripts a hub needs, without their
 //! launcher parts:
 //!
 //! - **Linux:** `<install>/acnh` and the libraries a stock system may lack (SDL3, libvpx,

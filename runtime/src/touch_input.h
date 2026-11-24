@@ -1,6 +1,6 @@
 // The on-screen touch controls of the iPhone and iPad player (platform_mac.cpp, TARGET_OS_IPHONE): fingers in, the pad
 // the game reads and the circles the present pass draws out. It is the Android host's touch path
-// (platform_android_input.cpp) without Android: the same layout and hit test (touch_layout.cpp), the same
+// (platform_android_input.cpp) without Android: the same layout and hit test (Rust input module, via input_wrapper.cpp), the same
 // stick on the left half that also holds the run button past its ring, the same shapes (nvn_present.cpp draws them).
 // The differences are the safe area (the layout sits inside the notch's and the home indicator's insets) and that no
 // controller may be connected (touch_safe.h controls_visible).
