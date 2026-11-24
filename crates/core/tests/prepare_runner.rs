@@ -121,6 +121,14 @@ impl ScriptRunner for Fake {
         Ok(())
     }
 
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
+        self.ran.push(Stage::Recompile);
+        if self.fail_at == Some(Stage::Recompile) {
+            return Err(Error::Build("stage recompile: boom at ~/x".to_owned()));
+        }
+        Ok(())
+    }
+
     fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
     }
@@ -229,32 +237,14 @@ fn a_target_the_hub_does_not_serve_is_unsupported() {
 }
 
 #[test]
-fn step_is_rust_except_recompile() {
+fn step_is_rust_for_every_stage() {
     let req = request("step", Os::Linux);
     for stage in STAGES {
-        if stage == Stage::Recompile {
-            assert_eq!(
-                step(stage, &req),
-                Step::Script(vec![
-                    "python3".to_owned(),
-                    "-m".to_owned(),
-                    "recomp".to_owned(),
-                    "--out".to_owned(),
-                    req.out.display().to_string(),
-                ])
-            );
-        } else {
-            assert_eq!(step(stage, &req), Step::Rust);
-        }
+        assert_eq!(step(stage, &req), Step::Rust);
     }
     let win = request("step-win", Os::Windows);
-    assert_eq!(step(Stage::Shaders, &win), Step::Rust);
-    assert_eq!(step(Stage::Tools, &win), Step::Rust);
-    assert_eq!(step(Stage::Fonts, &win), Step::Rust);
-    assert_eq!(step(Stage::Build, &win), Step::Rust);
-    match step(Stage::Recompile, &win) {
-        Step::Script(a) => assert_eq!(a[0], "python"),
-        Step::Rust => panic!("recompile still runs python -m recomp"),
+    for stage in STAGES {
+        assert_eq!(step(stage, &win), Step::Rust);
     }
 }
 
@@ -363,6 +353,10 @@ impl ScriptRunner for Idle {
     }
 
     fn version(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
     }
 
@@ -573,6 +567,18 @@ impl ScriptRunner for StandIn {
 
     fn version(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
+    }
+
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
+        self.run(Stage::Recompile, &[]).map_err(|log| {
+            let named = log
+                .first()
+                .and_then(|l| l.strip_prefix("== "))
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or("recompile");
+            let text = log.join("\n").replace("/home/me", "~");
+            Error::Build(format!("stage {named}: {text}"))
+        })
     }
 
     fn finish(&mut self) -> Result<(), Vec<String>> {
@@ -970,6 +976,10 @@ impl ScriptRunner for Rooted {
         Ok(())
     }
 
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
     fn fonts(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
     }
@@ -1328,7 +1338,7 @@ impl ScriptRunner for StagesFaked {
         Ok(())
     }
 
-    fn recompile(&mut self, _req: &Request, _args: &[String]) -> Result<(), Vec<String>> {
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
     }
 

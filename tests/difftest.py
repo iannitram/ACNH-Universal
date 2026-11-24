@@ -18,10 +18,9 @@ import sys
 
 import capstone
 from capstone import arm64_const as A
+import lz4.block
 from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM, UcError
 from unicorn import arm64_const as U
-
-from recomp import analysis, emit, nso
 
 NX_BASE = 0x0000004000000000
 # Scratch memory for loads and stores, at the same address natively and in Unicorn. macOS arm64 reserves the
@@ -52,31 +51,50 @@ def shape(i):
     return "|".join(parts)
 
 
-def collect(an, per_shape):
+def _gp_reg(name):
+    if name in ("xzr", "wzr"):
+        return None
+    if name in ("sp", "wsp"):
+        return 31
+    if name and name[0] in ("x", "w") and name[1:].isdigit():
+        return int(name[1:])
+    raise ValueError(f"unexpected GP register: {name}")
+
+
+def _load_nso_text(path):
+    data = open(path, "rb").read()
+    if data[:4] != b"NSO0":
+        raise ValueError(f"{path}: not an NSO0")
+    flags = struct.unpack_from("<I", data, 0x0C)[0]
+    file_off, mem_off, mem_size = struct.unpack_from("<III", data, 0x10)
+    file_size = struct.unpack_from("<I", data, 0x60)[0]
+    raw = data[file_off:file_off + file_size]
+    if flags & 1:
+        raw = lz4.block.decompress(raw, uncompressed_size=mem_size)
+    image = bytearray(mem_off + len(raw))
+    image[mem_off:mem_off + len(raw)] = raw
+    return image, (mem_off, len(raw))
+
+
+def collect(image, text_range, per_shape):
     cs = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
     cs.detail = True
-    m = an.module
+    t0, tn = text_range
     shapes = collections.defaultdict(list)
     seen = collections.Counter()
     rng = random.Random(1)
-    for f in an.functions:
-        code = bytes(m.image[f.start:f.end])
-        for i in cs.disasm(code, f.start):
-            if i.mnemonic in SKIP or i.mnemonic.startswith("b."):
-                continue
-            k = shape(i)
-            seen[k] += 1
-            # Reservoir sample per shape.
-            if len(shapes[k]) < per_shape:
-                shapes[k].append(i.address)
-            elif rng.random() < per_shape / seen[k]:
-                shapes[k][rng.randrange(per_shape)] = i.address
+    code = bytes(image[t0:t0 + tn])
+    for i in cs.disasm(code, t0):
+        if i.mnemonic in SKIP or i.mnemonic.startswith("b."):
+            continue
+        k = shape(i)
+        seen[k] += 1
+        # Reservoir sample per shape.
+        if len(shapes[k]) < per_shape:
+            shapes[k].append(i.address)
+        elif rng.random() < per_shape / seen[k]:
+            shapes[k][rng.randrange(per_shape)] = i.address
     return shapes, seen
-
-
-class Fake:
-    def __init__(self, a):
-        self.start, self.end = a, a + 4
 
 
 def fvals(rng):
@@ -106,8 +124,8 @@ def mem_plan(i):
     """(base reg number, index reg number or None, disp, post-index) of the memory operand, or None."""
     for k, o in enumerate(i.operands):
         if o.type == A.ARM64_OP_MEM:
-            base = emit.Reg(i.reg_name(o.mem.base)).n
-            idx = emit.Reg(i.reg_name(o.mem.index)).n if o.mem.index else None
+            base = _gp_reg(i.reg_name(o.mem.base))
+            idx = _gp_reg(i.reg_name(o.mem.index)) if o.mem.index else None
             post = i.writeback and k + 1 < len(i.operands)
             return base, idx, o.mem.disp, post
     return None
@@ -281,27 +299,25 @@ def main():
     ap.add_argument("--per-shape", type=int, default=2)
     ap.add_argument("--states", type=int, default=12)
     ap.add_argument("--filter", default="")
-    ap.add_argument("--rust-emitter", help="use the optional Rust recomp-emitter example for code emission")
+    ap.add_argument("--rust-emitter", required=True, help="path to Rust recomp-emitter example for code emission")
     ap.add_argument("--buffer-addr", type=lambda value: int(value, 0), default=BUF,
                     help="override the native/Unicorn scratch address (hex or decimal)")
     args = ap.parse_args()
     BUF = args.buffer_addr
     os.makedirs(args.work, exist_ok=True)
 
-    m = nso.load(args.nso)
-    an = analysis.analyze(m, log=lambda *a: None)
-    shapes, seen = collect(an, args.per_shape)
+    image, text_range = _load_nso_text(args.nso)
+    shapes, seen = collect(image, text_range, args.per_shape)
     want = set(args.filter.split(",")) if args.filter else None
     print(f"{len(shapes)} shapes")
 
-    e = emit.Emitter(an)
     cs = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
     cs.detail = True
-    tests = []  # (shape, addr, insn text, stmt)
+    candidates = []  # (shape, addr, insn text)
     skipped = collections.Counter()
     for k, addrs in sorted(shapes.items()):
         for a in addrs:
-            i = next(cs.disasm(bytes(m.image[a:a + 4]), a))
+            i = next(cs.disasm(bytes(image[a:a + 4]), a))
             if want and i.mnemonic not in want:
                 continue
             if mem_plan(i) is None and any(o.type == A.ARM64_OP_MEM for o in i.operands):
@@ -309,38 +325,34 @@ def main():
             if i.mnemonic.startswith("ld") and not any(o.type == A.ARM64_OP_MEM for o in i.operands):
                 skipped["literal"] += 1
                 continue
-            e.labels = set()
-            try:
-                stmt = e.insn(Fake(a), i, {})
-            except emit.Unhandled as ex:
-                skipped[f"unhandled {i.mnemonic}"] += 1
-                continue
-            if "nx::call" in stmt or "unimpl" in stmt:
-                skipped["control"] += 1
-                continue
-            tests.append((k, a, f"{i.mnemonic} {i.op_str}", stmt))
-    print(f"{len(tests)} tests; skipped {dict(skipped)}")
+            candidates.append((k, a, f"{i.mnemonic} {i.op_str}"))
 
-    if args.rust_emitter:
-        if not tests:
-            ap.error("no instructions selected for the Rust differential test")
-        words = ((a, int.from_bytes(m.image[a:a + 4], "little")) for _, a, _, _ in tests)
-        reply = subprocess.run([args.rust_emitter, "instructions"], input="".join(
-            f"{a:x} {word:x}\n" for a, word in words
-        ), capture_output=True, text=True, check=True).stdout.splitlines()
-        if len(reply) != len(tests):
-            ap.error("Rust emitter returned an unexpected number of lines")
-        for (_, a, text, _), statement in zip(tests, reply):
-            if not statement:
-                ap.error(f"Rust emitter could not emit {text} at {a:#x}; filter to ported instructions")
-        tests = [(k, a, text, statement) for (k, a, text, _), statement in zip(tests, reply)]
+    if not candidates:
+        ap.error("no instructions selected for the Rust differential test")
+    words = ((a, int.from_bytes(image[a:a + 4], "little")) for _, a, _ in candidates)
+    reply = subprocess.run([args.rust_emitter, "instructions"], input="".join(
+        f"{a:x} {word:x}\n" for a, word in words
+    ), capture_output=True, text=True, check=True).stdout.splitlines()
+    if len(reply) != len(candidates):
+        ap.error("Rust emitter returned an unexpected number of lines")
+
+    tests = []
+    for (k, a, text), statement in zip(candidates, reply):
+        if not statement:
+            skipped[f"unhandled {text.split()[0]}"] += 1
+            continue
+        if "nx::call" in statement or "unimpl" in statement:
+            skipped["control"] += 1
+            continue
+        tests.append((k, a, text, statement))
+    print(f"{len(tests)} tests; skipped {dict(skipped)}")
 
     exe = build_runner(args.work, [t[3] for t in tests])
     rng = random.Random(42)
     states = []
     with open(os.path.join(args.work, "in.bin"), "wb") as f:
         for tid, (k, a, txt, _) in enumerate(tests):
-            i = next(cs.disasm(bytes(m.image[a:a + 4]), a))
+            i = next(cs.disasm(bytes(image[a:a + 4]), a))
             for _ in range(args.states):
                 st = make_state(rng, i, tid)
                 if st is None:
@@ -356,9 +368,9 @@ def main():
 
     uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     uc.ctl_set_cpu_model(U.UC_CPU_ARM64_MAX)  # ARMv8.1+ (LSE atomics) and the crypto extension
-    t0, tn = m.text
+    t0, tn = text_range
     uc.mem_map(NX_BASE, (tn + 0xFFF) & ~0xFFF)
-    uc.mem_write(NX_BASE, bytes(m.image[t0:t0 + tn]))
+    uc.mem_write(NX_BASE, bytes(image[t0:t0 + tn]))
     uc.mem_map(BUF, 0x10000)
 
     fails = collections.defaultdict(list)
@@ -369,7 +381,7 @@ def main():
         hmem = out.read(BUF_SIZE) if has_mem else b""
         hx, hv, hn = rest[:32], rest[32], rest[33]
         k, a, txt, stmt = tests[tid]
-        ux, uv, un, umem, ucrash = uc_run(uc, m, a, st, mem)
+        ux, uv, un, umem, ucrash = uc_run(uc, None, a, st, mem)
         if has_mem == 2 or ucrash:
             if not (has_mem == 2 and ucrash):
                 fails[k].append((txt, a, f"crash host={has_mem == 2} uc={ucrash}"))
