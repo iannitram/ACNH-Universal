@@ -6,8 +6,8 @@
 // it appears where the thumb lands, and pushed past its ring it also holds Y, so running needs no second thumb.
 // Games without a layout here keep their own touch handling (Hades: zones around the thumb).
 //
-// Elsewhere touch_overlay() draws nothing, except with NX_OVERLAY_DEMO=1 (the buttons at rest), to check the look
-// on the Mac with NX_PRESENT_TEST.
+// On iPhone and iPad touch_input.cpp draws them (platform_mac.cpp); elsewhere touch_overlay() draws nothing, except
+// with NX_OVERLAY_DEMO=1 (the buttons at rest), to check the look on the Mac with NX_PRESENT_TEST.
 #include "touch_layout.h"
 
 #include <algorithm>
@@ -298,7 +298,7 @@ uint64_t touch_hit(float x, float y, float aspect) {
     return best;
 }
 
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !NX_TOUCH_IOS  // Android: platform_android_input.cpp; iOS: platform_mac.cpp
 size_t touch_overlay(OverlayShape* out, size_t max) {
     static const bool demo = std::getenv("NX_OVERLAY_DEMO") != nullptr;
     if (!demo) return 0;

@@ -6,6 +6,20 @@
 
 #include "platform.h"
 
+// The iPhone and iPad player (platform_mac.cpp) has the drawn touch controls too; the Mac player has none.
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#define NX_TOUCH_IOS TARGET_OS_IPHONE
+#else
+#define NX_TOUCH_IOS 0
+#endif
+// Where Settings > Controls shows the on-screen controls' rows (opacity, size, run, layout).
+#if defined(__ANDROID__) || NX_TOUCH_IOS
+#define NX_TOUCH_SETTINGS 1
+#else
+#define NX_TOUCH_SETTINGS 0
+#endif
+
 namespace nx::plat {
 
 struct TouchButton {

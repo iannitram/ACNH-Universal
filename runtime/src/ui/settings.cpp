@@ -439,7 +439,7 @@ bool button(const char* text, float width = 0) {
     return res;
 }
 
-#if defined(__ANDROID__)
+#if NX_TOUCH_SETTINGS
 // Settings > Controls > Edit layout (#42): the screen in small, with the on-screen buttons where they are drawn. A
 // finger drags a button, and the group it belongs to (the face buttons and the d-pad move as a whole), to where it
 // should be; input.touch_layout keeps the offsets (touch_layout.cpp). Reset puts every button back.
@@ -1328,8 +1328,8 @@ void page_controls() {
     });
     row("controls.rumble", nullptr, [&](float w) { toggle("input.rumble", true, w); });
     row("controls.deadzone", nullptr, [&](float w) { slider("input.deadzone", 5, 50, 24, "%d%%", w); });
-#if defined(__ANDROID__)
-    // Phones: the on-screen controls instead of keyboard keys.
+#if NX_TOUCH_SETTINGS
+    // Phones and tablets: the on-screen controls (on iPhone and iPad beside the keyboard's keys, for a keyboard on an iPad).
     row("controls.touch", "controls.touch.desc", [&](float w) { toggle("input.touch_controls", true, w); });
     row("controls.touch_opacity", nullptr, [&](float w) { slider("input.touch_opacity", 10, 100, 60, "%d%%", w); });
     row("controls.touch_size", nullptr, [&](float w) { slider("input.touch_size", 50, 150, 100, "%d%%", w); });
@@ -1341,7 +1341,8 @@ void page_controls() {
         });
         if (g_touch_edit) touch_layout_editor();
     }
-#else
+#endif
+#if !defined(__ANDROID__)
     ImGui::Dummy(ImVec2(0, 6 * g_scale));
     ImGui::PushFont(nullptr);
     ImGui::TextUnformatted(tr("controls.keyboard"));
