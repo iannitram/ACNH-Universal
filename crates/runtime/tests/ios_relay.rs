@@ -935,7 +935,11 @@ fn cancelling_the_sign_in_offers_retry_and_sign_in_again_and_a_retry_that_gets_4
 /// remembered, and the game boots with sync off and with nothing more asked.
 fn turned_off(fx: &Fx) {
     assert!(fx.creds.get(&account()).unwrap().is_none());
-    assert!(!fx.roots.library.join("save-relay/config/config.json").exists());
+    assert!(!fx
+        .roots
+        .library
+        .join("save-relay/config/config.json")
+        .exists());
     let ini = fs::read_to_string(fx.roots.data_root.join("config.ini")).unwrap();
     assert!(ini.contains("relay.ask = 0"), "{ini}");
     assert!(!fx.pulled.load(Ordering::SeqCst));
