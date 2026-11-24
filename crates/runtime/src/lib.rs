@@ -76,6 +76,9 @@ pub extern "C" fn acnh_runtime_abi_version() -> u32 {
 #[cfg(any(target_os = "ios", target_os = "android"))]
 pub mod relay;
 
+#[cfg(target_os = "android")]
+pub mod hub_android;
+
 pub mod config;
 pub mod files;
 pub mod saves;

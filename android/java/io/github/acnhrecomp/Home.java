@@ -288,6 +288,9 @@ public class Home extends Activity {
                             + (f.startsWith("/storage/emulated") ? t("phone", "celular") : t("memory card", "cartão de memória"))
                             + ")", Screen.GREEN, v -> check(f, false)));
         box.addView(Screen.button(this, t("Choose the game folder", "Escolher a pasta do jogo"), Screen.BLUE, v -> pick()));
+        box.addView(Screen.button(this, t("Pull the game from a paired hub", "Baixar o jogo de um hub pareado"),
+                Screen.BLUE, v -> HubPull.start(this, this::say,
+                        () -> check(privateGameDir().getAbsolutePath(), false))));
 
         String ver = buildVersion();
         if (!ver.isEmpty()) {

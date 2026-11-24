@@ -225,9 +225,21 @@ impl BuildActions {
                 .ok_or_else(|| Error::Hub("No paired hub found".into()))?;
             let id = crate::first_run::device(&self.dirs)?;
             report("Pulling build".into());
-            self.install_pulled(|staged| {
-                hub::pull_hub(address, &self.dirs, &id, &name, self.os, staged)
-            })?;
+            if self.os == Os::Android {
+                std::fs::create_dir_all(&self.dirs.data)?;
+                let game_dir =
+                    self.pull_android_prepared(address, &id, &name, &self.dirs.data, u64::MAX)?;
+                if !Self::android_game_installed(&game_dir) {
+                    return Err(Error::Build(
+                        "the installed Android game could not be verified".into(),
+                    ));
+                }
+                return Ok(());
+            } else {
+                self.install_pulled(|staged| {
+                    hub::pull_hub(address, &self.dirs, &id, &name, self.os, staged)
+                })?;
+            }
         }
         let player = assemble::player(self.os, Path::new(""), &self.dirs.install());
         if !self.installed(&player) {
@@ -236,6 +248,36 @@ impl BuildActions {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn pull_android_prepared(
+        &self,
+        address: std::net::SocketAddr,
+        id: &str,
+        name: &str,
+        private_dir: &Path,
+        free_bytes: u64,
+    ) -> Result<PathBuf> {
+        hub::pull_hub_prepared_app(
+            address,
+            &self.dirs,
+            id,
+            name,
+            Os::Android,
+            private_dir,
+            free_bytes,
+        )
+    }
+
+    pub(crate) fn android_game_installed(game_dir: &Path) -> bool {
+        [
+            "analysis/main.bin",
+            "romfs.pak",
+            "spirv.pak",
+            "libacnh_game.so",
+        ]
+        .iter()
+        .all(|rel| game_dir.join(rel).is_file())
     }
     fn install_pulled(&self, pull: impl FnOnce(&Path) -> Result<bundle::Bundle>) -> Result<()> {
         std::fs::create_dir_all(&self.dirs.data)?;
@@ -629,5 +671,87 @@ mod tests {
         assert!(actions.installed(&player));
         std::fs::write(&player, b"modified").unwrap();
         assert!(!actions.installed(&player));
+    }
+
+    #[test]
+    fn android_pair_and_pull_installs_into_private_game_and_verifies() {
+        let root = tempfile::tempdir().unwrap();
+        let hub_vars = Vars {
+            home: root.path().join("hub-home"),
+            data: root.path().join("hub-data"),
+            config: root.path().join("hub-config"),
+        };
+        let hub_dirs = AppDirs::new(&hub_vars);
+        let client_vars = Vars {
+            home: root.path().join("client-home"),
+            data: root.path().join("client-data"),
+            config: root.path().join("client-config"),
+        };
+        let client_dirs = AppDirs::new(&client_vars);
+        let actions = BuildActions {
+            dirs: client_dirs.clone(),
+            os: Os::Android,
+        };
+
+        let source = root.path().join("prepared-android");
+        std::fs::create_dir_all(source.join("analysis")).unwrap();
+        std::fs::create_dir_all(source.join("fonts")).unwrap();
+        std::fs::write(source.join("analysis/main.bin"), b"main").unwrap();
+        std::fs::write(source.join("romfs.pak"), b"romfs").unwrap();
+        std::fs::write(source.join("spirv.pak"), b"spirv").unwrap();
+        std::fs::write(source.join("libacnh_game.so"), b"lib").unwrap();
+        std::fs::write(source.join("fonts/shared.ttf"), b"font").unwrap();
+
+        let builds = root.path().join("builds");
+        std::fs::create_dir_all(&builds).unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let private_dir = root.path().join("app-files");
+        std::fs::create_dir_all(&private_dir).unwrap();
+
+        std::thread::scope(|s| {
+            let worker = s.spawn(|| {
+                let mut pairing = hub::PairingSession::new("654321").unwrap();
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut transport = hub::TcpTransport::from_stream(stream).unwrap();
+                    hub::serve_request(
+                        &mut transport,
+                        &hub_dirs,
+                        &builds,
+                        Some(&source),
+                        Some(&mut pairing),
+                    )
+                    .unwrap();
+                }
+            });
+
+            hub::pair_hub(
+                addr,
+                &client_dirs,
+                "android-phone",
+                "tablet",
+                "654321",
+                Os::Android,
+            )
+            .unwrap();
+            let game_dir = hub::pull_hub_prepared_app_with(
+                addr,
+                &client_dirs,
+                "android-phone",
+                "tablet",
+                Os::Android,
+                &private_dir,
+                64 * 1024 * 1024,
+                false,
+            )
+            .unwrap();
+            worker.join().unwrap();
+
+            assert_eq!(game_dir, private_dir.join("game"));
+            assert!(BuildActions::android_game_installed(&game_dir));
+            assert!(!actions.dirs.install().exists());
+        });
     }
 }
