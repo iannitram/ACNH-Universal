@@ -90,14 +90,17 @@ pub fn install_with(
 }
 
 fn finalize_partial(partial: &Path, dest: &Path) -> Result<PathBuf> {
-    make_read_only_recursive(partial)?;
     if dest.exists() {
         remove_tree_writable(dest)?;
     }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Rename first, then make the tree read-only: macOS refuses to rename a directory that has no
+    // write permission when its `..` entry must change (EACCES), so a read-only `game.partial/`
+    // cannot always be moved into place.
     fs::rename(partial, dest)?;
+    make_read_only_recursive(dest)?;
     Ok(dest.to_path_buf())
 }
 
