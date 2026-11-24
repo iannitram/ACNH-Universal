@@ -814,7 +814,14 @@ fn find<'a>(missing: &'a [Missing], what: &str) -> Option<&'a Missing> {
 fn mac_finds_homebrew_off_path_and_names_a_missing_molten_vk() {
     let base = toolchain_dir("mac-brew");
     let bin = base.join("app/usr/bin");
-    for tool in ["clang", "clang++", "curl", "python3", "xcode-select"] {
+    for tool in [
+        "clang",
+        "clang++",
+        "curl",
+        "python3",
+        "xcode-select",
+        "cargo",
+    ] {
         file(&bin.join(tool));
     }
     // No brew on PATH: the fake prefix is found through toolchain_with, as the Finder's
@@ -840,7 +847,7 @@ fn mac_finds_homebrew_off_path_and_names_a_missing_molten_vk() {
 fn linux_names_a_missing_clang_and_warns_about_missing_libvpx() {
     let base = toolchain_dir("linux-clang");
     let bin = base.join("usr/bin");
-    for tool in ["clang++", "curl", "python3"] {
+    for tool in ["clang++", "curl", "python3", "cargo"] {
         file(&bin.join(tool));
     }
     let prefix = base.join("usr");
@@ -858,10 +865,25 @@ fn linux_names_a_missing_clang_and_warns_about_missing_libvpx() {
 }
 
 #[test]
+fn a_missing_cargo_is_named_on_every_desktop_os() {
+    let base = toolchain_dir("no-cargo");
+    let bin = base.join("usr/bin");
+    for tool in ["clang", "clang++", "curl", "python3"] {
+        file(&bin.join(tool));
+    }
+    let missing = toolchain_with(Os::Linux, &bin, &[]);
+    let cargo = find(&missing, "cargo").expect("cargo is named");
+    assert!(!cargo.warning);
+    assert!(cargo.install.contains("rustup"), "{cargo:?}");
+    let missing = toolchain_with(Os::Windows, base.join("empty"), &[]);
+    assert!(find(&missing, "cargo").is_some(), "{missing:?}");
+}
+
+#[test]
 fn a_complete_toolchain_has_nothing_missing() {
     let base = toolchain_dir("linux-complete");
     let bin = base.join("usr/bin");
-    for tool in ["clang", "clang++", "curl", "python3"] {
+    for tool in ["clang", "clang++", "curl", "python3", "cargo"] {
         file(&bin.join(tool));
     }
     let prefix = base.join("usr");
@@ -880,7 +902,7 @@ fn linked_python(name: &str, with_venv: bool) -> Vec<Missing> {
     let base = toolchain_dir(name);
     let prefix = base.join("usr");
     let bin = prefix.join("bin");
-    for tool in ["clang", "clang++", "curl"] {
+    for tool in ["clang", "clang++", "curl", "cargo"] {
         file(&bin.join(tool));
     }
     file(&prefix.join("include/SDL3/SDL.h"));
@@ -1783,9 +1805,9 @@ fn the_desktop_build_builds_the_runtime_and_gives_cmake_its_archive_and_header()
     decoy(
         "cargo",
         r#"while [ $# -gt 0 ]; do [ "$1" = --target-dir ] && t=$2; shift; done
-mkdir -p "$t/release/build/acnh-runtime-abc/out/include"
+mkdir -p "$t/release/build/acnh-runtime/abc/out/include"
 : > "$t/release/libacnh_runtime.a"
-: > "$t/release/build/acnh-runtime-abc/out/include/acnh_runtime.h""#,
+: > "$t/release/build/acnh-runtime/abc/out/include/acnh_runtime.h""#,
     );
     decoy("cmake", "exit 0");
     decoy("ninja", "exit 0");
@@ -1811,7 +1833,7 @@ mkdir -p "$t/release/build/acnh-runtime-abc/out/include"
     assert!(
         lines[1].contains(&format!(
             "-DNX_RUNTIME_INCLUDE={}",
-            target.join("build/acnh-runtime-abc/out/include").display()
+            target.join("build/acnh-runtime/abc/out/include").display()
         )),
         "{calls}"
     );
