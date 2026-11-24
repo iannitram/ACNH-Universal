@@ -54,6 +54,15 @@ make_decoy() {
         "$g/user/device_save/main.dat" "$g/config.ini"
 }
 
+make_mods() { # <folder>: decoy mods in the shape tools/bundle_mods.sh makes (empty files; never the real mods)
+  local m=$1
+  mkdir -p "$m/speedfix60/romfs/Pack" "$m/speedfix60/romfs/Bcsv" "$m/ptbr/romfs/Message"
+  : >"$m/speedfix60/romfs/Pack/Decoy.pack"
+  : >"$m/speedfix60/romfs/Bcsv/Decoy.bcsv"
+  : >"$m/ptbr/romfs/Message/Decoy.sarc.zs"
+  { echo decoybundle; (cd "$m" && find . -type f ! -name bundle.txt | sed 's|^\./||' | LC_ALL=C sort); } >"$m/bundle.txt"
+}
+
 # A refusal must exit nonzero, say the reason on stderr, and leave the out folder empty or absent.
 refuse() { # <label> <reason substring> <command...>
     local label=$1 reason=$2 err out_dir=${3:-}
@@ -144,6 +153,54 @@ make_decoy "$nobin"
 rm "$nobin/analysis/main.bin"
 refuse "a game folder without analysis/main.bin" "analysis/main.bin" "$work/out-nobin" \
     env CI=1 bash "$script" nobin "$build" --game "$nobin" "$work/out-nobin"
+
+# 3b. --mods carries the bundled mods beside the player: Payload/ACNH.app/mods/ (the SpeedFix's 60 fps files).
+mods=$work/bundled/mods
+make_mods "$mods"
+mods_out=$work/out-mods
+env CI=1 bash "$script" mods "$build" --game "$decoy" "$mods_out" --mods "$mods" > "$work/mods.log"
+zipinfo -1 "$mods_out/ACNH-Universal-mods.ipa" > "$work/mods.list"
+grep '^Payload/ACNH\.app/mods/.' "$work/mods.list" | grep -v '/$' | sort > "$work/mods.got"
+printf '%s\n' Payload/ACNH.app/mods/bundle.txt Payload/ACNH.app/mods/ptbr/romfs/Message/Decoy.sarc.zs \
+    Payload/ACNH.app/mods/speedfix60/romfs/Bcsv/Decoy.bcsv Payload/ACNH.app/mods/speedfix60/romfs/Pack/Decoy.pack \
+    | sort > "$work/mods.want"
+diff "$work/mods.want" "$work/mods.got" || die "the archive's mods/ is not exactly the bundle"
+grep -q '^Payload/ACNH\.app/game/analysis/main.bin$' "$work/mods.list" || die "--mods lost the game"
+awk '!/^Payload\/ACNH\.app\/game/' "$work/mods.list" | bash "$root/tools/check_release_files.sh" > /dev/null \
+    || die "the archive with mods fails the release check outside game/"
+unzip -tq "$mods_out/ACNH-Universal-mods.ipa" > /dev/null || die "--mods archive fails unzip -t"
+# beside the player: the player reads <its folder>/mods/bundle.txt, version first (acnh_files_mods_fetch)
+mkdir "$work/unpacked-mods"
+unzip -q "$mods_out/ACNH-Universal-mods.ipa" -d "$work/unpacked-mods"
+[ "$(head -n1 "$work/unpacked-mods/Payload/ACNH.app/mods/bundle.txt")" = decoybundle ] || die "bundle.txt lost its version line"
+[ -f "$work/unpacked-mods/Payload/ACNH.app/ACNH" ] || die "the player is not beside mods/"
+# a stub, and the prepared folder's own mods/ (decoy file in it) is never taken
+printf 'x' > "$decoy/mods/FromPrepared.bcsv"
+env CI=1 bash "$script" mods2 "$build" --no-game "$work/out-mods2" --mods "$mods" > /dev/null
+zipinfo -1 "$work/out-mods2/ACNH-Universal-mods2.ipa" > "$work/mods2.list"
+grep -q 'ACNH\.app/mods/speedfix60/romfs/Pack/Decoy.pack$' "$work/mods2.list" || die "a stub with --mods lost the mods"
+env CI=1 bash "$script" mods3 "$build" --game "$decoy" "$work/out-mods3" --mods "$mods" > /dev/null
+zipinfo -1 "$work/out-mods3/ACNH-Universal-mods3.ipa" > "$work/mods3.list"
+if grep -q FromPrepared "$work/mods3.list"; then die "the prepared folder's mods/ was copied"; fi
+# without --mods the archive has no mods/ folder
+if grep -q 'ACNH\.app/mods' "$work/game.list"; then die "an archive made without --mods holds mods/"; fi
+say "--mods carries exactly the bundled mods in the app"
+
+badm=$work/bundled-bad/mods
+make_mods "$badm"; mkdir -p "$badm/other/romfs"; : > "$badm/other/romfs/x.bcsv"
+refuse "a mods folder with another name" "not allowed" "$work/out-badmods" \
+    env CI=1 bash "$script" badmods "$build" --no-game "$work/out-badmods" --mods "$badm"
+rm -rf "$badm/other"; mkdir -p "$badm/ptbr/romfs/gen"; : > "$badm/ptbr/romfs/gen/x.zs"
+refuse "a mods folder with a gen/ folder in it" "release_files" "$work/out-badmods" \
+    env CI=1 bash "$script" badmods "$build" --no-game "$work/out-badmods" --mods "$badm"
+rm -rf "$badm/ptbr/romfs/gen"; ln -s /etc/hosts "$badm/ptbr/romfs/link"
+refuse "a mods folder with a link" "link" "$work/out-badmods" \
+    env CI=1 bash "$script" badmods "$build" --no-game "$work/out-badmods" --mods "$badm"
+rm -f "$badm/ptbr/romfs/link"; rm -rf "$badm/speedfix60"
+refuse "a mods folder without the SpeedFix" "speedfix60" "$work/out-badmods" \
+    env CI=1 bash "$script" badmods "$build" --no-game "$work/out-badmods" --mods "$badm"
+refuse "a missing mods folder" "not a folder" "$work/out-badmods" \
+    env CI=1 bash "$script" badmods "$build" --no-game "$work/out-badmods" --mods "$work/bundled-missing"
 
 # 4. Past 4 GB: zip -qry makes a ZIP64 archive that unzip -t passes.
 big=$work/big

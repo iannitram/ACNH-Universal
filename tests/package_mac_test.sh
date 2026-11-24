@@ -34,6 +34,14 @@ refused() {
   if ci "$@" >"$log" 2>&1; then fail "was not refused: $reason"; fi
   grep -qi -- "$reason" "$log" || { cat "$log" >&2; fail "refusal does not say: $reason"; }
 }
+make_mods() { # <folder>: decoy mods in the shape tools/bundle_mods.sh makes (empty files; never the real mods)
+  local m=$1
+  mkdir -p "$m/speedfix60/romfs/Pack" "$m/speedfix60/romfs/Bcsv" "$m/ptbr/romfs/Message"
+  : >"$m/speedfix60/romfs/Pack/Decoy.pack"
+  : >"$m/speedfix60/romfs/Bcsv/Decoy.bcsv"
+  : >"$m/ptbr/romfs/Message/Decoy.sarc.zs"
+  { echo decoybundle; (cd "$m" && find . -type f ! -name bundle.txt | sed 's|^\./||' | LC_ALL=C sort); } >"$m/bundle.txt"
+}
 empty_or_missing() { [ ! -e "$1" ] || [ -z "$(ls -A "$1")" ]; }
 
 # ---- the fake app: three arm64 executables, a dylib, an Info.plist, an ad-hoc signature ----
@@ -148,6 +156,63 @@ out=$work/out-x86
 refused "arm64" t3 "$x86" --no-game "$out"
 empty_or_missing "$out" || fail "an x86-64 executable wrote to the out folder"
 pass "refusals"
+
+# ---- the bundled mods: --mods puts them in Contents/Resources/mods (the SpeedFix's 60 fps files), nothing else passes ----
+mods=$work/bundled/mods
+make_mods "$mods"
+res=ACNH-Universal.app/Contents/Resources
+out=$work/out-mods
+ci t4 "$app" "$prep" "$out" --mods "$mods" >"$work/mods.log"
+zip=$out/ACNH-Universal-t4.zip
+zipinfo -1 "$zip" >"$work/mods.list"
+grep "^$res/mods/." "$work/mods.list" | grep -v '/$' | sort >"$work/mods.got"
+printf '%s\n' "$res/mods/bundle.txt" "$res/mods/ptbr/romfs/Message/Decoy.sarc.zs" \
+  "$res/mods/speedfix60/romfs/Bcsv/Decoy.bcsv" "$res/mods/speedfix60/romfs/Pack/Decoy.pack" | sort >"$work/mods.want"
+diff "$work/mods.want" "$work/mods.got" || fail "the zip's mods/ is not exactly the bundle"
+grep -v "^$res/game/" "$work/mods.list" | bash "$root/tools/check_release_files.sh" >/dev/null ||
+  fail "the zip with mods fails the release check outside game/"
+! grep -q "^$res/game/.*mods" "$work/mods.list" || fail "mods went into game/"
+mkdir "$work/unpacked-mods"
+ditto -x -k "$zip" "$work/unpacked-mods"
+codesign --verify --deep --strict "$work/unpacked-mods/ACNH-Universal.app" || fail "signature with mods does not verify"
+# what the player reads (acnh_files_mods_fetch): bundle.txt's first line is the version, then the files
+bt=$work/unpacked-mods/$res/mods/bundle.txt
+[ "$(head -n1 "$bt")" = decoybundle ] || fail "bundle.txt lost its version line"
+grep -qx 'speedfix60/romfs/Pack/Decoy.pack' "$bt" || fail "bundle.txt does not list the SpeedFix file"
+# the prepared folder's own mods/ is never taken, and a stub carries the mods too
+mkdir -p "$prep/mods/speedfix60/romfs"; : >"$prep/mods/speedfix60/romfs/FromPrepared.bcsv"
+ci t5 "$app" "$prep" "$work/out-mods2" --mods "$mods" >/dev/null
+zipinfo -1 "$work/out-mods2/ACNH-Universal-t5.zip" >"$work/mods2.list"
+! grep -q FromPrepared "$work/mods2.list" || fail "the prepared folder's mods/ was copied"
+ci t5 "$app" --no-game "$work/out-mods3" --mods "$mods" >/dev/null
+zipinfo -1 "$work/out-mods3/ACNH-Universal-t5.zip" >"$work/mods3.list"
+grep -q "$res/mods/speedfix60/romfs/Pack/Decoy.pack" "$work/mods3.list" || fail "a stub with --mods lost the mods"
+# without --mods the zip has no mods/ folder (and romfs/ stays refused outside game/)
+! grep -q "$res/mods" "$work/decoy.list" || fail "a zip made without --mods holds mods/"
+# refusals leave the out folder empty
+badm=$work/bundled-bad/mods
+make_mods "$badm"; mkdir -p "$badm/other/romfs"; : >"$badm/other/romfs/x.bcsv"
+refused "not allowed" t6 "$app" --no-game "$work/out-badmods" --mods "$badm"
+rm -rf "$badm/other"; mkdir -p "$badm/ptbr/romfs/gen"; : >"$badm/ptbr/romfs/gen/x.zs"
+refused "check_release_files" t6 "$app" --no-game "$work/out-badmods" --mods "$badm"
+rm -rf "$badm/ptbr/romfs/gen"; ln -s /etc/hosts "$badm/ptbr/romfs/link"
+refused "link" t6 "$app" --no-game "$work/out-badmods" --mods "$badm"
+rm -f "$badm/ptbr/romfs/link"; rm -rf "$badm/speedfix60"
+refused "speedfix60" t6 "$app" --no-game "$work/out-badmods" --mods "$badm"
+refused "not a folder" t6 "$app" --no-game "$work/out-badmods" --mods "$work/bundled-missing"
+empty_or_missing "$work/out-badmods" || fail "a refused mods folder wrote to the out folder"
+# check_release_files.sh lets exactly the bundled mods' romfs/ through, in either package, and nothing like it
+ok_list=$work/release-ok.list
+printf '%s\n' "$res/mods/speedfix60/romfs/Pack/Decoy.pack" "$res/mods/ptbr/romfs/Message/Decoy.sarc.zs" \
+  Payload/ACNH.app/mods/speedfix60/romfs/Bcsv/Decoy.bcsv >"$ok_list"
+bash "$root/tools/check_release_files.sh" <"$ok_list" >/dev/null || fail "the release check refuses the bundled mods"
+for bad in "$res/game/romfs/Decoy.bcsv" "$res/mods/other/romfs/Decoy.bcsv" "$res/mods/ptbr/romfs/Decoy.bin" \
+           "$res/mods/ptbr/romfs/gen/Decoy.zs" "$res/mods/ptbr/romfs/../x/romfs/Decoy.zs" "$res/other/romfs/Decoy.zs" \
+           "$res/mods/ptbr/Decoy.zs" "$res/Decoy.pack" Payload/ACNH.app/game/mods/ptbr/romfs/Decoy.bcsv \
+           Payload/ACNH.app/x/mods/ptbr/romfs/Decoy.bcsv; do
+  if printf '%s\n' "$bad" | bash "$root/tools/check_release_files.sh" >/dev/null 2>&1; then fail "the release check lets through: $bad"; fi
+done
+pass "bundled mods"
 
 # ---- past 4 GB: a ZIP64 archive that lists the full size and unpacks with ditto ----
 # `ditto -c -k` stores a file past 4 GiB with its size modulo 4 GiB in the central directory
