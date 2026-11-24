@@ -89,8 +89,10 @@ fn player(manifest: &Path, out: &Path) -> Result<(), Box<dyn Error>> {
         Ok(game) => game,
         Err(_) => String::from("acnh"),
     };
-    cmake::Config::new(manifest.join("../.."))
-        .out_dir(out.join("player"))
+    println!("cargo:rerun-if-env-changed=CMAKE_LINKER");
+    println!("cargo:rerun-if-env-changed=NX_VULKAN_INCLUDE");
+    let mut cfg = cmake::Config::new(manifest.join("../.."));
+    cfg.out_dir(out.join("player"))
         .generator("Ninja")
         .define("NX_GAME", &game)
         .define("NX_GAME_FROM_FOLDER", "ON")
@@ -104,7 +106,17 @@ fn player(manifest: &Path, out: &Path) -> Result<(), Box<dyn Error>> {
         )
         .define("NX_RUNTIME_ARCHIVE", archive)
         .define("NX_RUNTIME_INCLUDE", out.join("include"))
-        .build_target(&game)
-        .build();
+        .build_target(&game);
+    if target.contains("msvc") {
+        // Rust's windows-msvc target always links the release CRT (/MD); match it in CMake.
+        cfg.profile("Release");
+    }
+    if let Ok(linker) = env::var("CMAKE_LINKER") {
+        cfg.define("CMAKE_LINKER", linker);
+    }
+    if let Ok(vk) = env::var("NX_VULKAN_INCLUDE") {
+        cfg.define("NX_VULKAN_INCLUDE", vk);
+    }
+    cfg.build();
     Ok(())
 }
