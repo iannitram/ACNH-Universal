@@ -265,6 +265,11 @@ fn late_setup_and_a_fully_cached_retry_consume_pending_reflow() {
         fs::write(file, "synthetic").unwrap();
     }
     fs::write(out.join(".fan-mod-settings"), "false false\n").unwrap();
+    fs::write(
+        out.join("gen/.recomp-hash"),
+        format!("{}\n", acnh_core::prepare::recomp_hash(root).unwrap()),
+    )
+    .unwrap();
     let script = root.join("tools/setup_acnh.py");
     fs::create_dir_all(script.parent().unwrap()).unwrap();
     fs::write(

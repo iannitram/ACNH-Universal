@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::gamefolder::GameFolder;
 use crate::platform::{AppDirs, Os, Vars};
 use crate::recipe::{hub_for, output, serves, Hub, Stage, STAGES};
+use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -688,6 +689,46 @@ fn tools_record(req: &Request) -> PathBuf {
     req.out.join(".prepare-tools.json")
 }
 
+/// Where the recompiler input hash is recorded beside `gen/`.
+fn recomp_hash_file(req: &Request) -> PathBuf {
+    req.out.join("gen").join(".recomp-hash")
+}
+
+/// Deterministic SHA-256 hash of the recompiler inputs (`recomp/*.py` in sorted name order,
+/// plus the Rust emitter/version marker) so changes to the recompiler invalidate `gen/`.
+pub fn recomp_hash(source: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    let recomp_dir = source.join("recomp");
+    if recomp_dir.is_dir() {
+        let mut entries: Vec<(String, PathBuf)> = Vec::new();
+        for entry in std::fs::read_dir(&recomp_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if name.ends_with(".py") {
+                entries.push((name, path));
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, path) in entries {
+            let bytes = std::fs::read(&path)?;
+            hasher.update(name.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(&bytes);
+            hasher.update(b"\0");
+        }
+    }
+    hasher.update(b"rust-emitter:");
+    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher.update(b"\0");
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// A mod's `.sarc.zs` archives as the game reads them (`sarc::fix_archives`), for every mod
 /// installed in `out/mods/<name>/romfs`.
 fn fix_mod_archives(req: &Request) -> Result<()> {
@@ -763,7 +804,7 @@ pub fn rust_fonts(req: &Request) -> Result<()> {
 /// Whether everything `stage` leaves in `req.out` is there. Game and recompile leave one
 /// file per module; upstream's build leaves the bare player in `build/` (on the Mac the
 /// plain executable), which `assemble` then makes self-contained in the install folder.
-fn stage_complete(stage: Stage, req: &Request) -> bool {
+fn stage_complete(stage: Stage, req: &Request, expected_recomp_hash: &str) -> bool {
     const MODULES: [&str; 3] = ["main", "sdk", "subsdk0"];
     match stage {
         Stage::Tools => tools_record(req).is_file(),
@@ -774,9 +815,14 @@ fn stage_complete(stage: Stage, req: &Request) -> bool {
                 .join(format!("{module}.bin"))
                 .is_file()
         }),
-        Stage::Recompile => MODULES
-            .iter()
-            .all(|module| req.out.join("gen").join(module).join("table.cpp").is_file()),
+        Stage::Recompile => {
+            MODULES
+                .iter()
+                .all(|module| req.out.join("gen").join(module).join("table.cpp").is_file())
+                && std::fs::read_to_string(recomp_hash_file(req))
+                    .ok()
+                    .is_some_and(|recorded| recorded.trim() == expected_recomp_hash)
+        }
         Stage::Shaders => req.out.join("spirv").join("summary.txt").is_file(),
         Stage::Fonts => req
             .out
@@ -1022,8 +1068,9 @@ fn run_stages(
         || req.fan_mods.speedfix
         || ptbr_present
         || speedfix_present;
+    let expected_recomp_hash = recomp_hash(&runner.root())?;
     let before = STAGES.map(|stage| {
-        stage_complete(stage, req)
+        stage_complete(stage, req, &expected_recomp_hash)
             && !(recheck
                 && matches!(
                     stage,
@@ -1032,7 +1079,7 @@ fn run_stages(
     });
     let mut last = None;
     for (stage, was_there) in STAGES.into_iter().zip(before) {
-        if was_there && stage_complete(stage, req) {
+        if was_there && stage_complete(stage, req, &expected_recomp_hash) {
             continue;
         }
         progress(stage);
@@ -1053,6 +1100,13 @@ fn run_stages(
         if stage == Stage::Tools {
             std::fs::create_dir_all(&req.out)?;
             std::fs::write(tools_record(req), "{\"tools\": \"ready\"}\n")?;
+        }
+        if stage == Stage::Recompile {
+            let hash_file = recomp_hash_file(req);
+            if let Some(parent) = hash_file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(hash_file, format!("{expected_recomp_hash}\n"))?;
         }
         last = Some(stage);
     }

@@ -4,8 +4,8 @@ use acnh_core::error::Error;
 use acnh_core::gamefolder::GameFolder;
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{
-    delivery_folder, delivery_subfolder, prepare_installed, prepare_with, step, toolchain_with,
-    Missing, ProcessRunner, Request, ScriptRunner, Step,
+    delivery_folder, delivery_subfolder, prepare_installed, prepare_with, recomp_hash, step,
+    toolchain_with, Missing, ProcessRunner, Request, ScriptRunner, Step,
 };
 use acnh_core::recipe::{Hub, Stage, STAGES};
 use acnh_core::version::Version;
@@ -438,6 +438,15 @@ fn make(paths: &[PathBuf]) {
     }
 }
 
+fn make_completed_stage(out: &Path, stage: Stage) {
+    make(&outputs(out, stage));
+    if stage == Stage::Recompile {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hash = recomp_hash(&root).unwrap();
+        std::fs::write(out.join("gen/.recomp-hash"), format!("{hash}\n")).unwrap();
+    }
+}
+
 /// Wait (at most 20 s) for `path` to be there.
 fn wait_for(path: &Path) -> bool {
     let start = Instant::now();
@@ -630,7 +639,7 @@ fn a_complete_build_folder_starts_no_script() {
     let req = request("complete", Os::Linux);
     std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
     for stage in STAGES {
-        make(&outputs(&req.out, stage));
+        make_completed_stage(&req.out, stage);
     }
     let mut seen = vec![];
     prepare_with(
@@ -651,7 +660,7 @@ fn one_missing_output_is_one_reported_stage_and_the_run_ends_first() {
     std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
     for stage in STAGES {
         if stage != Stage::Fonts {
-            make(&outputs(&req.out, stage));
+            make_completed_stage(&req.out, stage);
         }
     }
     let mut seen = vec![];
@@ -681,7 +690,7 @@ fn a_failure_in_a_stage_we_did_not_wait_on_is_named_by_the_scripts_line() {
         std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
         for stage in STAGES {
             if stage != missing {
-                make(&outputs(&req.out, stage));
+                make_completed_stage(&req.out, stage);
             }
         }
         let mut seen = vec![];
@@ -1414,4 +1423,92 @@ fn a_failed_package_script_is_a_build_error_after_the_assembly() {
     let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap_err();
     assert!(matches!(error, Error::Build(_)));
     assert_eq!(fake.assembled.len(), 1);
+}
+
+fn seed_all_stages_without_recomp_hash(out: &Path) {
+    std::fs::write(out.join(".prepare-tools.json"), "{}").unwrap();
+    for stage in STAGES {
+        make(&outputs(out, stage));
+    }
+}
+
+#[test]
+fn recompile_with_missing_hash_reruns_and_writes_hash() {
+    let req = request("recomp-missing-hash", Os::Linux);
+    seed_all_stages_without_recomp_hash(&req.out);
+    assert!(!req.out.join("gen/.recomp-hash").exists());
+
+    let mut fake = Fake::default();
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(fake.ran, vec![Stage::Recompile]);
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let expected = recomp_hash(&root).unwrap();
+    let recorded = std::fs::read_to_string(req.out.join("gen/.recomp-hash")).unwrap();
+    assert_eq!(recorded.trim(), expected);
+}
+
+#[test]
+fn recompile_with_changed_hash_reruns_and_updates_hash() {
+    let req = request("recomp-changed-hash", Os::Linux);
+    seed_all_stages_without_recomp_hash(&req.out);
+    std::fs::write(req.out.join("gen/.recomp-hash"), "stale-hash\n").unwrap();
+
+    let mut fake = Fake::default();
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(fake.ran, vec![Stage::Recompile]);
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let expected = recomp_hash(&root).unwrap();
+    let recorded = std::fs::read_to_string(req.out.join("gen/.recomp-hash")).unwrap();
+    assert_eq!(recorded.trim(), expected);
+}
+
+#[test]
+fn recompile_with_matching_hash_stays_cached() {
+    let req = request("recomp-matching-hash", Os::Linux);
+    seed_all_stages_without_recomp_hash(&req.out);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let expected = recomp_hash(&root).unwrap();
+    std::fs::write(req.out.join("gen/.recomp-hash"), format!("{expected}\n")).unwrap();
+
+    let mut fake = Fake::default();
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(!fake.ran.contains(&Stage::Recompile));
+    assert!(fake.ran.is_empty());
+}
+
+#[test]
+fn recompile_hash_changes_when_recomp_python_file_changes() {
+    let source = std::env::temp_dir().join(format!("acnh-recomp-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&source);
+    std::fs::create_dir_all(source.join("recomp")).unwrap();
+    std::fs::write(source.join("recomp/emit.py"), "def emit(): return 1\n").unwrap();
+
+    let h1 = recomp_hash(&source).unwrap();
+    std::fs::write(source.join("recomp/emit.py"), "def emit(): return 2\n").unwrap();
+    let h2 = recomp_hash(&source).unwrap();
+    assert_ne!(h1, h2);
+    let _ = std::fs::remove_dir_all(&source);
 }
