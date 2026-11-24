@@ -38,3 +38,7 @@ refs/
 
 # Rust build output.
 /target/
+
+# Test and run leftovers.
+/crates/core/relative-prepared*/
+/crates/runtime/config.ini

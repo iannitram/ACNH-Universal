@@ -563,6 +563,18 @@ fn mac_never_copies_the_game_of_the_delivered_app_it_runs_from() {
 }
 
 #[test]
+fn mac_never_copies_the_bundled_mods_of_the_delivered_app_it_runs_from() {
+    let dir = tmp("mac-bundle-mods");
+    let plan = mac_plan(&dir, &fake_binary, None, true);
+    let mods = dir.join("release/ACNH Universal.app/Contents/Resources/mods");
+    put(&mods.join("bundle.txt"), b"1\n");
+    let mut fake = Fake::default();
+    let made = assemble_with(&plan, &mut fake).unwrap();
+    assert!(!made.join("Contents/Resources/mods").exists());
+    assert!(mods.join("bundle.txt").is_file());
+}
+
+#[test]
 fn mac_layout_is_the_same_app_from_a_checkout() {
     let dir = tmp("mac-checkout");
     let plan = mac_plan(&dir, &fake_binary, None, false);
