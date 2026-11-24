@@ -115,7 +115,7 @@ jobs:
           echo "test targets: $targets"
           cmake --build build --target $targets
       - name: Test
-        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig|recomp_source_test)$'  # recomp_source_test: #247
+        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig)$'
       - name: Game reads stay on the game root
         run: bash tests/game_root_check.sh
 
@@ -219,7 +219,7 @@ jobs:
           echo "test targets: $targets"
           cmake --build build --target acnh_recomp acnh_prepare $targets
       - name: Test (C++ unit tests)
-        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig|recomp_source_test)$'
+        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig)$'
       - name: Player (clang-cl, lld-link, x86_64-pc-windows-msvc)
         env:
           CC: clang-cl

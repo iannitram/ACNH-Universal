@@ -1,29 +1,20 @@
-// macOS host (Apple silicon): memory (mmap at fixed addresses), pthreads, an SDL3 window with a Metal layer for
-// MoltenVK (VK_EXT_metal_surface), SDL3 gamepad + keyboard, SDL3 audio, a signal crash handler and main.
+// Linux host (x86-64): memory (mmap at fixed addresses), pthreads, an SDL3 window with an SDL-made Vulkan surface
+// (X11 or Wayland, whichever SDL picked), SDL3 gamepad + keyboard, SDL3 audio, a signal crash handler and main.
 //
-// Cocoa owns the main thread: main() starts the game (nx::boot) on its own thread and then runs the SDL event loop.
-// Anything that touches the window (creating it, its Metal view) is done there; the game's threads ask for it and
-// wait. Input is sampled on the main thread into a snapshot read_pad() copies.
+// Same shape as platform_mac.cpp: main() starts the game (nx::boot) on its own thread and then runs the SDL event
+// loop. Anything that touches the window (creating it, its Vulkan surface) is done on the main thread; the game's
+// threads ask for it and wait. Input is sampled on the main thread into a snapshot read_pad() copies.
 //
 // Data: NX_DATA_ROOT or games/<game>'s pc_data_root ("private/<game>"): analysis/{main,sdk}.bin, extract/romfs, user/.
-// Settings: NX_<KEY> environment variables, as on Windows.
-#include <TargetConditionals.h>
+// Settings: NX_<KEY> environment variables, as on Windows and macOS.
 #include <dlfcn.h>
 #include <pthread.h>
-#include <cstdlib>
-#include <mach/mach.h>
-#if TARGET_OS_IPHONE
-#include <mach/vm_map.h>
-#else
-#include <mach/mach_vm.h>
-#endif
-#include <mach/thread_switch.h>
-#include <pthread/qos.h>
 #include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <time.h>
-#include <sys/stat.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -31,39 +22,26 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
-#include <chrono>
 #include <climits>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
 #include <functional>
-#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <SDL3/SDL.h>
-#if TARGET_OS_IPHONE
-#include <SDL3/SDL_main.h>  // the UIKit main, which runs ours as SDL_main
-#endif
-#include <SDL3/SDL_metal.h>
 #include <SDL3/SDL_vulkan.h>
 
 #define VK_NO_PROTOTYPES
-#define VK_USE_PLATFORM_METAL_EXT
 #include <vulkan/vulkan.h>
 
 #include <nx/game.h>
 #include <nx/runtime.h>
-
-#if TARGET_OS_IPHONE
-// The small .ipa's first-start download (runtime/src/appgame_ios.mm; issue #231).
-extern "C" bool nx_appgame_first_start();      // blocks until the game is installed (true) or given up (false)
-extern "C" bool nx_appgame_game_matches();      // the downloaded game is of this app's build and runtime
-extern "C" const char* nx_appgame_game_dir();  // Library/Application Support/game
-#endif
 
 #include "kernel.h"
 #include "config.h"
@@ -72,12 +50,32 @@ extern "C" const char* nx_appgame_game_dir();  // Library/Application Support/ga
 #include "ui/ui.h"
 #include "bug_report.h"
 #include "platform.h"
+
+#ifdef NX_RUST_RUNTIME
+#include <acnh_runtime.h>
+#else
+extern "C" {
+void acnh_platform_window_set_minimized(bool minimized);
+void acnh_platform_window_set_size(uint32_t w, uint32_t h);
+void acnh_platform_window_set_refresh_hz(int32_t hz);
+void acnh_platform_pick_begin();
+void acnh_platform_pick_complete(const char* path);
+void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
+size_t acnh_platform_pad_kind(int32_t vendor, const char* name, char* out, size_t cap);
+size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, const char* name, char* out, size_t cap);
+bool acnh_platform_xbox_layout(const char* controller_kind);
+int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
+uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
+uint32_t acnh_platform_touch_label_code(const char* label);
+bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t now_ns, bool* was_run, uint64_t* past_ns);
+}
+#endif
+
 #include "sdl_audio_frame.h"
 #include "sdl_audio_queue.h"
 
 namespace nx {
 void boot();
-void cpu_profile_register(const char* name);  // cpu_profile.cpp
 }
 
 namespace nx {
@@ -89,12 +87,14 @@ namespace nx::plat {
 
 namespace {
 
-// Work for the main thread (window creation), run between event polls.
+pthread_t g_main_thread;
+
+// Work for the main thread (window creation, surfaces), run between event polls.
 std::mutex g_main_lock;
 std::deque<std::function<void()>> g_main_work;
 
 void run_on_main(std::function<void()> fn) {
-    if (pthread_main_np()) {
+    if (pthread_equal(pthread_self(), g_main_thread)) {
         fn();
         return;
     }
@@ -115,10 +115,7 @@ void run_on_main(std::function<void()> fn) {
 }
 
 SDL_Window* g_window = nullptr;
-SDL_MetalView g_view = nullptr;
-void* g_layer = nullptr;  // CAMetalLayer*
-std::atomic<bool> g_minimized{false};
-std::atomic<uint32_t> g_pixel_w{0}, g_pixel_h{0};
+
 
 std::mutex g_pad_lock;
 PadState g_pad;
@@ -128,61 +125,25 @@ void update_refresh_hz();  // below, with display_refresh_hz
 
 // ---- memory ---------------------------------------------------------------------------------------------------
 
-// No MAP_FIXED_NOREPLACE on Darwin: ask for the address as a hint and give it back if the kernel chose another.
-// macOS 27 ignores mmap's address hint below 0x70_0000_0000 (the mapping lands up there), and MAP_FIXED would
-// silently replace whatever is already mapped. mach_vm_allocate (vm_allocate on iOS, where mach_vm.h is refused)
-// with VM_FLAGS_FIXED takes the exact range or fails when any of it is in use.
 bool reserve(uint64_t addr, uint64_t size) {
-#if TARGET_OS_IPHONE
-    vm_address_t a = addr;
-    if (vm_allocate(mach_task_self(), &a, size, VM_FLAGS_FIXED) != KERN_SUCCESS) {
-        vm_address_t r = addr;  // name what is in the way (svcs and the guest layout are in runtime.h)
-        vm_size_t rs = 0;
-        vm_region_basic_info_data_64_t info;
-        mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t obj;
-        if (vm_region_64(mach_task_self(), &r, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) ==
-            KERN_SUCCESS)
-            nx::log("memory: %llx (+%llx) overlaps a mapping at %llx (+%llx)", (unsigned long long)addr,
-                    (unsigned long long)size, (unsigned long long)r, (unsigned long long)rs);
-        return false;
-    }
-    if (mprotect(reinterpret_cast<void*>(addr), size, PROT_NONE) != 0) {
-        vm_deallocate(mach_task_self(), addr, size);
+    void* p = mmap(reinterpret_cast<void*>(addr), size, PROT_NONE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    if (p == MAP_FAILED) return false;
+    if (uint64_t(p) != addr) {  // kernels before 4.17 take MAP_FIXED_NOREPLACE as a hint
+        munmap(p, size);
         return false;
     }
     return true;
-#else
-    mach_vm_address_t a = addr;
-    if (mach_vm_allocate(mach_task_self(), &a, size, VM_FLAGS_FIXED) != KERN_SUCCESS) {
-        mach_vm_address_t r = addr;  // name what is in the way (svcs and the guest layout are in runtime.h)
-        mach_vm_size_t rs = 0;
-        vm_region_basic_info_data_64_t info;
-        mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t obj;
-        if (mach_vm_region(mach_task_self(), &r, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) ==
-            KERN_SUCCESS)
-            nx::log("memory: %llx (+%llx) overlaps a mapping at %llx (+%llx)", (unsigned long long)addr,
-                    (unsigned long long)size, (unsigned long long)r, (unsigned long long)rs);
-        return false;
-    }
-    if (mprotect(reinterpret_cast<void*>(addr), size, PROT_NONE) != 0) {
-        mach_vm_deallocate(mach_task_self(), addr, size);
-        return false;
-    }
-    return true;
-#endif
 }
 
 bool commit(uint64_t addr, uint64_t size) {
-    uint64_t page = uint64_t(getpagesize()) - 1;  // 16 KiB on Apple silicon
+    uint64_t page = uint64_t(getpagesize()) - 1;
     uint64_t a = addr & ~page, e = (addr + size + page) & ~page;
     return mprotect(reinterpret_cast<void*>(a), e - a, PROT_READ | PROT_WRITE) == 0;
 }
 
-// The guest frees 4 KiB pages; Apple silicon pages are 16 KiB, and mprotect would take the neighbours of a partly
-// freed page with it (SIGBUS in Wonder when nn::os's VAMM unmapped single pages). Only whole host pages are
-// released; the freed part of a shared one is zeroed, which is what the guest would see if it maps it again.
+// As on macOS: only whole host pages are released (MADV_DONTNEED gives zero pages back on the next touch); the freed
+// part of a page shared with live data is zeroed instead. With 4 KiB host pages that is the guest's own granule.
 void decommit(uint64_t addr, uint64_t size) {
     uint64_t page = uint64_t(getpagesize());
     uint64_t lo = (addr + page - 1) & ~(page - 1), hi = (addr + size) & ~(page - 1);
@@ -192,7 +153,7 @@ void decommit(uint64_t addr, uint64_t size) {
     }
     if (addr < lo) std::memset(reinterpret_cast<void*>(addr), 0, lo - addr);
     if (hi < addr + size) std::memset(reinterpret_cast<void*>(hi), 0, addr + size - hi);
-    madvise(reinterpret_cast<void*>(lo), hi - lo, MADV_FREE);
+    madvise(reinterpret_cast<void*>(lo), hi - lo, MADV_DONTNEED);
     mprotect(reinterpret_cast<void*>(lo), hi - lo, PROT_NONE);
 }
 
@@ -206,9 +167,6 @@ struct ThreadStart {
 static void* thread_entry(void* p) {
     ThreadStart s = *static_cast<ThreadStart*>(p);
     delete static_cast<ThreadStart*>(p);
-    // The game's threads (render, jobs, audio) are latency critical: default QoS lets macOS run them on the M1's
-    // efficiency cores and stretch their sleeps and wakeups.
-    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     s.fn(s.arg);
     return nullptr;
 }
@@ -216,7 +174,8 @@ static void* thread_entry(void* p) {
 void start_thread(ThreadFn fn, void* arg, size_t stack_size) {
     pthread_attr_t a;
     pthread_attr_init(&a);
-    pthread_attr_setstacksize(&a, (stack_size + 0x3FFF) & ~size_t(0x3FFF));
+    size_t page = size_t(getpagesize()) - 1;
+    pthread_attr_setstacksize(&a, std::max<size_t>((stack_size + page) & ~page, PTHREAD_STACK_MIN));
     pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
     pthread_t t;
     pthread_create(&t, &a, thread_entry, new ThreadStart{fn, arg});
@@ -224,38 +183,34 @@ void start_thread(ThreadFn fn, void* arg, size_t stack_size) {
 }
 
 void exit_thread() { pthread_exit(nullptr); }
-void exit_process(int code) { _exit(code); }
+void exit_process(int code) {
+    std::fflush(nullptr);
+    _exit(code);
+}
 
 void sleep_ns(int64_t ns) {
     timespec ts{time_t(ns / 1000000000), long(ns % 1000000000)};
-    nanosleep(&ts, nullptr);
+    while (clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, &ts) == EINTR) {
+    }
 }
 
-// macOS sched_yield drops the caller to priority 0 for a while: measured 20-180 us per call on the M1, and Wonder's
-// job system yields after every job item and in its barriers, so the main thread spent ~60% of its frame there and
-// the game's governor fell to 30 fps (docs/nvn/DEBUG.md #44). thread_switch with no hint (2-4 us) gives the core to
-// another ready thread without that penalty. NX_YIELD=sched: the old call.
-void yield() {
-    static const bool sched = [] {
-        const char* e = std::getenv("NX_YIELD");
-        return e && std::strcmp(e, "sched") == 0;
-    }();
-    if (sched)
-        sched_yield();
-    else
-        thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
-}
-void set_thread_name(const char* name) { pthread_setname_np(name); }  // Darwin: the calling thread only
+void yield() { sched_yield(); }
 
-int64_t current_thread_id() {
-    uint64_t tid = 0;
-    pthread_threadid_np(nullptr, &tid);
-    return int64_t(tid);
+void set_thread_name(const char* name) {
+    char n[16];  // the kernel keeps 15 characters
+    std::snprintf(n, sizeof n, "%s", name);
+    pthread_setname_np(pthread_self(), n);
 }
 
-bool profile(const int64_t*, const uint64_t* const*, size_t, int, const std::string&) { return false; }  // use Instruments
+int64_t current_thread_id() { return int64_t(syscall(SYS_gettid)); }
 
-uint64_t monotonic_ns() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+bool profile(const int64_t*, const uint64_t* const*, size_t, int, const std::string&) { return false; }  // use perf
+
+uint64_t monotonic_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
+}
 
 // ---- files and output -----------------------------------------------------------------------------------------
 
@@ -276,11 +231,7 @@ uint64_t read_at(FILE* f, int64_t off, void* buf, uint64_t size) {
     return done;
 }
 
-bool make_dirs(const std::string& path) {
-    std::error_code ec;
-    std::filesystem::create_directories(path, ec);
-    return !ec;
-}
+
 
 void log_line(const char* line) { std::fprintf(stderr, "%s\n", line); }
 
@@ -289,37 +240,15 @@ std::string data_root() {
     return r ? r : nx::game::kInfo.pc_data_root;
 }
 
-// The game inside the app (Contents/Resources/game on the Mac, ACNH.app/game on the iPad), or NX_GAME_ROOT from the
-// launcher; the data root otherwise (a development build).
-std::string game_root() {
-    const char* base = SDL_GetBasePath();
-    const auto is_file = [](const std::string& path) {
-        std::error_code ec;
-        return std::filesystem::is_regular_file(std::filesystem::u8path(path), ec);
-    };
-#if TARGET_OS_IPHONE
-    // The game the app downloaded at first start, when the .ipa has none (appgame_ios.mm, issue #231).
-    return choose_game_root(std::getenv("NX_GAME_ROOT"), true, base ? base : "", is_file, data_root(), nx_appgame_game_dir());
-#else
-    return choose_game_root(std::getenv("NX_GAME_ROOT"), true, base ? base : "", is_file, data_root());
-#endif
-}
+
 
 std::string device_locale() { return ""; }
 
-std::string setting(const std::string& key) {
-    std::string env = "NX_";
-    for (char ch : key) env += char(std::toupper(static_cast<unsigned char>(ch)));
-    const char* v = std::getenv(env.c_str());
-    return v ? v : "";
-}
+
 
 // ---- window ---------------------------------------------------------------------------------------------------
 
-bool headless() {
-    static const bool on = std::getenv("NX_HEADLESS") != nullptr;
-    return on;
-}
+
 
 void* create_window() {
     run_on_main([] {
@@ -328,7 +257,7 @@ void* create_window() {
         std::string r = setting("resolution");
         if (!r.empty()) std::sscanf(r.c_str(), "%dx%d", &w, &h);
         g_window = SDL_CreateWindow(nx::game::kInfo.title, w, h,
-                                    SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_METAL |
+                                    SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_VULKAN |
                                         (headless() ? SDL_WINDOW_HIDDEN : 0));
         if (!g_window) {
             log_line(SDL_GetError());
@@ -336,18 +265,15 @@ void* create_window() {
         }
         nx::plat::set_window_icon(g_window);
         if (!headless()) {
-            SDL_RaiseWindow(g_window);  // without an app bundle it does not come to the front
-            // The saved choice (video.fullscreen): the window opened in a window though the settings said full screen.
+            SDL_RaiseWindow(g_window);
             if (setting("fullscreen") == "1") SDL_SetWindowFullscreen(g_window, true);
         }
-        g_view = SDL_Metal_CreateView(g_window);
-        g_layer = SDL_Metal_GetLayer(g_view);
         int pw = 0, ph = 0;
         SDL_GetWindowSizeInPixels(g_window, &pw, &ph);
-        g_pixel_w = uint32_t(pw), g_pixel_h = uint32_t(ph);
+        acnh_platform_window_set_size(uint32_t(pw), uint32_t(ph));
         update_refresh_hz();
     });
-    return g_layer;  // the Vulkan surface is made from the CAMetalLayer, from any thread
+    return g_window;  // the Vulkan surface is made from it (on the main thread, vulkan_create_surface)
 }
 
 void release_window(void*) {}
@@ -355,12 +281,7 @@ void release_window(void*) {}
 void picture_shown() {}
 uint64_t wait_vblank() { return 0; }  // no display vblank to wait on here: hle_vi.cpp keeps its timed tick
 uint64_t window_generation() { return 1; }
-bool window_minimized() { return g_minimized; }
 
-void window_size(uint32_t& w, uint32_t& h) {
-    w = g_pixel_w;
-    h = g_pixel_h;
-}
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 float default_render_scale() { return 1.0f; }
@@ -617,17 +538,11 @@ static void sample_input() {
 
 // ---- settings screen hooks (platform.h) --------------------------------------------------------------------------
 
-std::atomic<float> g_volume{-1.0f};  // master volume 0..1 (-1: not read from config.ini yet; audio_cb applies it)
-
-// The refresh rate of the window's display, read on the main thread when the window is made and when it moves to
-// another display (nvn_vk.cpp presents each game frame for that many vsyncs).
-std::atomic<int> g_refresh_hz{60};
 void update_refresh_hz() {
     if (!g_window) return;
     if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(g_window)); m && m->refresh_rate > 20)
-        g_refresh_hz = int(m->refresh_rate + 0.5f);
+        acnh_platform_window_set_refresh_hz(int32_t(m->refresh_rate + 0.5f));
 }
-int display_refresh_hz() { return g_refresh_hz.load(); }
 
 void show_fatal(const char* text) {
     if (headless()) return;
@@ -641,7 +556,7 @@ void set_fullscreen(bool on) {
     });
 }
 
-void set_master_volume(float v) { g_volume = std::clamp(v, 0.0f, 1.0f); }
+
 
 std::string controller_name() {
     SDL_Gamepad* pad = g_gamepad;
@@ -686,21 +601,13 @@ void open_path(const std::string& path) {
 }
 
 namespace {
-std::mutex g_pick_lock;
-bool g_pick_done = false;
-std::string g_pick_path;
 void SDLCALL picked(void*, const char* const* list, int) {
-    std::lock_guard lk(g_pick_lock);
-    g_pick_path = list && list[0] ? list[0] : "";
-    g_pick_done = true;
+    acnh_platform_pick_complete(list && list[0] ? list[0] : "");
 }
 }  // namespace
 
 void pick_path(bool zip, const std::string& title) {
-    {
-        std::lock_guard lk(g_pick_lock);
-        g_pick_done = false;
-    }
+    acnh_platform_pick_begin();
     run_on_main([zip, title] {
         SDL_PropertiesID props = SDL_CreateProperties();
         SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, g_window);
@@ -716,10 +623,7 @@ void pick_path(bool zip, const std::string& title) {
 }
 
 void pick_file(const std::string& title, const char* extension) {
-    {
-        std::lock_guard lk(g_pick_lock);
-        g_pick_done = false;
-    }
+    acnh_platform_pick_begin();
     run_on_main([title, extension] {
         SDL_PropertiesID props = SDL_CreateProperties();
         SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, g_window);
@@ -732,21 +636,17 @@ void pick_file(const std::string& title, const char* extension) {
     });
 }
 
-bool pick_result(std::string& path) {
-    std::lock_guard lk(g_pick_lock);
-    if (!g_pick_done) return false;
-    g_pick_done = false;
-    path = g_pick_path;
-    return true;
-}
+
 
 void read_pad(PadState& p) {
-    std::lock_guard lk(g_pad_lock);
-    p.buttons |= g_pad.buttons;
-    if (g_pad.lx) p.lx = g_pad.lx;
-    if (g_pad.ly) p.ly = g_pad.ly;
-    if (g_pad.rx) p.rx = g_pad.rx;
-    if (g_pad.ry) p.ry = g_pad.ry;
+    {
+        std::lock_guard lk(g_pad_lock);
+        p.buttons |= g_pad.buttons;
+        if (g_pad.lx) p.lx = g_pad.lx;
+        if (g_pad.ly) p.ly = g_pad.ly;
+        if (g_pad.rx) p.rx = g_pad.rx;
+        if (g_pad.ry) p.ry = g_pad.ry;
+    }
     input_script(p);
 }
 
@@ -769,16 +669,8 @@ int g_audio_frame_bytes = 4;
 
 // Master volume (settings screen, live) and the mute while the window is in the background (audio.mute_background).
 void apply_gain(int16_t* pcm, int count) {
-    float v = g_volume.load(std::memory_order_relaxed);
-    if (v < 0) {
-        v = std::clamp(nx::config_get_int("audio.volume", 100), 0, 100) / 100.0f;
-        g_volume = v;
-    }
-    if (g_window && !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) &&
-        nx::config_get_bool("audio.mute_background", false))
-        v = 0;
-    if (v >= 0.999f) return;
-    for (int i = 0; i < count; i++) pcm[i] = int16_t(float(pcm[i]) * v);
+    const bool focused = !g_window || (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS);
+    acnh_platform_apply_gain(pcm, size_t(count), focused);
 }
 
 void SDLCALL audio_cb(void*, SDL_AudioStream* s, int additional, int) {
@@ -820,7 +712,10 @@ bool audio_open(AudioDone done, int channels) {
     g_audio_frame_bytes = channels * int(sizeof(int16_t));
     SDL_AudioSpec spec{SDL_AUDIO_S16LE, Uint8(channels), 48000};
     g_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audio_cb, nullptr);
-    if (!g_stream) return false;
+    if (!g_stream) {
+        log("audio: %s", SDL_GetError());
+        return false;
+    }
     SDL_ResumeAudioStreamDevice(g_stream);
     return true;
 }
@@ -848,7 +743,7 @@ void audio_pause(bool paused) {
         SDL_ResumeAudioStreamDevice(g_stream);
 }
 
-// ---- Vulkan (MoltenVK through the Vulkan loader SDL finds) ------------------------------------------------------
+// ---- Vulkan (the system loader, through SDL) ------------------------------------------------------------------
 
 void* vulkan_get_instance_proc_addr() {
     static void* gipa = [] {
@@ -861,115 +756,34 @@ void* vulkan_get_instance_proc_addr() {
     return gipa;
 }
 
-const char* vulkan_surface_extension() { return VK_EXT_METAL_SURFACE_EXTENSION_NAME; }
+// The window system's surface extension (VK_KHR_xlib_surface, VK_KHR_wayland_surface, ...): SDL lists it next to
+// VK_KHR_surface, which vk_bridge.cpp adds by itself.
+const char* vulkan_surface_extension() {
+    static const char* ext = [] {
+        const char* found = "VK_KHR_xlib_surface";
+        Uint32 n = 0;
+        const char* const* names = SDL_Vulkan_GetInstanceExtensions(&n);
+        for (Uint32 k = 0; names && k < n; k++)
+            if (std::strcmp(names[k], VK_KHR_SURFACE_EXTENSION_NAME) != 0) found = names[k];
+        log("platform: %s video driver, %s", SDL_GetCurrentVideoDriver(), found);
+        return found;
+    }();
+    return ext;
+}
 
-int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface, void* gipa) {
-    auto create = reinterpret_cast<PFN_vkCreateMetalSurfaceEXT>(
-        reinterpret_cast<PFN_vkGetInstanceProcAddr>(gipa)(static_cast<VkInstance>(instance), "vkCreateMetalSurfaceEXT"));
-    if (!create) return VK_ERROR_EXTENSION_NOT_PRESENT;
-    VkMetalSurfaceCreateInfoEXT ci{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
-    ci.pLayer = static_cast<const CAMetalLayer*>(native_window);
+int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface, void* /*gipa: SDL's own*/) {
     VkSurfaceKHR s = VK_NULL_HANDLE;
-    VkResult r = create(static_cast<VkInstance>(instance), &ci, nullptr, &s);
+    bool ok = false;
+    run_on_main([&] {
+        ok = native_window && SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(native_window),
+                                                       static_cast<VkInstance>(instance), nullptr, &s);
+        if (!ok) log("platform: SDL_Vulkan_CreateSurface: %s", SDL_GetError());
+    });
     *surface = reinterpret_cast<uint64_t>(s);
-    return r;
+    return ok ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 }  // namespace nx::plat
-
-// ---- per-thread CPU (NX_THREAD_CPU=<seconds>) ---------------------------------------------------------------------
-// Every that many seconds, the threads that used the most CPU over the interval, by name, as a share of one core:
-// what the process spends, where (the replay, the game's threads, Metal's, the audio...), to cut its heat.
-namespace {
-void thread_cpu_watch() {
-    const char* e = std::getenv("NX_THREAD_CPU");
-    const int every = e ? std::atoi(e) : 0;
-    if (every <= 0) return;
-    std::thread([every] {
-        pthread_setname_np("thread cpu");
-        std::map<uint64_t, double> last;
-        for (;;) {
-            std::this_thread::sleep_for(std::chrono::seconds(every));
-            thread_act_array_t threads = nullptr;
-            mach_msg_type_number_t n = 0;
-            if (task_threads(mach_task_self(), &threads, &n) != KERN_SUCCESS) continue;
-            std::vector<std::pair<double, std::string>> rows;
-            std::map<uint64_t, double> now;
-            double total = 0;
-            for (mach_msg_type_number_t k = 0; k < n; k++) {
-                thread_basic_info_data_t bi{};
-                mach_msg_type_number_t c = THREAD_BASIC_INFO_COUNT;
-                thread_identifier_info_data_t ii{};
-                mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT;
-                if (thread_info(threads[k], THREAD_BASIC_INFO, thread_info_t(&bi), &c) == KERN_SUCCESS &&
-                    thread_info(threads[k], THREAD_IDENTIFIER_INFO, thread_info_t(&ii), &ic) == KERN_SUCCESS) {
-                    const double t = bi.user_time.seconds + bi.user_time.microseconds / 1e6 + bi.system_time.seconds +
-                                     bi.system_time.microseconds / 1e6;
-                    now[ii.thread_id] = t;
-                    auto it = last.find(ii.thread_id);
-                    const double d = it == last.end() ? 0 : t - it->second;
-                    char name[64] = {};
-                    if (pthread_t pt = pthread_from_mach_thread_np(threads[k])) pthread_getname_np(pt, name, sizeof name);
-                    if (!name[0]) std::snprintf(name, sizeof name, "tid %llu", (unsigned long long)ii.thread_id);
-                    rows.push_back({d, name});
-                    total += d;
-                }
-                mach_port_deallocate(mach_task_self(), threads[k]);
-            }
-            vm_deallocate(mach_task_self(), vm_address_t(threads), n * sizeof(thread_act_t));
-            last = std::move(now);
-            std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.first > b.first; });
-            std::string out;
-            for (size_t k = 0; k < rows.size() && k < 12; k++) {
-                char b[96];
-                std::snprintf(b, sizeof b, "%s%s %.0f%%", k ? ", " : "", rows[k].second.c_str(), 100.0 * rows[k].first / every);
-                out += b;
-            }
-            nx::log("thread cpu: %.0f%% of a core over %d s: %s", 100.0 * total / every, every, out.c_str());
-        }
-    }).detach();
-}
-}  // namespace
-
-#if TARGET_OS_IPHONE
-// save-relay inside the player (crates/runtime, relay.rs; issue #172). The Rust half pulls the island before the game
-// boots (it returns only when the game may boot) and pushes it when the game quits or the app goes to the background.
-extern "C" void acnh_relay_before_game(const char* data_root);
-extern "C" void acnh_relay_after_game(const char* data_root);   // synchronous: the game has quit
-extern "C" void acnh_relay_background(const char* data_root);   // returns at once: the push runs on a worker
-extern "C" void acnh_relay_foreground(const char* data_root);   // returns at once: a waiting mark is written on a worker
-
-// The Rust half's log lines go into the player's log (Documents/logs/nx.log).
-extern "C" void nx_relay_log(const char* line) { nx::log("%s", line); }
-
-// relay.ask lives in the player's own settings: this side is the only writer of config.ini (config_save rewrites the
-// file from the entries it loaded, so a key written behind its back would be lost at the next save).
-extern "C" bool nx_relay_ask_off() { return nx::config_get("relay.ask", "") == "0"; }
-extern "C" bool nx_relay_remember_not_now() {
-    nx::config_set("relay.ask", "0");
-    return nx::config_save();
-}
-
-static void relay_after_game() {
-    if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
-}
-
-// The app went to the background. SDL's WILL_ENTER_BACKGROUND is UIKit's resign-active, which also fires for
-// Control Center or a notification pulled over the game, so the push waits for DID_ENTER_BACKGROUND. The watch runs
-// on the main thread, which must keep its run loop: acnh_relay_background begins the background task here
-// (beginBackgroundTaskWithExpirationHandler:), pushes on a worker thread and returns at once. It does nothing until
-// acnh_relay_before_game has returned.
-static bool background_watch(void*, SDL_Event* e) {
-    if (e->type == SDL_EVENT_DID_ENTER_BACKGROUND)
-        if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_background(root);
-    // Back to the front: a "playing here" mark the background push could not write back is written now (on a worker).
-    if (e->type == SDL_EVENT_WILL_ENTER_FOREGROUND)
-        if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_foreground(root);
-    return true;
-}
-#else
-static void relay_after_game() {}
-#endif
 
 // ---- crash handler and entry ----------------------------------------------------------------------------------
 
@@ -977,12 +791,13 @@ namespace {
 
 void crash_handler(int sig, siginfo_t* info, void* uc) {
     if ((sig == SIGSEGV || sig == SIGBUS) && nx::plat::write_watch_fault(info->si_addr)) return;  // write_watch.cpp
-    const auto* m = static_cast<ucontext_t*>(uc)->uc_mcontext;
+    const auto& m = static_cast<ucontext_t*>(uc)->uc_mcontext;
     Dl_info d{};
-    uint64_t pc = m->__ss.__pc;
+    uint64_t pc = uint64_t(m.gregs[REG_RIP]);
     dladdr(reinterpret_cast<void*>(pc), &d);
-    nx::log("CRASH: signal %d at %s+%llx, data address %llx", sig, d.dli_fname ? d.dli_fname : "?",
-            (unsigned long long)(pc - uint64_t(d.dli_fbase)), (unsigned long long)uint64_t(info->si_addr));
+    nx::log("CRASH: signal %d at %s+%llx (%s), data address %llx", sig, d.dli_fname ? d.dli_fname : "?",
+            (unsigned long long)(pc - uint64_t(d.dli_fbase)), d.dli_sname ? d.dli_sname : "?",
+            (unsigned long long)uint64_t(info->si_addr));
     nx::CPU& c = nx::current_cpu();
     nx::log("  guest lr %s  sp %llx", nx::describe(c.x[30]).c_str(), (unsigned long long)c.x[31]);
     for (int k = 0; k < 32; k += 4)
@@ -990,27 +805,13 @@ void crash_handler(int sig, siginfo_t* info, void* uc) {
                 (unsigned long long)c.x[k + 2], (unsigned long long)c.x[k + 3]);
     nx::backtrace(c);
     nx::log_recent_files();
+    std::fflush(nullptr);
     signal(sig, SIG_DFL);
     raise(sig);
 }
 
 void game_thread() {
     try {
-#if TARGET_OS_IPHONE
-        // The small .ipa holds no game: offer to download it (Dropbox, in the background, resumable) before anything
-        // else. Returns when the game is there or the person said Not now (the boot then says what is missing). Also
-        // when the game root is the downloaded game and it is of another build or runtime than this app's (the app was
-        // updated; Library/Application Support/game outlives that): the matching one replaces it, whole or not at all.
-        {
-            std::error_code ec;
-            const std::string root = nx::plat::game_root();
-            const bool missing =
-                !std::filesystem::is_regular_file(std::filesystem::u8path(root + "/analysis/main.bin"), ec);
-            if (missing || (root == nx_appgame_game_dir() && !nx_appgame_game_matches())) nx_appgame_first_start();
-        }
-        // On this thread, so the main thread keeps the run loop the prompts need. Returns when the game may boot.
-        if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_before_game(root);
-#endif
         nx::boot();
     } catch (const nx::LongJmp& j) {
         nx::fatal("longjmp to buffer %llx with no setjmp frame", (unsigned long long)j.buf);
@@ -1022,26 +823,18 @@ void game_thread() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    nx::plat::g_main_thread = pthread_self();
     // acnh <game folder>: the prepared game folder (else NX_DATA_ROOT, else the setup's data folder)
     if (argc > 1) setenv("NX_DATA_ROOT", argv[1], 1);
-#if TARGET_OS_IPHONE
-    // SideStore starts the app with no environment and no arguments: the writable data root is the app's
-    // Documents folder (visible in the Files app, ios/Info.plist.in), where config.ini, user/ and the logs live.
-    if (!std::getenv("NX_DATA_ROOT"))
-        if (const char* home = std::getenv("HOME")) {
-            const std::string docs = std::string(home) + "/Documents";
-            setenv("NX_DATA_ROOT", docs.c_str(), 1);
-        }
-    // The log goes with the saves, where the Files app shows it (the loader's default is one folder above Documents).
-    if (!std::getenv("NX_LOG"))
-        if (const char* root = std::getenv("NX_DATA_ROOT")) {
-            const std::string logs = std::string(root) + "/logs";
-            mkdir(logs.c_str(), 0755);  // the player opens the log with fopen: the folder must exist
-            setenv("NX_LOG", (logs + "/nx.log").c_str(), 1);
-        }
-#endif
     nx::config_apply();  // config.ini -> NX_* defaults, before anything reads them (config.h)
     if (nx::report_mode()) return 0;
+
+    // The crash handler runs on its own stack: a guest stack overflow would leave it none.
+    static std::vector<uint8_t> alt(1 << 20);
+    stack_t ss{};
+    ss.ss_sp = alt.data();
+    ss.ss_size = alt.size();
+    sigaltstack(&ss, nullptr);
     struct sigaction sa{};
     sa.sa_sigaction = crash_handler;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -1050,33 +843,10 @@ int main(int argc, char** argv) {
     sigaction(SIGILL, &sa, nullptr);
     sigaction(SIGFPE, &sa, nullptr);
 
-    // MoltenVK encodes the Metal commands of a vkQueueSubmit inside the call. Its own dispatch queue (=0) took ~2.4 ms
-    // of encoding per frame off the replay thread, but crashed MoltenVK 1.4.2 within minutes at 60 fps (signal 11 in
-    // MVKAttachmentDescription, the render pass of a vkCmdBeginRendering, on its encoding thread; 5 of 5 runs, none of
-    // 2 synchronous; the image views it named were all alive). Set before the Vulkan library loads; an
-    // MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS in the environment wins.
-    setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "1", 0);
-    // Descriptor sets as Metal argument buffers (MoltenVK's default) cost the replay ~2.5 ms a frame at ~4000 sets a
-    // frame: walking about the island's north at 60 fps on an M1 Air, replay 12.5 -> 10.1 ms and 56-59 -> 60 fps,
-    // the picture the same (island, inventory, phone, map). Off; an MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS set wins.
-    setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 0);
-    // A release package: the Vulkan loader and MoltenVK beside the player, before any
-    // installed ones. A VK_DRIVER_FILES or SDL_VULKAN_LIBRARY in the environment wins.
-    if (const char* base = SDL_GetBasePath()) {
-        // Inside ACNHRecomp.app the libraries are in Contents/MacOS with the player, the ICD file in
-        // Contents/Resources (SDL's base there); in a plain folder both are beside the player.
-        // ACNH-Universal.app (the one contained app, crates/core/src/assemble.rs) keeps them in Contents/Frameworks.
-        std::string dir = base;
-        if (const size_t r = dir.rfind("/Contents/Resources/"); r != std::string::npos && r + 20 == dir.size()) {
-            dir = dir.substr(0, r) + "/Contents/Frameworks/";
-            if (access((dir + "libvulkan.1.dylib").c_str(), R_OK) != 0) dir = dir.substr(0, r) + "/Contents/MacOS/";
-        }
-        const std::string loader = dir + "libvulkan.1.dylib", icd = std::string(base) + "MoltenVK_icd.json";
-        if (access(loader.c_str(), R_OK) == 0 && access(icd.c_str(), R_OK) == 0) {
-            setenv("SDL_VULKAN_LIBRARY", loader.c_str(), 0);
-            setenv("VK_DRIVER_FILES", icd.c_str(), 0);
-        }
-    }
+    // On Wayland SDL draws window decorations through libdecor, whose GTK plugin aborts the process on some GNOME
+    // setups (a gsettings schema without the "antialiasing" key: GLib-GIO-ERROR in gtk_init_check). XWayland
+    // decorates the window itself, so prefer X11 when it is there; SDL_VIDEO_DRIVER still decides when set.
+    if (!std::getenv("SDL_VIDEO_DRIVER") && std::getenv("DISPLAY")) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland");
     // One app id with the launcher: Wayland and the taskbars find the icon in io.github.acnhrecomp.desktop.
     SDL_SetAppMetadata("ACNHRecomp", NX_VERSION_STRING, "io.github.acnhrecomp");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
@@ -1085,70 +855,44 @@ int main(int argc, char** argv) {
     }
 
     nx::plat::start_memory_guard();  // before anything can grow: a leak must never freeze the machine
+
 #ifdef NX_GAME_DYNAMIC
     if (!nx::plat::load_game_or_explain()) return 1;  // game_folder.cpp
 #endif
-    thread_cpu_watch();              // NX_THREAD_CPU
 
-    // The game on its own thread, with a big stack (recompiled calls nest deeply); the main thread keeps Cocoa's
-    // event loop.
-#if TARGET_OS_IPHONE
-    SDL_AddEventWatch(background_watch, nullptr);
-#endif
-    nx::plat::start_thread([](void*) { game_thread(); relay_after_game(); nx::plat::exit_process(0); }, nullptr, 64ull << 20);
+    // The game on its own thread, with a big stack (recompiled calls nest deeply); the main thread keeps the event
+    // loop.
+    nx::plat::start_thread([](void*) { game_thread(); nx::plat::exit_process(0); }, nullptr, 64ull << 20);
 
     using namespace nx::plat;
-    pthread_setname_np("events");        // the Cocoa main thread (NX_THREAD_CPU names it)
-    nx::cpu_profile_register("events");  // NX_CPU_PROFILE (cpu_profile.cpp)
-    // One Cocoa event pump per turn (SDL_PollEvent pumps on every call: each pump walks AppKit's gesture recognizers,
-    // ~0.25 ms on an M1), then the queue drained without pumping; a turn every 4 ms (250 Hz) when idle.
     for (;;) {
         SDL_Event e;
-        SDL_PumpEvents();
-        while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) > 0) {
+        while (SDL_PollEvent(&e)) {
             nx::ui::ui_event(e);
             switch (e.type) {
             case SDL_EVENT_QUIT:
-                nx::log("platform: quit requested (window closed / Cmd-Q)");
+                nx::log("platform: quit requested (window closed)");
                 nx::olsc_backup_on_exit();
                 nx::game_clock_save();
-                relay_after_game();
                 exit_process(0);
             case SDL_EVENT_WINDOW_MINIMIZED:
             case SDL_EVENT_WINDOW_HIDDEN:
-                g_minimized = true;
+                acnh_platform_window_set_minimized(true);
                 break;
             case SDL_EVENT_WINDOW_RESTORED:
             case SDL_EVENT_WINDOW_SHOWN:
-                g_minimized = false;
+                acnh_platform_window_set_minimized(false);
                 break;
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-                g_pixel_w = uint32_t(e.window.data1), g_pixel_h = uint32_t(e.window.data2);
+                acnh_platform_window_set_size(uint32_t(e.window.data1), uint32_t(e.window.data2));
                 break;
             case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
-            case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
             case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
-            case SDL_EVENT_WINDOW_RESIZED:
                 update_refresh_hz();
-                // Another display (its own pixels per point), or a size SDL reported in points only: the pixel size
-                // read again, so video.aspect = auto and the swapchain follow the screen the window is on.
-                if (g_window) {
-                    int pw = 0, ph = 0;
-                    if (SDL_GetWindowSizeInPixels(g_window, &pw, &ph) && pw > 0 && ph > 0)
-                        g_pixel_w = uint32_t(pw), g_pixel_h = uint32_t(ph);
-                }
                 break;
-            case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
-            case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN: {
-                // However it changed (F11, the green button, the settings screen), the setting follows the window,
-                // so the settings screen shows it and the next start opens the same way.
-                const char* now = e.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ? "1" : "0";
-                nx::log("platform: window %s full screen", *now == '1' ? "entered" : "left");
-                if (nx::config_get("video.fullscreen", "0") != now) nx::config_set("video.fullscreen", now), nx::config_save();
-                break;
-            }
             case SDL_EVENT_KEY_DOWN:
-                if (e.key.scancode == SDL_SCANCODE_F11 && g_window)
+                if ((e.key.scancode == SDL_SCANCODE_F11 ||
+                     (e.key.scancode == SDL_SCANCODE_RETURN && (e.key.mod & SDL_KMOD_ALT))) && g_window)
                     SDL_SetWindowFullscreen(g_window, !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN));
                 break;
             default:
@@ -1162,6 +906,6 @@ int main(int argc, char** argv) {
         }
         for (auto& fn : work) fn();
         sample_input();
-        SDL_Delay(4);
+        SDL_Delay(2);
     }
 }

@@ -1,28 +1,15 @@
-// Linux host (x86-64): memory (mmap at fixed addresses), pthreads, an SDL3 window with an SDL-made Vulkan surface
-// (X11 or Wayland, whichever SDL picked), SDL3 gamepad + keyboard, SDL3 audio, a signal crash handler and main.
+// The SDL3 half of the PC hosts (Linux, Windows): the game window with an SDL-made Vulkan surface, every gamepad SDL
+// knows + keyboard + mouse, SDL3 audio, the settings screen's hooks (fullscreen, volume, controller, pickers) and the
+// main thread's event loop. platform_win.cpp adds memory, threads, time, files, the crash
+// handler and main(), which calls sdl_start() and then sdl_main_loop() (platform_sdl.h).
 //
-// Same shape as platform_mac.cpp: main() starts the game (nx::boot) on its own thread and then runs the SDL event
-// loop. Anything that touches the window (creating it, its Vulkan surface) is done on the main thread; the game's
-// threads ask for it and wait. Input is sampled on the main thread into a snapshot read_pad() copies.
-//
-// Data: NX_DATA_ROOT or games/<game>'s pc_data_root ("private/<game>"): analysis/{main,sdk}.bin, extract/romfs, user/.
-// Settings: NX_<KEY> environment variables, as on Windows and macOS.
-#include <dlfcn.h>
-#include <pthread.h>
-#include <sched.h>
-#include <signal.h>
-#include <sys/mman.h>
-#include <sys/syscall.h>
-#include <time.h>
-#include <ucontext.h>
-#include <unistd.h>
-
+// Anything that touches the window (creating it, its Vulkan surface) is done on the main thread; the game's threads
+// ask for it and wait. Input is sampled on the main thread into a snapshot read_pad() copies.
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
-#include <climits>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -43,19 +30,35 @@
 #include <nx/game.h>
 #include <nx/runtime.h>
 
-#include "kernel.h"
 #include "config.h"
+#include "platform.h"
+
+#ifdef NX_RUST_RUNTIME
+#include <acnh_runtime.h>
+#else
+extern "C" {
+void acnh_platform_window_set_minimized(bool minimized);
+void acnh_platform_window_set_size(uint32_t w, uint32_t h);
+void acnh_platform_window_set_refresh_hz(int32_t hz);
+void acnh_platform_pick_begin();
+void acnh_platform_pick_complete(const char* path);
+void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
+size_t acnh_platform_pad_kind(int32_t vendor, const char* name, char* out, size_t cap);
+size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, const char* name, char* out, size_t cap);
+bool acnh_platform_xbox_layout(const char* controller_kind);
+int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
+uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
+uint32_t acnh_platform_touch_label_code(const char* label);
+bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t now_ns, bool* was_run, uint64_t* past_ns);
+}
+#endif
+
+#include "platform_sdl.h"
+#include "sdl_audio_frame.h"
+#include "sdl_audio_queue.h"
 #include "nfp_host.h"
 #include "ui/amiibo_importer.h"
 #include "ui/ui.h"
-#include "bug_report.h"
-#include "platform.h"
-#include "sdl_audio_frame.h"
-#include "sdl_audio_queue.h"
-
-namespace nx {
-void boot();
-}
 
 namespace nx {
 void olsc_backup_on_exit();  // hle_olsc.cpp
@@ -66,14 +69,14 @@ namespace nx::plat {
 
 namespace {
 
-pthread_t g_main_thread;
+std::thread::id g_main_thread;
 
 // Work for the main thread (window creation, surfaces), run between event polls.
 std::mutex g_main_lock;
 std::deque<std::function<void()>> g_main_work;
 
 void run_on_main(std::function<void()> fn) {
-    if (pthread_equal(pthread_self(), g_main_thread)) {
+    if (std::this_thread::get_id() == g_main_thread) {
         fn();
         return;
     }
@@ -94,8 +97,9 @@ void run_on_main(std::function<void()> fn) {
 }
 
 SDL_Window* g_window = nullptr;
-std::atomic<bool> g_minimized{false};
-std::atomic<uint32_t> g_pixel_w{0}, g_pixel_h{0};
+std::atomic<bool> g_held_back{false};  // made hidden, for picture_shown to show
+int g_held_x = 0, g_held_y = 0;        // where: a window made hidden was shown elsewhere than it was asked to be
+
 
 std::mutex g_pad_lock;
 PadState g_pad;
@@ -103,143 +107,24 @@ PadState g_pad;
 }  // namespace
 void update_refresh_hz();  // below, with display_refresh_hz
 
-// ---- memory ---------------------------------------------------------------------------------------------------
-
-bool reserve(uint64_t addr, uint64_t size) {
-    void* p = mmap(reinterpret_cast<void*>(addr), size, PROT_NONE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
-    if (p == MAP_FAILED) return false;
-    if (uint64_t(p) != addr) {  // kernels before 4.17 take MAP_FIXED_NOREPLACE as a hint
-        munmap(p, size);
+bool sdl_start() {
+    g_main_thread = std::this_thread::get_id();
+    // One app id with the launcher: Wayland and the taskbars find the icon in io.github.acnhrecomp.desktop.
+    SDL_SetAppMetadata("ACNHRecomp", NX_VERSION_STRING, "io.github.acnhrecomp");
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
+        std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return false;
     }
     return true;
 }
 
-bool commit(uint64_t addr, uint64_t size) {
-    uint64_t page = uint64_t(getpagesize()) - 1;
-    uint64_t a = addr & ~page, e = (addr + size + page) & ~page;
-    return mprotect(reinterpret_cast<void*>(a), e - a, PROT_READ | PROT_WRITE) == 0;
-}
-
-// As on macOS: only whole host pages are released (MADV_DONTNEED gives zero pages back on the next touch); the freed
-// part of a page shared with live data is zeroed instead. With 4 KiB host pages that is the guest's own granule.
-void decommit(uint64_t addr, uint64_t size) {
-    uint64_t page = uint64_t(getpagesize());
-    uint64_t lo = (addr + page - 1) & ~(page - 1), hi = (addr + size) & ~(page - 1);
-    if (lo >= hi) {
-        std::memset(reinterpret_cast<void*>(addr), 0, size);
-        return;
-    }
-    if (addr < lo) std::memset(reinterpret_cast<void*>(addr), 0, lo - addr);
-    if (hi < addr + size) std::memset(reinterpret_cast<void*>(hi), 0, addr + size - hi);
-    madvise(reinterpret_cast<void*>(lo), hi - lo, MADV_DONTNEED);
-    mprotect(reinterpret_cast<void*>(lo), hi - lo, PROT_NONE);
-}
-
-// ---- threads and time -----------------------------------------------------------------------------------------
-
-struct ThreadStart {
-    ThreadFn fn;
-    void* arg;
-};
-
-static void* thread_entry(void* p) {
-    ThreadStart s = *static_cast<ThreadStart*>(p);
-    delete static_cast<ThreadStart*>(p);
-    s.fn(s.arg);
-    return nullptr;
-}
-
-void start_thread(ThreadFn fn, void* arg, size_t stack_size) {
-    pthread_attr_t a;
-    pthread_attr_init(&a);
-    size_t page = size_t(getpagesize()) - 1;
-    pthread_attr_setstacksize(&a, std::max<size_t>((stack_size + page) & ~page, PTHREAD_STACK_MIN));
-    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-    pthread_t t;
-    pthread_create(&t, &a, thread_entry, new ThreadStart{fn, arg});
-    pthread_attr_destroy(&a);
-}
-
-void exit_thread() { pthread_exit(nullptr); }
-void exit_process(int code) {
-    std::fflush(nullptr);
-    _exit(code);
-}
-
-void sleep_ns(int64_t ns) {
-    timespec ts{time_t(ns / 1000000000), long(ns % 1000000000)};
-    while (clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, &ts) == EINTR) {
-    }
-}
-
-void yield() { sched_yield(); }
-
-void set_thread_name(const char* name) {
-    char n[16];  // the kernel keeps 15 characters
-    std::snprintf(n, sizeof n, "%s", name);
-    pthread_setname_np(pthread_self(), n);
-}
-
-int64_t current_thread_id() { return int64_t(syscall(SYS_gettid)); }
-
-bool profile(const int64_t*, const uint64_t* const*, size_t, int, const std::string&) { return false; }  // use perf
-
-uint64_t monotonic_ns() {
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
-}
-
-// ---- files and output -----------------------------------------------------------------------------------------
-
-FILE* fopen_utf8(const std::string& path, const char* mode) { return std::fopen(path.c_str(), mode); }
-int64_t ftell64(FILE* f) { return ftello(f); }
-int fseek64(FILE* f, int64_t off, int origin) { return fseeko(f, off, origin); }
-
-uint64_t read_at(FILE* f, int64_t off, void* buf, uint64_t size) {
-    if (size > uint64_t(SSIZE_MAX)) return 0;  // the game passes -1 as "everything": fread read nothing
-    int fd = fileno(f);
-    uint64_t done = 0;
-    while (done < size) {
-        ssize_t n = pread(fd, static_cast<uint8_t*>(buf) + done, size_t(size - done), off + int64_t(done));
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) break;
-        done += uint64_t(n);
-    }
-    return done;
-}
-
-bool make_dirs(const std::string& path) {
-    std::error_code ec;
-    std::filesystem::create_directories(path, ec);
-    return !ec;
-}
-
-void log_line(const char* line) { std::fprintf(stderr, "%s\n", line); }
-
-std::string data_root() {
-    const char* r = std::getenv("NX_DATA_ROOT");
-    return r ? r : nx::game::kInfo.pc_data_root;
-}
-
-
-
-std::string device_locale() { return ""; }
-
-std::string setting(const std::string& key) {
-    std::string env = "NX_";
-    for (char ch : key) env += char(std::toupper(static_cast<unsigned char>(ch)));
-    const char* v = std::getenv(env.c_str());
-    return v ? v : "";
-}
-
 // ---- window ---------------------------------------------------------------------------------------------------
 
-bool headless() {
-    static const bool on = std::getenv("NX_HEADLESS") != nullptr;
-    return on;
+
+
+void* sdl_native_window() {
+    SDL_Window* w = g_window;
+    return w ? SDL_GetPointerProperty(SDL_GetWindowProperties(w), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr) : nullptr;
 }
 
 void* create_window() {
@@ -248,37 +133,62 @@ void* create_window() {
         int w = 1280, h = 720;
         std::string r = setting("resolution");
         if (!r.empty()) std::sscanf(r.c_str(), "%dx%d", &w, &h);
-        g_window = SDL_CreateWindow(nx::game::kInfo.title, w, h,
-                                    SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_VULKAN |
-                                        (headless() ? SDL_WINDOW_HIDDEN : 0));
+        // NX_WINDOW_RECT=x,y,w,h[,max]: the launcher's window, which this one replaces in place (launcher/pipeline.cpp).
+        int x = int(SDL_WINDOWPOS_CENTERED), y = int(SDL_WINDOWPOS_CENTERED);
+        bool maximized = false;
+        g_held_back = false;
+        if (const char* e = std::getenv("NX_WINDOW_RECT")) {
+            int rx, ry, rw, rh;
+            char max[8] = {};
+            if (std::sscanf(e, "%d,%d,%d,%d,%7s", &rx, &ry, &rw, &rh, max) >= 4 && rw > 0 && rh > 0)
+                x = rx, y = ry, w = rw, h = rh, maximized = std::string(max) == "max";
+            g_held_back = !headless();  // shown with the first picture (picture_shown): the launcher's stays till then
+            g_held_x = rx, g_held_y = ry;
+        }
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, nx::game::kInfo.title);
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, x);
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, y);
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, w);
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h);
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER,
+                              SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_VULKAN |
+                                  (maximized ? SDL_WINDOW_MAXIMIZED : 0) | (headless() || g_held_back ? SDL_WINDOW_HIDDEN : 0));
+        g_window = SDL_CreateWindowWithProperties(props);
+        SDL_DestroyProperties(props);
         if (!g_window) {
             log_line(SDL_GetError());
             return;
         }
         nx::plat::set_window_icon(g_window);
-        if (!headless()) {
+        if (!headless() && !g_held_back) {
             SDL_RaiseWindow(g_window);
             if (setting("fullscreen") == "1") SDL_SetWindowFullscreen(g_window, true);
         }
         int pw = 0, ph = 0;
         SDL_GetWindowSizeInPixels(g_window, &pw, &ph);
-        g_pixel_w = uint32_t(pw), g_pixel_h = uint32_t(ph);
+        acnh_platform_window_set_size(uint32_t(pw), uint32_t(ph));
         update_refresh_hz();
     });
     return g_window;  // the Vulkan surface is made from it (on the main thread, vulkan_create_surface)
 }
 
 void release_window(void*) {}
-// The window is shown from the start here (the launcher's hand-over, NX_WINDOW_RECT, is Windows only).
-void picture_shown() {}
-uint64_t wait_vblank() { return 0; }  // no display vblank to wait on here: hle_vi.cpp keeps its timed tick
-uint64_t window_generation() { return 1; }
-bool window_minimized() { return g_minimized; }
 
-void window_size(uint32_t& w, uint32_t& h) {
-    w = g_pixel_w;
-    h = g_pixel_h;
+void picture_shown() {
+    if (!g_held_back) return;
+    g_held_back = false;
+    std::lock_guard lk(g_main_lock);  // not waited for: the presenting thread goes on
+    g_main_work.push_back([] {
+        if (!g_window) return;
+        if (!(SDL_GetWindowFlags(g_window) & SDL_WINDOW_MAXIMIZED)) SDL_SetWindowPosition(g_window, g_held_x, g_held_y);
+        SDL_ShowWindow(g_window);
+        SDL_RaiseWindow(g_window);
+        if (setting("fullscreen") == "1") SDL_SetWindowFullscreen(g_window, true);
+    });
 }
+uint64_t window_generation() { return 1; }
+
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 float default_render_scale() { return 1.0f; }
@@ -288,7 +198,7 @@ float default_render_scale() { return 1.0f; }
 // Input options from config.ini (the settings screen writes them), re-read when the config changes.
 struct InputOptions {
     bool xbox_layout = false;  // confirm on the bottom face button (Xbox/PlayStation habit)
-    bool layout_auto = true;   // input.layout auto: from the pad in hand (Nintendo's own: right; others: bottom)
+    bool layout_auto = true;   // input.layout auto: xbox_layout from the pad in hand
     int deadzone = 7849;       // of 32767
     bool rumble = true;
     SDL_Scancode keys[22] = {};  // the order of kKeyNames
@@ -314,9 +224,8 @@ const InputOptions& input_options() {
     static uint64_t gen = 0;
     if (uint64_t g = nx::config_generation(); g != gen) {
         gen = g;
-        // "auto" (the default): confirm on the bottom face button unless the pad is Nintendo's own (controller_kind).
-        // With "console" as the default an Xbox-labelled pad's A was the game's B: dialogue went on, menus chose
-        // nothing (a Razer Kishi, 2026-11-23).
+        // "auto" (the default): confirm on the bottom face button unless the pad is Nintendo's own (controller_kind);
+        // see platform_android_input.cpp's xbox_layout. Resolved where the buttons are read (the pad can change).
         const std::string layout = nx::config_get("input.layout", "auto");
         o.layout_auto = layout != "xbox" && layout != "console";
         o.xbox_layout = layout == "xbox";
@@ -332,115 +241,57 @@ const InputOptions& input_options() {
     return o;
 }
 
-SDL_Gamepad* g_gamepad = nullptr;  // player 1's controller: the settings screen's name and icons, and rumble
-
-// ---- several controllers, one per player (hle_hid.cpp reads players 2.. through read_player_pad) ---------------
-
-namespace {
-SDL_Gamepad* g_pads[kMaxPlayers] = {};  // the controller that holds each player
-PadState g_players[kMaxPlayers];        // players 2..: their last sample, under g_pad_lock
-bool g_player_on[kMaxPlayers] = {};
-}  // namespace
-
-// One controller's buttons and sticks, in the layout chosen in the settings.
-static void read_gamepad(SDL_Gamepad* pad, const InputOptions& opt, PadState& p) {
-    // SDL names buttons by position (south/east/...). Console layout: the game's A is the east button, as on a
-    // Switch controller. Xbox layout: A is the bottom one (confirm where Xbox and PlayStation players expect it).
-    struct Map {
-        SDL_GamepadButton b;
-        uint64_t bit;
-    };
-    static const Map map[] = {
-        {SDL_GAMEPAD_BUTTON_NORTH, kX},          {SDL_GAMEPAD_BUTTON_WEST, kY},
-        {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, kL},  {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, kR},
-        {SDL_GAMEPAD_BUTTON_START, kPlus},       {SDL_GAMEPAD_BUTTON_BACK, kMinus},
-        {SDL_GAMEPAD_BUTTON_LEFT_STICK, kStickL}, {SDL_GAMEPAD_BUTTON_RIGHT_STICK, kStickR},
-        {SDL_GAMEPAD_BUTTON_DPAD_LEFT, kLeft},   {SDL_GAMEPAD_BUTTON_DPAD_UP, kUp},
-        {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, kRight}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN, kDown},
-    };
-    for (const Map& m : map)
-        if (SDL_GetGamepadButton(pad, m.b)) p.buttons |= m.bit;
-    bool east = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST), south = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH);
-    const bool bottom_confirm = opt.layout_auto ? !nintendo_pad(pad) : opt.xbox_layout;
-    if (bottom_confirm ? south : east) p.buttons |= kA;
-    if (bottom_confirm ? east : south) p.buttons |= kB;
-    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 12000) p.buttons |= kZL;
-    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 12000) p.buttons |= kZR;
-    auto axis = [&](SDL_GamepadAxis a, bool invert) {
-        int v = SDL_GetGamepadAxis(pad, a);
-        if (v > -opt.deadzone && v < opt.deadzone) return 0;
-        v = std::clamp(v, -kStickMax, kStickMax);
-        return invert ? -v : v;
-    };
-    p.lx = axis(SDL_GAMEPAD_AXIS_LEFTX, false);
-    p.ly = axis(SDL_GAMEPAD_AXIS_LEFTY, true);  // SDL: down is positive; Horizon: up is positive
-    p.rx = axis(SDL_GAMEPAD_AXIS_RIGHTX, false);
-    p.ry = axis(SDL_GAMEPAD_AXIS_RIGHTY, true);
-}
-
-// Controllers join as on the console: one that connects waits, the first to press a button becomes player 1, the
-// next player 2, and so on, and each keeps its player while it stays connected. The press that joins is kept from
-// the game until it is released.
-static void sample_gamepads(const InputOptions& opt, PadState (&players)[kMaxPlayers]) {
-    static std::vector<SDL_Gamepad*> waiting;
-    static bool joining[kMaxPlayers] = {};
-    for (int k = 0; k < kMaxPlayers; k++)
-        if (g_pads[k] && !SDL_GamepadConnected(g_pads[k])) {
-            nx::log("input: player %d's controller disconnected", k + 1);
-            SDL_CloseGamepad(g_pads[k]);
-            g_pads[k] = nullptr;
-        }
-    std::erase_if(waiting, [](SDL_Gamepad* pad) {
-        if (SDL_GamepadConnected(pad)) return false;
-        SDL_CloseGamepad(pad);
-        return true;
-    });
-    static uint64_t next_scan = 0;  // new controllers: looked for 4 times a second, not on every loop
-    if (monotonic_ns() >= next_scan) {
-        next_scan = monotonic_ns() + 250'000'000;
-        int n = 0;
-        SDL_JoystickID* ids = SDL_GetGamepads(&n);
-        for (int i = 0; ids && i < n; i++) {
-            bool known = false;
-            for (SDL_Gamepad* pad : g_pads) known |= pad && SDL_GetGamepadID(pad) == ids[i];
-            for (SDL_Gamepad* pad : waiting) known |= SDL_GetGamepadID(pad) == ids[i];
-            if (known) continue;
-            if (SDL_Gamepad* pad = SDL_OpenGamepad(ids[i])) {
-                nx::log("input: controller %s, joins on its first button", SDL_GetGamepadName(pad) ? SDL_GetGamepadName(pad) : "?");
-                waiting.push_back(pad);
-            }
-        }
-        SDL_free(ids);
-    }
-    for (auto it = waiting.begin(); it != waiting.end();) {
-        PadState press;
-        read_gamepad(*it, opt, press);
-        int k = 0;
-        while (k < kMaxPlayers && g_pads[k]) k++;
-        if (!press.buttons || k == kMaxPlayers) {
-            ++it;
-            continue;
-        }
-        g_pads[k] = *it;
-        joining[k] = true;
-        SDL_SetGamepadPlayerIndex(g_pads[k], k);  // the player lights, on controllers that have them
-        nx::log("input: player %d: %s", k + 1, SDL_GetGamepadName(g_pads[k]) ? SDL_GetGamepadName(g_pads[k]) : "?");
-        it = waiting.erase(it);
-    }
-    for (int k = 0; k < kMaxPlayers; k++) {
-        if (!g_pads[k]) continue;
-        read_gamepad(g_pads[k], opt, players[k]);
-        if (joining[k] && players[k].buttons) players[k] = PadState{};
-        else joining[k] = false;
-    }
-    g_gamepad = g_pads[0];
-}
+SDL_Gamepad* g_gamepad = nullptr;
 
 static void sample_input() {
+    PadState p;
     const InputOptions& opt = input_options();
-    PadState players[kMaxPlayers];
-    sample_gamepads(opt, players);
-    PadState& p = players[0];  // player 1: its controller, the keyboard and the settings screen
+    SDL_Gamepad*& pad = g_gamepad;
+    if (!pad) {
+        int n = 0;
+        SDL_JoystickID* ids = SDL_GetGamepads(&n);
+        if (ids && n > 0) pad = SDL_OpenGamepad(ids[0]);
+        SDL_free(ids);
+        if (pad) nx::log("input: controller %s", SDL_GetGamepadName(pad) ? SDL_GetGamepadName(pad) : "?");
+    }
+    if (pad && !SDL_GamepadConnected(pad)) {
+        SDL_CloseGamepad(pad);
+        pad = nullptr;
+    }
+    if (pad) {
+        // SDL names buttons by position (south/east/...). Console layout: the game's A is the east button, as on a
+        // Switch controller. Xbox layout: A is the bottom one (confirm where Xbox and PlayStation players expect it).
+        struct Map {
+            SDL_GamepadButton b;
+            uint64_t bit;
+        };
+        static const Map map[] = {
+            {SDL_GAMEPAD_BUTTON_NORTH, kX},          {SDL_GAMEPAD_BUTTON_WEST, kY},
+            {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, kL},  {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, kR},
+            {SDL_GAMEPAD_BUTTON_START, kPlus},       {SDL_GAMEPAD_BUTTON_BACK, kMinus},
+            {SDL_GAMEPAD_BUTTON_LEFT_STICK, kStickL}, {SDL_GAMEPAD_BUTTON_RIGHT_STICK, kStickR},
+            {SDL_GAMEPAD_BUTTON_DPAD_LEFT, kLeft},   {SDL_GAMEPAD_BUTTON_DPAD_UP, kUp},
+            {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, kRight}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN, kDown},
+        };
+        for (const Map& m : map)
+            if (SDL_GetGamepadButton(pad, m.b)) p.buttons |= m.bit;
+        bool east = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST), south = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH);
+        const bool bottom_confirm = opt.layout_auto ? !nintendo_pad(pad) : opt.xbox_layout;
+        if (bottom_confirm ? south : east) p.buttons |= kA;
+        if (bottom_confirm ? east : south) p.buttons |= kB;
+        if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 12000) p.buttons |= kZL;
+        if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 12000) p.buttons |= kZR;
+        auto axis = [&](SDL_GamepadAxis a, bool invert) {
+            int v = SDL_GetGamepadAxis(pad, a);
+            if (v > -opt.deadzone && v < opt.deadzone) return 0;
+            v = std::clamp(v, -kStickMax, kStickMax);
+            return invert ? -v : v;
+        };
+        p.lx = axis(SDL_GAMEPAD_AXIS_LEFTX, false);
+        p.ly = axis(SDL_GAMEPAD_AXIS_LEFTY, true);  // SDL: down is positive; Horizon: up is positive
+        p.rx = axis(SDL_GAMEPAD_AXIS_RIGHTX, false);
+        p.ry = axis(SDL_GAMEPAD_AXIS_RIGHTY, true);
+    }
     // Keyboard: the bindings from config.ini (defaults laid out for ACNH: WASD left stick, IJKL camera, arrows
     // D-pad, Space A, Shift B, X X, F Y, Q/E L/R, Z/C ZL/ZR, Enter +, Esc -).
     // The keys also go to the game as a USB keyboard (hle_hid.cpp). While its text entry takes them, they type and
@@ -513,11 +364,7 @@ static void sample_input() {
     // The settings screen takes the input while it is open (and watches for its Minus + Plus combo).
     bool ui = nx::ui::ui_pad(p.buttons, p.lx, p.ly);
     p.buttons = nx::ui::ui_filter_game_buttons(p.buttons, ui);
-    if (ui) {
-        for (PadState& q : players) q = PadState{};
-        std::memset(usb, 0, sizeof usb);
-        mods = 0;
-    }
+    if (ui) p = PadState{}, std::memset(usb, 0, sizeof usb), mods = 0;
     nx::plat::set_keyboard(mods, usb);
     // The mouse: its left button touches the console's screen where the picture is (the game's own touch support).
     if (g_window) {
@@ -530,27 +377,24 @@ static void sample_input() {
     }
     std::lock_guard lk(g_pad_lock);
     g_pad = p;
-    for (int k = 1; k < kMaxPlayers; k++) g_players[k] = players[k], g_player_on[k] = g_pads[k] != nullptr;
 }
 
 // ---- settings screen hooks (platform.h) --------------------------------------------------------------------------
 
-std::atomic<float> g_volume{-1.0f};  // master volume 0..1 (-1: not read from config.ini yet; audio_cb applies it)
-
 // The refresh rate of the window's display, read on the main thread when the window is made and when it moves to
 // another display (nvn_vk.cpp presents each game frame for that many vsyncs).
-std::atomic<int> g_refresh_hz{60};
 void update_refresh_hz() {
     if (!g_window) return;
     if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(g_window)); m && m->refresh_rate > 20)
-        g_refresh_hz = int(m->refresh_rate + 0.5f);
+        acnh_platform_window_set_refresh_hz(int32_t(m->refresh_rate + 0.5f));
 }
-int display_refresh_hz() { return g_refresh_hz.load(); }
 
 void show_fatal(const char* text) {
     if (headless()) return;
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ACNHRecomp", text, nullptr);
 }
+
+
 
 
 void set_fullscreen(bool on) {
@@ -559,7 +403,7 @@ void set_fullscreen(bool on) {
     });
 }
 
-void set_master_volume(float v) { g_volume = std::clamp(v, 0.0f, 1.0f); }
+
 
 std::string controller_name() {
     SDL_Gamepad* pad = g_gamepad;
@@ -595,30 +439,21 @@ void rumble(float low_freq, float high_freq, uint32_t duration_ms) {
 }
 
 void open_path(const std::string& path) {
-    std::string url = "file://" + path;
-    if (!path.empty() && path[0] != '/') {
-        char cwd[4096];
-        if (getcwd(cwd, sizeof cwd)) url = std::string("file://") + cwd + "/" + path;
-    }
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::absolute(std::filesystem::u8path(path), ec);
+    std::u8string g = (ec ? std::filesystem::u8path(path) : p).generic_u8string();
+    std::string url = (g.size() > 1 && g[1] == u8':' ? "file:///" : "file://") + std::string(g.begin(), g.end());
     run_on_main([url] { SDL_OpenURL(url.c_str()); });
 }
 
 namespace {
-std::mutex g_pick_lock;
-bool g_pick_done = false;
-std::string g_pick_path;
 void SDLCALL picked(void*, const char* const* list, int) {
-    std::lock_guard lk(g_pick_lock);
-    g_pick_path = list && list[0] ? list[0] : "";
-    g_pick_done = true;
+    acnh_platform_pick_complete(list && list[0] ? list[0] : "");
 }
 }  // namespace
 
 void pick_path(bool zip, const std::string& title) {
-    {
-        std::lock_guard lk(g_pick_lock);
-        g_pick_done = false;
-    }
+    acnh_platform_pick_begin();
     run_on_main([zip, title] {
         SDL_PropertiesID props = SDL_CreateProperties();
         SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, g_window);
@@ -634,10 +469,7 @@ void pick_path(bool zip, const std::string& title) {
 }
 
 void pick_file(const std::string& title, const char* extension) {
-    {
-        std::lock_guard lk(g_pick_lock);
-        g_pick_done = false;
-    }
+    acnh_platform_pick_begin();
     run_on_main([title, extension] {
         SDL_PropertiesID props = SDL_CreateProperties();
         SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, g_window);
@@ -650,13 +482,9 @@ void pick_file(const std::string& title, const char* extension) {
     });
 }
 
-bool pick_result(std::string& path) {
-    std::lock_guard lk(g_pick_lock);
-    if (!g_pick_done) return false;
-    g_pick_done = false;
-    path = g_pick_path;
-    return true;
-}
+
+
+bool read_player_pad(int, PadState&) { return false; }  // player 1 only on this host
 
 void read_pad(PadState& p) {
     {
@@ -670,14 +498,6 @@ void read_pad(PadState& p) {
     input_script(p);
 }
 
-bool read_player_pad(int index, PadState& p) {
-    if (index < 1 || index >= kMaxPlayers) return false;
-    std::lock_guard lk(g_pad_lock);
-    if (!g_player_on[index]) return false;
-    p = g_players[index];
-    return true;
-}
-
 // ---- audio: SDL3 stream, s16 stereo 48 kHz, fed from the queue of submitted buffers ----------------------------
 
 namespace {
@@ -689,16 +509,8 @@ int g_audio_frame_bytes = 4;
 
 // Master volume (settings screen, live) and the mute while the window is in the background (audio.mute_background).
 void apply_gain(int16_t* pcm, int count) {
-    float v = g_volume.load(std::memory_order_relaxed);
-    if (v < 0) {
-        v = std::clamp(nx::config_get_int("audio.volume", 100), 0, 100) / 100.0f;
-        g_volume = v;
-    }
-    if (g_window && !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) &&
-        nx::config_get_bool("audio.mute_background", false))
-        v = 0;
-    if (v >= 0.999f) return;
-    for (int i = 0; i < count; i++) pcm[i] = int16_t(float(pcm[i]) * v);
+    const bool focused = !g_window || (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS);
+    acnh_platform_apply_gain(pcm, size_t(count), focused);
 }
 
 void SDLCALL audio_cb(void*, SDL_AudioStream* s, int additional, int) {
@@ -811,88 +623,8 @@ int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface
     return ok ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
-}  // namespace nx::plat
 
-// ---- crash handler and entry ----------------------------------------------------------------------------------
-
-namespace {
-
-void crash_handler(int sig, siginfo_t* info, void* uc) {
-    if ((sig == SIGSEGV || sig == SIGBUS) && nx::plat::write_watch_fault(info->si_addr)) return;  // write_watch.cpp
-    const auto& m = static_cast<ucontext_t*>(uc)->uc_mcontext;
-    Dl_info d{};
-    uint64_t pc = uint64_t(m.gregs[REG_RIP]);
-    dladdr(reinterpret_cast<void*>(pc), &d);
-    nx::log("CRASH: signal %d at %s+%llx (%s), data address %llx", sig, d.dli_fname ? d.dli_fname : "?",
-            (unsigned long long)(pc - uint64_t(d.dli_fbase)), d.dli_sname ? d.dli_sname : "?",
-            (unsigned long long)uint64_t(info->si_addr));
-    nx::CPU& c = nx::current_cpu();
-    nx::log("  guest lr %s  sp %llx", nx::describe(c.x[30]).c_str(), (unsigned long long)c.x[31]);
-    for (int k = 0; k < 32; k += 4)
-        nx::log("  x%-2d %016llx %016llx %016llx %016llx", k, (unsigned long long)c.x[k], (unsigned long long)c.x[k + 1],
-                (unsigned long long)c.x[k + 2], (unsigned long long)c.x[k + 3]);
-    nx::backtrace(c);
-    nx::log_recent_files();
-    std::fflush(nullptr);
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-
-void game_thread() {
-    try {
-        nx::boot();
-    } catch (const nx::LongJmp& j) {
-        nx::fatal("longjmp to buffer %llx with no setjmp frame", (unsigned long long)j.buf);
-    } catch (const std::exception& e) {
-        nx::fatal("host exception: %s", e.what());
-    }
-}
-
-}  // namespace
-
-int main(int argc, char** argv) {
-    nx::plat::g_main_thread = pthread_self();
-    // acnh <game folder>: the prepared game folder (else NX_DATA_ROOT, else the setup's data folder)
-    if (argc > 1) setenv("NX_DATA_ROOT", argv[1], 1);
-    nx::config_apply();  // config.ini -> NX_* defaults, before anything reads them (config.h)
-    if (nx::report_mode()) return 0;
-
-    // The crash handler runs on its own stack: a guest stack overflow would leave it none.
-    static std::vector<uint8_t> alt(1 << 20);
-    stack_t ss{};
-    ss.ss_sp = alt.data();
-    ss.ss_size = alt.size();
-    sigaltstack(&ss, nullptr);
-    struct sigaction sa{};
-    sa.sa_sigaction = crash_handler;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigaction(SIGSEGV, &sa, nullptr);
-    sigaction(SIGBUS, &sa, nullptr);
-    sigaction(SIGILL, &sa, nullptr);
-    sigaction(SIGFPE, &sa, nullptr);
-
-    // On Wayland SDL draws window decorations through libdecor, whose GTK plugin aborts the process on some GNOME
-    // setups (a gsettings schema without the "antialiasing" key: GLib-GIO-ERROR in gtk_init_check). XWayland
-    // decorates the window itself, so prefer X11 when it is there; SDL_VIDEO_DRIVER still decides when set.
-    if (!std::getenv("SDL_VIDEO_DRIVER") && std::getenv("DISPLAY")) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland");
-    // One app id with the launcher: Wayland and the taskbars find the icon in io.github.acnhrecomp.desktop.
-    SDL_SetAppMetadata("ACNHRecomp", NX_VERSION_STRING, "io.github.acnhrecomp");
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
-        std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
-        return 1;
-    }
-
-    nx::plat::start_memory_guard();  // before anything can grow: a leak must never freeze the machine
-
-#ifdef NX_GAME_DYNAMIC
-    if (!nx::plat::load_game_or_explain()) return 1;  // game_folder.cpp
-#endif
-
-    // The game on its own thread, with a big stack (recompiled calls nest deeply); the main thread keeps the event
-    // loop.
-    nx::plat::start_thread([](void*) { game_thread(); nx::plat::exit_process(0); }, nullptr, 64ull << 20);
-
-    using namespace nx::plat;
+void sdl_main_loop() {
     for (;;) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -905,19 +637,36 @@ int main(int argc, char** argv) {
                 exit_process(0);
             case SDL_EVENT_WINDOW_MINIMIZED:
             case SDL_EVENT_WINDOW_HIDDEN:
-                g_minimized = true;
+                acnh_platform_window_set_minimized(true);
                 break;
             case SDL_EVENT_WINDOW_RESTORED:
             case SDL_EVENT_WINDOW_SHOWN:
-                g_minimized = false;
+                acnh_platform_window_set_minimized(false);
                 break;
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-                g_pixel_w = uint32_t(e.window.data1), g_pixel_h = uint32_t(e.window.data2);
+                acnh_platform_window_set_size(uint32_t(e.window.data1), uint32_t(e.window.data2));
                 break;
             case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+            case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
             case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
+            case SDL_EVENT_WINDOW_RESIZED:
                 update_refresh_hz();
+                // Another display (its own pixels per point), or a size SDL reported in points only: the pixel size
+                // read again, so video.aspect = auto and the swapchain follow the screen the window is on.
+                if (g_window) {
+                    int pw = 0, ph = 0;
+                    if (SDL_GetWindowSizeInPixels(g_window, &pw, &ph) && pw > 0 && ph > 0)
+                        g_pixel_w = uint32_t(pw), g_pixel_h = uint32_t(ph);
+                }
                 break;
+            case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+            case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN: {
+                // However it changed (F11, the settings screen), the setting follows the window, so the settings
+                // screen shows it and the next start opens the same way.
+                const char* now = e.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ? "1" : "0";
+                if (nx::config_get("video.fullscreen", "0") != now) nx::config_set("video.fullscreen", now), nx::config_save();
+                break;
+            }
             case SDL_EVENT_KEY_DOWN:
                 if ((e.key.scancode == SDL_SCANCODE_F11 ||
                      (e.key.scancode == SDL_SCANCODE_RETURN && (e.key.mod & SDL_KMOD_ALT))) && g_window)
@@ -937,3 +686,5 @@ int main(int argc, char** argv) {
         SDL_Delay(2);
     }
 }
+
+}  // namespace nx::plat

@@ -125,12 +125,17 @@ if(NX_TESTS AND NOT ANDROID)
     if(EXISTS "${CMAKE_SOURCE_DIR}/private/wonder/spirv")  # the game's own shaders: never in the repository
         add_test(NAME shader_cache COMMAND shader_cache_test "${CMAKE_SOURCE_DIR}/private/wonder")
     endif()
-    if(APPLE AND NOT IOS)
-        add_executable(layout_test tests/layout_test.cpp runtime/src/memory.cpp runtime/src/compact_layout.cpp)
+    if(APPLE AND NOT IOS AND NX_RUNTIME_ARCHIVE)
+        add_executable(layout_test tests/layout_test.cpp runtime/src/memory_wrapper.cpp runtime/src/compact_layout.cpp)
         target_include_directories(layout_test PRIVATE runtime/include runtime/src)
         target_compile_definitions(layout_test PRIVATE NX_COMPACT_LAYOUT=1)
         target_compile_options(layout_test PRIVATE -UNDEBUG)
+        target_link_libraries(layout_test PRIVATE "${NX_RUNTIME_ARCHIVE}")
         add_test(NAME compact_layout COMMAND layout_test)
+        add_executable(desktop_layout_test tests/desktop_layout_test.cpp)
+        target_include_directories(desktop_layout_test PRIVATE runtime/include)
+        add_test(NAME desktop_layout COMMAND desktop_layout_test)
+    elseif(APPLE AND NOT IOS)
         add_executable(desktop_layout_test tests/desktop_layout_test.cpp)
         target_include_directories(desktop_layout_test PRIVATE runtime/include)
         add_test(NAME desktop_layout COMMAND desktop_layout_test)
@@ -141,9 +146,10 @@ if(NX_TESTS AND NOT ANDROID)
         target_link_libraries(ldn_net_test PRIVATE ws2_32)
     endif()
     add_test(NAME ldn_net COMMAND ldn_net_test)
-    if(WIN32)
-        add_executable(memguard_test tests/memguard_test.cpp)
-        target_link_libraries(memguard_test PRIVATE psapi)
+    if(WIN32 AND NX_RUNTIME_ARCHIVE)
+        add_executable(memguard_test tests/memguard_test.cpp runtime/src/memory_wrapper.cpp)
+        target_include_directories(memguard_test PRIVATE runtime/include runtime/src)
+        target_link_libraries(memguard_test PRIVATE "${NX_RUNTIME_ARCHIVE}" psapi userenv ntdll)
         add_test(NAME memguard COMMAND memguard_test)
     endif()
 endif()
@@ -287,51 +293,29 @@ endforeach()
 set(NX_RUNTIME_SOURCES
     runtime/src/compact_layout.cpp
     runtime/src/files_wrapper.cpp
-    runtime/src/main.cpp
     runtime/src/sampler.cpp
-    runtime/src/loader.cpp
+    runtime/src/loader_wrapper.cpp
     runtime/src/bug_report.cpp
-    runtime/src/memory.cpp
+    runtime/src/memory_wrapper.cpp
     runtime/src/kernel_wrapper.cpp
-    runtime/src/svc_hid.cpp
-    runtime/src/svc_am.cpp
-    runtime/src/svc_set.cpp
-    runtime/src/svc_misc.cpp
-    runtime/src/svc_process.cpp
-    runtime/src/svc_nfp.cpp
-    runtime/src/hle_ro.cpp
-    runtime/src/hle_vi.cpp
+    runtime/src/services_wrapper.cpp
     runtime/src/input_wrapper.cpp
-    runtime/src/hle_hid_system_nfc.cpp
-    runtime/src/hle_net.cpp
-    runtime/src/hle_web.cpp
     runtime/src/hle_hostnet.cpp
-    runtime/src/hle_ldn.cpp
     runtime/src/hle_vsock.cpp
     runtime/src/ldn_link.cpp
     runtime/src/ldn_lan.cpp
     runtime/src/nextendo.cpp
     runtime/src/nextendo_http.cpp
     runtime/src/audio_wrapper.cpp
-    runtime/src/hle_pl.cpp
-    runtime/src/hle_album.cpp
-    runtime/src/hle_jpeg.cpp
-    runtime/src/hle_nfp.cpp
     runtime/src/nfp_host.cpp
     runtime/src/acnh_amiibo_hook.cpp
     runtime/src/amiibo_decode.cpp
-    runtime/src/hle_bcat.cpp
-    runtime/src/hle_movie.cpp
-    runtime/src/hle_friends.cpp
-    runtime/src/hle_ngc.cpp
     runtime/src/config_wrapper.cpp
     runtime/src/time_wrapper.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
-    runtime/src/perf_hint.cpp
-    runtime/src/thermal.cpp
+    runtime/src/platform_wrapper.cpp
     runtime/src/frame_stats.cpp
-    runtime/src/write_watch.cpp
     runtime/src/nvn/nvn_caps.cpp
     runtime/src/nvn/nvn_renderpass.cpp
     runtime/src/nvn/nvn_gpu_busy.cpp
@@ -413,8 +397,8 @@ endif()
 if(ANDROID)
     # NativeActivity app: lib<game>.so, entry android_main (android_native_app_glue).
     set(GLUE "${ANDROID_NDK}/sources/android/native_app_glue")
-    add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
-        runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
+    add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android_wrapper.cpp
+        runtime/src/platform_android_input_wrapper.cpp runtime/src/platform_android_audio_wrapper.cpp
         runtime/src/hub_android.cpp runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
         "${GLUE}/android_native_app_glue.c")
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}"
@@ -467,10 +451,10 @@ if(ANDROID)
     # The game's code: lib<game>_game.so, linked against the app's library for the few functions it calls (nx::call,
     # svc, mrs, ...: NX_GAME_API). Never in the APK; tools/build_android.sh leaves it beside, for the game folder.
     if(NX_GAME_LIBS AND NOT NX_ANDROID_GAME_IN_APP)
-        add_library(${NX_GAME}_game SHARED runtime/src/game_abi.cpp)
+        add_library(${NX_GAME}_game SHARED runtime/src/loader_wrapper.cpp)
         target_include_directories(${NX_GAME}_game PRIVATE runtime/include)
         target_compile_options(${NX_GAME}_game PRIVATE -fvisibility=hidden -march=armv8.2-a+crypto)
-        target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}")
+        target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}" NX_GAME_ABI_ONLY)
         target_link_libraries(${NX_GAME}_game PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${NX_GAME_LIBS}>" ${NX_GAME})
         target_link_options(${NX_GAME}_game PRIVATE -Wl,-z,max-page-size=16384)
     endif()
@@ -513,9 +497,8 @@ elseif(IOS)
     # The small .ipa's first-start download (issue #231): Objective-C++ beside the player, a background URLSession and
     # its screens; its plan, checks and Dropbox sign-in are in the Rust runtime library above (appgame_ios.rs).
     enable_language(OBJCXX)
-    add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp
-                   runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp
-                   runtime/src/appgame_ios.mm)
+    add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac_wrapper.cpp
+                   runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp runtime/src/appgame_ios.mm)
     set_source_files_properties(runtime/src/appgame_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-std=c++20")
     target_compile_definitions(${NX_GAME} PRIVATE NX_APPGAME_ABI="${NX_GAME_ABI}")
     # The game build(s) the linked code was recompiled from (tools/build_ios.sh reads them from game.ini): the small .ipa
@@ -551,7 +534,7 @@ elseif(APPLE)
     # (brew install sdl3 vulkan-headers vulkan-loader molten-vk).
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS /opt/homebrew/include /usr/local/include)
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_mac_wrapper.cpp runtime/src/cpu_profile.cpp
                    runtime/src/app_icon.cpp)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3)
@@ -561,10 +544,10 @@ elseif(APPLE)
         target_compile_definitions(${NX_GAME} PRIVATE NX_GAME_DYNAMIC NX_GAME_ABI="${NX_GAME_ABI}")
         set_target_properties(${NX_GAME} PROPERTIES ENABLE_EXPORTS ON)
         if(NX_GAME_LIBS)
-            add_library(${NX_GAME}_game SHARED runtime/src/game_abi.cpp)
+            add_library(${NX_GAME}_game SHARED runtime/src/loader_wrapper.cpp)
             target_include_directories(${NX_GAME}_game PRIVATE runtime/include)
             target_compile_options(${NX_GAME}_game PRIVATE -fvisibility=hidden)
-            target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}")
+            target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}" NX_GAME_ABI_ONLY)
             target_link_libraries(${NX_GAME}_game PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${NX_GAME_LIBS}>")
             target_link_options(${NX_GAME}_game PRIVATE -undefined dynamic_lookup)
         endif()
@@ -580,7 +563,7 @@ elseif(UNIX)
     find_package(SDL3 REQUIRED CONFIG)
     find_package(Threads REQUIRED)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/include" /usr/include /usr/local/include)
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_linux.cpp runtime/src/memguard_linux.cpp runtime/src/cpu_profile.cpp
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_linux_wrapper.cpp runtime/src/cpu_profile.cpp
                    runtime/src/app_icon.cpp)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 Threads::Threads ${CMAKE_DL_LIBS})
@@ -593,10 +576,10 @@ elseif(UNIX)
             foreach(lib ${NX_GAME_LIBS})
                 set_target_properties(${lib} PROPERTIES POSITION_INDEPENDENT_CODE ON)
             endforeach()
-            add_library(${NX_GAME}_game SHARED runtime/src/game_abi.cpp)
+            add_library(${NX_GAME}_game SHARED runtime/src/loader_wrapper.cpp)
             target_include_directories(${NX_GAME}_game PRIVATE runtime/include)
             target_compile_options(${NX_GAME}_game PRIVATE -fvisibility=hidden)
-            target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}")
+            target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}" NX_GAME_ABI_ONLY)
             target_link_libraries(${NX_GAME}_game PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${NX_GAME_LIBS}>")
         endif()
     else()
@@ -610,8 +593,8 @@ else()
     # Vulkan loader of the GPU driver. Vulkan headers: NX_VULKAN_INCLUDE (the setup's Vulkan-Headers) or the LunarG SDK.
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/Include")
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win.cpp runtime/src/platform_sdl.cpp
-                   runtime/src/app_icon.cpp assets/acnhrecomp.manifest runtime/src/memguard_win.cpp)
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win_wrapper.cpp runtime/src/platform_sdl_wrapper.cpp
+                   runtime/src/app_icon.cpp assets/acnhrecomp.manifest)
     nx_add_windows_rc(${NX_GAME} assets/acnhrecomp.rc)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 ole32 psapi winmm dxgi ws2_32 bcrypt)
