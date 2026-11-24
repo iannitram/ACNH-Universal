@@ -39,6 +39,9 @@
 #include "bug_report.h"
 #include "config.h"
 #include "touch_layout.h"
+#if NX_TOUCH_IOS
+#include "touch_input.h"
+#endif
 #include "game_clock.h"
 #include "platform.h"
 #include "saves.h"
@@ -451,7 +454,7 @@ bool button(const char* text, float width = 0) {
     return res;
 }
 
-#if defined(__ANDROID__)
+#if NX_TOUCH_SETTINGS
 // Settings > Controls > Edit layout (#42): the screen in small, with the on-screen buttons where they are drawn. A
 // finger drags a button, and the group it belongs to (the face buttons and the d-pad move as a whole), to where it
 // should be; input.touch_layout keeps the offsets (touch_layout.cpp). Reset puts every button back.
@@ -459,7 +462,12 @@ bool g_touch_edit = false;
 
 void touch_layout_editor() {
     ImGuiIO& io = ImGui::GetIO();
-    const float aspect = io.DisplaySize.y > 0 ? io.DisplaySize.x / io.DisplaySize.y : 16.0f / 9.0f;
+    float aspect = io.DisplaySize.y > 0 ? io.DisplaySize.x / io.DisplaySize.y : 16.0f / 9.0f;
+#if NX_TOUCH_IOS
+    // The game lays the buttons out inside the safe area (touch_input.cpp): preview, hit test and clamp use its shape,
+    // so the stored offsets mean the same thing in the editor and in play (and acnh_buttons keeps one cached aspect).
+    aspect = plat::touch_input_layout_aspect();
+#endif
     const float w = ImGui::GetContentRegionAvail().x, h = w / aspect;
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("##touch_layout", ImVec2(w, h));
@@ -1340,8 +1348,8 @@ void page_controls() {
     });
     row("controls.rumble", nullptr, [&](float w) { toggle("input.rumble", true, w); });
     row("controls.deadzone", nullptr, [&](float w) { slider("input.deadzone", 5, 50, 24, "%d%%", w); });
-#if defined(__ANDROID__)
-    // Phones: the on-screen controls instead of keyboard keys.
+#if NX_TOUCH_SETTINGS
+    // Phones and tablets: the on-screen controls (on iPhone and iPad beside the keyboard's keys, for a keyboard on an iPad).
     row("controls.touch", "controls.touch.desc", [&](float w) { toggle("input.touch_controls", true, w); });
     row("controls.touch_opacity", nullptr, [&](float w) { slider("input.touch_opacity", 10, 100, 60, "%d%%", w); });
     row("controls.touch_size", nullptr, [&](float w) { slider("input.touch_size", 50, 150, 100, "%d%%", w); });
@@ -1353,7 +1361,8 @@ void page_controls() {
         });
         if (g_touch_edit) touch_layout_editor();
     }
-#else
+#endif
+#if !defined(__ANDROID__)
     ImGui::Dummy(ImVec2(0, 6 * g_scale));
     ImGui::PushFont(nullptr);
     ImGui::TextUnformatted(tr("controls.keyboard"));

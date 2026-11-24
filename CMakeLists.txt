@@ -135,6 +135,14 @@ if(NX_TESTS AND NOT ANDROID)
         target_include_directories(desktop_layout_test PRIVATE runtime/include)
         add_test(NAME desktop_layout COMMAND desktop_layout_test)
     endif()
+    add_executable(touch_safe_test tests/touch_safe_test.cpp)
+    target_include_directories(touch_safe_test PRIVATE runtime/src)
+    target_compile_options(touch_safe_test PRIVATE -UNDEBUG)
+    add_test(NAME touch_safe COMMAND touch_safe_test)
+    add_executable(touch_input_test tests/touch_input_test.cpp runtime/src/touch_input.cpp runtime/src/touch_layout.cpp)
+    target_include_directories(touch_input_test PRIVATE runtime/include runtime/src)
+    target_compile_options(touch_input_test PRIVATE -UNDEBUG)
+    add_test(NAME touch_input COMMAND touch_input_test)
     add_executable(ldn_net_test tests/ldn_net_test.cpp)
     target_include_directories(ldn_net_test PRIVATE runtime/src)
     if(WIN32)
@@ -332,6 +340,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/glyphs.cpp
     runtime/src/input_script.cpp
     runtime/src/touch_layout.cpp
+    runtime/src/touch_input.cpp
     runtime/src/perf_hint.cpp
     runtime/src/thermal.cpp
     runtime/src/frame_stats.cpp
