@@ -356,10 +356,13 @@ impl Runner for ProcessRunner {
         // Tiered compilation off: on macOS 27 the .NET 10 runtime segfaulted a few hundred shaders
         // into the batch in two of its tiering paths, JIT_Patchpoint (on-stack replacement) and
         // JIT_ClassProfile32 (PGO instrumentation). With it off each method is compiled once,
-        // fully optimized, and neither path runs.
+        // fully optimized, and neither path runs. W^X off as well: with it on, the runtime then
+        // segfaulted in the garbage collector's allocation wait (2026-11-23, the SpeedFix prepare);
+        // with both off the batch ran to the end.
         let status = Command::new(program)
             .args(args)
             .env("DOTNET_TieredCompilation", "0")
+            .env("DOTNET_EnableWriteXorExecute", "0")
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(stderr))
             .status()
