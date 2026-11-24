@@ -45,11 +45,18 @@ impl BuildActions {
     }
 
     fn has_contained_game(&self, player: &Path) -> bool {
-        self.os == Os::Mac
-            && player
+        match self.os {
+            Os::Mac => player
                 .parent()
                 .and_then(Path::parent)
-                .is_some_and(|contents| contents.join("Resources/game/analysis/main.bin").is_file())
+                .is_some_and(|contents| {
+                    contents.join("Resources/game/analysis/main.bin").is_file()
+                }),
+            Os::Linux => player
+                .parent()
+                .is_some_and(|dir| dir.join("game/analysis/main.bin").is_file()),
+            _ => false,
+        }
     }
 
     pub fn launch_location(&self, launcher: &Path) -> (PathBuf, Option<PathBuf>) {
@@ -158,6 +165,11 @@ impl BuildActions {
                 )));
             }
             assemble::assemble(target, &out.join("build"), &self.dirs.install())?;
+            if target == Os::Linux {
+                let launcher_exe = std::env::current_exe()?;
+                let app_dir = prepare::app_out_dir(launcher, home);
+                prepare::pack_folder(&launcher_exe, &self.dirs.install(), &out, &app_dir)?;
+            }
             Ok(())
         })
     }

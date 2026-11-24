@@ -21,6 +21,7 @@ pub use crate::assemble::assemble;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::gamefolder::GameFolder;
+pub use crate::pack_folder::{app_out_dir, pack_folder, pack_folder_with, PackContext};
 use crate::platform::{AppDirs, Os, Vars};
 use crate::recipe::{hub_for, output, serves, Hub, Stage, STAGES};
 use std::ffi::OsStr;
