@@ -293,37 +293,18 @@ set(NX_RUNTIME_SOURCES
     runtime/src/bug_report.cpp
     runtime/src/memory.cpp
     runtime/src/kernel_wrapper.cpp
-    runtime/src/svc_hid.cpp
-    runtime/src/svc_am.cpp
-    runtime/src/svc_set.cpp
-    runtime/src/svc_misc.cpp
-    runtime/src/svc_process.cpp
-    runtime/src/svc_nfp.cpp
-    runtime/src/hle_ro.cpp
-    runtime/src/hle_vi.cpp
+    runtime/src/services_wrapper.cpp
     runtime/src/input_wrapper.cpp
-    runtime/src/hle_hid_system_nfc.cpp
-    runtime/src/hle_net.cpp
-    runtime/src/hle_web.cpp
     runtime/src/hle_hostnet.cpp
-    runtime/src/hle_ldn.cpp
     runtime/src/hle_vsock.cpp
     runtime/src/ldn_link.cpp
     runtime/src/ldn_lan.cpp
     runtime/src/nextendo.cpp
     runtime/src/nextendo_http.cpp
     runtime/src/audio_wrapper.cpp
-    runtime/src/hle_pl.cpp
-    runtime/src/hle_album.cpp
-    runtime/src/hle_jpeg.cpp
-    runtime/src/hle_nfp.cpp
     runtime/src/nfp_host.cpp
     runtime/src/acnh_amiibo_hook.cpp
     runtime/src/amiibo_decode.cpp
-    runtime/src/hle_bcat.cpp
-    runtime/src/hle_movie.cpp
-    runtime/src/hle_friends.cpp
-    runtime/src/hle_ngc.cpp
     runtime/src/config_wrapper.cpp
     runtime/src/time_wrapper.cpp
     runtime/src/discord_presence.cpp
