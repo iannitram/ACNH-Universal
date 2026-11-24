@@ -79,6 +79,19 @@ bundle=$stage/ACNH-Universal.app
 ditto "$app" "$bundle"
 rm -rf "$bundle/Contents/_CodeSignature"
 
+# Stamp the bundle's version from git as tools/build_ios.sh does the iOS one (tools/build_version.sh): a short version
+# of dotted numbers and a CFBundleVersion that rises with every commit. The launcher's own plist carries the engine's
+# 0.0.0 and no build number. Outside a git checkout the values fall back to 0.0.0 and 10000.
+plist=$bundle/Contents/Info.plist
+read -r short_version build_number < <(cd "$root" && . tools/build_version.sh && s=${BASE_VER%%-*} && echo "${s%%+*} $VCODE")
+case "$short_version" in ''|*[!0-9.]*|.*|*.|*..*) die "the short version is not dotted numbers: $short_version" ;; esac
+case "$build_number" in ''|*[!0-9]*) die "the build number is not a number: $build_number" ;; esac
+for kv in "CFBundleShortVersionString:$short_version" "CFBundleVersion:$build_number"; do
+  /usr/libexec/PlistBuddy -c "Set :${kv%%:*} ${kv#*:}" "$plist" 2>/dev/null ||
+    /usr/libexec/PlistBuddy -c "Add :${kv%%:*} string ${kv#*:}" "$plist" || die "cannot stamp ${kv%%:*}"
+done
+plutil -lint "$plist" >/dev/null || die "the stamped Info.plist is not valid"
+
 if [ -n "$game" ]; then
   dest=$bundle/Contents/Resources/game
   mkdir -p "$dest"

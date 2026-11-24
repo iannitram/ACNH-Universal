@@ -41,7 +41,36 @@ app=$build/ACNH.app
 mkdir -p "$app"
 printf 'int main(void) { return 0; }\n' > "$work/fake.c"
 xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=15.0 -o "$app/ACNH" "$work/fake.c"
-cp "$template" "$app/Info.plist"
+# Rendered as CMake's MACOSX_BUNDLE_INFO_PLIST does (configure_file replaces ${VAR}): the names the template uses.
+render_plist() { # <short version> <bundle version> <out file>
+    cmake -DMACOSX_BUNDLE_SHORT_VERSION_STRING="$1" -DMACOSX_BUNDLE_BUNDLE_VERSION="$2" \
+        -DIN="$template" -DOUT="$3" -P "$work/render.cmake"
+}
+printf 'configure_file("${IN}" "${OUT}")\n' > "$work/render.cmake"
+render_plist 0.11.0 1100832 "$app/Info.plist"
+plutil -lint "$app/Info.plist" > /dev/null || die "the rendered Info.plist is not valid"
+
+# 0. The stamps build_ios.sh gives: build_version.sh's values, rendered into the template.
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")" = 0.11.0 ] || die "short version not stamped"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")" = 1100832 ] || die "bundle version not stamped"
+grep -q '\${' "$app/Info.plist" && die "the rendered Info.plist still holds a template variable"
+stamp=$(cd "$root" && . tools/build_version.sh && s=${BASE_VER%%-*} && echo "${s%%+*} $VCODE")
+case "$stamp" in [0-9]*.[0-9]*" "[0-9]*) ;; *) die "build_version.sh gave an unusable stamp: $stamp" ;; esac
+case "${stamp#* }" in ''|*[!0-9]*) die "VCODE is not an integer: ${stamp#* }" ;; esac
+[ "${stamp#* }" -ge 1100 ] || die "VCODE is below the floor of 1100"
+# VCODE rises with the commit count (stamps from a scratch repo, one commit apart).
+rise=$work/rise
+git init -q "$rise"
+git -C "$rise" -c user.name=t -c user.email=t@t.invalid commit -q --allow-empty -m one
+first=$(cd "$rise" && . "$root/tools/build_version.sh" && echo "$VCODE")
+git -C "$rise" -c user.name=t -c user.email=t@t.invalid commit -q --allow-empty -m two
+second=$(cd "$rise" && . "$root/tools/build_version.sh" && echo "$VCODE")
+[ "$second" -gt "$first" ] || die "VCODE did not rise across commits ($first, $second)"
+printf 'x\n' > "$rise/f"
+git -C "$rise" add f
+dirty=$(cd "$rise" && . "$root/tools/build_version.sh" && echo "$VNAME")
+case "$dirty" in *-dirty) ;; *) die "a dirty tree is not marked: $dirty" ;; esac
+say "Info.plist stamps: rendered values, VCODE integer that rises, dirty marked"
 
 # A prepared game of empty files: the five names that ship, and names that must never ship.
 make_decoy() {
@@ -65,6 +94,20 @@ refuse() { # <label> <reason substring> <command...>
     fi
     say "refused: $label ($reason)"
 }
+
+# A template that was not rendered, and a version that is not numeric, are refused.
+raw=$work/build-raw
+mkdir -p "$raw/ACNH.app"
+cp "$app/ACNH" "$raw/ACNH.app/ACNH"
+cp "$template" "$raw/ACNH.app/Info.plist"
+refuse "an unrendered Info.plist" "CFBundleShortVersionString" "$work/out-raw" \
+    env CI=1 bash "$script" raw "$raw" --no-game "$work/out-raw"
+badver=$work/build-badver
+mkdir -p "$badver/ACNH.app"
+cp "$app/ACNH" "$badver/ACNH.app/ACNH"
+render_plist 0.11.0 1100832+abc "$badver/ACNH.app/Info.plist"
+refuse "a non-numeric CFBundleVersion" "CFBundleVersion" "$work/out-badver" \
+    env CI=1 bash "$script" badver "$badver" --no-game "$work/out-badver"
 
 # 1. --no-game packs the app and makes no game/ folder.
 nogame_out=$work/out-nogame

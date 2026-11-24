@@ -40,18 +40,19 @@ if [ "$target" = android ]; then
     extra=()
 else
     sdk=$target
+    extra=()
     sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
     out=$root/private/third_party/libvpx-ios/$target
     if [ "$target" = iphoneos ]; then
         vpxtarget=arm64-darwin-gcc
         minflag=-miphoneos-version-min=15.0
+        extra=(--extra-cflags=-miphoneos-version-min=15.0)  # configure adds its own -miphoneos-version-min=7.0 first
     else
         vpxtarget=generic-gnu  # libvpx has no simulator target: plain C (the Simulator is for checking, not speed)
         minflag=-mios-simulator-version-min=15.0
     fi
     export CC="$(xcrun --sdk "$sdk" -f clang) -isysroot $sysroot $minflag" CXX="$(xcrun --sdk "$sdk" -f clang++) -isysroot $sysroot $minflag"
     export AR=$(xcrun --sdk "$sdk" -f ar) LD="$CC" AS="$CC"
-    extra=()
 fi
 
 build=$root/private/third_party/libvpx-build-$target
