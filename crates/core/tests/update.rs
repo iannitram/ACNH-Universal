@@ -119,7 +119,27 @@ impl ScriptRunner for Fake {
         Ok(())
     }
 
+    fn tools(&mut self, _req: &Request) -> Result<(), acnh_core::error::Error> {
+        Ok(())
+    }
+
+    fn game(&mut self, _req: &Request) -> Result<(), acnh_core::error::Error> {
+        Ok(())
+    }
+
+    fn version(&mut self, _req: &Request) -> Result<(), acnh_core::error::Error> {
+        Ok(())
+    }
+
     fn shaders(&mut self, _req: &Request) -> Result<(), acnh_core::error::Error> {
+        Ok(())
+    }
+
+    fn fonts(&mut self, _req: &Request) -> Result<(), acnh_core::error::Error> {
+        Ok(())
+    }
+
+    fn build(&mut self, _req: &Request) -> Result<(), acnh_core::error::Error> {
         Ok(())
     }
 }

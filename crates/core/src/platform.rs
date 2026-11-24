@@ -383,6 +383,63 @@ impl AppDirs {
     }
 }
 
+/// True when `path` is a symbolic link or Windows directory junction.
+pub fn is_dir_link(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|meta| meta.file_type().is_symlink())
+}
+
+/// Removes a directory link (symbolic link or Windows junction) without touching its target.
+pub fn unlink_dir(path: &std::path::Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if std::fs::remove_dir(path).is_ok() {
+            return Ok(());
+        }
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+/// Links `link` to `target` (a symbolic link on Unix, a directory junction on Windows).
+pub fn link_dir(target: &std::path::Path, link: &std::path::Path) -> Result<()> {
+    if is_dir_link(link) {
+        if std::fs::canonicalize(link).ok() == std::fs::canonicalize(target).ok() {
+            return Ok(());
+        }
+        unlink_dir(link)?;
+    } else if link.is_dir() {
+        std::fs::remove_dir_all(link)?;
+    }
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)?;
+    }
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            return Err(Error::Io(format!(
+                "cannot create directory junction {} -> {}",
+                link.display(),
+                target.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod atomic_tests {
     use super::{atomic_write, atomic_write_with};
