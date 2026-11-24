@@ -58,7 +58,12 @@ pub const APPLE_GUEST_SHIFT: u64 = 0xC0_0000_0000;
 pub fn ported(service: Service) -> bool {
     matches!(
         service,
-        Service::Config | Service::Time | Service::Saves | Service::Files | Service::Input
+        Service::Config
+            | Service::Time
+            | Service::Saves
+            | Service::Files
+            | Service::Input
+            | Service::Audio
     )
 }
 
@@ -76,8 +81,11 @@ pub extern "C" fn acnh_runtime_abi_version() -> u32 {
 #[cfg(any(target_os = "ios", target_os = "android"))]
 pub mod relay;
 
+pub mod audio;
 pub mod config;
 pub mod files;
+#[cfg(target_os = "android")]
+pub mod hub_android;
 pub mod input;
 pub mod saves;
 pub mod time;

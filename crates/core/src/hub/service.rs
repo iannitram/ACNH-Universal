@@ -275,6 +275,43 @@ pub fn pull_hub_prepared(
     pull_prepared(&mut t, dirs, hub_name, target, data_root)
 }
 
+/// Pull prepared Android game library and data from a paired hub and install it into
+/// `<private_dir>/game/` through [`crate::appgame::install`].
+pub fn pull_hub_prepared_app(
+    addr: SocketAddr,
+    dirs: &AppDirs,
+    this_device: &str,
+    hub_name: &str,
+    target: Os,
+    private_dir: &Path,
+    free_bytes: u64,
+) -> Result<PathBuf> {
+    if target != Os::Android {
+        return Err(hub_error("prepared data is only available for Android"));
+    }
+    let mut t = connect(addr, Operation::Prepared, this_device, target)?;
+    pull_prepared_app(&mut t, dirs, hub_name, target, private_dir, free_bytes)
+}
+
+/// Like [`pull_hub_prepared_app`], with an explicit `ci` flag for deterministic host tests.
+#[allow(clippy::too_many_arguments)]
+pub fn pull_hub_prepared_app_with(
+    addr: SocketAddr,
+    dirs: &AppDirs,
+    this_device: &str,
+    hub_name: &str,
+    target: Os,
+    private_dir: &Path,
+    free_bytes: u64,
+    ci: bool,
+) -> Result<PathBuf> {
+    if target != Os::Android {
+        return Err(hub_error("prepared data is only available for Android"));
+    }
+    let mut t = connect(addr, Operation::Prepared, this_device, target)?;
+    pull_prepared_app_with(&mut t, dirs, hub_name, target, private_dir, free_bytes, ci)
+}
+
 /// Report this authenticated device after a sync.
 pub fn report_hub(
     addr: SocketAddr,

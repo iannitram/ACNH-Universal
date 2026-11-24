@@ -311,7 +311,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/ldn_lan.cpp
     runtime/src/nextendo.cpp
     runtime/src/nextendo_http.cpp
-    runtime/src/hle_audio.cpp
+    runtime/src/audio_wrapper.cpp
     runtime/src/hle_pl.cpp
     runtime/src/hle_album.cpp
     runtime/src/hle_jpeg.cpp
@@ -413,7 +413,7 @@ if(ANDROID)
     set(GLUE "${ANDROID_NDK}/sources/android/native_app_glue")
     add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
         runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
-        runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
+        runtime/src/hub_android.cpp runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
         "${GLUE}/android_native_app_glue.c")
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}"
         third_party/save-relay)
