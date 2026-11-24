@@ -28,8 +28,9 @@ void expect(const std::string& got, const std::string& want, int line) {
     }
 }
 
-std::string game_root(const char* env, bool apple, const std::string& base, const std::string& data) {
-    return choose_game_root(env, apple, base, is_file, data);
+std::string game_root(const char* env, bool apple, const std::string& base, const std::string& data,
+                      const std::string& downloaded = "") {
+    return choose_game_root(env, apple, base, is_file, data, downloaded);
 }
 
 void touch(const fs::path& file) {
@@ -90,6 +91,18 @@ int main() {
     // Even if data_root exists, Android never falls back to it.
     touch(fs::path(android_data) / "analysis" / "main.bin");
     EXPECT(choose_android_game_root(nullptr, android_files.string(), is_file), "");
+
+    // The game downloaded at first start (iOS, issue #231): after the bundle's game/, before the data root.
+    const std::string downloaded = tmp.string() + "/support/game";
+    EXPECT(game_root(nullptr, true, empty_base, data, downloaded), data);  // nothing downloaded yet
+    touch(fs::path(downloaded) / "analysis" / "sdk.bin");
+    EXPECT(game_root(nullptr, true, empty_base, data, downloaded), data);  // no analysis/main.bin: not a game
+    touch(fs::path(downloaded) / "analysis" / "main.bin");
+    EXPECT(game_root(nullptr, true, empty_base, data, downloaded), downloaded);
+    EXPECT(game_root(nullptr, true, base, data, downloaded), package);  // the bundle's game wins
+    EXPECT(game_root((tmp.string() + "/env-game").c_str(), true, empty_base, data, downloaded), tmp.string() + "/env-game");
+    EXPECT(game_root(nullptr, false, empty_base, data, downloaded), data);  // only Apple looks there
+    EXPECT(game_root(nullptr, true, empty_base, data, ""), data);
 
     fs::remove_all(tmp, ec);
     std::printf("game_root_test: %s\n", g_failed ? "FAILED" : "all passed");

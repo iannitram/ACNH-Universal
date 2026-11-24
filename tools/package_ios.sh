@@ -4,9 +4,16 @@
 #
 #   tools/package_ios.sh <version> <build dir> --game <prepared folder> <out folder>
 #   tools/package_ios.sh <version> <build dir> --no-game <out folder>
+#   tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> [--abi <12 hex>] <out folder>
 #
 # --game copies only analysis/, romfs.pak, spirv.pak and, when present, fonts/ and aoc/ from the prepared folder into
 # Payload/ACNH.app/game/, as real files, and makes them read-only. --no-game makes no game/ folder.
+# --small (issue #231, SPEC M18) makes the small .ipa: no game/ inside, and the same game files plus manifest.json in
+# <out>/acnh-universal-game/ios/, which the player downloads at first start from the owner's own Dropbox (copy
+# acnh-universal-game/ into Dropbox/Apps/save-relay/, the app folder of save-relay's Dropbox app). manifest.json lists
+# each file's path, size and SHA-256, the game's main build id (--build-id) and the runtime ABI the player was built for
+# (--abi; default: the first 12 hex digits of the SHA-1 of runtime/include/nx/{cpu,module,runtime}.h, as CMake's NX_GAME_ABI).
+# The big .ipa (--game) is unchanged.
 # The out folder is required and has no default. Every refusal writes nothing to it.
 # The .ipa is staged in <out>/.ACNH-Universal-<version>.partial/ and moved into <out> when complete.
 # Under CI (CI or GITHUB_ACTIONS set) the out folder must be inside $RUNNER_TEMP, and the game items it copies may hold only
@@ -17,6 +24,7 @@ root=$(cd "$(dirname "$0")/.." && pwd -P)
 usage() {
     echo "usage: tools/package_ios.sh <version> <build dir> --game <prepared folder> <out folder>" >&2
     echo "       tools/package_ios.sh <version> <build dir> --no-game <out folder>" >&2
+    echo "       tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> [--abi <12 hex>] <out folder>" >&2
     exit 2
 }
 fail() { echo "error: $*" >&2; exit 1; }
@@ -28,11 +36,52 @@ build=$2
 shift 2
 case "$version" in ''|*[!a-zA-Z0-9._-]*|.|..) usage ;; esac
 game=
+small=
+build_id=
+abi=
 case "$1" in
     --game)
         [ "$#" -ge 2 ] || usage
         game=$2
         shift 2
+        ;;
+    --small)
+        [ "$#" -ge 2 ] || usage
+        game=$2
+        small=1
+        shift 2
+        while [ "$#" -ge 2 ]; do
+            case "$1" in
+                --build-id) build_id=$2 ;;
+                --abi) abi=$2 ;;
+                *) break ;;
+            esac
+            shift 2
+        done
+        # The prepared folder's game.ini names its build: take it when --build-id is not given, refuse a different one
+        # (the player's code is linked from one build, and a wrong game fails at boot).
+        ini_id=
+        if [ -f "$game/game.ini" ]; then
+            ini_id=$(sed -n 's/^[[:space:]]*build_id[[:space:]]*=[[:space:]]*\([0-9A-Fa-f]\{32\}\)[[:space:]]*$/\1/p' "$game/game.ini" \
+                | head -n 1 | tr 'a-f' 'A-F')
+        fi
+        if [ -z "$build_id" ]; then build_id=$ini_id; fi
+        if [ -n "$ini_id" ] && [ "$ini_id" != "$(printf '%s' "$build_id" | tr 'a-f' 'A-F')" ]; then
+            fail "--build-id $build_id is not the build of the prepared folder ($ini_id in its game.ini)"
+        fi
+        case "$build_id" in
+            [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) ;;
+            *) fail "--small needs --build-id with the game's 32 hex digit build id" ;;
+        esac
+        build_id=$(printf '%s' "$build_id" | tr 'a-f' 'A-F')
+        if [ -z "$abi" ]; then
+            abi=$(cat "$root/runtime/include/nx/cpu.h" "$root/runtime/include/nx/module.h" "$root/runtime/include/nx/runtime.h" \
+                | shasum -a 1 | cut -c1-12)
+        fi
+        case "$abi" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) fail "--abi must be 12 lowercase hex digits" ;;
+        esac
         ;;
     --no-game)
         shift
@@ -139,7 +188,7 @@ copy=$stage/Payload/ACNH.app
 cp -R "$app" "$copy"
 xattr -cr "$copy"
 rm -rf "$copy/_CodeSignature" "$copy/embedded.mobileprovision"
-if [ -n "$game" ]; then
+if [ -n "$game" ] && [ -z "$small" ]; then
     mkdir "$copy/game"
     for item in analysis romfs.pak spirv.pak fonts aoc; do
         if [ -e "$game/$item" ]; then
@@ -147,6 +196,36 @@ if [ -n "$game" ]; then
         fi
     done
     chmod -R a-w "$copy/game"
+fi
+if [ -n "$small" ]; then
+    # The same files, for the Dropbox the small .ipa downloads from, and their manifest (written last).
+    files=$stage/acnh-universal-game/ios
+    mkdir -p "$files"
+    for item in analysis romfs.pak spirv.pak fonts aoc; do
+        if [ -e "$game/$item" ]; then
+            cp -RL "$game/$item" "$files/"
+        fi
+    done
+    find "$files" -name .DS_Store -delete
+    python3 - "$files" "$build_id" "$abi" <<'PY'
+import hashlib, json, os, sys
+root, build_id, abi = sys.argv[1:4]
+files = []
+for base, dirs, names in os.walk(root):
+    dirs.sort()
+    for name in sorted(names):
+        path = os.path.join(base, name)
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        files.append({"path": os.path.relpath(path, root).replace(os.sep, "/"),
+                      "size": os.path.getsize(path), "sha256": digest.hexdigest()})
+files.sort(key=lambda e: e["path"])
+with open(os.path.join(root, "manifest.json"), "w") as out:
+    json.dump({"version": 1, "build_id": build_id, "abi": abi, "files": files}, out, separators=(",", ":"))
+PY
+    chmod -R u+rw,go+r "$files"
 fi
 # Sign nested frameworks first; no entitlement file or provisioning profile is supplied. game/ holds no frameworks.
 while IFS= read -r -d '' framework; do
@@ -168,12 +247,12 @@ game_bad=$(awk -F/ '$1 == "Payload" && $2 == "ACNH.app" && $3 == "game" {
     else if ($4 != "analysis" && $4 != "romfs.pak" && $4 != "spirv.pak" && $4 != "fonts" && $4 != "aoc") print
 }' "$list")
 [ -z "$game_bad" ] || fail "game/ holds a name outside analysis, romfs.pak, spirv.pak, fonts and aoc"
-if [ -n "$game" ]; then
+if [ -n "$game" ] && [ -z "$small" ]; then
     for need in analysis/main.bin romfs.pak spirv.pak; do
         grep -Fqx "Payload/ACNH.app/game/$need" "$list" || fail "the archive has no game/$need"
     done
 elif grep -q '^Payload/ACNH\.app/game' "$list"; then
-    fail "the archive has a game/ folder although --no-game was given"
+    fail "the archive has a game/ folder although --no-game or --small was given"
 fi
 outside=$(awk -F/ '!($1 == "Payload" && $2 == "ACNH.app" && $3 == "game") { print }' "$list")
 if ! check=$(printf '%s\n' "$outside" | bash "$root/tools/check_release_files.sh" 2>&1); then
@@ -182,6 +261,19 @@ if ! check=$(printf '%s\n' "$outside" | bash "$root/tools/check_release_files.sh
 fi
 
 mv -f "$stage/$partial" "$ipa"
+if [ -n "$small" ]; then
+    # The game files for Dropbox, replacing an earlier set in one rename pair.
+    mkdir -p "$out/acnh-universal-game"
+    rm -rf "$out/acnh-universal-game/ios.old"
+    if [ -e "$out/acnh-universal-game/ios" ]; then mv "$out/acnh-universal-game/ios" "$out/acnh-universal-game/ios.old"; fi
+    mv "$stage/acnh-universal-game/ios" "$out/acnh-universal-game/ios"
+    rm -rf "$out/acnh-universal-game/ios.old"
+fi
 size=$(stat -f %z "$ipa")
 sha=$(shasum -a 256 "$ipa" | awk '{print $1}')
 printf 'IPA: %s\nSize: %s bytes\nSHA-256: %s\n' "$ipa" "$size" "$sha"
+if [ -n "$small" ]; then
+    count=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(len(m["files"]), sum(f["size"] for f in m["files"]))' \
+        "$out/acnh-universal-game/ios/manifest.json")
+    printf 'Game files: %s\nGame files in the manifest: %s (count, bytes)\n' "$out/acnh-universal-game/ios" "$count"
+fi

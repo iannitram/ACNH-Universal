@@ -205,6 +205,91 @@ rm "$nobin/analysis/main.bin"
 refuse "a game folder without analysis/main.bin" "analysis/main.bin" "$work/out-nobin" \
     env CI=1 bash "$script" nobin "$build" --game "$nobin" "$work/out-nobin"
 
+# 3b. --small (#231): the .ipa has no game/, and the game's files with a manifest are staged for Dropbox. Decoy files with
+# made-up bytes (never game data) so the sizes and hashes mean something; not under CI, which allows only empty files.
+small=$work/decoy-small
+make_decoy "$small"
+printf 'analysis decoy bytes' > "$small/analysis/main.bin"
+head -c 70000 /dev/zero | tr '\0' 'r' > "$small/romfs.pak"
+printf 's' > "$small/spirv.pak"
+printf 'font decoy' > "$small/fonts/shared.ttf"
+: > "$small/aoc/1/data"
+printf 'junk' > "$small/fonts/.DS_Store"
+small_out=$work/out-small
+build_id=0123456789abcdef0123456789ABCDEF
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" "$small_out" > "$work/small.log"
+ipa3=$small_out/ACNH-Universal-smallv.ipa
+[ -f "$ipa3" ] || die "--small wrote no .ipa"
+zipinfo -1 "$ipa3" > "$work/small.list"
+if grep -q '^Payload/ACNH\.app/game' "$work/small.list"; then die "--small archive has a game/ folder"; fi
+unzip -tq "$ipa3" > /dev/null || die "--small archive fails unzip -t"
+bash "$root/tools/check_release_files.sh" < "$work/small.list" > /dev/null || die "--small list fails the release check"
+files=$small_out/acnh-universal-game/ios
+[ -f "$files/manifest.json" ] || die "--small wrote no manifest.json"
+[ "$(ls -A "$small_out" | sort | tr '\n' ' ')" = "ACNH-Universal-smallv.ipa acnh-universal-game " ] || die "--small left other files in the out folder"
+python3 - "$files" "$small" "$build_id" <<'PY' || die "the manifest does not match the files"
+import hashlib, json, os, sys
+files, prepared, build_id = sys.argv[1:4]
+m = json.load(open(os.path.join(files, "manifest.json")))
+assert m["version"] == 1
+assert m["build_id"] == build_id.upper(), m["build_id"]
+assert len(m["abi"]) == 12 and all(c in "0123456789abcdef" for c in m["abi"]), m["abi"]
+listed = {e["path"]: e for e in m["files"]}
+expected = {"analysis/main.bin", "aoc/1/data", "fonts/shared.ttf", "romfs.pak", "spirv.pak"}
+assert set(listed) == expected, sorted(listed)
+for path, e in listed.items():
+    data = open(os.path.join(prepared, path), "rb").read()
+    assert e["size"] == len(data), path
+    assert e["sha256"] == hashlib.sha256(data).hexdigest(), path
+    staged = open(os.path.join(files, path), "rb").read()
+    assert staged == data, path
+on_disk = set()
+for base, _, names in os.walk(files):
+    for n in names:
+        on_disk.add(os.path.relpath(os.path.join(base, n), files))
+assert on_disk == expected | {"manifest.json"}, sorted(on_disk)
+# Never anything the prepared folder keeps besides the game (build folders, saves, logs, keys).
+for bad in ("gen", "build", "exefs", "user", "config.ini", "nx.log"):
+    assert not any(p.split("/")[0] == bad for p in on_disk), bad
+PY
+grep -q '^Game files: ' "$work/small.log" || die "--small did not say where the game files are"
+say "--small: no game/ in the .ipa; the manifest lists every staged file with matching sizes and hashes"
+
+# A second run replaces the staged files; a new ABI can be given.
+printf 'newer' > "$small/spirv.pak"
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" --abi 0123456789ab "$small_out" > /dev/null
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["abi"]=="0123456789ab"; assert [f["size"] for f in m["files"] if f["path"]=="spirv.pak"]==[5]' "$files/manifest.json" \
+    || die "a second --small run did not replace the staged files"
+[ ! -e "$small_out/acnh-universal-game/ios.old" ] || die "--small left ios.old behind"
+say "--small again replaces the staged files and takes --abi"
+
+# The prepared folder's game.ini names its build: --build-id may be left out, and a different one is refused.
+printf '# decoy\nbuild_id = FEDCBA9876543210FEDCBA9876543210\n' > "$small/game.ini"
+refuse "--build-id that is not the prepared folder's build" "is not the build of the prepared folder" "$work/out-small-bad" \
+    env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" "$work/out-small-bad"
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" "$work/out-small-ini" > /dev/null
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["build_id"]=="FEDCBA9876543210FEDCBA9876543210"' \
+    "$work/out-small-ini/acnh-universal-game/ios/manifest.json" || die "--small did not take the build id from game.ini"
+rm "$small/game.ini"
+say "--small takes the build id from the prepared folder's game.ini and refuses a different --build-id"
+
+# Under CI, empty decoys: the manifest lists them with size 0 and the hash of nothing.
+env CI=1 bash "$script" smallci "$build" --small "$decoy" --build-id "$build_id" "$work/out-small-ci" > /dev/null
+python3 - "$work/out-small-ci/acnh-universal-game/ios/manifest.json" <<'PY' || die "the CI manifest is wrong"
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert {e["size"] for e in m["files"]} == {0}
+assert {e["sha256"] for e in m["files"]} == {"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+PY
+say "--small under CI lists empty decoys with the hash of nothing"
+
+refuse "--small without a build id" "build id" "$work/out-small-nobid" \
+    env CI=1 bash "$script" nobid "$build" --small "$decoy" "$work/out-small-nobid"
+refuse "--small with a bad build id" "build id" "$work/out-small-badbid" \
+    env CI=1 bash "$script" badbid "$build" --small "$decoy" --build-id xyz "$work/out-small-badbid"
+refuse "--small with a non-empty game file under CI" "non-empty" "$work/out-small-bad" \
+    env CI=1 bash "$script" smallbad "$build" --small "$bad" --build-id "$build_id" "$work/out-small-bad"
+
 # 4. Past 4 GB: zip -qry makes a ZIP64 archive that unzip -t passes.
 big=$work/big
 mkdir "$big"

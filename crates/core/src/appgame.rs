@@ -1,9 +1,16 @@
+//! The game inside an app on a phone or tablet (SPEC.md M18). `download` fetches the prepared
+//! game from the owner's own Dropbox into the app's private storage, resumably, with the
+//! transport passed in: iOS (issue #231) brings a background `URLSession`, Android (issue #230)
+//! its own job.
+//!
 //! Android private-storage game installer (#192).
 //!
 //! Copies only the six prepared game entries (`analysis/`, `romfs.pak`, `spirv.pak`,
 //! `fonts/`, `aoc/` when present, and `libacnh_game.so`) into `<private>/game.partial/`,
 //! resuming over matching-size files, marks them read-only, and atomically renames
 //! `game.partial/` to `<private>/game/`. Writes nowhere outside the given private folder.
+
+pub mod download;
 
 use crate::error::{Error, Result};
 use std::fs;

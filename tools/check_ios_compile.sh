@@ -24,7 +24,7 @@ while IFS= read -r f; do sources+=("$f"); done < <(
 )
 sources+=(runtime/src/platform_mac.cpp runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp
           runtime/src/app_icon.cpp runtime/src/save_storage.cpp runtime/src/save_profiles.cpp
-          runtime/src/mod_manager.cpp runtime/src/saves.cpp)
+          runtime/src/mod_manager.cpp runtime/src/saves.cpp runtime/src/appgame_ios.mm)
 for f in "games/$game"/*.cpp; do sources+=("$f"); done
 
 imgui=()
@@ -56,7 +56,10 @@ for sdk in iphoneos iphonesimulator; do
     sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
     echo "== $sdk ($target): ${#sources[@]} files"
     for f in "${sources[@]}"; do
-        if ! xcrun --sdk "$sdk" clang++ "${common[@]}" --target="$target" "$minimum" -isysroot "$sysroot" "$f"; then
+        # appgame_ios.mm (the small .ipa's first-start download, #231) is Objective-C++ with ARC; NX_APPGAME_ABI as CMake sets it.
+        extra=()
+        case "$f" in *.mm) extra=(-fobjc-arc -DNX_APPGAME_ABI='"000000000000"') ;; esac
+        if ! xcrun --sdk "$sdk" clang++ "${common[@]}" ${extra[@]+"${extra[@]}"} --target="$target" "$minimum" -isysroot "$sysroot" "$f"; then
             echo "FAILED: $sdk $f" >&2
             status=1
         fi
