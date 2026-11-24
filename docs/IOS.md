@@ -27,3 +27,7 @@ The player carries save-relay through its Rust API (`crates/runtime`, module `re
 Not verified on a device: whether a controller can answer the alerts, whether a push on going to the background can catch the game between two writes, and the sign-in again after coming back from the background (#76).
 
 A free Apple ID does not provide the extended virtual addressing or increased memory limit entitlements. This package supplies neither; available address space and memory may limit whether the game runs. See [the iOS address-space finding](apple-ios.md) for details. Device installation and gameplay still need to be tested.
+
+## The small .ipa (issue #231)
+
+`tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> <out folder>` packs the player with no `game/` inside, and writes the same game files and a `manifest.json` (each file's path, size and SHA-256, the game's build id and the runtime ABI) to `<out folder>/acnh-universal-game/ios/`. Copy `acnh-universal-game/` into `Dropbox/Apps/save-relay/` (the app folder of save-relay's Dropbox app). At first start the player asks "Download the game (about N GB)?", signs in to Dropbox (Safari shows a code to paste), and downloads over Wi-Fi in a background `URLSession` into `Library/Application Support/game/` (read-only, excluded from backup), resuming from what is on disk after an interruption. Saves stay in Documents. The big `.ipa` (`--game`) is unchanged. Not yet run on a device.

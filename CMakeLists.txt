@@ -517,8 +517,14 @@ elseif(IOS)
     if(NOT NX_RUNTIME_ARCHIVE)
         message(FATAL_ERROR "NX_RUNTIME_ARCHIVE is not set: run tools/build_ios.sh <sdk> (it builds libacnh_runtime.a)")
     endif()
+    # The small .ipa's first-start download (issue #231): Objective-C++ beside the player, a background URLSession and
+    # its screens; its plan, checks and Dropbox sign-in are in the Rust runtime library above (appgame_ios.rs).
+    enable_language(OBJCXX)
     add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp
-                   runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp)
+                   runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp
+                   runtime/src/appgame_ios.mm)
+    set_source_files_properties(runtime/src/appgame_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-std=c++20")
+    target_compile_definitions(${NX_GAME} PRIVATE NX_APPGAME_ABI="${NX_GAME_ABI}")
     if(NOT NX_IOS_SHORT_VERSION)
         set(NX_IOS_SHORT_VERSION "0.0.0")
     endif()
