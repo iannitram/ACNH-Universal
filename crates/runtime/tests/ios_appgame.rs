@@ -55,7 +55,12 @@ fn plan_check_and_install_the_way_the_player_drives_them() {
     let fetch = plan["fetch"].as_array().unwrap();
     assert_eq!(fetch.len(), 2);
     assert_eq!(fetch[0]["path"], "analysis/main.bin");
-    assert!(root.path().join(PENDING).is_file());
+    assert!(
+        !root.path().join(PENDING).exists(),
+        "a plan made to ask the question keeps nothing: only the person's yes does"
+    );
+    // The player writes it once the person says Download.
+    fs::write(root.path().join(PENDING), &bytes).unwrap();
 
     // The session wrote romfs.pak whole and half of the other; it checks, the other resumes.
     let partial = root.path().join("game.partial");

@@ -525,6 +525,10 @@ elseif(IOS)
                    runtime/src/appgame_ios.mm)
     set_source_files_properties(runtime/src/appgame_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-std=c++20")
     target_compile_definitions(${NX_GAME} PRIVATE NX_APPGAME_ABI="${NX_GAME_ABI}")
+    # The game build(s) the linked code was recompiled from (tools/build_ios.sh reads them from game.ini): the small .ipa
+    # refuses a downloaded game of another build. Empty accepts any.
+    set(NX_APPGAME_BUILDS "" CACHE STRING "Game build id(s) the small .ipa accepts, comma separated")
+    target_compile_definitions(${NX_GAME} PRIVATE NX_APPGAME_BUILDS="${NX_APPGAME_BUILDS}")
     if(NOT NX_IOS_SHORT_VERSION)
         set(NX_IOS_SHORT_VERSION "0.0.0")
     endif()

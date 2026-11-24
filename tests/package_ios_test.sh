@@ -203,6 +203,16 @@ python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["abi"]=="0
 [ ! -e "$small_out/acnh-universal-game/ios.old" ] || die "--small left ios.old behind"
 say "--small again replaces the staged files and takes --abi"
 
+# The prepared folder's game.ini names its build: --build-id may be left out, and a different one is refused.
+printf '# decoy\nbuild_id = FEDCBA9876543210FEDCBA9876543210\n' > "$small/game.ini"
+refuse "--build-id that is not the prepared folder's build" "is not the build of the prepared folder" "$work/out-small-bad" \
+    env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" "$work/out-small-bad"
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" "$work/out-small-ini" > /dev/null
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["build_id"]=="FEDCBA9876543210FEDCBA9876543210"' \
+    "$work/out-small-ini/acnh-universal-game/ios/manifest.json" || die "--small did not take the build id from game.ini"
+rm "$small/game.ini"
+say "--small takes the build id from the prepared folder's game.ini and refuses a different --build-id"
+
 # Under CI, empty decoys: the manifest lists them with size 0 and the hash of nothing.
 env CI=1 bash "$script" smallci "$build" --small "$decoy" --build-id "$build_id" "$work/out-small-ci" > /dev/null
 python3 - "$work/out-small-ci/acnh-universal-game/ios/manifest.json" <<'PY' || die "the CI manifest is wrong"

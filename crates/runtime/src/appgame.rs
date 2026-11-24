@@ -16,7 +16,9 @@ use std::path::Path;
 pub const REMOTE_DIR: &str = "/acnh-universal-game/ios";
 
 /// The manifest being downloaded, kept beside `game.partial/` so a relaunch by the system (the
-/// background session finishing) needs no new request to check files and install.
+/// background session finishing) needs no new request to check files and install. The player
+/// writes it once the person agrees to the download, never `plan_json`: a plan made only to ask
+/// "Download the game (about N GB)?" must leave nothing behind that a later launch takes for a yes.
 pub const PENDING: &str = "game.manifest.pending.json";
 
 fn failure(error: &DownloadError) -> Value {
@@ -33,7 +35,8 @@ pub fn api_arg(path: &str) -> String {
 ///
 /// `{"ok":true,"installed":true}` when `game/` already is this game; else `{"ok":true,
 /// "installed":false,"total":N,"remaining":M,"fetch":[{"path","size","offset"}]}`; else
-/// `{"ok":false,"code","error"}` (a refused build, too little room, an unusable manifest).
+/// `{"ok":false,"code","error"}` (a refused build, too little room, an unusable manifest). Writes
+/// nothing but the (empty) folder `root`.
 pub fn plan_json(root: &Path, manifest: &[u8], abi: &str, builds: &str, free_bytes: u64) -> Value {
     let expect = Expect {
         abi: abi.trim().to_string(),
@@ -53,7 +56,6 @@ pub fn plan_json(root: &Path, manifest: &[u8], abi: &str, builds: &str, free_byt
         fs::create_dir_all(root)?;
         let plan = download::plan(root, &parsed)?;
         download::check_space(&plan, free_bytes)?;
-        fs::write(root.join(PENDING), manifest)?;
         let fetch: Vec<Value> = plan
             .to_fetch()
             .map(|i| json!({"path": i.path, "size": i.size, "offset": i.have}))

@@ -56,8 +56,14 @@ const char* const kAbi = NX_APPGAME_ABI;
 #else
 const char* const kAbi = "";
 #endif
-// The game builds this app plays (3.0.2, 3.0.3, 2.0.7, 1.0.0): the manifest names its own. Empty accepts any.
+// The game build(s) this app was compiled from, comma separated (tools/build_ios.sh passes NX_APPGAME_BUILDS from the
+// recompiled game's game.ini): the game's code is linked into the player, so it can run only that build's files.
+// Empty (no game.ini beside the code) accepts any.
+#ifdef NX_APPGAME_BUILDS
+const char* const kBuilds = NX_APPGAME_BUILDS;
+#else
 const char* const kBuilds = "";
+#endif
 
 void note(NSString* line) { nx_relay_log([[@"appgame: " stringByAppendingString:line] UTF8String]); }
 
@@ -161,10 +167,17 @@ namespace {
 UIWindow* g_window;
 NXProgressController* g_progress;
 
-// A window on the main thread, for an alert or the progress screen. Created when there is none.
+// A window on the main thread, for an alert or the progress screen. Created when there is none. nil when there is
+// nowhere to show one yet (a background launch has no scene, and a window made then is never shown): callers try again.
 UIViewController* host_controller() {
+    UIWindowScene* scene = active_scene();
+    if (g_window && !g_window.windowScene && scene) {  // made before the scene connected: it would never be shown
+        g_window.hidden = YES;
+        g_window = nil;
+        g_progress = nil;
+    }
     if (!g_window) {
-        UIWindowScene* scene = active_scene();
+        if (!scene && UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return nil;
         g_window = scene ? [[UIWindow alloc] initWithWindowScene:scene] : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
         g_window.rootViewController = [UIViewController new];
         g_window.rootViewController.view.backgroundColor = UIColor.blackColor;
@@ -181,6 +194,36 @@ void close_window() {
     g_window.hidden = YES;
     g_window = nil;
     g_progress = nil;
+}
+
+// Present `a` as soon as there is a window to show it in.
+void present_alert(UIAlertController* a) {
+    UIViewController* host = host_controller();
+    if (!host) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_main_queue(), ^{ present_alert(a); });
+        return;
+    }
+    [host presentViewController:a animated:NO completion:nil];
+}
+
+// Block the game's thread until the app is in the foreground (a background launch has no screen to ask on, and the
+// game must not boot, and so must not touch the GPU, there).
+void wait_until_active() {
+    dispatch_semaphore_t go = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (UIApplication.sharedApplication.applicationState == UIApplicationStateActive) {
+            dispatch_semaphore_signal(go);
+            return;
+        }
+        __block id observer = nil;
+        observer = [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+                                                                     queue:NSOperationQueue.mainQueue
+                                                                usingBlock:^(NSNotification*) {
+            [NSNotificationCenter.defaultCenter removeObserver:observer];
+            dispatch_semaphore_signal(go);
+        }];
+    });
+    dispatch_semaphore_wait(go, DISPATCH_TIME_FOREVER);
 }
 
 // An alert, answered from the game's thread: returns the tapped button's index (cancel style: the last one is "no").
@@ -205,7 +248,7 @@ int ask(NSString* title, NSString* message, NSArray<NSString*>* buttons, NSStrin
                 dispatch_semaphore_signal(answered);
             }]];
         }
-        [host_controller() presentViewController:a animated:NO completion:nil];
+        present_alert(a);
     });
     dispatch_semaphore_wait(answered, DISPATCH_TIME_FOREVER);
     if (text_field) *text_field = typed;
@@ -215,8 +258,9 @@ int ask(NSString* title, NSString* message, NSArray<NSString*>* buttons, NSStrin
 void show_progress(NSString* status, double fraction) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_progress) {
-            g_progress = [NXProgressController new];
             UIViewController* top = host_controller();
+            if (!top) return;  // no screen yet (a background launch): the next update shows it
+            g_progress = [NXProgressController new];
             g_progress.modalPresentationStyle = UIModalPresentationFullScreen;
             [top presentViewController:g_progress animated:NO completion:nil];
         }
@@ -254,15 +298,18 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
 @property(nonatomic, assign) int64_t total, base;  // all bytes; bytes on disk when the current chunk began
 @property(nonatomic, assign) int64_t inflight;     // bytes of the running chunk so far
 @property(nonatomic, assign) int failures;
-@property(nonatomic, strong) NSMutableDictionary<NSString*, NSNumber*>* completions;  // path -> times it came out wrong
-@property(nonatomic, assign) bool running;
+@property(nonatomic, strong) NSMutableDictionary<NSString*, NSNumber*>* fetched;  // path -> full fetches finished (last chunk landed)
+// One chain at a time, all on `queue`: `active` while a task is in flight or a step/retry is scheduled, `current` the
+// identifier of the task in flight, `halted` after the chain stopped (failed or installed) until -begin.
+@property(nonatomic, assign) bool active, halted;
+@property(nonatomic, strong) NSNumber* current;
 @property(nonatomic, copy) NSString* chunk_error;  // what went wrong with the chunk whose task just finished
 @property(nonatomic, copy) void (^background_done)(void);
 + (instancetype)shared;
-- (void)begin;
+- (dispatch_semaphore_t)begin;
 - (NSString*)raw_api_arg:(NSString*)path;
 - (void)step;
-- (void)fail:(NSString*)text;
+- (void)stop:(NSString*)failure;
 - (void)retry:(NSString*)text;
 @end
 
@@ -274,7 +321,7 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
     dispatch_once(&once, ^{
         d = [NXGameDownloader new];
         d.queue = dispatch_queue_create("io.github.acnhrecomp.game-download", DISPATCH_QUEUE_SERIAL);
-        d.completions = [NSMutableDictionary new];
+        d.fetched = [NSMutableDictionary new];
         NSURLSessionConfiguration* c = [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:kSessionId];
         c.sessionSendsLaunchEvents = YES;
         c.discretionary = NO;
@@ -287,72 +334,95 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
     return d;
 }
 
-// Start (or take up) the chain: with a task already running from before a relaunch, wait for it; else plan and go.
-- (void)begin {
-    self.finished = dispatch_semaphore_create(0);
-    self.failure = nil;
-    self.failures = 0;
-    dispatch_async(self.queue, ^{
-        self.running = true;
-        [self.session getAllTasksWithCompletionHandler:^(NSArray<__kindof NSURLSessionTask*>* tasks) {
-            dispatch_async(self.queue, ^{
-                for (NSURLSessionTask* t in tasks)
-                    if (t.state == NSURLSessionTaskStateRunning || t.state == NSURLSessionTaskStateSuspended) {
-                        note(@"a task from before is still running: waiting for it");
-                        [t resume];
-                        return;
-                    }
-                [self step];
-            });
-        }];
+// Start (or take up) the chain, and return the semaphore signalled when it ends (`failure` says how). With a chain
+// already going (the system relaunched the app for a finished chunk, or a retry is waiting) or a task still there from
+// before a relaunch, nothing new starts: that chain goes on and is the only one.
+- (dispatch_semaphore_t)begin {
+    __block dispatch_semaphore_t done;
+    dispatch_sync(self.queue, ^{
+        self.halted = false;
+        self.failure = nil;
+        self.failures = 0;
+        [self.fetched removeAllObjects];  // Try again is a fresh attempt at every file
+        if (!self.active || !self.finished) self.finished = dispatch_semaphore_create(0);
+        done = self.finished;
     });
+    [self.session getAllTasksWithCompletionHandler:^(NSArray<__kindof NSURLSessionTask*>* tasks) {
+        dispatch_async(self.queue, ^{
+            if (self.active) { note(@"a download is already going on: waiting for it"); return; }
+            NSURLSessionTask* adopt = nil;
+            for (NSURLSessionTask* t in tasks)
+                if (t.state == NSURLSessionTaskStateRunning || t.state == NSURLSessionTaskStateSuspended) { adopt = t; break; }
+            if (!adopt) adopt = tasks.firstObject;  // finished while the app was gone: its events are still to come
+            self.active = true;
+            if (adopt) {
+                note(@"a task from before is still there: waiting for it");
+                self.current = @(adopt.taskIdentifier);
+                if (adopt.state == NSURLSessionTaskStateSuspended) [adopt resume];
+                return;
+            }
+            [self step];
+        });
+    }];
+    return done;
 }
 
-- (void)fail:(NSString*)text {
-    self.failure = text;
-    self.running = false;
+// The chain ends: `failure` nil is success (installed). On self.queue.
+- (void)stop:(NSString*)failure {
+    self.failure = failure;
+    self.active = false;
+    self.halted = true;
+    self.current = nil;
+    if (!self.finished) self.finished = dispatch_semaphore_create(0);
     dispatch_semaphore_signal(self.finished);
+}
+
+// Whether `t` belongs to the one chain: the task in flight, or, with none yet, the first to report (a task finished
+// while the app was gone) which then is. A late task of an older chain is not. On self.queue.
+- (bool)claim:(NSURLSessionTask*)t {
+    if (self.halted) return false;
+    if (self.current) return self.current.unsignedIntegerValue == t.taskIdentifier;
+    if (self.active) return false;
+    self.active = true;
+    self.current = @(t.taskIdentifier);
+    if (!self.finished) self.finished = dispatch_semaphore_create(0);
+    return true;
 }
 
 // Plan from the disk, then start the next chunk, or install when nothing is left. On self.queue.
 - (void)step {
     NSData* manifest = [NSData dataWithContentsOfFile:pending_path()];
-    if (!manifest) { [self fail:@"The file list is missing: start the download again."]; return; }
+    if (!manifest) { [self stop:@"The file list is missing: start the download again."]; return; }
     NSDictionary* plan = take(acnh_appgame_plan(support_root().UTF8String, (const uint8_t*)manifest.bytes, manifest.length,
                                                 kAbi, kBuilds, free_bytes()));
-    if (!ok(plan)) { [self fail:why(plan)]; return; }
+    if (!ok(plan)) { [self stop:why(plan)]; return; }
     self.total = [plan[@"total"] longLongValue];
     int64_t remaining = [plan[@"remaining"] longLongValue];
     self.base = self.total - remaining;
     self.inflight = 0;
     NSArray* fetch = plan[@"fetch"];
-    if ([plan[@"installed"] boolValue]) {
-        self.running = false;
-        dispatch_semaphore_signal(self.finished);
-        return;
-    }
+    if ([plan[@"installed"] boolValue]) { [self stop:nil]; return; }
     if (fetch.count == 0) {
         NSDictionary* done = take(acnh_appgame_finish(support_root().UTF8String));
-        if (!ok(done)) { [self fail:why(done)]; return; }
+        if (!ok(done)) { [self stop:why(done)]; return; }
         exclude_from_backup(game_path());
         note(@"the game is installed");
-        self.running = false;
-        dispatch_semaphore_signal(self.finished);
+        [self stop:nil];
         return;
     }
     NSDictionary* next = fetch[0];
     NSString* path = next[@"path"];
     int64_t size = [next[@"size"] longLongValue], offset = [next[@"offset"] longLongValue];
-    // A file that was complete and now starts again from 0 failed its hash check (Rust deleted it): twice is enough.
-    if (offset == 0 && self.completions[path]) {
-        NSUInteger n = self.completions[path].unsignedIntegerValue + 1;
-        if (n >= 2) { [self fail:[NSString stringWithFormat:@"%@ did not download correctly, even fetched again. Try again later.", path]]; return; }
-        self.completions[path] = @(n);
+    // A file whose last chunk landed twice and that starts from 0 again failed its hash check each time (Rust deleted
+    // it): enough. A fetch that stopped on the way (no network) is not counted: only a last chunk landing is.
+    if (offset == 0 && self.fetched[path].unsignedIntegerValue >= 2) {
+        [self stop:[NSString stringWithFormat:@"%@ did not download correctly, even fetched again. Try again later.", path]];
+        return;
     }
     int64_t length = MIN(kChunk, size - offset);
     NSDictionary* tok = take(acnh_appgame_token());
     if (!ok(tok)) {
-        if ([tok[@"reauth"] boolValue]) { [self fail:@"Dropbox needs you to sign in again."]; return; }
+        if ([tok[@"reauth"] boolValue]) { [self stop:@"Dropbox needs you to sign in again."]; return; }
         [self retry:why(tok)];
         return;
     }
@@ -364,6 +434,9 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
     [r setValue:[NSString stringWithFormat:@"bytes=%lld-%lld", offset, offset + length - 1] forHTTPHeaderField:@"Range"];
     NSURLSessionDownloadTask* t = [self.session downloadTaskWithRequest:r];
     t.taskDescription = describe(path, offset, length, size);
+    self.active = true;
+    self.current = @(t.taskIdentifier);
+    self.chunk_error = nil;
     [t resume];
     show_progress([self status_text], self.total ? (double)self.base / self.total : 0);
 }
@@ -385,8 +458,12 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
 - (void)retry:(NSString*)text {
     self.failures++;
     note([NSString stringWithFormat:@"failed (%d): %@", self.failures, text]);
-    if (self.failures >= kRetries) { [self fail:text]; return; }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MIN(60, 5 << self.failures) * NSEC_PER_SEC)), self.queue, ^{ [self step]; });
+    if (self.failures >= kRetries) { [self stop:text]; return; }
+    self.active = true;  // the chain waits here: nothing else starts one meanwhile
+    self.current = nil;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MIN(60, 5 << self.failures) * NSEC_PER_SEC)), self.queue, ^{
+        if (!self.halted && self.active && !self.current) [self step];
+    });
 }
 
 // Append a finished chunk to its file, at the offset it was asked for.
@@ -423,55 +500,68 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
 - (void)URLSession:(NSURLSession*)s downloadTask:(NSURLSessionDownloadTask*)t didWriteData:(int64_t)n totalBytesWritten:(int64_t)w
     totalBytesExpectedToWrite:(int64_t)x {
     dispatch_async(self.queue, ^{
+        if (!self.current || self.current.unsignedIntegerValue != t.taskIdentifier) return;
         self.inflight = w;
         show_progress([self status_text], self.total ? (double)(self.base + w) / self.total : 0);
     });
 }
 
-// The temporary file is deleted when this returns: appended now. Errors are judged in didCompleteWithError.
+// The temporary file is deleted when this returns: appended now, on self.queue so that no step (which hashes and
+// deletes files) runs meanwhile. Errors are judged in didCompleteWithError.
 - (void)URLSession:(NSURLSession*)s downloadTask:(NSURLSessionDownloadTask*)t didFinishDownloadingToURL:(NSURL*)tmp {
     NSInteger status = [(NSHTTPURLResponse*)t.response statusCode];
     NSString* path = nil;
     int64_t offset = 0, length = 0, size = 0;
     if (!parse_description(t.taskDescription, &path, &offset, &length, &size)) return;
-    NSString* problem = nil;
-    if (status == 200 || status == 206) {
-        problem = [self append:tmp path:path offset:offset status:status];
-    } else if (status == 401) {
-        problem = @"Dropbox refused the sign-in.";
-    } else if (status == 409 || status == 404) {
-        problem = [NSString stringWithFormat:@"The game's files are not in Dropbox yet (%@ in save-relay's app folder, acnh-universal-game/ios/).", path];
-    } else {
-        problem = [NSString stringWithFormat:@"Dropbox answered %ld.", (long)status];
-    }
-    dispatch_async(self.queue, ^{
+    dispatch_sync(self.queue, ^{
+        if (![self claim:t]) { note(@"a late chunk of an older download was dropped"); return; }
+        NSString* problem = nil;
+        if (status == 200 || status == 206) {
+            problem = [self append:tmp path:path offset:offset status:status];
+        } else if (status == 401) {
+            problem = @"Dropbox refused the sign-in.";  // usually a token that expired while the task waited: retried
+        } else if (status == 409 || status == 404) {
+            problem = [NSString stringWithFormat:@"The game's files are not in Dropbox yet (%@ in save-relay's app folder, acnh-universal-game/ios/).", path];
+        } else {
+            problem = [NSString stringWithFormat:@"Dropbox answered %ld.", (long)status];
+        }
         self.chunk_error = problem;
     });
 }
 
 - (void)URLSession:(NSURLSession*)s task:(NSURLSessionTask*)t didCompleteWithError:(NSError*)error {
-    UIBackgroundTaskIdentifier bg = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"game download" expirationHandler:nil];
+    // Time to finish the step when the system relaunched the app in the background; ended when it runs out (a hash of a
+    // big file can take longer: the step then waits until the app is opened, but the app is not killed for it).
+    UIApplication* app = UIApplication.sharedApplication;
+    __block UIBackgroundTaskIdentifier bg = UIBackgroundTaskInvalid;
+    bg = [app beginBackgroundTaskWithName:@"game download" expirationHandler:^{
+        [app endBackgroundTask:bg];
+        bg = UIBackgroundTaskInvalid;
+    }];
     dispatch_async(self.queue, ^{
-        NSString* problem = self.chunk_error;
-        self.chunk_error = nil;
-        if (error && !problem) problem = error.localizedDescription;
-        if (!self.running) self.running = true;  // relaunched by the system: this process has no waiting caller yet
-        if (!self.finished) self.finished = dispatch_semaphore_create(0);
-        if (problem) {
-            if ([problem hasPrefix:@"The game's files are not in Dropbox"] || [problem hasPrefix:@"Dropbox refused"])
-                [self fail:problem];
-            else
-                [self retry:problem];
+        if ([self claim:t]) {
+            self.current = nil;
+            NSString* problem = self.chunk_error;
+            self.chunk_error = nil;
+            if (error && !problem) problem = error.localizedDescription;
+            if (problem) {
+                if ([problem hasPrefix:@"The game's files are not in Dropbox"])
+                    [self stop:problem];
+                else
+                    [self retry:problem];
+            } else {
+                self.failures = 0;
+                NSString* path;
+                int64_t offset, length, size;
+                // A file's last chunk landed: if its hash is wrong the plan lists the file from 0 again, which step() counts.
+                if (parse_description(t.taskDescription, &path, &offset, &length, &size) && offset + length >= size)
+                    self.fetched[path] = @(self.fetched[path].unsignedIntegerValue + 1);
+                [self step];
+            }
         } else {
-            self.failures = 0;
-            NSString* path;
-            int64_t offset, length, size;
-            // A file's last chunk: if its hash is wrong the plan lists the file from 0 again, which step() counts.
-            if (parse_description(t.taskDescription, &path, &offset, &length, &size) && offset + length >= size && !self.completions[path])
-                self.completions[path] = @0;
-            [self step];
+            note(@"a task of an older download ended: ignored");
         }
-        [UIApplication.sharedApplication endBackgroundTask:bg];
+        if (bg != UIBackgroundTaskInvalid) [app endBackgroundTask:bg];
     });
 }
 
@@ -491,19 +581,24 @@ namespace {
 void handle_events(id, SEL, UIApplication*, NSString* identifier, void (^completion)(void)) {
     if (![identifier isEqualToString:kSessionId]) { completion(); return; }
     note(@"the system relaunched the app for the game download");
-    NXGameDownloader* d = [NXGameDownloader shared];  // the session exists again: its events are delivered
+    // The session exists again, so its events are delivered; the delegate runs the chain from them (a claimed task
+    // finishing starts the next chunk), with no game thread: SDL_main does not run until a scene connects.
+    NXGameDownloader* d = [NXGameDownloader shared];
     d.background_done = [completion copy];
 }
 
 __attribute__((constructor)) void install_background_hook() {
-    for (NSString* name in @[ @"SDLUIKitDelegate", @"SDLAppDelegate" ]) {
+    // SDL 3 on iOS 13 and later makes the scene delegate the app's delegate class (SDLUIKitSceneDelegate); older paths use
+    // SDLUIKitDelegate. Add it to every one that exists: UIKit asks only the class it instantiated.
+    bool added = false;
+    for (NSString* name in @[ @"SDLUIKitSceneDelegate", @"SDLUIKitDelegate", @"SDLAppDelegate" ]) {
         Class c = NSClassFromString(name);
         if (!c) continue;
         SEL sel = @selector(application:handleEventsForBackgroundURLSession:completionHandler:);
-        if (class_addMethod(c, sel, (IMP)handle_events, "v@:@@@?")) return;
+        if (class_addMethod(c, sel, (IMP)handle_events, "v@:@@@?")) added = true;
     }
     // Not found: a download still resumes the next time the app is opened, from what is on disk.
-    note(@"no app delegate to receive background session events");
+    if (!added) note(@"no app delegate to receive background session events");
 }
 
 // ---- the first-start screen --------------------------------------------------------------------------------------
@@ -532,12 +627,11 @@ bool sign_in() {
     return true;
 }
 
-// The file list: the one a download in progress kept, else Dropbox's. nil when the person gave up.
+// The file list: Dropbox's, always when it can be reached (the owner may have prepared the game again since a download
+// began; the plan then drops what no longer matches). With no network the one a download in progress kept is used, so
+// a resume works offline. nil when the person gave up.
 NSData* load_manifest(bool resuming) {
-    if (resuming) {
-        NSData* kept = [NSData dataWithContentsOfFile:pending_path()];
-        if (kept) return kept;
-    }
+    NSData* kept = resuming ? [NSData dataWithContentsOfFile:pending_path()] : nil;
     for (;;) {
         NSDictionary* tok = take(acnh_appgame_token());
         NSString* problem = nil;
@@ -560,9 +654,11 @@ NSData* load_manifest(bool resuming) {
             }] resume];
             dispatch_semaphore_wait(got, DISPATCH_TIME_FOREVER);
             if (status == 200 && body) return body;
+            if (kept && status == 0) { note(@"no network: resuming with the kept file list"); return kept; }
             if (status == 409 || status == 404)
-                problem = @"The game's files are not in Dropbox yet. Prepare the game on your Mac (it writes the small-.ipa files to "
-                          @"Dropbox/Apps/save-relay/acnh-universal-game/ios/), wait for Dropbox to finish uploading, then try again.";
+                problem = @"The game's files are not in Dropbox yet. On your Mac run tools/package_ios.sh with --small (it "
+                          @"writes an acnh-universal-game folder), copy that folder into Dropbox/Apps/save-relay/, wait for Dropbox to "
+                          @"finish uploading, then try again.";
             else if (status == 401)
                 problem = @"Dropbox refused the sign-in.";
             else
@@ -584,8 +680,10 @@ NSData* load_manifest(bool resuming) {
 // now installed under Application Support/game; false when the person said Not now or the download stopped.
 extern "C" bool nx_appgame_first_start() {
     @autoreleasepool {
+        wait_until_active();  // a background launch has nobody to ask, and the game must not boot there
         NXGameDownloader* d = [NXGameDownloader shared];  // first: events of a download from before reach the delegate
-        const bool resuming = [[NSFileManager defaultManager] fileExistsAtPath:pending_path()] && acnh_appgame_signed_in();
+        // A kept file list means the person already said yes (it is written only after the question below).
+        bool resuming = [[NSFileManager defaultManager] fileExistsAtPath:pending_path()] && acnh_appgame_signed_in();
         for (;;) {
             if (!acnh_appgame_signed_in() && !sign_in()) return false;
             NSData* manifest = load_manifest(resuming);
@@ -596,7 +694,7 @@ extern "C" bool nx_appgame_first_start() {
                 ask(@"Download the game", why(plan), @[ @"OK" ]);
                 return false;
             }
-            if ([plan[@"installed"] boolValue]) return true;
+            if ([plan[@"installed"] boolValue]) { wait_until_active(); return true; }
             exclude_from_backup(partial_path());
             if (!resuming) {
                 double total = [plan[@"total"] doubleValue], remaining = [plan[@"remaining"] doubleValue];
@@ -605,12 +703,18 @@ extern "C" bool nx_appgame_first_start() {
                                     @"background and picks up where it stopped if it is interrupted.", gb(remaining), gb((double)free_bytes())];
                 if (ask(question, detail, @[ @"Download", @"Not now" ]) != 0) return false;
             }
-            [d begin];
+            [manifest writeToFile:pending_path() atomically:YES];  // the yes (or the newer list of a download in progress)
+            resuming = true;  // Try again goes on without asking again
+            dispatch_semaphore_t finished = [d begin];
             show_progress(@"Starting", 0);
-            dispatch_semaphore_wait(d.finished, DISPATCH_TIME_FOREVER);
+            dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
             dispatch_async(dispatch_get_main_queue(), ^{ close_window(); });
-            if (!d.failure) return true;
-            if (ask(@"Download the game", d.failure, @[ @"Try again", @"Not now" ]) != 0) return false;
+            NSString* failure = d.failure;
+            if (!failure) { wait_until_active(); return true; }
+            if (ask(@"Download the game", failure, @[ @"Try again", @"Not now" ]) != 0) {
+                [[NSFileManager defaultManager] removeItemAtPath:pending_path() error:nil];  // the next launch asks again
+                return false;
+            }
         }
     }
 }
