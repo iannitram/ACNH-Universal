@@ -189,6 +189,8 @@ SaveSync save_sync_status() {
 }
 
 bool save_sync_now() { return acnh_relay_android_sync_now(g_root.c_str(), g_cache_dir.c_str()); }
+// The Android start screen has its own save sync setup button (relay.ask is a file there, written by Rust).
+bool save_sync_set_up() { return false; }
 
 // The home screen's pull names the game folder before android_main does (relay_android.cpp): its config.ini holds
 // relay.ask, its logs/ the relay's lines.

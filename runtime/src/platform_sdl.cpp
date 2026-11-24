@@ -183,6 +183,7 @@ float default_render_scale() { return 1.0f; }
 // No save sync inside the game here: the launcher syncs (platform.h, SaveSync).
 SaveSync save_sync_status() { return {}; }
 bool save_sync_now() { return false; }
+bool save_sync_set_up() { return false; }
 
 // ---- input: first SDL gamepad + keyboard (sampled on the main thread) -----------------------------------------
 
