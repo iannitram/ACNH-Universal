@@ -930,6 +930,85 @@ fn cancelling_the_sign_in_offers_retry_and_sign_in_again_and_a_retry_that_gets_4
     });
 }
 
+/// The way out of a broken setup (the iPad's blocked alert offers "Turn off save sync" on an
+/// error and a cancelled sign-in, never offline): save-relay's config and secret go, Not now is
+/// remembered, and the game boots with sync off and with nothing more asked.
+fn turned_off(fx: &Fx) {
+    assert!(fx.creds.get(&account()).unwrap().is_none());
+    assert!(!fx.roots.library.join("save-relay/config/config.json").exists());
+    let ini = fs::read_to_string(fx.roots.data_root.join("config.ini")).unwrap();
+    assert!(ini.contains("relay.ask = 0"), "{ini}");
+    assert!(!fx.pulled.load(Ordering::SeqCst));
+    assert!(fx.booted.load(Ordering::SeqCst));
+    // The next start asks nothing and boots with sync off.
+    run(fx, |game| game.finish());
+    assert!(!fx.pulled.load(Ordering::SeqCst));
+}
+
+#[test]
+fn turn_off_on_an_error_screen_boots_with_sync_off_and_asks_nothing_again() {
+    let fx = Fx::new("turn-off-error");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    fx.connector.broken.store(true, Ordering::SeqCst);
+    run(&fx, |game| {
+        let Shown::Blocked(Blocked::Error(_)) = game.shown() else {
+            panic!("expected the error screen")
+        };
+        assert!(!game.returned());
+        game.reply(Reply::Blocked(BlockedAnswer::TurnOff));
+        game.finish();
+    });
+    turned_off(&fx);
+    assert_eq!(read_main(&fx.saves()), "main v1");
+}
+
+#[test]
+fn turn_off_after_a_cancelled_sign_in_boots_with_sync_off() {
+    let fx = Fx::new("turn-off-cancel");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    *fx.connector.accepted.lock().unwrap() = SECOND.into();
+    run(&fx, |game| {
+        let Shown::SignIn(_) = game.shown() else {
+            panic!("expected the form")
+        };
+        game.reply(Reply::SignIn(SignInAnswer::Cancel));
+        let Shown::Blocked(Blocked::SignInCancelled) = game.shown() else {
+            panic!("expected the cancelled screen")
+        };
+        game.reply(Reply::Blocked(BlockedAnswer::TurnOff));
+        game.finish();
+    });
+    turned_off(&fx);
+}
+
+#[test]
+fn a_blank_ipad_set_up_from_the_prompt_pulls_the_macs_island_without_a_conflict_or_held_screen() {
+    // #76 check 4: another device ("mac") has pushed an island; this iPad has no island, no
+    // user/device_save and no save-relay config yet.
+    let fx = Fx::new("blank-ipad");
+    let (mac, mac_saves) = fx.other("mac");
+    island(&mac_saves, "mac-1");
+    mac.push(&mac_saves, None).unwrap();
+    assert!(!fx.saves().exists());
+    run(&fx, |game| {
+        let Shown::SignIn(form) = game.shown() else {
+            panic!("expected the sign-in form")
+        };
+        assert!(form.allow_not_now);
+        game.reply(submit(PASSWORD));
+        // No conflict screen and no held-island screen: `finish` fails on any other screen.
+        game.finish();
+    });
+    assert!(fx.pulled.load(Ordering::SeqCst));
+    assert_eq!(read_main(&fx.saves()), "main mac-1");
+    assert_eq!(
+        fs::read_to_string(fx.saves().join("Villager0/personal.dat")).unwrap(),
+        "villager mac-1"
+    );
+}
+
 #[test]
 fn a_synced_quit_pushes_the_island_and_clears_the_waiting_mark() {
     let fx = Fx::new("quit");
