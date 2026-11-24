@@ -173,4 +173,13 @@ pass "ZIP64 past 4 GB"
 # ---- the release workflow never names the script ----
 ! grep -q 'package_mac' "$root/.github/workflows/release.yml" || fail "release.yml names package_mac.sh"
 pass "release.yml does not name the script"
+# ---- the Info.plist template: Game Mode category and the local-network prompt text ----
+tpl=$root/assets/mac/Info.plist.in
+sed "s/@VERSION@/1.0/" "$tpl" > "$work/template.plist"
+plutil -lint "$work/template.plist" >/dev/null || fail "assets/mac/Info.plist.in is not a valid plist"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$work/template.plist")" = public.app-category.simulation-games ] \
+  || fail "the Mac Info.plist lacks LSApplicationCategoryType simulation-games (Game Mode)"
+[ -n "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$work/template.plist")" ] \
+  || fail "the Mac Info.plist lacks NSLocalNetworkUsageDescription"
+pass "Info.plist template keys"
 echo "all package_mac tests passed"
