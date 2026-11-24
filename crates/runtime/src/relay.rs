@@ -27,8 +27,8 @@ use save_relay::local::LocalStore;
 use save_relay::platform::AppDirs;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::{Mutex, TryLockError};
 
 #[cfg(target_os = "ios")]
 #[path = "relay_ios.rs"]
@@ -395,6 +395,160 @@ impl Settings for FileSettings {
     }
 }
 
+/// What the Saves page's Sync now came to (issue #260). It only ever uploads, as the background
+/// checkpoint does (`Player::sync_now`); the codes are what the C exports hand the settings
+/// screen (`plat::SaveSync`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncNow {
+    /// A new revision of the island went up.
+    Synced = 1,
+    /// The server already had this island: nothing new to upload.
+    NothingNew = 2,
+    /// The server has a newer island from another device (it moved on, both changed, or another
+    /// device has it open): nothing was overwritten, and the next start shows the choice.
+    Newer = 3,
+    /// The island went up, but another device has opened it since (Play anyway there).
+    TakenOver = 4,
+    /// Save sync is off on this device, or this game started with it off.
+    Off = 5,
+    /// Save sync is set up, but its sign-in is gone or refused: the next start signs in again.
+    SignedOut = 6,
+    /// The server could not be reached: the push waits for the next start.
+    Offline = 7,
+    /// Any other error: the push waits for the next start.
+    Error = 8,
+}
+
+impl SyncNow {
+    /// The code the C exports hand over.
+    pub fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// Whether the Saves page's Sync now can run now; the codes are the C exports' (`plat::SaveSync`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncReady {
+    Ready = 0,
+    /// Save sync is not set up (or its settings do not read).
+    Off = 1,
+    /// This game started with save sync off: it never pushes (the next start pulls first).
+    StartedOff = 2,
+    /// A push (the background one, the quit's, or a Sync now) is running.
+    Busy = 3,
+    /// Set up, but the sign-in is gone: pressing it says so.
+    SignedOut = 4,
+    /// The game has not started yet.
+    NotBooted = 5,
+}
+
+impl SyncReady {
+    /// The code the C exports hand over.
+    pub fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// True while a sync holds the process's one-at-a-time lock (a push, a pull, a mark written back).
+pub fn sync_running() -> bool {
+    matches!(PUSH_LOCK.try_lock(), Err(TryLockError::WouldBlock))
+}
+
+/// One Sync now at a time, run on a worker thread, and its last outcome for the screen to poll.
+pub struct SyncNowSlot {
+    running: AtomicBool,
+    /// -1 while running, 0 before the first, else a `SyncNow` code.
+    outcome: AtomicI32,
+}
+
+impl Default for SyncNowSlot {
+    fn default() -> Self {
+        SyncNowSlot::new()
+    }
+}
+
+impl SyncNowSlot {
+    pub const fn new() -> SyncNowSlot {
+        SyncNowSlot {
+            running: AtomicBool::new(false),
+            outcome: AtomicI32::new(0),
+        }
+    }
+
+    pub fn running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// `work` on a new thread, unless a Sync now is already running. False when it did not start
+    /// (one is running, or the thread could not be made: then the outcome is `Error`).
+    pub fn start(&'static self, work: impl FnOnce() -> SyncNow + Send + 'static) -> bool {
+        if self.running.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        self.outcome.store(-1, Ordering::SeqCst);
+        let spawned = std::thread::Builder::new()
+            .name("relay sync now".into())
+            .spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                    .unwrap_or(SyncNow::Error);
+                self.outcome.store(outcome.code(), Ordering::SeqCst);
+                self.running.store(false, Ordering::SeqCst);
+            });
+        if spawned.is_err() {
+            self.outcome.store(SyncNow::Error.code(), Ordering::SeqCst);
+            self.running.store(false, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// -1 while running, 0 before the first, else the last `SyncNow` code.
+    pub fn poll(&self) -> i32 {
+        self.outcome.load(Ordering::SeqCst)
+    }
+}
+
+/// The status C exports' out-parameters (`acnh_relay_android_sync_status`, `acnh_relay_sync_status`).
+pub struct StatusOut {
+    pub ready: *mut std::ffi::c_int,
+    pub outcome: *mut std::ffi::c_int,
+    pub last: *mut u64,
+    /// `cap` bytes for the service's name, NUL-terminated (cut short when it does not fit).
+    pub service: *mut std::ffi::c_char,
+    pub cap: usize,
+}
+
+impl StatusOut {
+    /// Each one written where its pointer is not null.
+    ///
+    /// # Safety
+    /// Each pointer is null or valid for a write; `service` holds `cap` bytes.
+    pub unsafe fn write(&self, ready: i32, outcome: i32, last: u64, service: &str) {
+        if !self.ready.is_null() {
+            *self.ready = ready;
+        }
+        if !self.outcome.is_null() {
+            *self.outcome = outcome;
+        }
+        if !self.last.is_null() {
+            *self.last = last;
+        }
+        if !self.service.is_null() && self.cap > 0 {
+            let bytes = service.as_bytes();
+            let n = bytes.len().min(self.cap - 1);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.service.cast::<u8>(), n);
+            *self.service.add(n) = 0;
+        }
+    }
+}
+
+/// Now, in Unix seconds.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// Everything the loop needs, borrowed.
 pub struct Player<'a> {
     pub roots: Roots,
@@ -411,6 +565,9 @@ pub struct Player<'a> {
     pub pulled: &'a AtomicBool,
     /// Where `relay.ask` lives.
     pub settings: &'a dyn Settings,
+    /// When the island last synced in this process (Unix seconds, 0: not yet): the pull that let
+    /// the game start, then every push that went or found nothing new. The Saves page shows it.
+    pub synced: &'a AtomicU64,
     /// One line per event, never holding a password.
     pub log: Box<dyn Fn(&str) + std::marker::Sync + 'a>,
 }
@@ -460,6 +617,9 @@ impl Player<'_> {
                 }
             }
         };
+        if pulled {
+            self.synced.store(unix_now(), Ordering::SeqCst);
+        }
         self.pulled.store(pulled, Ordering::SeqCst);
         self.booted.store(true, Ordering::SeqCst);
     }
@@ -530,27 +690,72 @@ impl Player<'_> {
         self.push_island(true);
     }
 
-    fn push_island(&self, checkpoint: bool) {
+    /// The Saves page's Sync now (issue #260): the background checkpoint's push, on demand, while
+    /// the game runs. It only uploads (never a pull mid-game), this device stays marked as the
+    /// one playing, and a newer island on the server is left for the next start to settle.
+    pub fn sync_now(&self) -> SyncNow {
+        self.log("Sync now");
+        self.push_island(true)
+    }
+
+    /// Whether Sync now can run: the game started after a pull, save sync is still set up, and
+    /// no push is running (`busy`: the caller's Sync now, or `sync_running`). Reads the config
+    /// and the credential store only, no network.
+    pub fn sync_now_ready(&self, busy: bool) -> SyncReady {
+        if !self.booted.load(Ordering::SeqCst) {
+            return SyncReady::NotBooted;
+        }
+        if !self.pulled.load(Ordering::SeqCst) {
+            return SyncReady::StartedOff;
+        }
+        if busy {
+            return SyncReady::Busy;
+        }
+        let config = match LocalStore::new(self.roots.dirs()).load_config() {
+            Ok(Some(config)) => config,
+            Ok(None) | Err(_) => return SyncReady::Off,
+        };
+        let signed_in = save_relay::service::credential_accounts(&config)
+            .ok()
+            .and_then(|accounts| accounts.first().cloned())
+            .is_some_and(|account| matches!(self.creds.get(&account), Ok(Some(_))));
+        if signed_in {
+            SyncReady::Ready
+        } else {
+            SyncReady::SignedOut
+        }
+    }
+
+    /// The service save sync uses here, as a person reads it ("Dropbox", "Nextcloud"), when its
+    /// config reads.
+    pub fn service_label(&self) -> Option<&'static str> {
+        let (server, _) = self.sync_config()?;
+        save_relay::service::Service::from_server(&server)
+            .ok()
+            .map(|service| service.label())
+    }
+
+    fn push_island(&self, checkpoint: bool) -> SyncNow {
         if !self.booted.load(Ordering::SeqCst) {
             self.log("no push yet: the game has not booted");
-            return;
+            return SyncNow::Off;
         }
         if !self.pulled.load(Ordering::SeqCst) {
             // Sync was off when this game started (and may have been set up since): its island
             // was never pulled, so it is not pushed either; the next start pulls first.
             self.log("no push: this game started with save sync off");
-            return;
+            return SyncNow::Off;
         }
         let _one_at_a_time = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let relay = match self.opened() {
             Ok(Opened::Sync(relay)) => relay,
-            Ok(Opened::Off) => return,
+            Ok(Opened::Off) => return SyncNow::Off,
             // Set up, but the password cannot be read (the credential store is out of reach, or
             // the item is gone): the push waits for the next start, which sends it first.
             Ok(Opened::NeedsSignIn { .. }) => {
                 self.set_waiting(true);
                 self.log("the push is waiting: the app password cannot be read");
-                return;
+                return SyncNow::SignedOut;
             }
             Err(error) => {
                 let message = self.say(&error, None);
@@ -558,13 +763,22 @@ impl Player<'_> {
                 self.log(&format!(
                     "the push is waiting, save sync could not be opened: {message}"
                 ));
-                return;
+                return SyncNow::Error;
             }
         };
         let dir = saves::save_dir(&self.roots.data_root);
+        // What a push that went comes to: a new revision, nothing new, or (a checkpoint only) an
+        // island that moved on or was taken over meanwhile.
+        let mut went = SyncNow::Synced;
         let result = if checkpoint {
             relay.checkpoint(&dir).map(|done| {
                 self.remarked(&done.remark);
+                went = match done.remark {
+                    acnh_core::relay::Remark::MovedOn { .. } => SyncNow::Newer,
+                    acnh_core::relay::Remark::Elsewhere { .. } => SyncNow::TakenOver,
+                    _ if done.pushed => SyncNow::Synced,
+                    _ => SyncNow::NothingNew,
+                };
                 done.sync
             })
         } else {
@@ -572,19 +786,34 @@ impl Player<'_> {
             relay.push(&dir, None)
         };
         match decide(&result) {
-            Action::Play | Action::PlaySyncOff => {
+            Action::Play => {
                 self.set_waiting(false);
+                if went != SyncNow::Newer {
+                    self.synced.store(unix_now(), Ordering::SeqCst);
+                }
                 self.log(if checkpoint {
                     "pushed the island (the game goes on)"
                 } else {
                     "pushed the island"
                 });
+                went
+            }
+            Action::PlaySyncOff => {
+                self.set_waiting(false);
+                self.log("no push: save sync is off");
+                SyncNow::Off
             }
             other => {
                 self.set_waiting(true);
                 self.log(&format!(
                     "the push is waiting for the next start: {other:?}"
                 ));
+                match other {
+                    Action::PickConflict { .. } | Action::AskHeld { .. } => SyncNow::Newer,
+                    Action::RefuseOffline => SyncNow::Offline,
+                    Action::SignInAgain => SyncNow::SignedOut,
+                    _ => SyncNow::Error,
+                }
             }
         }
     }

@@ -180,6 +180,9 @@ void window_size(uint32_t& w, uint32_t& h) {
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 float default_render_scale() { return 1.0f; }
+// No save sync inside the game here: the launcher syncs (platform.h, SaveSync).
+SaveSync save_sync_status() { return {}; }
+bool save_sync_now() { return false; }
 
 // ---- input: first SDL gamepad + keyboard (sampled on the main thread) -----------------------------------------
 

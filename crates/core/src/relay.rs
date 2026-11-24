@@ -137,6 +137,9 @@ pub enum Remark {
 pub struct Checkpointed {
     pub sync: Sync,
     pub remark: Remark,
+    /// True when this push uploaded a new revision; false when there was nothing new to send
+    /// (or it did not sync).
+    pub pushed: bool,
 }
 
 impl SaveRelay {
@@ -166,6 +169,7 @@ impl SaveRelay {
             report.sync.action,
             Action::Noop | Action::Adopted | Action::Pulled | Action::Pushed
         );
+        let pushed = report.sync.action == Action::Pushed;
         let remark = if synced {
             if let Some(session) = &session {
                 // Best effort: a session that cannot be saved costs the card its play time only.
@@ -183,7 +187,11 @@ impl SaveRelay {
             Some((since, revision)) => self.write_mark(&id, since, revision),
             None => Remark::Untouched,
         };
-        Ok(Checkpointed { sync, remark })
+        Ok(Checkpointed {
+            sync,
+            remark,
+            pushed,
+        })
     }
 
     /// This device's mark written back, as `checkpoint` does: for a later retry after

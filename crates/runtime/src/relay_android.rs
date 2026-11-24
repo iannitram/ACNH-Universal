@@ -14,7 +14,8 @@
 
 use super::{
     android_ask_off_file, android_credentials, android_ready, forget_android, sign_out_android,
-    BridgePrompt, CallbackTransport, Connector, FileStore, Player, Roots, Settings,
+    BridgePrompt, CallbackTransport, Connector, FileStore, Player, Roots, Settings, SyncNowSlot,
+    SyncReady,
 };
 use acnh_core::relay::SaveRelay;
 use acnh_core::Result;
@@ -23,7 +24,7 @@ use save_relay::local::LocalStore;
 use save_relay::platform::AppDirs;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 extern "C" {
@@ -162,6 +163,12 @@ static BOOTED: AtomicBool = AtomicBool::new(false);
 /// True when that start pulled (sync on); a game started with sync off never pushes.
 static PULLED: AtomicBool = AtomicBool::new(false);
 
+/// When the island last synced in this process (Unix seconds; `Player::synced`).
+static SYNCED: AtomicU64 = AtomicU64::new(0);
+
+/// The Saves page's Sync now: one at a time, on a worker (`acnh_relay_android_sync_now`).
+static SYNC_NOW: SyncNowSlot = SyncNowSlot::new();
+
 fn path(raw: *const c_char) -> Option<PathBuf> {
     text(raw).filter(|t| !t.is_empty()).map(PathBuf::from)
 }
@@ -191,6 +198,7 @@ fn with_player(data_root: &Path, files: &Path, work: impl FnOnce(&Player<'_>)) {
             booted: &BOOTED,
             pulled: &PULLED,
             settings: &PlayerSettings { files },
+            synced: &SYNCED,
             log: Box::new(log),
         };
         work(&player);
@@ -334,6 +342,64 @@ pub unsafe extern "C" fn acnh_relay_android_resume(data_root: *const c_char, fil
     let _ = std::thread::Builder::new()
         .name("relay mark".into())
         .spawn(move || with_player(&root, &files, |player| player.resume()));
+}
+
+/// The Saves page's Sync now (issue #260), from the settings screen: the background push
+/// (`Player::sync_now`) on a worker thread; returns at once. False when it did not start (one is
+/// running, or no folder was given). The outcome comes from `acnh_relay_android_sync_status`.
+///
+/// # Safety
+/// As `acnh_relay_android_before_game`.
+#[no_mangle]
+pub unsafe extern "C" fn acnh_relay_android_sync_now(
+    data_root: *const c_char,
+    files: *const c_char,
+) -> bool {
+    let (Some(root), Some(files)) = (path(data_root), path(files)) else {
+        return false;
+    };
+    SYNC_NOW.start(move || {
+        let mut outcome = super::SyncNow::Error;
+        with_player(&root, &files, |player| outcome = player.sync_now());
+        outcome
+    })
+}
+
+/// What the Saves page shows of save sync, without the network: `*ready` a `SyncReady` code,
+/// `*outcome` the last Sync now's (-1 running, 0 none yet), `*last` when the island last synced
+/// (Unix seconds, 0 not yet), and the service's name ("Dropbox") in `service` (`cap` bytes,
+/// NUL-terminated; empty when unknown).
+///
+/// # Safety
+/// The paths are NUL-terminated; the out pointers are valid (or null); `service` holds `cap` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn acnh_relay_android_sync_status(
+    data_root: *const c_char,
+    files: *const c_char,
+    ready: *mut c_int,
+    outcome: *mut c_int,
+    last: *mut u64,
+    service: *mut c_char,
+    cap: usize,
+) {
+    let mut code = SyncReady::Off.code();
+    let mut label = "";
+    if let (Some(root), Some(files)) = (path(data_root), path(files)) {
+        with_player(&root, &files, |player| {
+            code = player
+                .sync_now_ready(SYNC_NOW.running() || super::sync_running())
+                .code();
+            label = player.service_label().unwrap_or("");
+        });
+    }
+    let out = super::StatusOut {
+        ready,
+        outcome,
+        last,
+        service,
+        cap,
+    };
+    out.write(code, SYNC_NOW.poll(), SYNCED.load(Ordering::SeqCst), label);
 }
 
 /// "Turn off save sync" on the home screen: save-relay's config and every secret it filed here

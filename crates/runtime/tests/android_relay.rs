@@ -16,7 +16,8 @@ use relay::{
     android_credentials, android_ready, android_vars, describe_card, for_android, forget_android,
     header_lines, parse_wire, sign_in_again_message, sign_out_android, BridgePrompt,
     CallbackTransport, Connector, FileSettings, FileStore, Player, Prompt, Roots, Settings,
-    SignInAnswer, SignInForm, ANDROID_DEVICE, DOWNLOAD_ACCOUNT,
+    SignInAnswer, SignInForm, StatusOut, SyncNow, SyncNowSlot, SyncReady, ANDROID_DEVICE,
+    DOWNLOAD_ACCOUNT,
 };
 use save_relay::creds::{CredentialStore, Secret};
 use save_relay::http::{Request, Transport};
@@ -27,7 +28,7 @@ use save_relay::service::{token_account, Service};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -538,6 +539,7 @@ struct Fx {
     connector: FakeDropbox,
     booted: AtomicBool,
     pulled: AtomicBool,
+    synced: AtomicU64,
     settings: FileSettings,
     log: Mutex<Vec<String>>,
 }
@@ -561,6 +563,7 @@ impl Fx {
             },
             booted: AtomicBool::new(false),
             pulled: AtomicBool::new(false),
+            synced: AtomicU64::new(0),
             settings: FileSettings(game.join("config.ini")),
             log: Mutex::new(Vec::new()),
             root,
@@ -576,6 +579,7 @@ impl Fx {
             booted: &self.booted,
             pulled: &self.pulled,
             settings: &self.settings,
+            synced: &self.synced,
             log: Box::new(|line| self.log.lock().unwrap().push(line.to_string())),
         }
     }
@@ -1343,4 +1347,270 @@ fn upgraded_install_not_now_remembers_opt_out_and_skips_next_start() {
     let player2 = fx.player(&prompt2);
     player2.before_game();
     assert!(none.kinds().is_empty());
+}
+
+// ---- the Saves page's Sync now (issue #260): the checkpoint's push, on demand ----------------
+
+/// A booted game, signed in and pulled, its island "phone".
+fn playing(name: &str) -> Fx {
+    let fx = Fx::new(name);
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    island(&fx.saves(), "phone");
+    let none = FakeJava::new(&[]);
+    fx.player(&bridge(&none)).before_game();
+    assert!(fx.pulled.load(Ordering::SeqCst));
+    fx
+}
+
+#[test]
+fn sync_now_uploads_keeps_this_device_playing_and_says_synced_then_nothing_new() {
+    let fx = playing("sync-now");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    let pulled_at = fx.synced.load(Ordering::SeqCst);
+    assert!(pulled_at > 0, "the start's pull is the first sync");
+    let started = fx.session_start().unwrap();
+    assert_eq!(player.sync_now_ready(false), SyncReady::Ready);
+    assert_eq!(player.service_label(), Some("Dropbox"));
+
+    island(&fx.saves(), "phone, played");
+    assert_eq!(player.sync_now(), SyncNow::Synced);
+    assert!(fx.synced.load(Ordering::SeqCst) >= pulled_at);
+    // As the background push: still marked as playing, the session goes on, nothing waits.
+    assert_eq!(fx.mark().unwrap().device, "android");
+    assert_eq!(fx.session_start(), Some(started));
+    assert!(!fx.roots.dirs().data.join("push-waiting").exists());
+    // Nothing changed since: nothing new to upload, the mark stays.
+    assert_eq!(player.sync_now(), SyncNow::NothingNew);
+    assert_eq!(fx.mark().unwrap().device, "android");
+    // The island went up: another device sees it held, then gets it with Play anyway.
+    let (switch, dir) = fx.device("switch");
+    assert!(matches!(
+        switch.pull(&dir, None).unwrap(),
+        acnh_core::launch::Sync::Held { .. }
+    ));
+    switch.pull_anyway(&dir, None).unwrap();
+    assert_eq!(read_main(&dir), "main phone, played");
+    assert!(none.kinds().is_empty(), "Sync now shows no dialog");
+    fx.assert_no_leaks();
+}
+
+#[test]
+fn sync_now_against_a_newer_island_overwrites_nothing_never_pulls_and_leaves_the_choice_for_the_next_start(
+) {
+    let fx = playing("sync-now-newer");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    // Another device pushes a newer island while the phone plays on: both changed.
+    let (switch, dir) = fx.device("switch");
+    switch.pull_anyway(&dir, None).unwrap();
+    island(&dir, "switch, newer");
+    switch.push(&dir, None).unwrap();
+    island(&fx.saves(), "phone, also changed");
+    let synced = fx.synced.load(Ordering::SeqCst);
+    assert_eq!(player.sync_now(), SyncNow::Newer);
+    // Nothing pulled mid-game, nothing overwritten on the server, the conflict waits.
+    assert_eq!(read_main(&fx.saves()), "main phone, also changed");
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    assert_eq!(fx.synced.load(Ordering::SeqCst), synced, "not synced");
+    let (pc, pdir) = fx.device("pc");
+    pc.pull_anyway(&pdir, None).unwrap();
+    assert_eq!(read_main(&pdir), "main switch, newer");
+    assert!(none.kinds().is_empty());
+}
+
+#[test]
+fn sync_now_after_the_island_moved_on_claims_no_mark_and_says_newer() {
+    let fx = playing("sync-now-moved-on");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    // The Switch takes over, pushes and quits; the phone's island did not change.
+    let (switch, dir) = fx.device("switch");
+    switch.pull_anyway(&dir, None).unwrap();
+    island(&dir, "switch, newer");
+    switch.push(&dir, None).unwrap();
+    assert_eq!(player.sync_now(), SyncNow::Newer);
+    assert!(fx.mark().is_none(), "no mark over the newer island");
+    assert_eq!(read_main(&fx.saves()), "main phone", "nothing pulled");
+}
+
+#[test]
+fn sync_now_when_another_device_took_the_island_over_leaves_its_mark_and_says_so() {
+    let fx = playing("sync-now-taken");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    let (switch, dir) = fx.device("switch");
+    switch.pull_anyway(&dir, None).unwrap();
+    assert_eq!(player.sync_now(), SyncNow::TakenOver);
+    assert_eq!(fx.mark().unwrap().device, "switch");
+}
+
+#[test]
+fn sync_now_is_off_for_a_game_started_with_sync_off_and_after_sync_is_turned_off() {
+    // Started with sync off, set up while it runs: never a push.
+    let fx = Fx::new("sync-now-off");
+    island(&fx.saves(), "phone");
+    let java = FakeJava::new(&[Some("cancel")]);
+    let prompt = bridge(&java);
+    let player = fx.player(&prompt);
+    assert_eq!(player.sync_now_ready(false), SyncReady::NotBooted);
+    player.before_game();
+    assert_eq!(fx.synced.load(Ordering::SeqCst), 0);
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    assert_eq!(player.sync_now_ready(false), SyncReady::StartedOff);
+    assert_eq!(player.sync_now(), SyncNow::Off);
+    assert!(fx.mark().is_none());
+
+    // Pulled, then sync turned off on the home screen while the game runs.
+    let fx = playing("sync-now-turned-off");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    forget_android(&fx.roots.dirs(), &fx.creds).unwrap();
+    assert_eq!(player.sync_now_ready(false), SyncReady::Off);
+    island(&fx.saves(), "phone, played");
+    assert_eq!(player.sync_now(), SyncNow::Off);
+    assert_eq!(player.service_label(), None);
+}
+
+#[test]
+fn sync_now_without_the_sign_in_says_signed_out_and_the_push_waits() {
+    let fx = playing("sync-now-signed-out");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    // Dropbox no longer takes the token: refused.
+    *fx.connector.accepted.lock().unwrap() = SECOND.into();
+    island(&fx.saves(), "phone, played");
+    assert_eq!(player.sync_now(), SyncNow::SignedOut);
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    // The token is gone from the credential file.
+    fx.creds
+        .delete(&token_account(Service::Dropbox, EMAIL).unwrap())
+        .unwrap();
+    assert_eq!(player.sync_now_ready(false), SyncReady::SignedOut);
+    assert_eq!(player.sync_now(), SyncNow::SignedOut);
+    assert!(none.kinds().is_empty(), "no sign-in mid-game");
+    fx.assert_no_leaks();
+}
+
+#[test]
+fn sync_now_offline_or_with_broken_settings_waits_for_the_next_start() {
+    let fx = playing("sync-now-offline");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    fx.connector.offline.store(true, Ordering::SeqCst);
+    island(&fx.saves(), "phone, played");
+    assert_eq!(player.sync_now(), SyncNow::Offline);
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    fx.connector.offline.store(false, Ordering::SeqCst);
+    assert_eq!(player.sync_now(), SyncNow::Synced);
+    assert!(!fx.roots.dirs().data.join("push-waiting").exists());
+    // Settings that no longer read: an error, the push waits, the button says sync is off.
+    fs::write(fx.roots.dirs().config.join("config.json"), b"{").unwrap();
+    assert_eq!(player.sync_now(), SyncNow::Error);
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    assert_eq!(player.sync_now_ready(false), SyncReady::Off);
+}
+
+#[test]
+fn sync_now_runs_one_at_a_time_on_a_worker_and_reports_its_outcome() {
+    static SLOT: SyncNowSlot = SyncNowSlot::new();
+    assert_eq!(SLOT.poll(), 0, "nothing yet");
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let caller = std::thread::current().id();
+    let (seen_tx, seen) = std::sync::mpsc::channel();
+    assert!(SLOT.start(move || {
+        seen_tx.send(std::thread::current().id()).unwrap();
+        wait.recv().unwrap();
+        SyncNow::Synced
+    }));
+    assert_ne!(seen.recv().unwrap(), caller, "not on the caller's thread");
+    assert!(SLOT.running());
+    assert_eq!(SLOT.poll(), -1, "busy while it runs");
+    assert!(!SLOT.start(|| SyncNow::Error), "one at a time");
+    // The screen's busy state: the button is disabled while it runs.
+    let fx = playing("sync-now-busy");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    assert_eq!(
+        fx.player(&prompt).sync_now_ready(SLOT.running()),
+        SyncReady::Busy
+    );
+    go.send(()).unwrap();
+    let start = std::time::Instant::now();
+    while SLOT.running() {
+        assert!(start.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(SLOT.poll(), SyncNow::Synced.code());
+    assert_eq!(
+        fx.player(&prompt).sync_now_ready(SLOT.running()),
+        SyncReady::Ready
+    );
+    // A panic in the work is an error, never a stuck busy state.
+    assert!(SLOT.start(|| panic!("a bug")));
+    while SLOT.running() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(SLOT.poll(), SyncNow::Error.code());
+}
+
+#[test]
+fn the_status_export_writes_what_it_is_given_and_cuts_the_name_to_fit() {
+    let (mut ready, mut outcome, mut last) = (9, 9, 9u64);
+    let mut name = [0x55u8; 5];
+    let out = StatusOut {
+        ready: &mut ready,
+        outcome: &mut outcome,
+        last: &mut last,
+        service: name.as_mut_ptr().cast(),
+        cap: name.len(),
+    };
+    // SAFETY: every pointer is to a local that lives through the call.
+    unsafe { out.write(SyncReady::Busy.code(), -1, 1_700_000_000, "Dropbox") };
+    assert_eq!((ready, outcome, last), (3, -1, 1_700_000_000));
+    assert_eq!(&name, b"Drop\0");
+    // Null pointers are skipped.
+    let none = StatusOut {
+        ready: std::ptr::null_mut(),
+        outcome: std::ptr::null_mut(),
+        last: std::ptr::null_mut(),
+        service: std::ptr::null_mut(),
+        cap: 0,
+    };
+    // SAFETY: nothing is written through a null pointer.
+    unsafe { none.write(0, 0, 0, "Dropbox") };
+    // The codes the C++ side reads (platform.h, plat::SaveSync).
+    assert_eq!(
+        [
+            SyncNow::Synced,
+            SyncNow::NothingNew,
+            SyncNow::Newer,
+            SyncNow::TakenOver,
+            SyncNow::Off,
+            SyncNow::SignedOut,
+            SyncNow::Offline,
+            SyncNow::Error
+        ]
+        .map(SyncNow::code),
+        [1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    assert_eq!(
+        [
+            SyncReady::Ready,
+            SyncReady::Off,
+            SyncReady::StartedOff,
+            SyncReady::Busy,
+            SyncReady::SignedOut,
+            SyncReady::NotBooted
+        ]
+        .map(SyncReady::code),
+        [0, 1, 2, 3, 4, 5]
+    );
 }
