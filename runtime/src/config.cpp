@@ -291,7 +291,8 @@ void config_apply() {
     log_environment();  // before set_env_default adds the settings' own
     // Fan mods are installed by prepare only after the player opts in.
     const bool ptbr_enabled = on_off(config_get("mods.ptbr", "0")) == "1";
-    const bool speedfix_enabled = on_off(config_get("mods.speedfix", "0")) == "1";
+    const bool speedfix_enabled =
+        on_off(config_get("mods.speedfix", "0")) == "1" || config_get("video.frame_rate", "") == "60";
     if (speedfix_enabled) mods_fetch();
     // Game language "auto": from the system, unless a language file or NX_LANGUAGE says otherwise. Only applied:
     // the entry keeps "auto", so the choice stays automatic.

@@ -1082,7 +1082,13 @@ void page_video() {
         ImGui::Dummy(ImVec2(0, 4 * g_scale));
     }
     row("video.mode", nullptr, [&](float w) {
-        combo("video.mode", "docked", {{"docked", console("video.render.docked")}, {"handheld", tr("video.render.handheld")}}, w);
+#if defined(__ANDROID__)
+        const char* mode_default = "handheld";
+#else
+        const char* mode_default = "docked";
+#endif
+        combo("video.mode", mode_default,
+              {{"docked", console("video.render.docked")}, {"handheld", tr("video.render.handheld")}}, w);
     });
 
     section("video.section.performance");
@@ -1094,8 +1100,11 @@ void page_video() {
     });
     row("video.framerate", "video.framerate.desc", [&](float w) {
         // No choice yet: 30, as config.cpp applies.
-        combo("video.frame_rate", "30",
-              {{"30", console("video.framerate.30")}, {"60", tr("video.framerate.60")}}, w);
+        choice("video.frame_rate", config_get("video.frame_rate", "30"),
+               {{"30", console("video.framerate.30")}, {"60", tr("video.framerate.60")}}, w, [&](const std::string& v) {
+                   store("video.frame_rate", v);
+                   if (v == "60") store("mods.speedfix", "1");
+               });
     });
     // Anti-aliasing method stays essential; its quality knobs live under Advanced.
     const std::string temporal = config_get("video.temporal", "off"), aa = config_get("video.antialiasing", "off");
