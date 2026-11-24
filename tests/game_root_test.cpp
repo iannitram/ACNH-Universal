@@ -9,6 +9,7 @@
 #include "game_root.h"
 
 namespace fs = std::filesystem;
+using nx::plat::choose_android_game_root;
 using nx::plat::choose_game_root;
 
 namespace {
@@ -72,6 +73,23 @@ int main() {
     touch(fs::path(package) / "analysis" / "main.bin");
     EXPECT(game_root(nullptr, false, base, data), data);
     EXPECT(game_root("", false, base, data), data);
+
+    // Android branch (#192): with NX_GAME_ROOT unset, <files>/game/analysis/main.bin gives <files>/game;
+    // without it, it gives "" (never a folder outside the app and never the data root).
+    const fs::path android_files = tmp / "android-files";
+    const fs::path android_game = android_files / "game";
+    const std::string android_data = (android_files / "root").string();
+    EXPECT(choose_android_game_root(nullptr, android_files.string(), is_file), "");
+    touch(android_game / "analysis" / "main.bin");
+    EXPECT(choose_android_game_root(nullptr, android_files.string(), is_file), android_game.string());
+    EXPECT(choose_android_game_root("", android_files.string() + "/", is_file), android_game.string());
+    EXPECT(choose_android_game_root((tmp.string() + "/env-game").c_str(), android_files.string(), is_file),
+           tmp.string() + "/env-game");
+    fs::remove(android_game / "analysis" / "main.bin", ec);
+    EXPECT(choose_android_game_root(nullptr, android_files.string(), is_file), "");
+    // Even if data_root exists, Android never falls back to it.
+    touch(fs::path(android_data) / "analysis" / "main.bin");
+    EXPECT(choose_android_game_root(nullptr, android_files.string(), is_file), "");
 
     fs::remove_all(tmp, ec);
     std::printf("game_root_test: %s\n", g_failed ? "FAILED" : "all passed");

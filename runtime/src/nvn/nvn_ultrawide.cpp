@@ -1,4 +1,5 @@
 #include "nvn_ultrawide.h"
+#include "nvn_aspect.h"
 
 #include <algorithm>
 #include <atomic>
@@ -100,17 +101,8 @@ Scale wanted(uint64_t present) {
     plat::screen_size(ww, wh);  // the display's own rows (Android's window size is the render-scaled one); 0: no cap
     g_display_rows.store(ww && wh ? std::min(ww, wh) : 0, std::memory_order_relaxed);
     window_px(present, ww, wh);
-    const double window = double(ww) / double(wh);
     std::string a = setting("NX_ULTRAWIDE", "video.aspect", plat::kDefaultAspect);
-    double aspect = k169, n = 0, d = 0;
-    if (a == "auto" || a == "window" || a == "1")
-        aspect = window;
-    else if ((std::sscanf(a.c_str(), "%lf:%lf", &n, &d) == 2 || std::sscanf(a.c_str(), "%lfx%lf", &n, &d) == 2) && n > 0 && d > 0)
-        aspect = n / d;
-    // 0.45: a Pixel Fold's inner screen held upright (1840x2208, 5:6, k 0.469) fills the screen; 0.5 left bars.
-    double k = std::clamp(aspect / k169, 0.45, 3.0);
-    if (std::fabs(k - 1.0) < 0.02) k = 1.0;
-    k = std::round(k * 256.0) / 256.0;  // a few distinct values: each makes its own UI pipelines
+    const double k = double(parse_aspect_factor(a.c_str(), ww, wh));
     const double native = config_is_handheld() ? 720.0 : 1080.0;
     std::string r = setting("NX_RENDER_HEIGHT", "video.resolution", plat::kDefaultResolution);
     double s = 1.0;
@@ -356,7 +348,8 @@ void uw_resize(Texture& t) {
         std::lock_guard lk(g_scale_lock);
         c = g_current, gen = g_gen.load();
     }
-    double sx = double(c.s) * std::max(1.0, double(c.k)), sy = double(c.s) * std::max(1.0, 1.0 / double(c.k));
+    const AspectScale sc = compute_target_scale(c.s, c.k);
+    double sx = sc.sx, sy = sc.sy;
     // Never more rows than the screen has: in handheld mode the scale that takes the 720-row targets to the asked
     // rows (x1.25 for 900) also took the game's 1080-row output to 1350 rows on a 1080-row phone, and the composite,
     // the frame generation and the present ran at 3000x1350 to be scaled down again. NX_UW_CAP=0: as before.
@@ -482,7 +475,6 @@ bool is_projection(uint64_t object) {
 // One projection for the wanted k (under g_cam_lock). `dirty`: mark it for sead to make the matrix again.
 void rewrite(uint64_t object, Camera& c, float k, bool dirty) {
     if (c.skip) return;
-    const uint32_t wide_bits = bits_of(float(16.0 / 9.0) * k);
     auto* w = reinterpret_cast<volatile uint32_t*>(object);
     uint32_t a = w[0xB0 / 4], f = w[0xA0 / 4];
     float cur_aspect = f32_of(a);
@@ -490,7 +482,6 @@ void rewrite(uint64_t object, Camera& c, float k, bool dirty) {
     if (is_169) c.fov_base = f;            // the game's 16:9 view (new, or set again)
     else if (!c.aspect_set || a != c.aspect_set) return;  // an aspect of the game's own: not ours to change
     else if (f != c.fov_set) c.fov_base = f;      // the game changed the field of view
-    uint32_t fov = c.fov_base;
     // A taller screen (4:3, 16:10) keeps the game's vertical field of view and sees less at the sides (Hor-): with
     // the field made taller (Vert+) the corners showed ground the game had culled, blue blocks at the edges.
     // NX_UW_VERT_PLUS=1: the taller field as before.
@@ -499,7 +490,9 @@ void rewrite(uint64_t object, Camera& c, float k, bool dirty) {
     // NX_UW_VERT_PLUS=1: Vert+ for all.
     static const bool vert_plus = std::getenv("NX_UW_VERT_PLUS") && std::getenv("NX_UW_VERT_PLUS")[0] == '1';
     const bool world = f32_of(c.fov_base) < 0.5f;
-    if (k < 1.0f && (vert_plus || !world)) fov = bits_of(2.0f * std::atan(std::tan(f32_of(c.fov_base) * 0.5f) / k));
+    const PerspectiveParams pp = compute_perspective(f32_of(c.fov_base), k, vert_plus || !world);
+    const uint32_t wide_bits = bits_of(pp.aspect);
+    const uint32_t fov = bits_of(pp.fov_y);
     if (a != wide_bits || f != fov) {  // with the half-angle terms the matrix is made from
         float half = f32_of(fov) * 0.5f;
         w[0xA0 / 4] = fov;
@@ -606,10 +599,8 @@ void rewrite_ortho(uint64_t object, Ortho& o, float k, bool dirty) {
         std::memcpy(o.set, cur, sizeof cur);
         return;
     }
-    const float kx = std::max(1.0f, k), ky = std::max(1.0f, 1.0f / k);
-    const float cy = (o.base[0] + o.base[1]) * 0.5f, cx = (o.base[2] + o.base[3]) * 0.5f;
-    const float v[4] = {cy + (o.base[0] - cy) * ky, cy + (o.base[1] - cy) * ky, cx + (o.base[2] - cx) * kx,
-                        cx + (o.base[3] - cx) * kx};
+    const OrthoBounds ob = compute_ortho_bounds({o.base[0], o.base[1], o.base[2], o.base[3]}, k);
+    const float v[4] = {ob.top, ob.bottom, ob.left, ob.right};
     bool changed = false;
     for (int i = 0; i < 4; i++) {
         const uint32_t b = bits_of(v[i]);
@@ -835,7 +826,8 @@ void pane_calculate(CPU& c) {
     // anchored to its bottom edge out of place (the dialogue's "next" arrow under its box at 16:10), while the box,
     // placed from the middle, stayed. Backgrounds still cover the whole target (below). NX_UW_TALL_EDGES=1: taller.
     static const bool tall_edges = std::getenv("NX_UW_TALL_EDGES") && std::getenv("NX_UW_TALL_EDGES")[0] == '1';
-    const float kx = std::max(1.0f, k), ky = tall_edges ? std::max(1.0f, 1.0f / k) : 1.0f;
+    const SafeEdgeLayout se = compute_safe_edge_layout(1920.0f, 1080.0f, k, tall_edges);
+    const float kx = se.root_scale_x, ky = se.root_scale_y;
     if (root) {
         // The size the game gave it (followed), widened to the target when it is a screen layout.
         follow(pane, 0x50, fix.set, fix.base, nullptr);
@@ -1003,11 +995,7 @@ NX_HOOK(0x27d4c0, pane_calculate);
 PerThread<UwTarget> g_uw;
 
 void uw_span(int32_t& x, int32_t& w, uint32_t extent, float f) {
-    int64_t x0 = std::llround(double(x) * f);
-    int64_t ww = std::llround(double(std::max(0, w)) * f);
-    if (std::llabs(int64_t(extent) - ww) <= 2 && x == 0) ww = extent;  // the whole target
-    if (x0 + ww > int64_t(extent)) ww = std::max<int64_t>(0, int64_t(extent) - x0);
-    x = int32_t(x0), w = int32_t(ww);
+    scale_viewport_span(x, w, extent, f);
 }
 
 namespace {

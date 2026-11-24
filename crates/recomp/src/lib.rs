@@ -1,19 +1,19 @@
 //! acnh-recomp: the static recompiler in Rust (SPEC.md M13; docs/adr/0002-runtime-strangler.md).
-//! It replaces upstream's `recomp/` (Python: `python3 -m recomp`), which turns `exefs/main`
-//! (and `sdk`, `subsdk0`) into the C++ the game library is built from. Ported pass by pass;
-//! the Rust output must match the Python output byte for byte on the same input (hand-written
-//! AArch64, never game code), and `tests/difftest.py` stays the oracle. Prepare runs
-//! upstream's driver (`prepare::Step::Script`) until the full emitter and Rust driver land.
+//! It replaces upstream's `recomp/` (Python), turning `exefs/main` (and `sdk`, `subsdk0`) into
+//! the C++ the game library is built from. `tests/difftest.py` (Unicorn) is the execution oracle.
 //!
 //! It reads my game folder on a hub and writes generated code beside the build; neither ever
 //! enters this repo or a bundle (M14).
 
 pub mod analyse;
 pub mod decode;
+pub mod driver;
 pub mod ehframe;
 pub mod emit;
 pub mod load;
+pub mod stats;
 
+pub use driver::{recompile, RecompileOptions, Report, INSNS_PER_FILE, REF_BASE};
 pub use load::{
     apply_relative, load, load_bytes, load_file, plt_imports, Error, Module, Reloc, Symbol,
     DT_FINI, DT_FINI_ARRAY, DT_FINI_ARRAYSZ, DT_GNU_HASH, DT_HASH, DT_INIT, DT_INIT_ARRAY,
@@ -23,21 +23,23 @@ pub use load::{
     SHN_UNDEF, STT_FUNC,
 };
 
-/// The recompiler's passes, in the order they run, with the Python they replace.
+/// The recompiler's passes, in the order they run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
-    /// Read the NSO: segments, symbols, relocations (`recomp/nso.py`).
+    /// Read the NSO: segments, symbols, relocations.
     Load,
-    /// Find functions and their bounds (`recomp/analysis.py`, `recomp/ehframe.py`).
+    /// Find functions and their bounds.
     Analyse,
     /// Complete AArch64 to C++ emission, including the floating-point and SIMD pass (3.04).
     Emit,
+    /// Whole-module driver: chunking, parallel emission, headers, module table, variants, stats (3.05).
+    Driver,
 }
 
 /// Every pass, in order.
-pub const PASSES: [Pass; 3] = [Pass::Load, Pass::Analyse, Pass::Emit];
+pub const PASSES: [Pass; 4] = [Pass::Load, Pass::Analyse, Pass::Emit, Pass::Driver];
 
 /// True once a pass is ported to Rust; false sends it to upstream's tool.
 pub fn ported(pass: Pass) -> bool {
-    matches!(pass, Pass::Load | Pass::Analyse | Pass::Emit)
+    matches!(pass, Pass::Load | Pass::Analyse | Pass::Emit | Pass::Driver)
 }

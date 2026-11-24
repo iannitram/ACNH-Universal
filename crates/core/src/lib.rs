@@ -23,6 +23,7 @@ macro_rules! not_built {
     };
 }
 
+pub mod appgame;
 pub mod artwork;
 pub mod assemble;
 pub mod backup;
@@ -39,6 +40,7 @@ pub mod msg;
 pub mod nso;
 pub mod nso2bin;
 pub mod pack;
+pub mod pack_folder;
 pub mod platform;
 pub mod prepare;
 pub mod profile;

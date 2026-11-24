@@ -1,30 +1,25 @@
 //! Prepare (SPEC.md M1, M13): from a checked game folder to a build for one device family, on
-//! a hub. The Rust replacement of upstream's `tools/setup_acnh.py` and the scripts it runs
+//! a hub. The Rust replacement of upstream's `tools/setup_acnh.py` and the scripts it ran
 //! (`acnh_version.py`, `nso2bin.py`, `pack_romfs.py`, `pack_spirv.py`, `extract_shaders.py`,
-//! `sarc_endian.py`, `msg_rewrap.py`), stage by stage (`recipe::Stage`), each skipped when its
-//! output is already there. Until a stage is ported it runs upstream's script (`Step::Script`),
-//! so a build works at every step of the move.
-//!
-//! Upstream's script is one command for all its stages, so while stages are unported one run
-//! of it is followed through its `== <stage>` lines, as upstream's launcher follows it
-//! (`launcher/pipeline.cpp`): `prepare` reports and waits on each stage as the script
-//! reaches it, and names the stage the script failed in. `prepare` decides whether the
-//! script runs at all and which stages are reported (those whose output was missing); inside
-//! a run, upstream's own checks decide what is redone.
+//! `sarc_endian.py`, `msg_rewrap.py`, `make_button_font.py`, `make_button_glyphs.py`), stage by
+//! stage (`recipe::Stage`), each skipped when its output is already there. Every stage except
+//! `Stage::Recompile` (`python3 -m recomp` until #49) runs in Rust (`Step::Rust`).
 //!
 //! Everything a prepare writes is made from my game folder: it stays in `out` on the hub, and
 //! reaches my other devices only through the hub, over the home network (M11, M14).
-//! During the game stage the script extracts mods, then Rust reflows their dialogue
-//! before Prepare advances past the script's version marker.
 
 pub use crate::assemble::assemble;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::gamefolder::GameFolder;
+pub use crate::pack_folder::{
+    app_out_dir, app_out_dir_for, pack_folder, pack_folder_with, PackContext,
+};
 use crate::platform::{AppDirs, Os, Vars};
 use crate::recipe::{hub_for, output, serves, Hub, Stage, STAGES};
+use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::thread::JoinHandle;
@@ -75,11 +70,12 @@ pub struct Request {
 pub const DELIVERY_ROOT: [&str; 2] = ["_transfers", "ACNH-Universal"];
 
 /// The delivery subfolder of `target`: "ios" for the iPhone and iPad, "mac" for the Mac,
-/// `None` for the others (nothing of theirs goes to Dropbox).
+/// "android" for Android, `None` for the others (nothing of theirs goes to Dropbox).
 pub fn delivery_subfolder(target: Os) -> Option<&'static str> {
     match target {
         Os::Ios => Some("ios"),
         Os::Mac => Some("mac"),
+        Os::Android => Some("android"),
         _ => None,
     }
 }
@@ -193,43 +189,19 @@ impl std::fmt::Display for Missing {
     }
 }
 
-/// How `stage` runs for `req` right now. The shaders stage's packs are ours now
-/// (`pack::romfs`, `pack::spirv`) and it is Rust (`sarc`, `shaders`); the rest is
-/// `Script(["python3", "tools/setup_acnh.py", "--game", <game root>, "--out", <out>])`
-/// (`python` instead of `python3` on Windows). Upstream's script has no argument that picks a
-/// stage (its `FORCE` only redoes one), so the unported stages share this one command: a
-/// runner starts it once and follows it stage by stage (`ProcessRunner`). A ported stage's
-/// arm becomes `Step::Rust`.
-pub fn step(stage: Stage, req: &Request) -> Step {
-    match stage {
-        Stage::Shaders => Step::Rust,
-        Stage::Tools | Stage::Game | Stage::Version | Stage::Recompile => {
-            let mut args = stage_script(req);
-            // The script ends before the shaders stage: that one is ours.
-            args.push("--stop-before-shaders".to_owned());
-            Step::Script(args)
-        }
-        Stage::Fonts | Stage::Build => Step::Script(stage_script(req)),
-    }
-}
+/// Pinned third-party versions for `Stage::Tools` and `Stage::Build`.
+const VK_HEADERS: &str = "1.4.357";
+const LLVM: &str = "23.1.3";
+const SDL3: &str = "3.4.16";
+const IMGUI: &str = "1.91.9";
+const RYUBING: &str = "a82350bb77";
+const DOTNET: &str = "10.0.401";
+const FFX: &str = "v2.4.0";
+const DLSS: &str = "v310.9.16";
 
-/// Upstream's one command for a stage that is still its script.
-fn stage_script(req: &Request) -> Vec<String> {
-    let mut args = vec![
-        script_python(req.target).to_owned(),
-        "tools/setup_acnh.py".to_owned(),
-        "--game".to_owned(),
-        req.game.root.display().to_string(),
-        "--out".to_owned(),
-        req.out.display().to_string(),
-    ];
-    if req.fan_mods.ptbr {
-        args.push("--ptbr".to_owned());
-    }
-    if req.fan_mods.speedfix {
-        args.push("--speedfix".to_owned());
-    }
-    args
+/// How `stage` runs for `req`. Every stage runs in Rust (`Step::Rust`).
+pub fn step(_stage: Stage, _req: &Request) -> Step {
+    Step::Rust
 }
 
 fn script_python(target: Os) -> &'static str {
@@ -246,6 +218,26 @@ pub trait ScriptRunner {
     /// Run `args` (a `Step::Script`) for `stage`, and come back when that stage of it is over.
     fn run(&mut self, stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>>;
 
+    /// The Rust tools stage. The default runs it (`rust_tools`).
+    fn tools(&mut self, req: &Request) -> Result<()> {
+        rust_tools(req, &self.root())
+    }
+
+    /// The Rust game stage. The default runs it (`rust_game`).
+    fn game(&mut self, req: &Request) -> Result<()> {
+        rust_game(req, &self.root())
+    }
+
+    /// The Rust version stage. The default runs it (`rust_version`).
+    fn version(&mut self, req: &Request) -> Result<()> {
+        rust_version(req, &self.root())
+    }
+
+    /// The Rust recompile stage. The default runs it (`rust_recompile`).
+    fn recompile(&mut self, req: &Request) -> Result<()> {
+        rust_recompile(req, &self.root(), 0)
+    }
+
     /// Wait for any first-pass setup child before shaders inspect its output.
     fn before_shaders(&mut self) -> std::result::Result<(), Vec<String>> {
         Ok(())
@@ -255,6 +247,16 @@ pub trait ScriptRunner {
     /// may stand in for it, as no translator is installed on a test machine.
     fn shaders(&mut self, req: &Request) -> Result<()> {
         rust_shaders(req, &self.root())
+    }
+
+    /// The Rust fonts stage. The default runs it (`rust_fonts`).
+    fn fonts(&mut self, req: &Request) -> Result<()> {
+        rust_fonts(req)
+    }
+
+    /// The Rust build stage. The default runs it (`rust_build`).
+    fn build(&mut self, req: &Request) -> Result<()> {
+        rust_build(req, &self.root(), 0)
     }
 
     /// The source folder the tools are built under (what `set_root` last gave). The default
@@ -364,7 +366,7 @@ fn cargo_dir(runner: &mut dyn ScriptRunner, home: &Path) -> Option<PathBuf> {
 /// have it), `cargo` and the `aarch64-apple-ios` Rust target. Other targets have none here.
 /// `Error::Build` naming what is missing; the tools are found with `runner.probe`.
 pub fn preflight(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Result<()> {
-    if !matches!(req.target, Os::Ios | Os::Mac) {
+    if !matches!(req.target, Os::Ios | Os::Mac | Os::Android) {
         return Ok(());
     }
     let delivery = req.delivery.as_deref().ok_or_else(|| {
@@ -517,6 +519,14 @@ impl ScriptRunner for ProcessRunner {
             )?);
         }
         self.follow(Some(stage))
+    }
+
+    fn recompile(&mut self, req: &Request) -> Result<()> {
+        rust_recompile(req, &self.root, self.jobs)
+    }
+
+    fn build(&mut self, req: &Request) -> Result<()> {
+        rust_build(req, &self.root, self.jobs)
     }
 
     fn before_shaders(&mut self) -> std::result::Result<(), Vec<String>> {
@@ -688,6 +698,46 @@ fn tools_record(req: &Request) -> PathBuf {
     req.out.join(".prepare-tools.json")
 }
 
+/// Where the recompiler input hash is recorded beside `gen/`.
+fn recomp_hash_file(req: &Request) -> PathBuf {
+    req.out.join("gen").join(".recomp-hash")
+}
+
+/// Deterministic SHA-256 hash of the recompiler inputs (`recomp/*.py` in sorted name order,
+/// plus the Rust emitter/version marker) so changes to the recompiler invalidate `gen/`.
+pub fn recomp_hash(source: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    let recomp_dir = source.join("recomp");
+    if recomp_dir.is_dir() {
+        let mut entries: Vec<(String, PathBuf)> = Vec::new();
+        for entry in std::fs::read_dir(&recomp_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if name.ends_with(".py") {
+                entries.push((name, path));
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, path) in entries {
+            let bytes = std::fs::read(&path)?;
+            hasher.update(name.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(&bytes);
+            hasher.update(b"\0");
+        }
+    }
+    hasher.update(b"rust-emitter:");
+    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher.update(b"\0");
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// A mod's `.sarc.zs` archives as the game reads them (`sarc::fix_archives`), for every mod
 /// installed in `out/mods/<name>/romfs`.
 fn fix_mod_archives(req: &Request) -> Result<()> {
@@ -743,8 +793,7 @@ fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
     pack_stage(req).map_err(invalidate)
 }
 
-/// The Rust fonts stage for the Prepare runner. The legacy script still owns
-/// stage dispatch until the remaining script stages can switch together.
+/// The Rust fonts stage for the Prepare runner.
 pub fn rust_fonts(req: &Request) -> Result<()> {
     let host = [
         r"C:\Windows\Fonts\arial.ttf",
@@ -760,10 +809,1202 @@ pub fn rust_fonts(req: &Request) -> Result<()> {
         .map_err(|error| Error::Build(format!("stage {}: {error}", Stage::Fonts.key())))
 }
 
+fn venv_dir(root: &Path) -> PathBuf {
+    root.join("private/venv")
+}
+
+fn venv_bin(root: &Path) -> PathBuf {
+    venv_dir(root).join(if cfg!(windows) { "Scripts" } else { "bin" })
+}
+
+fn venv_python(root: &Path) -> PathBuf {
+    venv_bin(root).join(if cfg!(windows) {
+        "python.exe"
+    } else {
+        "python"
+    })
+}
+
+fn stage_err(stage: Stage, message: impl std::fmt::Display) -> Error {
+    Error::Build(format!("stage {}: {message}", stage.key()))
+}
+
+fn run_logged(
+    stage: Stage,
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    remove_env: &[&str],
+    log_path: Option<&Path>,
+) -> Result<()> {
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(cwd).stdin(Stdio::null());
+    for key in remove_env {
+        cmd.env_remove(key);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| stage_err(stage, format!("cannot run {}: {e}", program.display())))?;
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+    if let Some(path) = log_path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, &combined);
+    }
+    if !output.status.success() {
+        let lines: Vec<&str> = combined.lines().collect();
+        let tail = lines[lines.len().saturating_sub(20)..].join("\n");
+        let log_note = log_path
+            .map(|p| format!(" (log: {})", p.display()))
+            .unwrap_or_default();
+        return Err(stage_err(
+            stage,
+            format!("failed: {}{log_note}\n{tail}", program.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn download_file(stage: Stage, url: &str, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension("download");
+    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+    run_logged(
+        stage,
+        Path::new(curl),
+        &[
+            "-fsSL".to_owned(),
+            "-o".to_owned(),
+            tmp.display().to_string(),
+            url.to_owned(),
+        ],
+        dest.parent().unwrap_or_else(|| Path::new(".")),
+        &[],
+        &[],
+        None,
+    )?;
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
+}
+
+fn fetch_archive(stage: Stage, url: &str, dest_dir: &Path, strip: bool, py: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest_dir)?;
+    let tmp = PathBuf::from(format!("{}.download", dest_dir.display()));
+    download_file(stage, url, &tmp)?;
+    let cwd = dest_dir;
+    if url.ends_with(".tar.zst") {
+        let script = "import sys, tarfile, zstandard; \
+            d = zstandard.ZstdDecompressor(max_window_size=1<<31).stream_reader(open(sys.argv[1],'rb')); \
+            t = tarfile.open(fileobj=d, mode='r|'); \
+            strip = sys.argv[3] == '1'; \
+            [t.extract(m, sys.argv[2], filter='data') for m in t if (not strip or ('/' in m.name and m.name.split('/',1)[1] and not setattr(m,'name',m.name.split('/',1)[1])))]";
+        run_logged(
+            stage,
+            py,
+            &[
+                "-c".to_owned(),
+                script.to_owned(),
+                tmp.display().to_string(),
+                dest_dir.display().to_string(),
+                if strip { "1" } else { "0" }.to_owned(),
+            ],
+            cwd,
+            &[],
+            &[],
+            None,
+        )?;
+    } else if url.ends_with(".zip") {
+        let script = "import os, shutil, sys, zipfile; \
+            z = zipfile.ZipFile(sys.argv[1]); \
+            strip = sys.argv[3] == '1'; \
+            names = z.namelist(); \
+            top = (names[0].split('/')[0] + '/') if (strip and names) else ''; \
+            [None for i in z.infolist() for n in [i.filename[len(top):] if (top and i.filename.startswith(top)) else i.filename] if n and not n.startswith('/') and '..' not in n.split('/') and ((os.makedirs(os.path.join(sys.argv[2], n), exist_ok=True) if i.is_dir() else (os.makedirs(os.path.dirname(os.path.join(sys.argv[2], n)), exist_ok=True), shutil.copyfileobj(z.open(i), open(os.path.join(sys.argv[2], n), 'wb')))) or True)]";
+        run_logged(
+            stage,
+            py,
+            &[
+                "-c".to_owned(),
+                script.to_owned(),
+                tmp.display().to_string(),
+                dest_dir.display().to_string(),
+                if strip { "1" } else { "0" }.to_owned(),
+            ],
+            cwd,
+            &[],
+            &[],
+            None,
+        )?;
+    } else {
+        let mut args = vec![
+            "-xzf".to_owned(),
+            tmp.display().to_string(),
+            "-C".to_owned(),
+            dest_dir.display().to_string(),
+        ];
+        if strip {
+            args.push("--strip-components=1".to_owned());
+        }
+        let tar = if cfg!(windows) { "tar.exe" } else { "tar" };
+        run_logged(stage, Path::new(tar), &args, cwd, &[], &[], None)?;
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Ok(())
+}
+
+fn find_on_path(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let name = executable(Os::current(), program);
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(&name))
+        .find(|p| p.is_file())
+}
+
+fn has_dotnet_10(dotnet: &Path) -> bool {
+    Command::new(dotnet)
+        .arg("--list-sdks")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|line| line.starts_with("10."))
+        })
+}
+
+fn dotnet_rid() -> Option<(&'static str, &'static str)> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Some(("win-x64", "zip")),
+        ("linux", "x86_64") => Some(("linux-x64", "tar.gz")),
+        ("linux", "aarch64") => Some(("linux-arm64", "tar.gz")),
+        ("macos", "aarch64") => Some(("osx-arm64", "tar.gz")),
+        ("macos", "x86_64") => Some(("osx-x64", "tar.gz")),
+        _ => None,
+    }
+}
+
+/// The Rust tools stage: ensures Python venv (for `python3 -m recomp` until #49), fetches
+/// Vulkan-Headers, Dear ImGui, Ryubing (and Windows SDKs/LLVM/SDL3/vcpkg), ensures .NET 10,
+/// and builds `spirv_harness.dll`.
+pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
+    let stage = Stage::Tools;
+    let p = root.join("private");
+    let t = p.join("third_party");
+    let logs = req.out.join("logs");
+    std::fs::create_dir_all(&t)?;
+    std::fs::create_dir_all(&logs)?;
+
+    let py = venv_python(root);
+    if !py.exists() {
+        run_logged(
+            stage,
+            Path::new(script_python(req.target)),
+            &[
+                "-m".to_owned(),
+                "venv".to_owned(),
+                venv_dir(root).display().to_string(),
+            ],
+            root,
+            &[],
+            &[],
+            None,
+        )?;
+    }
+    let check_pkgs = Command::new(&py)
+        .args([
+            "-c",
+            "import capstone, lz4, cmake, ninja, importlib.metadata as m; assert m.version('capstone') == '5.0.7'",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !check_pkgs {
+        let mut pkgs = vec![
+            "-m".to_owned(),
+            "pip".to_owned(),
+            "install".to_owned(),
+            "-q".to_owned(),
+            "capstone==5.0.7".to_owned(),
+            "lz4".to_owned(),
+            "cmake".to_owned(),
+            "ninja".to_owned(),
+        ];
+        if cfg!(windows) {
+            pkgs.push("zstandard".to_owned());
+        }
+        run_logged(stage, &py, &pkgs, root, &[], &[], None)?;
+    }
+
+    let vkh = t.join(format!("Vulkan-Headers-{VK_HEADERS}"));
+    if !vkh.is_dir() {
+        fetch_archive(
+            stage,
+            &format!("https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v{VK_HEADERS}.tar.gz"),
+            &vkh,
+            true,
+            &py,
+        )?;
+    }
+    let imgui = t.join("imgui");
+    if !imgui.join("imgui.cpp").exists() {
+        fetch_archive(
+            stage,
+            &format!("https://github.com/ocornut/imgui/archive/refs/tags/v{IMGUI}.tar.gz"),
+            &imgui,
+            true,
+            &py,
+        )?;
+    }
+    let ryubing = t.join("ryubing");
+    if !ryubing.join("Ryujinx.sln").exists() {
+        fetch_archive(
+            stage,
+            &format!("https://codeberg.org/Software_arch/Ryubing/archive/{RYUBING}.tar.gz"),
+            &ryubing,
+            true,
+            &py,
+        )?;
+    }
+
+    if cfg!(windows) {
+        rust_tools_windows(req, root, &t, &logs, &py)?;
+    }
+
+    let mut dotnet_env = vec![("DOTNET_CLI_TELEMETRY_OPTOUT".to_owned(), "1".to_owned())];
+    let dotnet = match find_on_path("dotnet").filter(|p| has_dotnet_10(p)) {
+        Some(sys) => sys,
+        None => {
+            let dn = t.join("dotnet");
+            let exe = dn.join(executable(req.target, "dotnet"));
+            if !exe.exists() {
+                let (rid, ext) = dotnet_rid().ok_or_else(|| {
+                    stage_err(stage, "unsupported host architecture for .NET 10 SDK")
+                })?;
+                fetch_archive(
+                    stage,
+                    &format!("https://builds.dotnet.microsoft.com/dotnet/Sdk/{DOTNET}/dotnet-sdk-{DOTNET}-{rid}.{ext}"),
+                    &dn,
+                    false,
+                    &py,
+                )?;
+            }
+            dotnet_env.push(("DOTNET_ROOT".to_owned(), dn.display().to_string()));
+            let cur_path = std::env::var_os("PATH").unwrap_or_default();
+            let joined =
+                std::env::join_paths(std::iter::once(dn).chain(std::env::split_paths(&cur_path)))
+                    .map_err(|e| stage_err(stage, e))?;
+            dotnet_env.push(("PATH".to_owned(), joined.to_string_lossy().into_owned()));
+            exe
+        }
+    };
+
+    let harness = p.join("build/spirv_harness/bin/Release/net10.0/spirv_harness.dll");
+    let alt_dir = p.join("build/spirv_harness/out");
+    let alt = alt_dir.join("spirv_harness.dll");
+    if !harness.exists() && !alt.exists() {
+        let proj = "tools/maxwell/spirv_harness/SpirvHarness.csproj";
+        let hlog = logs.join("harness.log");
+        run_logged(
+            stage,
+            &dotnet,
+            &[
+                "build".to_owned(),
+                proj.to_owned(),
+                "-c".to_owned(),
+                "Release".to_owned(),
+                "-m:4".to_owned(),
+            ],
+            root,
+            &dotnet_env,
+            &["Platform", "PLATFORM"],
+            Some(&hlog),
+        )?;
+        if !harness.exists() {
+            run_logged(
+                stage,
+                &dotnet,
+                &[
+                    "build".to_owned(),
+                    proj.to_owned(),
+                    "-c".to_owned(),
+                    "Release".to_owned(),
+                    "-m:1".to_owned(),
+                    "-o".to_owned(),
+                    alt_dir.display().to_string(),
+                ],
+                root,
+                &dotnet_env,
+                &["Platform", "PLATFORM"],
+                Some(&hlog),
+            )?;
+            if !alt.exists() {
+                return Err(stage_err(
+                    stage,
+                    format!(
+                        "the shader translator was built but spirv_harness.dll is missing (log: {})",
+                        hlog.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rust_tools_windows(_req: &Request, root: &Path, t: &Path, logs: &Path, py: &Path) -> Result<()> {
+    let stage = Stage::Tools;
+    let base = format!("https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/{FFX}/Kits/FidelityFX");
+    let nv = format!("https://raw.githubusercontent.com/NVIDIA/DLSS/{DLSS}");
+    let mut files = Vec::new();
+    for h in [
+        "api/include/ffx_api.h",
+        "api/include/ffx_api_types.h",
+        "api/include/vk/ffx_api_vk.h",
+        "upscalers/include/ffx_upscale.h",
+        "framegeneration/include/ffx_framegeneration.h",
+        "framegeneration/include/ffx_framegeneration_api_types.h",
+        "framegeneration/include/vk/ffx_api_framegeneration_vk.h",
+    ] {
+        files.push(("ffx", h.to_owned(), format!("{base}/{h}")));
+    }
+    files.push((
+        "ffx",
+        "LICENSE.md".to_owned(),
+        format!("{base}/docs/license.md"),
+    ));
+    for d in [
+        "amd_fidelityfx_loader_vk.dll",
+        "amd_fidelityfx_upscaler_vk.dll",
+        "amd_fidelityfx_framegeneration_vk.dll",
+    ] {
+        files.push(("ffx", format!("bin/{d}"), format!("{base}/signedbin/{d}")));
+    }
+    for h in [
+        "nvsdk_ngx.h",
+        "nvsdk_ngx_defs.h",
+        "nvsdk_ngx_defs_vk.h",
+        "nvsdk_ngx_helpers.h",
+        "nvsdk_ngx_helpers_vk.h",
+        "nvsdk_ngx_params.h",
+        "nvsdk_ngx_vk.h",
+    ] {
+        files.push(("dlss", format!("include/{h}"), format!("{nv}/include/{h}")));
+    }
+    files.push((
+        "dlss",
+        "LICENSE.txt".to_owned(),
+        format!("{nv}/LICENSE.txt"),
+    ));
+    files.push((
+        "dlss",
+        "lib/nvsdk_ngx_d.lib".to_owned(),
+        format!("{nv}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib"),
+    ));
+    files.push((
+        "dlss",
+        "bin/nvngx_dlss.dll".to_owned(),
+        format!("{nv}/lib/Windows_x86_64/rel/nvngx_dlss.dll"),
+    ));
+    for (top, rel, url) in files {
+        let out = t.join(top).join(rel);
+        if !out.exists() {
+            download_file(stage, &url, &out)?;
+        }
+    }
+    let llvm = t.join(format!("llvm-{LLVM}"));
+    if !llvm.join("bin/clang-cl.exe").exists() {
+        fetch_archive(
+            stage,
+            &format!("https://github.com/llvm/llvm-project/releases/download/llvmorg-{LLVM}/clang+llvm-{LLVM}-x86_64-pc-windows-msvc.tar.zst"),
+            &llvm,
+            true,
+            py,
+        )?;
+    }
+    let sdl = t.join(format!("SDL3-{SDL3}"));
+    if !sdl.join("cmake").is_dir() {
+        fetch_archive(
+            stage,
+            &format!("https://github.com/libsdl-org/SDL/releases/download/release-{SDL3}/SDL3-devel-{SDL3}-VC.zip"),
+            &sdl,
+            true,
+            py,
+        )?;
+    }
+    let movie_libs = windows_movie_libs(t);
+    if (!movie_libs.join("lib/vpx.lib").exists() || !movie_libs.join("lib/zs.lib").exists())
+        && find_on_path("git").is_some()
+    {
+        let vcpkg = t.join("vcpkg");
+        let vcpkg_exe = vcpkg.join("vcpkg.exe");
+        if !vcpkg_exe.exists() {
+            if !vcpkg.is_dir() {
+                run_logged(
+                    stage,
+                    Path::new("git"),
+                    &[
+                        "clone".to_owned(),
+                        "-q".to_owned(),
+                        "--depth".to_owned(),
+                        "1".to_owned(),
+                        "https://github.com/microsoft/vcpkg.git".to_owned(),
+                        vcpkg.display().to_string(),
+                    ],
+                    root,
+                    &[],
+                    &[],
+                    None,
+                )?;
+            }
+            run_logged(
+                stage,
+                &vcpkg.join("bootstrap-vcpkg.bat"),
+                &["-disableMetrics".to_owned()],
+                &vcpkg,
+                &[],
+                &[],
+                Some(&logs.join("vcpkg.log")),
+            )?;
+        }
+        if vcpkg_exe.exists() {
+            let env = msvc_env(stage, root, t)?;
+            let triplet = "x64-windows-static-md-release";
+            run_logged(
+                stage,
+                &vcpkg_exe,
+                &[
+                    "install".to_owned(),
+                    format!("libvpx:{triplet}"),
+                    format!("libvorbis:{triplet}"),
+                    format!("zlib:{triplet}"),
+                    "--disable-metrics".to_owned(),
+                ],
+                &vcpkg,
+                &env,
+                &["Platform", "PLATFORM"],
+                Some(&logs.join("vcpkg.log")),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn windows_movie_libs(t: &Path) -> PathBuf {
+    let release = t.join("vcpkg/installed/x64-windows-static-md-release");
+    let legacy = t.join("vcpkg/installed/x64-windows-static-md");
+    if !release.join("lib/vpx.lib").exists() && legacy.join("lib/vpx.lib").exists() {
+        legacy
+    } else {
+        release
+    }
+}
+
+fn msvc_env(stage: Stage, root: &Path, t: &Path) -> Result<Vec<(String, String)>> {
+    let prog_files = std::env::var_os("ProgramFiles(x86)")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)"));
+    let vswhere = prog_files.join(r"Microsoft Visual Studio\Installer\vswhere.exe");
+    let inst = if vswhere.is_file() {
+        Command::new(&vswhere)
+            .args([
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property",
+                "installationPath",
+            ])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let bat = PathBuf::from(&inst).join(r"VC\Auxiliary\Build\vcvars64.bat");
+    if inst.is_empty() || !bat.is_file() {
+        return Err(stage_err(
+            stage,
+            "missing: the Visual Studio C++ build tools (the Windows SDK and C runtime)",
+        ));
+    }
+    let out = Command::new("cmd")
+        .args([
+            "/s",
+            "/c",
+            &format!("\"{}\" >nul 2>&1 && set", bat.display()),
+        ])
+        .output()
+        .map_err(|e| stage_err(stage, format!("vcvars64.bat failed: {e}")))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut env: Vec<(String, String)> = Vec::new();
+    let mut path_val = String::new();
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.is_empty() || k.eq_ignore_ascii_case("PLATFORM") {
+            continue;
+        }
+        if k.eq_ignore_ascii_case("PATH") {
+            path_val = v.to_owned();
+        } else {
+            env.push((k.to_owned(), v.to_owned()));
+        }
+    }
+    let llvm_bin = t.join(format!("llvm-{LLVM}")).join("bin");
+    let venv_scripts = venv_bin(root);
+    let joined = std::env::join_paths(
+        [llvm_bin, venv_scripts]
+            .into_iter()
+            .chain(std::env::split_paths(&path_val)),
+    )
+    .map_err(|e| stage_err(stage, e))?;
+    env.push(("PATH".to_owned(), joined.to_string_lossy().into_owned()));
+    Ok(env)
+}
+
+fn mtime_newer(a: &Path, b: &Path) -> bool {
+    let Ok(ma) = std::fs::metadata(a).and_then(|m| m.modified()) else {
+        return true;
+    };
+    let Ok(mb) = std::fs::metadata(b).and_then(|m| m.modified()) else {
+        return true;
+    };
+    ma > mb
+}
+
+fn mod_component(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.ends_with([' ', '.'])
+        && !name.chars().any(|c| {
+            matches!(c, '\\' | '/' | ':' | '<' | '>' | '"' | '|' | '?' | '*') || c <= '\x1f'
+        })
+}
+
+/// Extracts `zpath`'s `romfs/` into `<mods_root>/<name>` with pending message reflow.
+pub fn install_mod_archive(
+    mods_root: &Path,
+    name: &str,
+    zpath: &Path,
+    romfs: &Path,
+    python: &str,
+) -> Result<()> {
+    let dst = mods_root.join(name);
+    if crate::platform::is_dir_link(&dst) {
+        return Err(Error::Build(
+            "mod output must be a regular directory".into(),
+        ));
+    }
+    if let (Ok(zp), Ok(dp)) = (std::fs::canonicalize(zpath), std::fs::canonicalize(&dst)) {
+        if zp.starts_with(&dp) {
+            return Err(Error::Build(
+                "keep the source mod archive outside its prepared output".into(),
+            ));
+        }
+    }
+    std::fs::create_dir_all(mods_root)?;
+    let temp = tempfile::Builder::new()
+        .prefix(".prepare-mod-")
+        .tempdir_in(mods_root)?;
+    let ready = temp.path().join("ready");
+    std::fs::create_dir_all(&ready)?;
+
+    let script = r#"import os, re, shutil, sys, zipfile
+def ok(n):
+    return bool(n) and n not in ('.', '..') and not n.endswith((' ', '.')) and not re.search(r'[\\/:<>"|?*\x00-\x1f]', n)
+zpath, ready = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(zpath) as z:
+    names = [e.filename for e in z.infolist()]
+    if any(not all(ok(p) for p in path.rstrip('/').split('/')) for path in names if path.rstrip('/')):
+        sys.exit('unsafe path in the zip')
+    prefix = ''
+    if not any(path.startswith('romfs/') for path in names):
+        tops = {path.split('/')[0] for path in names if '/romfs/' in path}
+        if len(tops) != 1:
+            sys.exit('no romfs/ folder in the zip')
+        prefix = tops.pop() + '/'
+    for entry in z.infolist():
+        if entry.is_dir() or not entry.filename.startswith(prefix + 'romfs/'):
+            continue
+        out = os.path.join(ready, entry.filename[len(prefix):])
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with z.open(entry) as s, open(out, 'wb') as d:
+            shutil.copyfileobj(s, d)
+if not os.path.isdir(os.path.join(ready, 'romfs')):
+    sys.exit('the mod archive contains no RomFS files')
+"#;
+
+    run_logged(
+        Stage::Game,
+        Path::new(python),
+        &[
+            "-c".to_owned(),
+            script.to_owned(),
+            zpath.display().to_string(),
+            ready.display().to_string(),
+        ],
+        mods_root,
+        &[],
+        &[],
+        None,
+    )?;
+
+    std::fs::create_dir_all(ready.join(".msg-reflow-pending"))?;
+    let previous = temp.path().join("previous");
+    let had_previous = std::fs::symlink_metadata(&dst).is_ok();
+    if had_previous {
+        std::fs::rename(&dst, &previous)?;
+    }
+    if let Err(err) = std::fs::rename(&ready, &dst) {
+        if had_previous {
+            let _ = std::fs::rename(&previous, &dst);
+        }
+        return Err(err.into());
+    }
+    let out = mods_root.parent().unwrap_or(mods_root);
+    crate::msg::finish_pending(romfs, out, python).map_err(|e| stage_err(Stage::Game, e))?;
+    Ok(())
+}
+
+/// Installs or removes opted-in fan mods (`ptbr`) and explicit `--mod <name>=<zip>` archives.
+pub fn install_mods(
+    out: &Path,
+    romfs: &Path,
+    game_src: &Path,
+    root: &Path,
+    ptbr_enabled: bool,
+    mods: &[(&str, &Path)],
+    python: &str,
+) -> Result<()> {
+    let mods_root = out.join("mods");
+    if crate::platform::is_dir_link(&mods_root) {
+        if ptbr_enabled || !mods.is_empty() {
+            return Err(Error::Build(
+                "mod output must be a regular directory".into(),
+            ));
+        }
+        return Ok(());
+    }
+    let ptbr = mods_root.join("ptbr");
+    let explicit_ptbr = mods.iter().any(|(name, _)| *name == "ptbr");
+    let mut to_install: Vec<(String, PathBuf)> = Vec::new();
+    if ptbr_enabled && !explicit_ptbr {
+        let mut found = Vec::new();
+        for dir in [game_src.to_path_buf(), root.join("private/translations")] {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = entry.file_name().to_string_lossy().to_lowercase();
+                    if name.ends_with(".zip") && name.contains("ptbr") && path.is_file() {
+                        found.push(path);
+                    }
+                }
+            }
+        }
+        let have = ptbr.join("romfs");
+        if found.is_empty() && !have.is_dir() {
+            return Err(Error::Build(
+                "pt-BR is enabled but no ptbr zip was found in the game folder or private/translations"
+                    .into(),
+            ));
+        }
+        if let Some(newest) = found
+            .into_iter()
+            .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        {
+            if !have.is_dir() || mtime_newer(&newest, &have) {
+                to_install.push(("ptbr".to_owned(), newest));
+            }
+        }
+    } else if !ptbr_enabled && !explicit_ptbr && std::fs::symlink_metadata(&ptbr).is_ok() {
+        if crate::platform::is_dir_link(&ptbr) {
+            crate::platform::unlink_dir(&ptbr)?;
+        } else {
+            std::fs::remove_dir_all(&ptbr)?;
+        }
+    }
+    for (name, zpath) in mods {
+        if !mod_component(name) || !zpath.is_file() {
+            return Err(Error::Build("--mod wants <name>=<zip>".into()));
+        }
+        to_install.push(((*name).to_owned(), zpath.to_path_buf()));
+    }
+    for (name, zpath) in to_install {
+        install_mod_archive(&mods_root, &name, &zpath, romfs, python)?;
+    }
+    Ok(())
+}
+
+/// Finds a player-supplied SpeedFix patch without using a stale output patch after a game change.
+pub fn speedfix_patch(
+    game: &Path,
+    output: &Path,
+    version: &str,
+    source_changed: bool,
+) -> Option<PathBuf> {
+    let patch_name = if version == "3.0.2" {
+        "speedfix_main_302.pchtxt"
+    } else {
+        "speedfix_main.pchtxt"
+    };
+    let mut candidates = Vec::new();
+    if !game.as_os_str().is_empty() {
+        candidates.push(game.join(patch_name));
+        candidates.push(game.join("exefs").join(patch_name));
+    }
+    let output_patch = output.join("speedfix_main.pchtxt");
+    let stale_marker = output.join(".speedfix-old-patch");
+    let stale = std::fs::metadata(&output_patch)
+        .ok()
+        .and_then(|stat| {
+            let mtime = stat
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos();
+            let fp = format!("{mtime} {}", stat.len());
+            let recorded = std::fs::read_to_string(&stale_marker).ok()?;
+            Some(recorded.trim() == fp)
+        })
+        .unwrap_or(false);
+    if !source_changed && !stale {
+        candidates.push(output_patch);
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Returns `["--variant", <patch>]` when SpeedFix is enabled for `main` on 3.0.2 or 3.0.3.
+pub fn speedfix_args(
+    enabled: bool,
+    module: &str,
+    version: &str,
+    game: &Path,
+    output: &Path,
+    source_changed: bool,
+) -> Result<Vec<String>> {
+    if !enabled || module != "main" || !matches!(version, "3.0.2" | "3.0.3") {
+        return Ok(Vec::new());
+    }
+    let patch = speedfix_patch(game, output, version, source_changed).ok_or_else(|| {
+        Error::Build("SpeedFix is enabled but no patch for this game version was found".into())
+    })?;
+    Ok(vec!["--variant".to_owned(), patch.display().to_string()])
+}
+
+/// The Rust game stage: links ExeFS/RomFS/AOC, extracts flat NSO images (`nso2bin`), and
+/// installs/removes opted-in fan mods.
+pub fn rust_game(req: &Request, root: &Path) -> Result<()> {
+    let stage = Stage::Game;
+    let exefs = req.out.join("exefs");
+    let romfs = req.out.join("extract/romfs");
+    let aoc = req.out.join("aoc");
+    let src_file = req.out.join("game_source.txt");
+    let old = std::fs::read_to_string(&src_file)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+    let real_exefs = exefs.is_dir() && !crate::platform::is_dir_link(&exefs);
+    let source_changed =
+        (!old.is_empty() && Path::new(&old) != req.game.root) || (old.is_empty() && real_exefs);
+    if source_changed {
+        if real_exefs {
+            return Err(stage_err(
+                stage,
+                format!(
+                    "{} holds a game imported into it: give the game folder its own --out folder",
+                    req.out.display()
+                ),
+            ));
+        }
+        let old_patch = req.out.join("speedfix_main.pchtxt");
+        if let Ok(stat) = std::fs::metadata(&old_patch) {
+            if let Ok(mtime) = stat.modified().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map_err(std::io::Error::other)
+            }) {
+                let _ = crate::platform::atomic_write(
+                    &req.out.join(".speedfix-old-patch"),
+                    format!("{} {}\n", mtime.as_nanos(), stat.len()).as_bytes(),
+                );
+            }
+        }
+        for d in ["analysis", "gen", "spirv", "shaders_extracted"] {
+            let _ = std::fs::remove_dir_all(req.out.join(d));
+        }
+        let _ = std::fs::remove_file(req.out.join("version.ini"));
+    }
+
+    crate::platform::link_dir(&req.game.exefs, &exefs)?;
+    crate::platform::link_dir(&req.game.romfs, &romfs)?;
+    let game_aoc = req.game.root.join("aoc");
+    if !req.game.aoc.is_empty() && game_aoc.is_dir() {
+        crate::platform::link_dir(&game_aoc, &aoc)?;
+    } else if crate::platform::is_dir_link(&aoc) {
+        crate::platform::unlink_dir(&aoc)?;
+    }
+    crate::platform::atomic_write(
+        &src_file,
+        format!("{}\n", req.game.root.display()).as_bytes(),
+    )?;
+
+    let analysis = req.out.join("analysis");
+    std::fs::create_dir_all(&analysis)?;
+    for m in ["main", "sdk", "subsdk0"] {
+        let nso = exefs.join(m);
+        let out_bin = analysis.join(format!("{m}.bin"));
+        if !out_bin.is_file() || mtime_newer(&nso, &out_bin) {
+            crate::nso2bin::write(&nso, &out_bin)?;
+        }
+    }
+
+    install_mods(
+        &req.out,
+        &romfs,
+        &req.game.root,
+        root,
+        req.fan_mods.ptbr,
+        &[],
+        script_python(req.target),
+    )?;
+    Ok(())
+}
+
+/// The Rust version stage: reads `exefs/main`'s build id, matches `games/acnh/versions.txt`,
+/// and writes `<out>/version.ini`.
+pub fn rust_version(req: &Request, root: &Path) -> Result<()> {
+    let exefs = req.out.join("exefs");
+    let bid = crate::nso::read_build_id(&exefs.join("main"))?;
+    let mut known: Option<(String, String)> = None;
+    if let Ok(table) = std::fs::read_to_string(root.join("games/acnh/versions.txt")) {
+        for line in table.lines() {
+            let code = line.split('#').next().unwrap_or("");
+            let mut parts = code.split_whitespace();
+            if let (Some(id), Some(ver), Some(hooks)) = (parts.next(), parts.next(), parts.next()) {
+                if id.eq_ignore_ascii_case(&bid) {
+                    known = Some((ver.to_owned(), hooks.to_owned()));
+                    break;
+                }
+            }
+        }
+    }
+    let game_ini = std::fs::canonicalize(&exefs)
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("game.ini")))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| Config::parse(&s).ok());
+    let tv = game_ini
+        .as_ref()
+        .filter(|c| {
+            c.get("build_id")
+                .is_none_or(|b| b.eq_ignore_ascii_case(&bid))
+        })
+        .and_then(|c| c.get("title_version"))
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(-1);
+
+    let (version, hooks) = match known {
+        Some(pair) => pair,
+        None => {
+            let ver = match crate::version::from_build_id(&bid) {
+                Ok(v) => v.name().to_owned(),
+                Err(_) if tv == 0 => "1.0.0".to_owned(),
+                Err(_) if tv == (29 << 16) => "2.0.7".to_owned(),
+                Err(_) if tv == (33 << 16) => "3.0.2".to_owned(),
+                Err(_) if tv > 0 => format!("release {}", tv >> 16),
+                Err(_) => "unknown".to_owned(),
+            };
+            (ver, "-".to_owned())
+        }
+    };
+
+    let content = format!(
+        "# Written by acnh_core::prepare: the version this folder holds and its build profile.\n\
+         build_id = {bid}\n\
+         version = {version}\n\
+         title_version = {tv}\n\
+         hooks = {hooks}\n"
+    );
+    crate::platform::atomic_write(&req.out.join("version.ini"), content.as_bytes())?;
+    Ok(())
+}
+
+fn default_jobs(requested: u32) -> u32 {
+    if requested > 0 {
+        return requested;
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn prepared_gen(out: &Path, module: &str, profile: &str, expected_hash: &str) -> Option<PathBuf> {
+    let src = std::fs::read_to_string(out.join("game_source.txt")).ok()?;
+    let pre = Path::new(src.trim()).join("gen");
+    let same = std::fs::read_to_string(pre.join("recomp_source.txt"))
+        .ok()
+        .is_some_and(|h| h.trim() == expected_hash);
+    let prof = std::fs::read_to_string(pre.join(module).join("profile.txt")).ok()?;
+    let table = pre.join(module).join("table.cpp");
+    if same && prof.trim() == profile && table.is_file() {
+        Some(pre.join(module))
+    } else {
+        None
+    }
+}
+
+fn rust_recompile(req: &Request, root: &Path, jobs: u32) -> Result<()> {
+    let ver_ini = std::fs::read_to_string(req.out.join("version.ini"))
+        .ok()
+        .and_then(|s| Config::parse(&s).ok())
+        .unwrap_or_default();
+    let hooks = ver_ini.get("hooks").unwrap_or("-").to_owned();
+    let version = ver_ini.get("version").unwrap_or("unknown").to_owned();
+    let game_src = std::fs::read_to_string(req.out.join("game_source.txt"))
+        .ok()
+        .map(|s| PathBuf::from(s.trim()))
+        .unwrap_or_else(|| req.game.root.clone());
+
+    let jobs = default_jobs(jobs);
+    let expected_hash = recomp_hash(root)?;
+    let recorded_hash = std::fs::read_to_string(recomp_hash_file(req)).ok();
+    let hash_matches = recorded_hash
+        .as_deref()
+        .is_some_and(|h| h.trim() == expected_hash);
+
+    let logs = req.out.join("logs");
+    std::fs::create_dir_all(&logs)?;
+
+    for (module, base) in [
+        ("sdk", 0x40_1000_0000u64),
+        ("subsdk0", 0x40_1800_0000u64),
+        ("main", 0x40_0000_0000u64),
+    ] {
+        let mut h = Vec::new();
+        let hooks_path = if module == "main" && hooks != "-" {
+            h.push("--hooks".to_owned());
+            h.push(hooks.clone());
+            Some(root.join(&hooks))
+        } else {
+            None
+        };
+        let variant = speedfix_args(
+            req.fan_mods.speedfix,
+            module,
+            &version,
+            &game_src,
+            &req.out,
+            false,
+        )?;
+        let pch = variant.get(1).cloned();
+        h.extend(variant);
+        let profile = if h.is_empty() {
+            "none".to_owned()
+        } else {
+            h.join(" ")
+        };
+
+        let gen = req.out.join("gen").join(module);
+        let table = gen.join("table.cpp");
+        let prof_file = gen.join("profile.txt");
+        let prof_matches = std::fs::read_to_string(&prof_file)
+            .ok()
+            .is_some_and(|p| p.trim() == profile);
+        let stale = !table.is_file()
+            || !hash_matches
+            || !prof_matches
+            || (module == "main"
+                && req.fan_mods.speedfix
+                && pch
+                    .as_deref()
+                    .is_some_and(|p| mtime_newer(Path::new(p), &table)))
+            || (module == "main" && hooks != "-" && mtime_newer(&root.join(&hooks), &table));
+
+        if !stale {
+            continue;
+        }
+        if let Some(pre) = prepared_gen(&req.out, module, &profile, &expected_hash) {
+            copy_tree(&pre, &gen)?;
+            crate::platform::atomic_write(&prof_file, format!("{profile}\n").as_bytes())?;
+            continue;
+        }
+
+        let log_path = logs.join(format!("recomp_{module}.log"));
+        let mut log_file = std::io::BufWriter::new(std::fs::File::create(&log_path)?);
+        let opts = acnh_recomp::RecompileOptions {
+            nso: req.out.join("exefs").join(module),
+            out: gen.clone(),
+            name: module.to_owned(),
+            base,
+            jobs: jobs as usize,
+            only: None,
+            hooks: hooks_path,
+            variant: pch.map(PathBuf::from),
+        };
+        let result = acnh_recomp::recompile(&opts, &mut |line| {
+            let _ = writeln!(log_file, "{line}");
+        });
+        let _ = log_file.flush();
+        if let Err(err) = result {
+            return Err(Error::Build(format!("stage recompile ({module}): {err}")));
+        }
+        crate::platform::atomic_write(&prof_file, format!("{profile}\n").as_bytes())?;
+    }
+    Ok(())
+}
+
+fn find_build_tool(root: &Path, name: &str) -> PathBuf {
+    let in_venv = venv_bin(root).join(executable(Os::current(), name));
+    if in_venv.is_file() {
+        return in_venv;
+    }
+    if let Some(on_path) = find_on_path(name) {
+        return on_path;
+    }
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        let candidate = Path::new(dir).join(name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(name)
+}
+
+fn brew_prefix() -> String {
+    let brew = find_on_path("brew").or_else(|| {
+        ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| p.is_file())
+    });
+    brew.and_then(|exe| {
+        Command::new(exe)
+            .arg("--prefix")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    })
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| "/opt/homebrew".to_owned())
+}
+
+/// The Rust build stage: configures CMake with Ninja and builds the `acnh` target.
+pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
+    let stage = Stage::Build;
+    let t = root.join("private/third_party");
+    let logs = req.out.join("logs");
+    std::fs::create_dir_all(&logs)?;
+    let cmake = find_build_tool(root, "cmake");
+    let ninja = find_build_tool(root, "ninja");
+    let vkh = t.join(format!("Vulkan-Headers-{VK_HEADERS}"));
+    let build = req.out.join("build");
+    let jobs = default_jobs(jobs);
+
+    let cache = build.join("CMakeCache.txt");
+    if let Ok(text) = std::fs::read_to_string(&cache) {
+        if let Some(home) = text
+            .lines()
+            .find_map(|l| l.strip_prefix("CMAKE_HOME_DIRECTORY:"))
+            .and_then(|rest| rest.split_once('='))
+            .map(|(_, val)| val.trim())
+        {
+            if Path::new(home) != root {
+                let _ = std::fs::remove_file(&cache);
+                let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
+            }
+        }
+    }
+
+    let mut cmake_args = vec![
+        "-S".to_owned(),
+        ".".to_owned(),
+        "-B".to_owned(),
+        build.display().to_string(),
+        "-G".to_owned(),
+        "Ninja".to_owned(),
+        format!("-DCMAKE_MAKE_PROGRAM={}", ninja.display()),
+        "-DNX_GAME=acnh".to_owned(),
+        "-DCMAKE_BUILD_TYPE=Release".to_owned(),
+        format!("-DNX_VULKAN_INCLUDE={}", vkh.join("include").display()),
+        format!("-DNX_GEN_DIR={}", req.out.join("gen").display()),
+    ];
+
+    let env = if cfg!(windows) {
+        cmake_args.push("-DCMAKE_C_COMPILER=clang-cl".to_owned());
+        cmake_args.push("-DCMAKE_CXX_COMPILER=clang-cl".to_owned());
+        let sdl = t.join(format!("SDL3-{SDL3}"));
+        let movie = windows_movie_libs(&t);
+        cmake_args.push(format!(
+            "-DCMAKE_PREFIX_PATH={};{}",
+            sdl.display(),
+            movie.display()
+        ));
+        msvc_env(stage, root, &t)?
+    } else {
+        if cfg!(target_os = "macos") {
+            cmake_args.push(format!("-DCMAKE_PREFIX_PATH={}", brew_prefix()));
+        }
+        vec![
+            ("CC".to_owned(), "clang".to_owned()),
+            ("CXX".to_owned(), "clang++".to_owned()),
+        ]
+    };
+
+    run_logged(
+        stage,
+        &cmake,
+        &cmake_args,
+        root,
+        &env,
+        &[],
+        Some(&logs.join("cmake.log")),
+    )?;
+    run_logged(
+        stage,
+        &ninja,
+        &[
+            "-C".to_owned(),
+            build.display().to_string(),
+            format!("-j{jobs}"),
+            "acnh".to_owned(),
+        ],
+        root,
+        &env,
+        &[],
+        None,
+    )?;
+    Ok(())
+}
+
 /// Whether everything `stage` leaves in `req.out` is there. Game and recompile leave one
 /// file per module; upstream's build leaves the bare player in `build/` (on the Mac the
 /// plain executable), which `assemble` then makes self-contained in the install folder.
-fn stage_complete(stage: Stage, req: &Request) -> bool {
+fn stage_complete(stage: Stage, req: &Request, expected_recomp_hash: &str) -> bool {
     const MODULES: [&str; 3] = ["main", "sdk", "subsdk0"];
     match stage {
         Stage::Tools => tools_record(req).is_file(),
@@ -774,9 +2015,14 @@ fn stage_complete(stage: Stage, req: &Request) -> bool {
                 .join(format!("{module}.bin"))
                 .is_file()
         }),
-        Stage::Recompile => MODULES
-            .iter()
-            .all(|module| req.out.join("gen").join(module).join("table.cpp").is_file()),
+        Stage::Recompile => {
+            MODULES
+                .iter()
+                .all(|module| req.out.join("gen").join(module).join("table.cpp").is_file())
+                && std::fs::read_to_string(recomp_hash_file(req))
+                    .ok()
+                    .is_some_and(|recorded| recorded.trim() == expected_recomp_hash)
+        }
         Stage::Shaders => req.out.join("spirv").join("summary.txt").is_file(),
         Stage::Fonts => req
             .out
@@ -963,15 +2209,6 @@ fn run_stages(
             }
         )));
     }
-    // Upstream's script builds the desktop player of the machine it runs on. Its Android
-    // route is another script with its own data folder (ADR 0005): until that is built, it
-    // is not answered with the hub's desktop build.
-    if req.target == Os::Android {
-        return Err(Error::Unsupported(format!(
-            "no stage builds for {} yet",
-            req.target.key()
-        )));
-    }
     let required: Vec<&Missing> = missing.iter().filter(|piece| !piece.warning).collect();
     if !required.is_empty() {
         let mut message = String::from("missing build tools:");
@@ -983,7 +2220,7 @@ fn run_stages(
     }
     // The steps and the work-tree check name the same, absolute folder.
     let absolute_req;
-    let req = if matches!(req.target, Os::Ios | Os::Mac) {
+    let req = if matches!(req.target, Os::Ios | Os::Mac | Os::Android) {
         absolute_req = Request {
             out: absolute(&req.out)?,
             ..req.clone()
@@ -1022,8 +2259,9 @@ fn run_stages(
         || req.fan_mods.speedfix
         || ptbr_present
         || speedfix_present;
+    let expected_recomp_hash = recomp_hash(&runner.root())?;
     let before = STAGES.map(|stage| {
-        stage_complete(stage, req)
+        stage_complete(stage, req, &expected_recomp_hash)
             && !(recheck
                 && matches!(
                     stage,
@@ -1032,27 +2270,37 @@ fn run_stages(
     });
     let mut last = None;
     for (stage, was_there) in STAGES.into_iter().zip(before) {
-        if was_there && stage_complete(stage, req) {
+        if was_there && stage_complete(stage, req, &expected_recomp_hash) {
             continue;
         }
         progress(stage);
         match step(stage, req) {
-            Step::Script(args) => runner
-                .run(stage, &args)
-                .map_err(|log| build_error(stage, &log, home))?,
-            Step::Rust if stage == Stage::Shaders => {
-                // If only an early stage ran, the script can still be installing mods.
-                // Wait for the first pass to leave before inspecting or packing its files.
-                runner
-                    .before_shaders()
-                    .map_err(|log| build_error(stage, &log, home))?;
-                runner.shaders(req)?;
-            }
-            Step::Rust => {}
+            Step::Script(_args) => runner.recompile(req)?,
+            Step::Rust => match stage {
+                Stage::Tools => runner.tools(req)?,
+                Stage::Game => runner.game(req)?,
+                Stage::Version => runner.version(req)?,
+                Stage::Recompile => runner.recompile(req)?,
+                Stage::Shaders => {
+                    runner
+                        .before_shaders()
+                        .map_err(|log| build_error(stage, &log, home))?;
+                    runner.shaders(req)?;
+                }
+                Stage::Fonts => runner.fonts(req)?,
+                Stage::Build => runner.build(req)?,
+            },
         }
         if stage == Stage::Tools {
             std::fs::create_dir_all(&req.out)?;
             std::fs::write(tools_record(req), "{\"tools\": \"ready\"}\n")?;
+        }
+        if stage == Stage::Recompile {
+            let hash_file = recomp_hash_file(req);
+            if let Some(parent) = hash_file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(hash_file, format!("{expected_recomp_hash}\n"))?;
         }
         last = Some(stage);
     }
@@ -1065,6 +2313,7 @@ fn run_stages(
     match req.target {
         Os::Ios => ios_deliver(req, runner, home),
         Os::Mac => mac_deliver(req, runner, home),
+        Os::Android => android_deliver(req, runner, home),
         _ => Ok(req.out.clone()),
     }
 }
@@ -1144,6 +2393,259 @@ fn mac_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
         .finish()
         .map_err(|log| build_error(Stage::Build, &log, home))?;
     Ok(zip_path(delivery))
+}
+
+/// What the `android` target does after the shared stages: ensures `romfs.pak` and `spirv.pak`,
+/// builds `libacnh_game.so` when missing, stages the prepared game files into the Dropbox
+/// delivery folder (`_transfers/ACNH-Universal/android/`), and writes `manifest.json` last.
+fn android_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Result<PathBuf> {
+    let delivery = req
+        .delivery
+        .as_deref()
+        .ok_or_else(|| Error::Env("the delivery folder is not set".into()))?;
+    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
+        pack_stage(req)?;
+    }
+
+    let root = runner.root();
+    let lib_path = if let Some(found) = find_android_game_lib(&req.out, &root) {
+        found
+    } else {
+        let args = vec!["tools/build_android.sh".to_owned()];
+        runner
+            .run(Stage::Build, &args)
+            .map_err(|log| build_error(Stage::Build, &log, home))?;
+        runner
+            .finish()
+            .map_err(|log| build_error(Stage::Build, &log, home))?;
+        find_android_game_lib(&req.out, &root)
+            .ok_or_else(|| Error::Build("libacnh_game.so was not built for Android".into()))?
+    };
+
+    let build_id = read_prepared_build_id(&req.out);
+    let abi = nx_game_abi(&root);
+    stage_android_delivery(&req.out, &lib_path, delivery, &build_id, &abi)?;
+    Ok(delivery.to_path_buf())
+}
+
+fn find_android_game_lib(out: &Path, root: &Path) -> Option<PathBuf> {
+    [
+        out.join("libacnh_game.so"),
+        out.join("game/android-arm64/libacnh_game.so"),
+        out.join("build-android/libacnh_game.so"),
+        root.join("private/acnh/apk/libacnh_game.so"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+}
+
+fn read_prepared_build_id(out: &Path) -> String {
+    if let Ok(ini) = std::fs::read_to_string(out.join("version.ini")) {
+        if let Ok(cfg) = Config::parse(&ini) {
+            if let Some(bid) = cfg.get("build_id") {
+                if !bid.is_empty() {
+                    return bid.to_owned();
+                }
+            }
+        }
+    }
+    let main = out.join("exefs/main");
+    if main.is_file() {
+        if let Ok(bid) = crate::nso::read_build_id(&main) {
+            return bid;
+        }
+    }
+    String::new()
+}
+
+/// Compute `NX_GAME_ABI` matching `CMakeLists.txt` (first 12 hex digits of SHA-1 over
+/// `runtime/include/nx/{cpu.h,module.h,runtime.h}`).
+pub fn nx_game_abi(root: &Path) -> String {
+    let mut text = Vec::new();
+    for header in ["cpu.h", "module.h", "runtime.h"] {
+        let path = root.join("runtime/include/nx").join(header);
+        let Ok(bytes) = std::fs::read(&path) else {
+            return "unknown".to_owned();
+        };
+        text.extend_from_slice(&bytes);
+    }
+    sha1_hex_12(&text)
+}
+
+fn sha1_hex_12(data: &[u8]) -> String {
+    let mut h: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.as_chunks::<64>().0 {
+        let mut w = [0u32; 80];
+        for (i, word) in w[..16].iter_mut().enumerate() {
+            let b = &chunk[i * 4..i * 4 + 4];
+            *word = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = h;
+        for (i, &wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1u32),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+
+    let full = format!(
+        "{:08x}{:08x}{:08x}{:08x}{:08x}",
+        h[0], h[1], h[2], h[3], h[4]
+    );
+    full[..12].to_owned()
+}
+
+/// Stage the prepared Android game files and `manifest.json` atomically into `delivery`.
+pub fn stage_android_delivery(
+    prepared_out: &Path,
+    game_lib: &Path,
+    delivery: &Path,
+    build_id: &str,
+    nx_game_abi: &str,
+) -> Result<()> {
+    let parent = delivery.parent().unwrap_or(delivery);
+    std::fs::create_dir_all(parent)?;
+    let name = delivery
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("android");
+    let staging = parent.join(format!(".{name}.new"));
+    let backup = parent.join(format!(".{name}.old"));
+
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+    std::fs::create_dir_all(&staging)?;
+
+    std::fs::copy(game_lib, staging.join("libacnh_game.so"))?;
+    for pak in ["romfs.pak", "spirv.pak"] {
+        let src = prepared_out.join(pak);
+        if !src.is_file() {
+            return Err(Error::Build(format!("missing {}", src.display())));
+        }
+        std::fs::copy(&src, staging.join(pak))?;
+    }
+    for dir in ["analysis", "fonts", "aoc"] {
+        let src_dir = prepared_out.join(dir);
+        if src_dir.is_dir() {
+            copy_dir_follow_symlinks(&src_dir, &staging.join(dir))?;
+        }
+    }
+
+    let mut manifest_files = Vec::new();
+    collect_manifest_files(&staging, Path::new(""), &mut manifest_files)?;
+    manifest_files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let manifest = crate::appgame::Manifest {
+        version: 1,
+        build_id: build_id.to_owned(),
+        nx_game_abi: nx_game_abi.to_owned(),
+        files: manifest_files,
+    };
+    // Write manifest.json last so an incomplete folder is never mistaken for a finished one.
+    std::fs::write(staging.join("manifest.json"), manifest.to_json().as_bytes())?;
+
+    if backup.exists() {
+        std::fs::remove_dir_all(&backup)?;
+    }
+    if delivery.exists() {
+        std::fs::rename(delivery, &backup)?;
+    }
+    std::fs::rename(&staging, delivery)?;
+    if backup.exists() {
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+    Ok(())
+}
+
+fn copy_dir_follow_symlinks(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".DS_Store" {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        let meta = std::fs::metadata(&src_path)?;
+        if meta.is_dir() {
+            copy_dir_follow_symlinks(&src_path, &dst_path)?;
+        } else if meta.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_manifest_files(
+    dir: &Path,
+    prefix: &Path,
+    out: &mut Vec<crate::appgame::ManifestFile>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == ".DS_Store" || name_str.starts_with("manifest.json") {
+            continue;
+        }
+        let path = entry.path();
+        let rel = prefix.join(&name);
+        let meta = std::fs::metadata(&path)?;
+        if meta.is_dir() {
+            collect_manifest_files(&path, &rel, out)?;
+        } else if meta.is_file() {
+            let rel_str = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let sha256 = crate::appgame::sha256_file(&path)?;
+            out.push(crate::appgame::ManifestFile {
+                path: rel_str,
+                size: meta.len(),
+                sha256,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The build tools `os` needs before its first stage, searched for in `path` (and, on the Mac,

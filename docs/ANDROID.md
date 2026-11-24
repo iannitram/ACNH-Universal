@@ -90,7 +90,7 @@ script stops and says so when it is missing (or put a `spirv_harness` built else
 The first time, **ACNH Recomp** shows its home screen:
 
 - *Download the game from Dropbox*: the prepared game from your own Dropbox, into the app's private storage
-  (`<files>/gamedata`), with nothing of it outside the app (issue #230). The app signs in with save-relay's Dropbox
+  (`<files>/game/`), with nothing of it outside the app (issue #230, #192). The app signs in with save-relay's Dropbox
   app (an App folder app: it sees only `Apps/<that app>/`), so the files wait in
   `Apps/<that app>/acnh-universal-game/android/`, put there on the computer with
   `tools/stage_dropbox_game.sh <work folder> private/acnh/apk/libacnh_game.so ~/Dropbox/Apps/<that app>` (it also
@@ -98,13 +98,15 @@ The first time, **ACNH Recomp** shows its home screen:
   notification: it keeps going with the app in the background or swiped away, picks up a file where it stopped (an
   HTTP range request), checks every file's hash, and the game starts when all are there. Never share that folder
   or make a link to it.
-- *Use the game found*: the folder `android_install.sh` copied into the app's own folder.
+- *Use the game found*: the folder `android_install.sh` copied into the app's own external folder. The app copies only
+  the prepared game files into `<files>/game/` (read-only) and offers to delete or keep the source folder.
 - *Choose the game folder*: any other folder with the prepared game (e.g. one copied by USB to `ACNH` on the memory
-  card), or one with the extracted `exefs/` and `romfs/`, which the app prepares (above). The app then asks for
-  access to all files once: Android needs it to read a folder outside the app's own.
+  card), or one with the extracted `exefs/` and `romfs/`, which the app prepares (above) and copies into
+  `<files>/game/` (read-only), then offers to delete or keep the source folder. The app asks for access to all files
+  only when picking a folder outside the app's own storage.
 
-The game starts as soon as the folder checks out (the first time a few seconds more: `libacnh_game.so` is copied
-into the app). To pick another folder later: long press on the app icon > *Change game folder*.
+The game runs directly from `<files>/game/` (no second copy of `libacnh_game.so`), and saves, `config.ini`, and logs
+live beside it in `<files>/root/`. To install another folder later: long press on the app icon > *Change game folder*.
 
 If the app was updated and the folder was prepared by an older version, the home screen says so and offers
 *Prepare it again on this phone* (where it is, from its own files: only the game's library is built again), or run

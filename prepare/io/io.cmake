@@ -24,9 +24,6 @@ if(nx_io_opts)
     list(REMOVE_ITEM nx_io_opts /arch:AVX2)
     set_target_properties(nx_prepare_io PROPERTIES COMPILE_OPTIONS "${nx_io_opts}")
 endif()
-if(TARGET acnhrecomp_launcher)
-    target_link_libraries(acnhrecomp_launcher PRIVATE nx_prepare_io)
-endif()
 
 if(NX_TESTS)
     # Synthetic ExeFS and RomFS only. The packs are compared with tools/pack_romfs.py's and tools/pack_spirv.py's, and

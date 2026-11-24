@@ -1,0 +1,327 @@
+#include <cstdlib>
+// Android host (NativeActivity): memory (mmap at fixed addresses), pthreads, the app's window (ANativeWindow),
+// game controllers + touch, AAudio, the Vulkan loader and android surface, a signal crash handler and
+// android_main. Game data lives in the app's external files dir (see docs/ANDROID.md):
+//   <files>/analysis/{main,sdk}.bin   module images (tools/nso2bin.py)
+//   <files>/extract/romfs/...         the RomFS
+//   <files>/user/...                  saves
+//   <files>/config.txt                optional: resolution=WxH
+#include <aaudio/AAudio.h>
+#include <android/log.h>
+#include <android/native_window.h>
+#include <android/window.h>
+#include <android_native_app_glue.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <jni.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <cmath>
+#include <cstring>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#define VK_NO_PROTOTYPES
+#define VK_USE_PLATFORM_ANDROID_KHR
+#include <vulkan/vulkan.h>
+
+#include <nx/game.h>
+#include <nx/runtime.h>
+
+#include "kernel.h"
+#include "platform.h"
+
+#ifdef NX_RUST_RUNTIME
+#include <acnh_runtime.h>
+#else
+extern "C" {
+void acnh_platform_window_set_minimized(bool minimized);
+void acnh_platform_window_set_size(uint32_t w, uint32_t h);
+void acnh_platform_window_set_refresh_hz(int32_t hz);
+void acnh_platform_pick_begin();
+void acnh_platform_pick_complete(const char* path);
+void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
+size_t acnh_platform_pad_kind(int32_t vendor, const char* name, char* out, size_t cap);
+size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, const char* name, char* out, size_t cap);
+bool acnh_platform_xbox_layout(const char* controller_kind);
+int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
+uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
+uint32_t acnh_platform_touch_label_code(const char* label);
+bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t now_ns, bool* was_run, uint64_t* past_ns);
+}
+#endif
+
+#include "platform_android.h"
+#include "config.h"
+#include "touch_layout.h"
+#include "ui/ui.h"
+
+// Android input: game controllers and touch (split from platform_android.cpp).
+namespace nx::plat {
+
+// ---- input: game controllers + touch --------------------------------------------------------------------------
+// Touch: left half = virtual stick (relative to where the finger went down); right half = four buttons in a
+// diamond around the thumb (Y attack up-left, X special up-right, B dash down-left, A interact down-right), top
+// corners L / R, top centre +.
+
+namespace {
+std::mutex g_in;
+PadState g_pad_buttons;  // controller state
+struct Touch {
+    int32_t id;
+    float x0, y0, x, y;
+    bool left;
+    uint64_t button;
+    bool run = false;      // the stick: holding the run button (read_pad)
+    uint64_t past_ns = 0;  // the stick: when it went past the run distance, 0 while inside it
+};
+std::vector<Touch> g_touches;
+float g_w = 1, g_h = 1;
+bool g_gamepad = false;  // the last input came from a controller: the drawn touch controls hide
+bool g_pad_connected = false;  // a controller is connected (platform_android.cpp polls the system's input devices)
+std::atomic<uint64_t> g_ui_taps{0};     // ui_taps
+std::atomic<bool> g_ui_finger{false};  // ui_finger_down
+
+// The button the on-screen stick holds to run (read_pad): Wonder's Y (dash), ACNH's B.
+uint64_t run_button() {
+    static const uint64_t run = std::strcmp(nx::game::kInfo.id, "acnh") == 0 ? kB : kY;
+    return run;
+}
+
+// Settings > Controls > Confirm / cancel buttons (input.layout), as on the other hosts (platform_sdl.cpp): "console"
+// keeps the game's A on the right face button, "xbox" puts it on the bottom one, "auto" (the default) chooses by
+// the controller in hand: the right one on Nintendo's own pads, the bottom one on every other (Xbox, PlayStation, a
+// Razer Kishi: their bottom button is the one labelled A or cross). With "console" as the default, an Xbox-labelled
+// pad's A was the game's B: it went through dialogue (A or B) but chose nothing in a menu (A only).
+bool xbox_layout() {
+    return acnh_platform_xbox_layout(controller_kind().c_str());
+}
+
+uint64_t key_to_button(int32_t k) {
+    return acnh_platform_android_key_to_button(k, xbox_layout());
+}
+
+uint64_t touch_button(float x, float y) {
+    float nx_ = x / g_w, ny = y / g_h;
+    if (ny < 0.2f) return nx_ < 0.6f ? (nx_ < 0.45f ? kL : kPlus) : (nx_ > 0.85f ? kR : kZR);
+    bool up = ny < 0.6f, right = nx_ > 0.8f;
+    if (up) return right ? kX : kY;
+    return right ? kA : kB;
+}
+
+}  // namespace
+
+int32_t on_input(android_app*, AInputEvent* e) {
+    std::lock_guard lk(g_in);
+    int32_t type = AInputEvent_getType(e);
+    int32_t src = AInputEvent_getSource(e);
+    if (type == AINPUT_EVENT_TYPE_KEY) {
+        // The layout changed (the settings screen) while A or B was held: its release now names the other button.
+        static bool layout_was = xbox_layout();
+        if (xbox_layout() != layout_was) layout_was = !layout_was, g_pad_buttons.buttons &= ~(kA | kB);
+        uint64_t b = key_to_button(AKeyEvent_getKeyCode(e));
+        if (!b) return 0;
+        g_gamepad = true;
+        if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN)
+            g_pad_buttons.buttons |= b;
+        else if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP)
+            g_pad_buttons.buttons &= ~b;
+        return 1;
+    }
+    if (type != AINPUT_EVENT_TYPE_MOTION) return 0;
+    if ((src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK) {
+        g_gamepad = true;
+        auto axis = [&](int32_t a) {
+            float v = AMotionEvent_getAxisValue(e, a, 0);
+            return std::fabs(v) < 0.15f ? 0 : int32_t(std::clamp(v, -1.f, 1.f) * kStickMax);
+        };
+        g_pad_buttons.lx = axis(AMOTION_EVENT_AXIS_X);
+        g_pad_buttons.ly = -axis(AMOTION_EVENT_AXIS_Y);
+        g_pad_buttons.rx = axis(AMOTION_EVENT_AXIS_Z);
+        g_pad_buttons.ry = -axis(AMOTION_EVENT_AXIS_RZ);
+        float hx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0);
+        float hy = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_Y, 0);
+        g_pad_buttons.buttons &= ~(kLeft | kRight | kUp | kDown | kZL | kZR);
+        if (hx < -0.5f) g_pad_buttons.buttons |= kLeft;
+        if (hx > 0.5f) g_pad_buttons.buttons |= kRight;
+        if (hy < -0.5f) g_pad_buttons.buttons |= kUp;
+        if (hy > 0.5f) g_pad_buttons.buttons |= kDown;
+        if (AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_LTRIGGER, 0) > 0.4f ||
+            AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_BRAKE, 0) > 0.4f)
+            g_pad_buttons.buttons |= kZL;
+        if (AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_RTRIGGER, 0) > 0.4f ||
+            AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_GAS, 0) > 0.4f)
+            g_pad_buttons.buttons |= kZR;
+        return 1;
+    }
+    if ((src & AINPUT_SOURCE_TOUCHSCREEN) != AINPUT_SOURCE_TOUCHSCREEN) return 0;
+    {  // The settings screen, while open, takes the first finger as its mouse (whatever the on-screen controls).
+        int32_t kind0 = AMotionEvent_getAction(e) & AMOTION_EVENT_ACTION_MASK;
+        bool up = kind0 == AMOTION_EVENT_ACTION_UP || kind0 == AMOTION_EVENT_ACTION_CANCEL;
+        if (nx::ui::ui_touch(AMotionEvent_getX(e, 0), AMotionEvent_getY(e, 0), !up)) {
+            g_touches.clear();
+            if (up) g_ui_taps.fetch_add(1, std::memory_order_relaxed);
+            g_ui_finger.store(!up, std::memory_order_relaxed);
+            return 1;
+        }
+    }
+    if (!touch_enabled()) return 0;  // NX_TOUCH_SHOW=0, or turned off in the settings
+    int32_t action = AMotionEvent_getAction(e);
+    int32_t kind = action & AMOTION_EVENT_ACTION_MASK;
+    size_t index = size_t((action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
+    if (ANativeWindow* w = android_window()) {
+        g_w = float(ANativeWindow_getWidth(w));
+        g_h = float(ANativeWindow_getHeight(w));
+    }
+    if (kind == AMOTION_EVENT_ACTION_DOWN || kind == AMOTION_EVENT_ACTION_POINTER_DOWN) {
+        float x = AMotionEvent_getX(e, index), y = AMotionEvent_getY(e, index);
+        g_gamepad = false;
+        // The first finger of a gesture: no other is down. A touch left from one whose end was not seen here (the
+        // controls turned off meanwhile) would otherwise keep its button held, or share the new finger's id.
+        if (kind == AMOTION_EVENT_ACTION_DOWN) g_touches.clear();
+        size_t drawn = 0;
+        touch_buttons(drawn, g_w / g_h);
+        if (drawn) {  // a drawn layout (touch_layout.cpp): its buttons first, the rest of the left half is the stick
+            uint64_t b = touch_hit(x / g_w, y / g_h, g_w / g_h);
+            bool left = !b && (touch_mirrored() ? x > g_w * 0.5f : x < g_w * 0.5f);
+            if (b || left) g_touches.push_back({AMotionEvent_getPointerId(e, index), x, y, x, y, left, b});
+        } else {
+            bool left = x < g_w * 0.5f;
+            g_touches.push_back({AMotionEvent_getPointerId(e, index), x, y, x, y, left, left ? 0 : touch_button(x, y)});
+        }
+    } else if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_POINTER_UP ||
+               kind == AMOTION_EVENT_ACTION_CANCEL) {
+        int32_t id = AMotionEvent_getPointerId(e, index);
+        if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_CANCEL) g_touches.clear();
+        g_touches.erase(std::remove_if(g_touches.begin(), g_touches.end(), [&](const Touch& t) { return t.id == id; }),
+                        g_touches.end());
+    } else if (kind == AMOTION_EVENT_ACTION_MOVE) {
+        for (size_t k = 0; k < AMotionEvent_getPointerCount(e); k++) {
+            int32_t id = AMotionEvent_getPointerId(e, k);
+            for (auto& t : g_touches)
+                if (t.id == id) {
+                    t.x = AMotionEvent_getX(e, k);
+                    t.y = AMotionEvent_getY(e, k);
+                }
+        }
+    }
+    return 1;
+}
+
+uint64_t ui_taps() { return g_ui_taps.load(std::memory_order_relaxed); }
+bool ui_finger_down() { return g_ui_finger.load(std::memory_order_relaxed); }
+
+
+
+bool read_player_pad(int, PadState&) { return false; }  // player 1 only on this host
+
+void read_pad(PadState& p) {
+    std::lock_guard lk(g_in);
+    p.buttons |= g_pad_buttons.buttons;
+    if (g_pad_buttons.lx || g_pad_buttons.ly) {
+        p.lx = g_pad_buttons.lx;
+        p.ly = g_pad_buttons.ly;
+    }
+    p.rx = g_pad_buttons.rx;
+    p.ry = g_pad_buttons.ry;
+    float radius = std::max(1.f, g_h * 0.12f);
+    size_t drawn = 0;
+    touch_buttons(drawn, g_w / g_h);
+    // A drawn layout's stick pushed past its ring also holds the run button (Wonder: Y, dash; ACNH: B, run), so running
+    // needs no second thumb on the right side. In ACNH's menus B is also Cancel, and in its software keyboard Delete:
+    // the stick pushed to its edge there (0.9 of the ring before, which any full push reached) backed out of menus and
+    // deleted the name being typed, a letter each time the thumb crossed that line (Discord, 0.8 and 0.9). So it runs
+    // only past the ring (kRunOn) and after a moment there (kRunDelayNs): a push across a menu or the keyboard is
+    // over before that. It stops back inside the ring (kRunOff), not at the same line, so a thumb resting near it does
+    // not press B again and again. Never while the game says its text entry is open (2.0.7: games/acnh/v2_0_7.cpp);
+    // input.touch_run = 0 (Settings > Controls) turns it off.
+    constexpr float kRunOn = 1.3f, kRunOff = 1.1f;
+    constexpr uint64_t kRunDelayNs = 250'000'000;
+    const uint64_t run = run_button();
+    const bool can_run = drawn && config_get_bool("input.touch_run", true) &&
+                         !(keyboard_state_known() && keyboard_typing());
+    const uint64_t now = monotonic_ns();
+    for (auto& t : g_touches) {
+        if (t.left) {
+            float dx = (t.x - t.x0) / radius, dy = (t.y - t.y0) / radius;
+            p.lx = int32_t(std::clamp(dx, -1.f, 1.f) * kStickMax);
+            p.ly = int32_t(std::clamp(-dy, -1.f, 1.f) * kStickMax);
+            acnh_platform_touch_stick_run(dx, dy, can_run, now, &t.run, &t.past_ns);
+            if (t.run) p.buttons |= run;
+        } else {
+            p.buttons |= t.button;
+        }
+    }
+    input_script(p);  // NX_INPUT_SCRIPT (config.txt): scripted runs on the phone, as on the Mac
+    // The gear opens and closes the settings screen; it is not a pad button.
+    static bool gear_held = false;
+    bool gear = p.buttons & kSettingsButton;
+    if (gear && !gear_held) nx::ui::ui_toggle();
+    gear_held = gear;
+    p.buttons &= ~kSettingsButton;
+    // The settings screen takes the controller while it is open (and watches for its Minus + Plus combo).
+    bool ui = nx::ui::ui_pad(p.buttons, p.lx, p.ly);
+    p.buttons = nx::ui::ui_filter_game_buttons(p.buttons, ui);
+    if (ui) p = PadState{};
+}
+
+// A controller connected: the touch controls hide at once (as on its first input); disconnected: they come back.
+void set_gamepad_connected(bool connected) {
+    std::lock_guard lk(g_in);
+    if (connected == g_pad_connected) return;
+    g_pad_connected = connected;
+    g_gamepad = connected;
+    nx::log("input: a controller %s: touch controls %s", connected ? "connected" : "disconnected",
+            connected ? "hidden" : "shown");
+}
+
+// The drawn layout's buttons (brighter while pressed) and the stick under the thumb; nothing while a controller is
+// in use or for games without a drawn layout.
+size_t touch_overlay(OverlayShape* out, size_t max) {
+    size_t n = 0, k = 0;
+    std::lock_guard lk(g_in);
+    if (ANativeWindow* w = android_window()) {  // the layout fits the screen's shape (touch_layout.cpp)
+        g_w = float(ANativeWindow_getWidth(w));
+        g_h = float(ANativeWindow_getHeight(w));
+    }
+    const TouchButton* b = touch_buttons(n, g_w / g_h);
+    if (!n) return 0;
+    if (g_gamepad || !touch_enabled()) return 0;
+    const float shade = touch_opacity_scale();
+    const Touch* stick = nullptr;
+    uint64_t held = 0;
+    for (const auto& t : g_touches) {
+        if (t.left) stick = &t;
+        held |= t.button | (t.run ? run_button() : 0);
+    }
+    // A button's letters ("A", "ZR", "+") in the glyphs present.frag draws: "ABXYRLZ+-"; nothing for the d-pad and gear.
+    auto label_code = [](const char* t) { return acnh_platform_touch_label_code(t); };
+    for (size_t i = 0; i < n && k < max; i++)
+        out[k++] = {b[i].x, b[i].y, b[i].r, std::min(1.0f, (held & b[i].button ? 0.5f : 0.2f) * shade), label_code(touch_label(i))};
+    if (stick && k + 2 <= max) {
+        float r = 0.12f, dx = (stick->x - stick->x0) / g_h, dy = (stick->y - stick->y0) / g_h;
+        float len = std::hypot(dx, dy), s = len > r ? r / len : 1.f;
+        // The ring lights up while the stick holds the run button (read_pad), as that button does.
+        out[k++] = {stick->x0 / g_w, stick->y0 / g_h, r, std::min(1.0f, (stick->run ? 0.3f : 0.14f) * shade)};
+        out[k++] = {(stick->x0 / g_h + dx * s) * g_h / g_w, stick->y0 / g_h + dy * s, 0.055f, std::min(1.0f, 0.45f * shade)};
+    } else if (k < max) {
+        float sx, sy, sr;
+        touch_stick_rest(g_w / g_h, touch_mirrored(), sx, sy, sr);
+        out[k++] = {sx, sy, sr, std::min(1.0f, 0.08f * shade)};  // where the stick goes
+    }
+    return k;
+}
+
+}  // namespace nx::plat

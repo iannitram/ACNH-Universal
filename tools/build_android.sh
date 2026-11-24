@@ -118,6 +118,13 @@ CARGO_OUT=${CARGO_TARGET_DIR:-$PWD/target}
 case "$CARGO_OUT" in /*) ;; *) CARGO_OUT=$PWD/$CARGO_OUT ;; esac
 RUNTIME_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_runtime.a
 [ -f "$RUNTIME_LIB" ] || { echo "$RUNTIME_LIB was not built"; exit 1; }
+
+echo "== the Slint launcher library (cargo, aarch64-linux-android, android-launcher)"
+CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android29-clang \
+CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android29-clang AR_aarch64_linux_android=$NDK_BIN/llvm-ar \
+  cargo build -p acnh-app --release --target aarch64-linux-android --features android-launcher --lib -j "$JOBS"
+LAUNCHER_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_app.so
+[ -f "$LAUNCHER_LIB" ] || { echo "$LAUNCHER_LIB was not built"; exit 1; }
 RUNTIME_HEADER=$(find "$CARGO_OUT/aarch64-linux-android/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
 [ -n "$RUNTIME_HEADER" ] || { echo "acnh_runtime.h was not generated"; exit 1; }
 
@@ -125,7 +132,7 @@ RUNTIME_HEADER=$(find "$CARGO_OUT/aarch64-linux-android/release/build" -name acn
 echo "== configure ($BUILD) [version $VNAME ($VCODE)]"
 cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_STL=c++_shared \
-  -DANDROID_PLATFORM=android-29 -DNX_GAME=$GAME -DNX_GEN_DIR="$GEN" -DNX_LAUNCHER=OFF \
+  -DANDROID_PLATFORM=android-29 -DNX_GAME=$GAME -DNX_GEN_DIR="$GEN" \
   -DNX_BUILD_VERSION="$VNAME" \
   -DNX_VULKAN_SDK="$PWD/private/third_party/Vulkan-Headers-1.4.357" \
   -DNX_RUNTIME_ARCHIVE="$RUNTIME_LIB" -DNX_RUNTIME_INCLUDE="$(dirname "$RUNTIME_HEADER")" > "$OUT.cmake.log" 2>&1 ||
@@ -145,6 +152,7 @@ STRIP=$NDK/toolchains/llvm/prebuilt/$HOST/bin/llvm-strip
 rm -rf "$OUT"; mkdir -p "$OUT/lib/arm64-v8a"
 "$STRIP" --strip-unneeded -o "$OUT/lib/arm64-v8a/lib$GAME.so" "$BUILD/lib$GAME.so"
 "$STRIP" --strip-unneeded -o "$OUT/lib/arm64-v8a/lib${GAME}_prepare.so" "$BUILD/lib${GAME}_prepare.so"
+"$STRIP" --strip-unneeded -o "$OUT/lib/arm64-v8a/libacnh_app.so" "$LAUNCHER_LIB"
 cp "$NDK/toolchains/llvm/prebuilt/$HOST/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$OUT/lib/arm64-v8a/"
 # The preparation's tools, run from the app's native library folder (extractNativeLibs in the manifest)
 if [ "${PHONE_PREPARE:-1}" = 1 ]; then

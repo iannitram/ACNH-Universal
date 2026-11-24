@@ -4,7 +4,8 @@ use acnh_core::error::Error;
 use acnh_core::gamefolder::GameFolder;
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{
-    delivery_folder, delivery_subfolder, prepare_installed, prepare_with, step, toolchain_with,
+    delivery_folder, delivery_subfolder, install_mod_archive, install_mods, prepare_installed,
+    prepare_with, recomp_hash, rust_version, speedfix_args, speedfix_patch, step, toolchain_with,
     Missing, ProcessRunner, Request, ScriptRunner, Step,
 };
 use acnh_core::recipe::{Hub, Stage, STAGES};
@@ -37,12 +38,9 @@ fn request(name: &str, target: Os) -> Request {
     }
 }
 
-/// The stages that run the script: all but the shaders stage, which is Rust.
+/// The stages that run a script: only recompile (`python3 -m recomp` until #49).
 fn scripted() -> Vec<Stage> {
-    STAGES
-        .into_iter()
-        .filter(|stage| *stage != Stage::Shaders)
-        .collect()
+    vec![Stage::Recompile]
 }
 
 #[derive(Default)]
@@ -111,7 +109,35 @@ impl ScriptRunner for Fake {
         self.root = Some(root.to_owned());
     }
 
+    fn tools(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn game(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn version(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
+        self.ran.push(Stage::Recompile);
+        if self.fail_at == Some(Stage::Recompile) {
+            return Err(Error::Build("stage recompile: boom at ~/x".to_owned()));
+        }
+        Ok(())
+    }
+
     fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn fonts(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn build(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
     }
 
@@ -140,6 +166,7 @@ impl ScriptRunner for Fake {
 fn stages_run_in_order_and_progress_sees_each_once() {
     let req = request("order", Os::Linux);
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = vec![];
     let out = prepare_with(
         &req,
@@ -161,16 +188,15 @@ fn a_stage_with_its_output_is_skipped() {
     std::fs::create_dir_all(&spirv).unwrap();
     std::fs::write(spirv.join("summary.txt"), "x").unwrap();
     let mut fake = Fake::default();
-    prepare_with(
-        &req,
-        Hub::StrixHalo,
-        &mut fake,
-        Path::new("/h"),
-        &mut |_| {},
-    )
+    fake.tools.push(("git", "false\n"));
+    let mut seen = Vec::new();
+    prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
     .unwrap();
-    assert!(!fake.ran.contains(&Stage::Shaders));
-    assert!(fake.ran.contains(&Stage::Fonts));
+    assert!(!seen.contains(&Stage::Shaders));
+    assert!(seen.contains(&Stage::Fonts));
+    assert_eq!(fake.ran, vec![Stage::Recompile]);
 }
 
 #[test]
@@ -213,38 +239,14 @@ fn a_target_the_hub_does_not_serve_is_unsupported() {
 }
 
 #[test]
-fn step_is_rust_for_shaders_and_upstreams_script_for_the_rest() {
+fn step_is_rust_for_every_stage() {
     let req = request("step", Os::Linux);
     for stage in STAGES {
-        if stage == Stage::Shaders {
-            assert_eq!(step(stage, &req), Step::Rust);
-            continue;
-        }
-        assert_eq!(
-            step(stage, &req),
-            Step::Script(
-                vec![
-                    "python3".to_owned(),
-                    "tools/setup_acnh.py".to_owned(),
-                    "--game".to_owned(),
-                    "/game".to_owned(),
-                    "--out".to_owned(),
-                    req.out.display().to_string(),
-                ]
-                .into_iter()
-                .chain(
-                    (stage != Stage::Fonts && stage != Stage::Build)
-                        .then(|| "--stop-before-shaders".to_owned())
-                )
-                .collect()
-            )
-        );
+        assert_eq!(step(stage, &req), Step::Rust);
     }
     let win = request("step-win", Os::Windows);
-    assert_eq!(step(Stage::Shaders, &win), Step::Rust);
-    match step(Stage::Tools, &win) {
-        Step::Script(a) => assert_eq!(a[0], "python"),
-        Step::Rust => panic!("not ported"),
+    for stage in STAGES {
+        assert_eq!(step(stage, &win), Step::Rust);
     }
 }
 
@@ -256,12 +258,13 @@ fn completed_tools_version_and_build_do_not_run_again() {
     std::fs::create_dir_all(req.out.join("build")).unwrap();
     std::fs::write(req.out.join("build/acnh"), "synthetic executable").unwrap();
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = Vec::new();
     prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
         seen.push(s)
     })
     .unwrap();
-    assert_eq!(fake.ran, vec![Stage::Game, Stage::Recompile, Stage::Fonts]);
+    assert_eq!(fake.ran, vec![Stage::Recompile]);
     assert_eq!(
         seen,
         vec![Stage::Game, Stage::Recompile, Stage::Shaders, Stage::Fonts]
@@ -276,15 +279,13 @@ fn incomplete_module_outputs_are_not_skipped() {
     std::fs::create_dir_all(req.out.join("gen/main")).unwrap();
     std::fs::write(req.out.join("gen/main/table.cpp"), "// synthetic table").unwrap();
     let mut fake = Fake::default();
-    prepare_with(
-        &req,
-        Hub::StrixHalo,
-        &mut fake,
-        Path::new("/h"),
-        &mut |_| {},
-    )
+    fake.tools.push(("git", "false\n"));
+    let mut seen = Vec::new();
+    prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
     .unwrap();
-    assert!(fake.ran.contains(&Stage::Game));
+    assert!(seen.contains(&Stage::Game));
     assert!(fake.ran.contains(&Stage::Recompile));
     for module in ["sdk", "subsdk0"] {
         std::fs::write(
@@ -300,31 +301,60 @@ fn incomplete_module_outputs_are_not_skipped() {
         .unwrap();
     }
     let mut fake = Fake::default();
-    prepare_with(
-        &req,
-        Hub::StrixHalo,
-        &mut fake,
-        Path::new("/h"),
-        &mut |_| {},
-    )
+    fake.tools.push(("git", "false\n"));
+    let mut seen2 = Vec::new();
+    prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
+        seen2.push(s)
+    })
     .unwrap();
-    assert!(!fake.ran.contains(&Stage::Game));
+    assert!(!seen2.contains(&Stage::Game));
     assert!(!fake.ran.contains(&Stage::Recompile));
 }
 
 #[test]
-fn mobile_requests_never_fall_back_to_a_desktop_build() {
-    {
-        let (target, hub) = (Os::Android, Hub::StrixHalo);
-        let req = request(target.key(), target);
-        let mut fake = Fake::default();
-        let mut seen = Vec::new();
-        let error =
-            prepare_with(&req, hub, &mut fake, Path::new("/h"), &mut |s| seen.push(s)).unwrap_err();
-        assert!(matches!(error, Error::Unsupported(message) if message.contains(target.key())));
-        assert!(fake.ran.is_empty());
-        assert!(seen.is_empty());
-    }
+fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut req = request("android-deliver", Os::Android);
+    let delivery_root = tmp.path().join("Dropbox/_transfers/ACNH-Universal");
+    let delivery = delivery_root.join("android");
+    std::fs::create_dir_all(&delivery_root).unwrap();
+    req.delivery = Some(delivery.clone());
+
+    // Minimal prepared outputs so pack_stage and android_deliver can stage them.
+    let romfs = req.out.join("game-romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    std::fs::write(romfs.join("a.bin"), b"romfs-bytes").unwrap();
+    req.game.romfs = romfs;
+    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
+    std::fs::write(req.out.join("spirv/a.spv"), b"spv-bytes").unwrap();
+    std::fs::create_dir_all(req.out.join("analysis")).unwrap();
+    std::fs::write(req.out.join("analysis/main.bin"), b"main-bytes").unwrap();
+    std::fs::write(
+        req.out.join("version.ini"),
+        "build_id = FCD2BB238ABE99E925B4E452DF1F41F1\n",
+    )
+    .unwrap();
+    std::fs::write(req.out.join("libacnh_game.so"), b"elf-bytes").unwrap();
+
+    let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
+    let mut seen = Vec::new();
+    let out = prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap();
+
+    assert_eq!(out, delivery);
+    assert!(!seen.is_empty());
+    let manifest_bytes = std::fs::read(delivery.join("manifest.json")).unwrap();
+    let manifest = acnh_core::appgame::Manifest::from_json(&manifest_bytes).unwrap();
+    assert_eq!(manifest.build_id, "FCD2BB238ABE99E925B4E452DF1F41F1");
+    assert!(!manifest.nx_game_abi.is_empty());
+    let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(paths.contains(&"analysis/main.bin"));
+    assert!(paths.contains(&"libacnh_game.so"));
+    assert!(paths.contains(&"romfs.pak"));
+    assert!(paths.contains(&"spirv.pak"));
 }
 
 #[test]
@@ -342,11 +372,35 @@ fn process_runner_keeps_stdout_and_stderr_lines_separate() {
     assert_eq!(log, vec!["stdout", "stderr"]);
 }
 
-/// A runner that starts nothing: the Rust shaders stage must not need the script.
+/// A runner that starts nothing: the Rust shaders stage must not need a script.
 struct Idle;
 
 impl ScriptRunner for Idle {
     fn run(&mut self, _stage: Stage, _args: &[String]) -> Result<(), Vec<String>> {
+        Ok(())
+    }
+
+    fn tools(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn game(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn version(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn fonts(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn build(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -435,6 +489,15 @@ fn make(paths: &[PathBuf]) {
     for path in paths {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "synthetic").unwrap();
+    }
+}
+
+fn make_completed_stage(out: &Path, stage: Stage) {
+    make(&outputs(out, stage));
+    if stage == Stage::Recompile {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hash = recomp_hash(&root).unwrap();
+        std::fs::write(out.join("gen/.recomp-hash"), format!("{hash}\n")).unwrap();
     }
 }
 
@@ -530,11 +593,43 @@ impl ScriptRunner for StandIn {
         self.runner.run(stage, &self.command)
     }
 
+    fn tools(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn game(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn version(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
+        self.run(Stage::Recompile, &[]).map_err(|log| {
+            let named = log
+                .first()
+                .and_then(|l| l.strip_prefix("== "))
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or("recompile");
+            let text = log.join("\n").replace("/home/me", "~");
+            Error::Build(format!("stage {named}: {text}"))
+        })
+    }
+
     fn finish(&mut self) -> Result<(), Vec<String>> {
         self.runner.finish()
     }
 
     fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn fonts(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn build(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -587,9 +682,7 @@ fn stages_the_script_is_already_past_are_still_reported_once() {
         &mut stand_in(&req, 0, &["eager"]),
         Path::new("/h"),
         &mut |stage| {
-            // The whole script has run through before game is reported as started: every
-            // later output is there before its stage is looked at.
-            if stage == Stage::Game {
+            if stage == Stage::Shaders {
                 assert!(wait_for(&req.out.join("ended.txt")));
             }
             seen.push(stage);
@@ -602,25 +695,25 @@ fn stages_the_script_is_already_past_are_still_reported_once() {
 
 #[test]
 fn a_failing_script_run_names_the_stage_it_failed_in() {
-    let req = request("fail-fonts", Os::Linux);
+    let req = request("fail-recomp", Os::Linux);
     let mut seen = vec![];
     let err = prepare_with(
         &req,
         Hub::StrixHalo,
-        &mut stand_in(&req, 0, &["fail:fonts"]),
+        &mut stand_in(&req, 0, &["fail:recompile"]),
         Path::new("/home/me"),
         &mut report(&req, &mut seen),
     )
     .unwrap_err();
     match err {
         Error::Build(m) => {
-            assert!(m.starts_with("stage fonts: == fonts"), "{m}");
+            assert!(m.starts_with("stage recompile: == recompile"), "{m}");
             assert!(m.contains("boom at ~/x"), "{m}");
-            assert!(m.contains("trace of fonts"), "{m}");
+            assert!(m.contains("trace of recompile"), "{m}");
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(seen, STAGES[..6].to_vec());
+    assert_eq!(seen, STAGES[..4].to_vec());
     assert_eq!(starts(&req), 1);
     assert!(!req.out.join("build").exists());
 }
@@ -630,7 +723,7 @@ fn a_complete_build_folder_starts_no_script() {
     let req = request("complete", Os::Linux);
     std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
     for stage in STAGES {
-        make(&outputs(&req.out, stage));
+        make_completed_stage(&req.out, stage);
     }
     let mut seen = vec![];
     prepare_with(
@@ -647,11 +740,11 @@ fn a_complete_build_folder_starts_no_script() {
 
 #[test]
 fn one_missing_output_is_one_reported_stage_and_the_run_ends_first() {
-    let req = request("fonts-only", Os::Linux);
+    let req = request("recomp-only", Os::Linux);
     std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
     for stage in STAGES {
-        if stage != Stage::Fonts {
-            make(&outputs(&req.out, stage));
+        if stage != Stage::Recompile {
+            make_completed_stage(&req.out, stage);
         }
     }
     let mut seen = vec![];
@@ -663,25 +756,23 @@ fn one_missing_output_is_one_reported_stage_and_the_run_ends_first() {
         &mut report(&req, &mut seen),
     )
     .unwrap();
-    assert_eq!(seen, vec![Stage::Fonts]);
+    assert_eq!(seen, vec![Stage::Recompile]);
     assert_eq!(starts(&req), 1);
-    assert!(outputs(&req.out, Stage::Fonts)[0].is_file());
+    assert!(outputs(&req.out, Stage::Recompile)[0].is_file());
     assert!(req.out.join("ended.txt").is_file());
 }
 
 #[test]
 fn a_failure_in_a_stage_we_did_not_wait_on_is_named_by_the_scripts_line() {
-    // Only the build is missing, and the script fails before it (its own tools check), then
-    // after the last stage we waited on (the build that follows the fonts).
     for (missing, fail, named) in [
-        (Stage::Build, "fail:tools", "stage tools: == tools"),
-        (Stage::Fonts, "fail:build", "stage build: == build"),
+        (Stage::Recompile, "fail:tools", "stage tools: == tools"),
+        (Stage::Recompile, "fail:build", "stage build: == build"),
     ] {
         let req = request(fail.trim_start_matches("fail:"), Os::Linux);
         std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
         for stage in STAGES {
             if stage != missing {
-                make(&outputs(&req.out, stage));
+                make_completed_stage(&req.out, stage);
             }
         }
         let mut seen = vec![];
@@ -851,6 +942,7 @@ fn a_packaged_source_is_copied_to_the_data_folder_and_the_runner_runs_there() {
     let req = request("installed-copy", Os::Linux);
     let (_base, exe, dirs) = installed("installed-copy", "abc123");
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = Vec::new();
     let out = prepare_installed(
         &req,
@@ -877,6 +969,7 @@ fn a_packaged_source_from_another_commit_is_refused() {
     let req = request("installed-other", Os::Linux);
     let (_base, exe, dirs) = installed("installed-other", "abc123");
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let error = prepare_installed(
         &req,
         Hub::StrixHalo,
@@ -906,6 +999,30 @@ struct Rooted {
 
 impl ScriptRunner for Rooted {
     fn run(&mut self, _stage: Stage, _args: &[String]) -> Result<(), Vec<String>> {
+        Ok(())
+    }
+
+    fn tools(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn game(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn version(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn fonts(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn build(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
     }
 
@@ -943,21 +1060,131 @@ fn shaders_step_looks_for_its_tools_under_the_runners_root() {
 }
 
 #[test]
-fn fan_mod_choices_are_snapshotted_in_each_script_pass() {
-    let mut req = request("fan-mods", Os::Linux);
-    let args = |req: &Request| match step(Stage::Game, req) {
-        Step::Script(args) => args,
-        _ => unreachable!(),
-    };
-    assert!(!args(&req).contains(&"--ptbr".to_owned()));
-    assert!(!args(&req).contains(&"--speedfix".to_owned()));
-    req.fan_mods.ptbr = true;
-    assert!(args(&req).contains(&"--ptbr".to_owned()));
-    assert!(!args(&req).contains(&"--speedfix".to_owned()));
-    req.fan_mods.speedfix = true;
-    req.fan_mods.ptbr = false;
-    assert!(!args(&req).contains(&"--ptbr".to_owned()));
-    assert!(args(&req).contains(&"--speedfix".to_owned()));
+fn speedfix_patch_selection_preserves_sources_and_rejects_old_output_after_game_change() {
+    let dir = std::env::temp_dir().join(format!("acnh-speedfix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let game = dir.join("game");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&game).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    let old = out.join("speedfix_main.pchtxt");
+    std::fs::write(&old, "synthetic old patch").unwrap();
+    assert_eq!(
+        speedfix_patch(&game, &out, "3.0.3", false),
+        Some(old.clone())
+    );
+    assert_eq!(speedfix_patch(&game, &out, "3.0.3", true), None);
+    let patch302 = game.join("speedfix_main_302.pchtxt");
+    std::fs::write(&patch302, "synthetic patch").unwrap();
+    assert_eq!(
+        speedfix_patch(&game, &out, "3.0.2", true),
+        Some(patch302.clone())
+    );
+    assert!(old.is_file() && patch302.is_file());
+    assert_eq!(
+        speedfix_args(false, "main", "3.0.2", &game, &out, true).unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        speedfix_args(true, "main", "3.0.2", &game, &out, true).unwrap(),
+        vec!["--variant".to_owned(), patch302.display().to_string()]
+    );
+    for version in ["1.0.0", "2.0.7"] {
+        assert_eq!(
+            speedfix_args(true, "main", version, &game, &out, true).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+    assert_eq!(
+        speedfix_args(true, "sdk", "3.0.2", &game, &out, true).unwrap(),
+        Vec::<String>::new()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn incomplete_mod_archive_preserves_previous_and_opt_in_then_off_preserves_other_mods() {
+    let dir = std::env::temp_dir().join(format!("acnh-mods-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let game = dir.join("game");
+    let out = dir.join("out");
+    let root = dir.join("repo");
+    let installed = out.join("mods/ptbr/romfs/previous.txt");
+    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    std::fs::write(&installed, "previous translation").unwrap();
+    let bad_zip = dir.join("bad.zip");
+    // Empty zip with only romfs/ directory entry and no files.
+    let status = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import sys, zipfile; z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr('romfs/','')",
+            &bad_zip.display().to_string(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(install_mod_archive(&out.join("mods"), "ptbr", &bad_zip, &dir, "python3").is_err());
+    assert_eq!(
+        std::fs::read_to_string(&installed).unwrap(),
+        "previous translation"
+    );
+
+    // Clean ptbr and test opt-in then off preserving other mods.
+    std::fs::remove_dir_all(out.join("mods/ptbr")).unwrap();
+    std::fs::create_dir_all(&game).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let ptbr_zip = game.join("ptbr.zip");
+    let status = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import sys, zipfile; z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr('romfs/synthetic.txt','translation')",
+            &ptbr_zip.display().to_string(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let other = out.join("mods/other/romfs/file");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, "other").unwrap();
+
+    install_mods(&out, &dir, &game, &root, false, &[], "python3").unwrap();
+    assert!(!out.join("mods/ptbr").exists());
+    install_mods(&out, &dir, &game, &root, true, &[], "python3").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(out.join("mods/ptbr/romfs/synthetic.txt")).unwrap(),
+        "translation"
+    );
+    install_mods(&out, &dir, &game, &root, false, &[], "python3").unwrap();
+    assert!(!out.join("mods/ptbr").exists());
+    assert!(ptbr_zip.is_file());
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "other");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rust_version_reads_build_id_and_writes_version_ini() {
+    let mut req = request("version", Os::Linux);
+    let exefs = req.out.join("exefs");
+    std::fs::create_dir_all(&exefs).unwrap();
+    let mut nso = vec![0u8; 0x60];
+    nso[..4].copy_from_slice(b"NSO0");
+    // 3.0.2 build id: FCD2BB238ABE99E925B4E452DF1F41F1
+    let bid = [
+        0xFC, 0xD2, 0xBB, 0x23, 0x8A, 0xBE, 0x99, 0xE9, 0x25, 0xB4, 0xE4, 0x52, 0xDF, 0x1F, 0x41,
+        0xF1,
+    ];
+    nso[0x40..0x50].copy_from_slice(&bid);
+    std::fs::write(exefs.join("main"), &nso).unwrap();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    rust_version(&req, &repo).unwrap();
+    let ini = std::fs::read_to_string(req.out.join("version.ini")).unwrap();
+    assert!(
+        ini.contains("build_id = FCD2BB238ABE99E925B4E452DF1F41F1"),
+        "{ini}"
+    );
+    assert!(ini.contains("version = 3.0.2"), "{ini}");
+    assert!(ini.contains("hooks = games/acnh/hooks.txt"), "{ini}");
+    req.game.root = PathBuf::from("/game");
 }
 
 /// A dropbox folder with `_transfers/ACNH-Universal/` in it, and the request that delivers to
@@ -996,6 +1223,7 @@ fn the_delivery_folder_is_the_dropbox_keys_or_homes() {
     );
     assert_eq!(delivery_subfolder(Os::Ios), Some("ios"));
     assert_eq!(delivery_subfolder(Os::Mac), Some("mac"));
+    assert_eq!(delivery_subfolder(Os::Android), Some("android"));
     assert_eq!(delivery_subfolder(Os::Linux), None);
 }
 
@@ -1074,6 +1302,7 @@ fn ios_without_the_iphoneos_sdk_stops_before_the_first_stage() {
     let (req, _) = ios_request("ios-no-sdk");
     // The command-line tools alone: `xcrun` fails for the iphoneos SDK.
     let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
     let mut seen = vec![];
     let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
         seen.push(s)
@@ -1129,18 +1358,39 @@ fn ios_needs_a_delivery_folder() {
     assert!(fake.ran.is_empty());
 }
 
-/// The macOS job's runner: the stages of upstream's script are faked, everything else runs.
+/// The macOS job's runner: the shared stages are faked, everything else runs.
 struct StagesFaked(ProcessRunner);
 
 impl ScriptRunner for StagesFaked {
     fn run(&mut self, stage: Stage, args: &[String]) -> Result<(), Vec<String>> {
-        if args.iter().any(|arg| arg == "tools/setup_acnh.py") {
-            return Ok(());
-        }
         self.0.run(stage, args)
     }
 
+    fn tools(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn game(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn version(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
     fn shaders(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn fonts(&mut self, _req: &Request) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn build(&mut self, _req: &Request) -> Result<(), Error> {
         Ok(())
     }
 
@@ -1414,4 +1664,95 @@ fn a_failed_package_script_is_a_build_error_after_the_assembly() {
     let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap_err();
     assert!(matches!(error, Error::Build(_)));
     assert_eq!(fake.assembled.len(), 1);
+}
+
+fn seed_all_stages_without_recomp_hash(out: &Path) {
+    std::fs::write(out.join(".prepare-tools.json"), "{}").unwrap();
+    for stage in STAGES {
+        make(&outputs(out, stage));
+    }
+}
+
+#[test]
+fn recompile_with_missing_hash_reruns_and_writes_hash() {
+    let req = request("recomp-missing-hash", Os::Linux);
+    seed_all_stages_without_recomp_hash(&req.out);
+    assert!(!req.out.join("gen/.recomp-hash").exists());
+
+    let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(fake.ran, vec![Stage::Recompile]);
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let expected = recomp_hash(&root).unwrap();
+    let recorded = std::fs::read_to_string(req.out.join("gen/.recomp-hash")).unwrap();
+    assert_eq!(recorded.trim(), expected);
+}
+
+#[test]
+fn recompile_with_changed_hash_reruns_and_updates_hash() {
+    let req = request("recomp-changed-hash", Os::Linux);
+    seed_all_stages_without_recomp_hash(&req.out);
+    std::fs::write(req.out.join("gen/.recomp-hash"), "stale-hash\n").unwrap();
+
+    let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(fake.ran, vec![Stage::Recompile]);
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let expected = recomp_hash(&root).unwrap();
+    let recorded = std::fs::read_to_string(req.out.join("gen/.recomp-hash")).unwrap();
+    assert_eq!(recorded.trim(), expected);
+}
+
+#[test]
+fn recompile_with_matching_hash_stays_cached() {
+    let req = request("recomp-matching-hash", Os::Linux);
+    seed_all_stages_without_recomp_hash(&req.out);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let expected = recomp_hash(&root).unwrap();
+    std::fs::write(req.out.join("gen/.recomp-hash"), format!("{expected}\n")).unwrap();
+
+    let mut fake = Fake::default();
+    fake.tools.push(("git", "false\n"));
+    prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(!fake.ran.contains(&Stage::Recompile));
+    assert!(fake.ran.is_empty());
+}
+
+#[test]
+fn recompile_hash_changes_when_recomp_python_file_changes() {
+    let source = std::env::temp_dir().join(format!("acnh-recomp-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&source);
+    std::fs::create_dir_all(source.join("recomp")).unwrap();
+    std::fs::write(source.join("recomp/emit.py"), "def emit(): return 1\n").unwrap();
+
+    let h1 = recomp_hash(&source).unwrap();
+    std::fs::write(source.join("recomp/emit.py"), "def emit(): return 2\n").unwrap();
+    let h2 = recomp_hash(&source).unwrap();
+    assert_ne!(h1, h2);
+    let _ = std::fs::remove_dir_all(&source);
 }
