@@ -1037,7 +1037,7 @@ int main(int argc, char** argv) {
     // frame: walking about the island's north at 60 fps on an M1 Air, replay 12.5 -> 10.1 ms and 56-59 -> 60 fps,
     // the picture the same (island, inventory, phone, map). Off; an MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS set wins.
     setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 0);
-    // A release package: the Vulkan loader and MoltenVK beside the player (tools/package_release_mac.sh), before any
+    // A release package: the Vulkan loader and MoltenVK beside the player, before any
     // installed ones. A VK_DRIVER_FILES or SDL_VULKAN_LIBRARY in the environment wins.
     if (const char* base = SDL_GetBasePath()) {
         // Inside ACNHRecomp.app the libraries are in Contents/MacOS with the player, the ICD file in
