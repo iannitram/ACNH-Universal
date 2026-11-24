@@ -40,7 +40,7 @@ serde_json = "1"
 # app's network and credential store, so neither `http` nor `keyring`: the Rust side has no C or
 # TLS of its own to cross-compile.
 [target.'cfg(target_os = "android")'.dependencies]
-acnh-core = { path = "../core", features = ["relay"] }
+acnh-core = { path = "../core", features = ["relay", "hub"] }
 save-relay = { git = "https://github.com/iannitram/save-relay", default-features = false, features = ["ffi"] }
 serde_json = "1"
 

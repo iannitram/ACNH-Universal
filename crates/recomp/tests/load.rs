@@ -9,10 +9,14 @@ use std::path::Path;
 
 #[test]
 fn passes_and_ported_flag() {
-    assert_eq!(PASSES, [Pass::Load, Pass::Analyse, Pass::Emit]);
+    assert_eq!(
+        PASSES,
+        [Pass::Load, Pass::Analyse, Pass::Emit, Pass::Driver]
+    );
     assert!(ported(Pass::Load));
     assert!(ported(Pass::Analyse));
     assert!(ported(Pass::Emit));
+    assert!(ported(Pass::Driver));
 }
 
 /// Helper to encode raw LZ4 block containing only literals.

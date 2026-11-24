@@ -230,13 +230,11 @@ final class Relay {
     // the game download. The island on this device stays. False when something was left behind.
     static boolean turnOff(Context c) { return nativeForget(files(c), dataRoot(c)); }
 
-    // The game folder of the last start (Home writes <files>/data_root.txt), whose config.ini keeps relay.ask; "" if none.
-    private static String dataRoot(Context c) {
-        try {
-            return new String(Files.readAllBytes(new File(files(c), "data_root.txt").toPath()), StandardCharsets.UTF_8).trim();
-        } catch (Exception e) {
-            return "";
-        }
+    // The data root (saves, config.ini, logs) is <files>/root/ (#192).
+    static String dataRoot(Context c) {
+        File r = new File(files(c), "root");
+        r.mkdirs();
+        return r.getAbsolutePath();
     }
 
     // "Sign out of Dropbox": save sync and the game download both end here. False when something was left behind.

@@ -2,7 +2,7 @@
 // when the game root has no analysis/main.bin, platform_mac.cpp calls nx_appgame_first_start (on the game's thread)
 // before the game boots. This file shows the screens (Dropbox sign-in, "Download the game (about N GB)?", progress)
 // and moves the bytes in a background URLSession; the plan, the hash checks and the install are Rust
-// (crates/runtime/src/appgame.rs through acnh_appgame_*, which uses acnh_core::appgame::download), and the Dropbox
+// (crates/runtime/src/appgame.rs through acnh_appgame_*, which build on acnh_core::appgame), and the Dropbox
 // sign-in and token are Rust too (appgame_ios.rs).
 //
 // The game goes to Library/Application Support/game/ (read-only once complete, excluded from iCloud backup);

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "config.h"
+#include "nvn_aspect.h"
 #include "nvn_shaders.h"
 #include "nvn_vk.h"
 #include "platform.h"
@@ -854,8 +855,9 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
     p.crop[2] = cw / float(src.width), p.crop[3] = ch / float(src.height);
     bool sideways = r == 1 || r == 3;
     float tw = float(sideways ? g.extent.height : g.extent.width), th = float(sideways ? g.extent.width : g.extent.height);
-    float scale = std::min(tw / cw, th / ch), bw = cw * scale / tw, bh = ch * scale / th;
-    p.box[0] = (1 - bw) / 2, p.box[1] = (1 - bh) / 2, p.box[2] = bw, p.box[3] = bh;
+    const LetterboxRect lb = compute_letterbox(cw, ch, tw, th);
+    const float bw = lb.w, bh = lb.h;
+    p.box[0] = lb.x, p.box[1] = lb.y, p.box[2] = bw, p.box[3] = bh;
     if (r == 0) plat::set_picture_box(p.box[0], p.box[1], p.box[2], p.box[3]);  // for mouse clicks (hle_hid.cpp)
     // The on-screen touch controls (touch_layout.cpp, Android), in upright uv; none on PC.
     plat::OverlayShape shapes[kOverlayMax];

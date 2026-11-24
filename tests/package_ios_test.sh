@@ -173,7 +173,7 @@ files, prepared, build_id = sys.argv[1:4]
 m = json.load(open(os.path.join(files, "manifest.json")))
 assert m["version"] == 1
 assert m["build_id"] == build_id.upper(), m["build_id"]
-assert len(m["abi"]) == 12 and all(c in "0123456789abcdef" for c in m["abi"]), m["abi"]
+assert len(m["nx_game_abi"]) == 12 and all(c in "0123456789abcdef" for c in m["nx_game_abi"]), m["nx_game_abi"]
 listed = {e["path"]: e for e in m["files"]}
 expected = {"analysis/main.bin", "aoc/1/data", "fonts/shared.ttf", "romfs.pak", "spirv.pak"}
 assert set(listed) == expected, sorted(listed)
@@ -198,7 +198,7 @@ say "--small: no game/ in the .ipa; the manifest lists every staged file with ma
 # A second run replaces the staged files; a new ABI can be given.
 printf 'newer' > "$small/spirv.pak"
 env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" --abi 0123456789ab "$small_out" > /dev/null
-python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["abi"]=="0123456789ab"; assert [f["size"] for f in m["files"] if f["path"]=="spirv.pak"]==[5]' "$files/manifest.json" \
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["nx_game_abi"]=="0123456789ab"; assert [f["size"] for f in m["files"] if f["path"]=="spirv.pak"]==[5]' "$files/manifest.json" \
     || die "a second --small run did not replace the staged files"
 [ ! -e "$small_out/acnh-universal-game/ios.old" ] || die "--small left ios.old behind"
 say "--small again replaces the staged files and takes --abi"

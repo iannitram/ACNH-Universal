@@ -1,7 +1,7 @@
 //! The iOS half of the game download (issue #231; SPEC.md M18): the Dropbox sign-in and its token,
 //! and the C exports the player's Objective-C++ (`runtime/src/appgame_ios.mm`) calls. Rust plans,
 //! checks and signs in; the Objective-C++ moves the bytes (a background `URLSession`) and shows the
-//! first-start screen. The plan and the checks are `appgame.rs`, which the tests run on every runner.
+//! first-start screen. The plan and the checks are `appgame.rs` (over `acnh_core::appgame`), which the tests run on every runner.
 //!
 //! The sign-in is save-relay's Dropbox app (an App-folder app, the owner's choice of 2026-11-23:
 //! reuse save-relay's app), by Dropbox's code flow: the app opens the Dropbox page in Safari, the

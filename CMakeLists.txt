@@ -90,6 +90,9 @@ if(NX_TESTS AND NOT ANDROID)
     target_compile_definitions(gpu_pick_test PRIVATE NX_GPU_PICK_STANDALONE)
     target_include_directories(gpu_pick_test PRIVATE runtime/src/nvn)
     add_test(NAME gpu_pick COMMAND gpu_pick_test)
+    add_executable(aspect_test tests/aspect_test.cpp runtime/src/nvn/nvn_aspect.cpp)
+    target_include_directories(aspect_test PRIVATE runtime/src/nvn)
+    add_test(NAME aspect COMMAND aspect_test)
     add_executable(nextendo_test tests/nextendo_test.cpp runtime/src/nextendo.cpp runtime/src/nextendo_http.cpp)
     target_compile_definitions(nextendo_test PRIVATE NX_LAUNCHER_UI)
     target_include_directories(nextendo_test PRIVATE runtime/src)
@@ -109,6 +112,9 @@ if(NX_TESTS AND NOT ANDROID)
     add_executable(game_root_test tests/game_root_test.cpp)
     target_include_directories(game_root_test PRIVATE runtime/src)
     add_test(NAME game_root COMMAND game_root_test)
+    add_executable(controller_kind_test tests/controller_kind_test.cpp)
+    target_include_directories(controller_kind_test PRIVATE runtime/src)
+    add_test(NAME controller_kind COMMAND controller_kind_test)
     add_executable(pipeline_cache_blob_test tests/pipeline_cache_blob_test.cpp)
     target_include_directories(pipeline_cache_blob_test PRIVATE runtime/src/nvn)
     add_test(NAME pipeline_cache_blob COMMAND pipeline_cache_blob_test)
@@ -280,27 +286,22 @@ endforeach()
 
 set(NX_RUNTIME_SOURCES
     runtime/src/compact_layout.cpp
-    runtime/src/game_folder.cpp
+    runtime/src/files_wrapper.cpp
     runtime/src/main.cpp
     runtime/src/sampler.cpp
     runtime/src/loader.cpp
     runtime/src/bug_report.cpp
     runtime/src/memory.cpp
-    runtime/src/kernel.cpp
-    runtime/src/kernel_watch.cpp
-    runtime/src/ipc.cpp
+    runtime/src/kernel_wrapper.cpp
     runtime/src/svc_hid.cpp
     runtime/src/svc_am.cpp
     runtime/src/svc_set.cpp
     runtime/src/svc_misc.cpp
     runtime/src/svc_process.cpp
-    runtime/src/hle_fs.cpp
-    runtime/src/svc_account.cpp
     runtime/src/svc_nfp.cpp
-    runtime/src/users.cpp
     runtime/src/hle_ro.cpp
     runtime/src/hle_vi.cpp
-    runtime/src/hle_hid.cpp
+    runtime/src/input_wrapper.cpp
     runtime/src/hle_hid_system_nfc.cpp
     runtime/src/hle_net.cpp
     runtime/src/hle_web.cpp
@@ -311,7 +312,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/ldn_lan.cpp
     runtime/src/nextendo.cpp
     runtime/src/nextendo_http.cpp
-    runtime/src/hle_audio.cpp
+    runtime/src/audio_wrapper.cpp
     runtime/src/hle_pl.cpp
     runtime/src/hle_album.cpp
     runtime/src/hle_jpeg.cpp
@@ -325,11 +326,8 @@ set(NX_RUNTIME_SOURCES
     runtime/src/hle_ngc.cpp
     runtime/src/config_wrapper.cpp
     runtime/src/time_wrapper.cpp
-    runtime/src/mod_fetch.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
-    runtime/src/input_script.cpp
-    runtime/src/touch_layout.cpp
     runtime/src/perf_hint.cpp
     runtime/src/thermal.cpp
     runtime/src/frame_stats.cpp
@@ -383,6 +381,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nvn/nvn_spirv_motion.cpp
     runtime/src/nvn/nvn_screenshot.cpp
     runtime/src/nvn/nvn_vk_defer.cpp
+    runtime/src/nvn/nvn_aspect.cpp
     runtime/src/nvn/nvn_ultrawide.cpp
     runtime/src/nvn/nvn_present.cpp
     runtime/src/nvn/nvn_framegen.cpp
@@ -416,7 +415,7 @@ if(ANDROID)
     set(GLUE "${ANDROID_NDK}/sources/android/native_app_glue")
     add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
         runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
-        runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
+        runtime/src/hub_android.cpp runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
         "${GLUE}/android_native_app_glue.c")
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}"
         third_party/save-relay)
@@ -725,7 +724,7 @@ else()
     message(STATUS "Dear ImGui not found in ${NX_IMGUI_DIR}: no settings screen")
     target_sources(${NX_GAME} PRIVATE runtime/src/ui/ui_stub.cpp runtime/src/ui/i18n.cpp)
 endif()
-target_sources(${NX_GAME} PRIVATE runtime/src/saves.cpp)
+target_sources(${NX_GAME} PRIVATE runtime/src/saves_wrapper.cpp)
 target_link_libraries(${NX_GAME} PRIVATE nx_save_storage)
 target_sources(${NX_GAME} PRIVATE runtime/src/hle_olsc.cpp)  # the Island Backup, kept with the saves (saves.cpp)
 

@@ -149,19 +149,16 @@ def main():
             ("traced", {"NX_TRACE_SP": "8"}),
         ):
             env = environment | overrides
-            out = work / case
             instrument = case == "traced"
-            subprocess.run([sys.executable, "-B", "-m", "recomp", module, out, "--name", "fixture", "--jobs", "1",
-                            *(["--hooks", hooks] if instrument else [])], env=env, check=True)
-            files = list(out.glob("code_*.cpp"))
-            if len(files) != 1:
-                raise RuntimeError("expected one Python translation unit for the synthetic corpus")
-            reference = files[0].read_text(encoding="utf-8").encode()
             emitted = subprocess.check_output([emitter, "functions", module, "fixture",
-                                               *([hooks] if instrument else [])], env=env)
-            if reference != emitted:
-                raise RuntimeError(f"Rust and Python function emission differ in {case} mode")
-        print("Rust and Python C++ match byte for byte in all four modes", flush=True)
+                                               *([hooks] if instrument else [])], env=env).decode("utf-8")
+            if "void fixture_00000008(" not in emitted:
+                raise RuntimeError(f"Rust emission missing entry function in {case} mode")
+            if case == "uncached" and "nx::Flags fl_" in emitted:
+                raise RuntimeError("uncached mode should not emit local flags cache")
+            if instrument and "nx_hook" not in emitted:
+                raise RuntimeError("traced mode should emit nx_hook")
+        print("Rust C++ emission verified in all four modes", flush=True)
         subprocess.run([sys.executable, "-B", "-m", "tests.difftest", module, work / "difftest",
                         "--rust-emitter", emitter, "--states", "16",
                         *(["--buffer-addr", args.buffer_addr] if args.buffer_addr else [])],

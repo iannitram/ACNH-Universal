@@ -77,7 +77,7 @@ jobs:
           host=$(rustc -vV | sed -n 's/^host: //p')
           test -n "$(cargo tree -e normal --target "$host" -p acnh-app -i save-relay)"
           test -n "$(cargo tree -e normal --target "$host" -p acnh-cli -i save-relay)"
-      - name: Rust emitter matches Python and Unicorn (Linux)
+      - name: Rust emitter matches Unicorn (Linux)
         if: runner.os == 'Linux'
         run: |
           python3 -m venv "$RUNNER_TEMP/recomp-oracle"
@@ -161,6 +161,79 @@ jobs:
       - name: Player through cargo, then boot on a fake game library
         run: bash tools/boot_smoke.sh
 
+  cpp-windows:
+    name: C++ and player (Windows)
+    runs-on: windows-2025
+    env:
+      SDL3: "3.4.16"
+      VK_HEADERS: "1.4.357"
+      LLVM: "20.1.8"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: LLVM (clang-cl, lld-link)
+        run: |
+          T=$(cygpath -u "$RUNNER_TEMP")
+          export PATH="/c/Program Files/7-Zip:$PATH"
+          curl -fsSL -o "$T/llvm.exe" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM/LLVM-$LLVM-win64.exe"
+          7z x -bso0 -o"$T/llvm" "$T/llvm.exe"
+          cygpath -w "$T/llvm/bin" >> "$GITHUB_PATH"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: SDL3 and Vulkan headers
+        run: |
+          T=$(cygpath -u "$RUNNER_TEMP")
+          export PATH="/c/Program Files/7-Zip:$PATH"
+          curl -fsSL -o "$T/sdl.zip" "https://github.com/libsdl-org/SDL/releases/download/release-$SDL3/SDL3-devel-$SDL3-VC.zip"
+          7z x -bso0 -o"$RUNNER_TEMP" "$RUNNER_TEMP/sdl.zip"
+          curl -fsSL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$VK_HEADERS.tar.gz" | tar -xz -C "$T"
+          TM=$(cygpath -m "$RUNNER_TEMP")
+          echo "SDL3_DIR=$TM/SDL3-$SDL3/cmake" >> "$GITHUB_ENV"
+          echo "NX_VULKAN_INCLUDE=$TM/Vulkan-Headers-$VK_HEADERS/include" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$TM/SDL3-$SDL3;$TM/Vulkan-Headers-$VK_HEADERS" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - name: Configure (C++ parts and unit tests)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER=clang-cl \
+            -DCMAKE_CXX_COMPILER=clang-cl \
+            -DCMAKE_LINKER=lld-link \
+            -DNX_TESTS=ON \
+            -DNX_GAME=acnh \
+            -DCMAKE_BUILD_TYPE=Release
+      - name: Build C++ parts and unit tests
+        run: |
+          targets=$(ninja -C build -t targets all | sed -n 's/^[[:space:]]*\([A-Za-z0-9_]*_test\(\.exe\)\?\): .*/\1/p' |
+                    grep -v '^cmake_' | grep -v -x -e prepare_e2e_test -e prepare_e2e_test.exe -e shader_cache_test -e shader_cache_test.exe | sort -u || true)
+          [ -n "$targets" ] || { echo "no *_test targets found"; exit 1; }
+          echo "test targets: $targets"
+          cmake --build build --target acnh_recomp acnh_prepare $targets
+      - name: Test (C++ unit tests)
+        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig|recomp_source_test)$'
+      - name: Player (clang-cl, lld-link, x86_64-pc-windows-msvc)
+        env:
+          CC: clang-cl
+          CXX: clang-cl
+          CMAKE_LINKER: lld-link
+          ACNH_GAME: acnh
+          ACNH_BUILD_PLAYER: "1"
+        run: |
+          cargo build --locked --release -p acnh-runtime --features player --target x86_64-pc-windows-msvc
+          player=$(find target/x86_64-pc-windows-msvc/release/build -path '*/out/player/build/acnh.exe' | head -n 1)
+          [ -n "$player" ] && [ -f "$player" ] || { echo "acnh.exe not found"; exit 1; }
+          [ -f "$(dirname "$player")/SDL3.dll" ] || { echo "SDL3.dll not found next to acnh.exe"; exit 1; }
+          echo "Built Windows player: $player"
+
   android:
     name: Cross-build (Android)
     runs-on: ubuntu-24.04
@@ -219,6 +292,8 @@ jobs:
             echo "AR_aarch64_linux_android=$ARCHIVER"
           } >> "$GITHUB_ENV"
       - run: cargo build --workspace --target aarch64-linux-android
+      - name: Android private-storage checks (#192)
+        run: bash tests/android_app_check.sh
 
   rust-macos:
     name: Rust (macOS)

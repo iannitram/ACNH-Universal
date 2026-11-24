@@ -131,6 +131,11 @@ impl ScriptRunner for Fake {
         Ok(())
     }
 
+    fn recompile(&mut self, _req: &Request) -> Result<(), acnh_core::error::Error> {
+        self.ran.push(Stage::Recompile);
+        Ok(())
+    }
+
     fn shaders(&mut self, _req: &Request) -> Result<(), acnh_core::error::Error> {
         Ok(())
     }

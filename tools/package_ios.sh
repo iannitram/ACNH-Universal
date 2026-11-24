@@ -217,7 +217,7 @@ for base, dirs, names in os.walk(root):
                       "size": os.path.getsize(path), "sha256": digest.hexdigest()})
 files.sort(key=lambda e: e["path"])
 with open(os.path.join(root, "manifest.json"), "w") as out:
-    json.dump({"version": 1, "build_id": build_id, "abi": abi, "files": files}, out, separators=(",", ":"))
+    json.dump({"version": 1, "build_id": build_id, "nx_game_abi": abi, "files": files}, out, separators=(",", ":"))
 PY
     chmod -R u+rw,go+r "$files"
 fi
