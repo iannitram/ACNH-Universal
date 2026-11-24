@@ -2,8 +2,9 @@
 //!
 //! Copies only the six prepared game entries (`analysis/`, `romfs.pak`, `spirv.pak`,
 //! `fonts/`, `aoc/` when present, and `libacnh_game.so`) into `<private>/game.partial/`,
-//! resuming over matching-size files, marks them read-only, and atomically renames
-//! `game.partial/` to `<private>/game/`. Writes nowhere outside the given private folder.
+//! resuming over matching-size files, atomically renames `game.partial/` to
+//! `<private>/game/`, then marks the tree read-only (macOS will not rename a directory without
+//! write permission). Writes nowhere outside the given private folder.
 
 use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};

@@ -2790,6 +2790,12 @@ fn cargo_in_homes(os: Os) -> bool {
     .into_iter()
     .flatten()
     .any(|h| h.join("bin").join(&name).is_file())
+        // The same Homebrew places `find_build_tool` tries (`brew install rust`): an app opened
+        // from the Finder has no Homebrew on its PATH, but the build stage still finds cargo there.
+        || (os != Os::Windows
+            && ["/opt/homebrew/bin", "/usr/local/bin"]
+                .iter()
+                .any(|d| Path::new(d).join(&name).is_file()))
 }
 
 fn missing_cargo(dirs: &[PathBuf], os: Os) -> Option<Missing> {
