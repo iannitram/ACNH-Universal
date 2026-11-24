@@ -125,7 +125,7 @@ RUNTIME_HEADER=$(find "$CARGO_OUT/aarch64-linux-android/release/build" -name acn
 echo "== configure ($BUILD) [version $VNAME ($VCODE)]"
 cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_STL=c++_shared \
-  -DANDROID_PLATFORM=android-29 -DNX_GAME=$GAME -DNX_GEN_DIR="$GEN" -DNX_LAUNCHER=OFF \
+  -DANDROID_PLATFORM=android-29 -DNX_GAME=$GAME -DNX_GEN_DIR="$GEN" \
   -DNX_BUILD_VERSION="$VNAME" \
   -DNX_VULKAN_SDK="$PWD/private/third_party/Vulkan-Headers-1.4.357" \
   -DNX_RUNTIME_ARCHIVE="$RUNTIME_LIB" -DNX_RUNTIME_INCLUDE="$(dirname "$RUNTIME_HEADER")" > "$OUT.cmake.log" 2>&1 ||

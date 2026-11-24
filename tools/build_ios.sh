@@ -166,7 +166,7 @@ cmake -S "$root" -B "$build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$sdk" -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
-    -DNX_GAME=acnh -DNX_GEN_DIR="$gen" -DNX_LAUNCHER=OFF -DNX_GAME_FROM_FOLDER=OFF \
+    -DNX_GAME=acnh -DNX_GEN_DIR="$gen" -DNX_GAME_FROM_FOLDER=OFF \
     -DNX_BUILD_VERSION="$VNAME" \
     -DNX_IOS_SHORT_VERSION="$ios_short_version" -DNX_IOS_BUNDLE_VERSION="$VCODE" \
     -DNX_VULKAN_INCLUDE="$vulkan" -DNX_VPX_IOS="$vpx_root" -DNX_IOS_MOLTENVK="$mv_prefix/lib/libMoltenVK.a" \

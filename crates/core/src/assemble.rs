@@ -218,6 +218,18 @@ pub fn assemble_with(plan: &Plan, tools: &mut dyn Tools) -> Result<PathBuf> {
 /// executable when there is one (the contained app), else the one in the app under `install`;
 /// elsewhere `<install>/<recipe::output>`.
 pub fn player(os: Os, launcher: &Path, install: &Path) -> PathBuf {
+    if matches!(os, Os::Linux | Os::Windows) {
+        if let Some(beside) = launcher.parent().and_then(|folder| {
+            folder
+                .join("game/analysis/main.bin")
+                .is_file()
+                .then(|| folder.join(output(os)))
+                .filter(|path| path.is_file())
+        }) {
+            return beside;
+        }
+        return install.join(output(os));
+    }
     if os != Os::Mac {
         return install.join(output(os));
     }

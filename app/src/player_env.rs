@@ -16,10 +16,14 @@ pub struct PlayerSetup {
     pub build_missing: bool,
 }
 
-/// `<app>/Contents/Resources/game` for a launcher at `<app>/Contents/MacOS/<launcher>`.
-fn own_game(launcher: &Path) -> Option<PathBuf> {
-    let contents = launcher.parent()?.parent()?;
-    Some(contents.join("Resources/game"))
+/// The contained `game` folder beside `launcher` (Mac `.app/Contents/Resources/game` or
+/// Linux/Windows `<folder>/game`).
+fn own_game(os: Os, launcher: &Path) -> Option<PathBuf> {
+    match os {
+        Os::Mac => Some(launcher.parent()?.parent()?.join("Resources/game")),
+        Os::Linux | Os::Windows => Some(launcher.parent()?.join("game")),
+        _ => None,
+    }
 }
 
 /// Make the data root and its logs folder, then build the player's environment.
@@ -28,6 +32,8 @@ fn own_game(launcher: &Path) -> Option<PathBuf> {
 /// - Mac: the data root and `logs/` are created; `NX_LOG` is `<data root>/logs/nx.log`;
 ///   `NX_GAME_ROOT` is the app's own `Contents/Resources/game` when it holds one; it wins over
 ///   a local prepare on the same Mac.
+/// - Linux: `NX_GAME_ROOT` is `<folder>/game` when running inside a packed folder, winning
+///   over a local prepare; otherwise `NX_GAME_ROOT` is set only when a local prepare names one.
 /// - Other OSes: `NX_GAME_ROOT` only when a local prepare names one, as before.
 pub fn player_setup(builds: &BuildActions, launcher: &Path) -> Result<PlayerSetup> {
     let root = builds.dirs.data_root();
@@ -40,8 +46,11 @@ pub fn player_setup(builds: &BuildActions, launcher: &Path) -> Result<PlayerSetu
             builds.dirs.logs().join("nx.log").display().to_string(),
         ));
         if game_root.is_none() {
-            game_root = own_game(launcher).filter(|game| game.is_dir());
+            game_root = own_game(Os::Mac, launcher).filter(|game| game.is_dir());
         }
+    } else if matches!(builds.os, Os::Linux | Os::Windows) && game_root.is_none() {
+        game_root =
+            own_game(builds.os, launcher).filter(|game| game.join("analysis/main.bin").is_file());
     }
     if let Some(game_root) = game_root {
         env.push(("NX_GAME_ROOT".into(), game_root.display().to_string()));
@@ -177,5 +186,117 @@ mod tests {
         );
         assert_eq!(value(&setup.env, "NX_LOG"), None);
         assert!(!root.path().join("data").exists());
+    }
+
+    #[test]
+    fn linux_packed_folder_launches_beside_player_with_game_and_external_data() {
+        let root = tempfile::tempdir().unwrap();
+        let vars = Vars {
+            home: root.path().join("home"),
+            data: root.path().join("data"),
+            config: root.path().join("config"),
+        };
+        let builds = BuildActions {
+            dirs: AppDirs::for_os(Os::Linux, &vars),
+            os: Os::Linux,
+        };
+        let packed = root.path().join("Applications/ACNH-Universal");
+        std::fs::create_dir_all(packed.join("game/analysis")).unwrap();
+        let launcher = packed.join("acnh-app");
+        let player = packed.join("acnh");
+        std::fs::write(&launcher, b"").unwrap();
+        std::fs::write(&player, b"").unwrap();
+        std::fs::write(packed.join("acnhrecomp.png"), b"").unwrap();
+        std::fs::write(packed.join("game/analysis/main.bin"), b"").unwrap();
+
+        let setup = player_setup(&builds, &launcher).unwrap();
+        assert_eq!(setup.program, player);
+        assert_eq!(
+            value(&setup.env, "NX_GAME_ROOT").map(PathBuf::from),
+            Some(packed.join("game"))
+        );
+        assert_eq!(
+            value(&setup.env, "NX_DATA_ROOT").map(PathBuf::from),
+            Some(builds.dirs.data_root())
+        );
+        assert!(!PathBuf::from(value(&setup.env, "NX_DATA_ROOT").unwrap()).starts_with(&packed));
+        assert!(!setup.build_missing);
+        assert_eq!(acnh_core::steam::assets_dir_for(&launcher, None), packed);
+    }
+
+    #[test]
+    fn linux_launcher_without_game_opens_build_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let vars = Vars {
+            home: root.path().join("home"),
+            data: root.path().join("data"),
+            config: root.path().join("config"),
+        };
+        let builds = BuildActions {
+            dirs: AppDirs::for_os(Os::Linux, &vars),
+            os: Os::Linux,
+        };
+        let launcher = root.path().join("mount/usr/bin/acnh-app");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, b"").unwrap();
+        let setup = player_setup(&builds, &launcher).unwrap();
+        assert!(setup.build_missing);
+        assert_eq!(value(&setup.env, "NX_GAME_ROOT"), None);
+    }
+
+    #[test]
+    fn windows_packed_folder_launches_beside_player_with_game_and_external_data() {
+        let root = tempfile::tempdir().unwrap();
+        let vars = Vars {
+            home: root.path().join("home"),
+            data: root.path().join("AppData/Local"),
+            config: root.path().join("AppData/Roaming"),
+        };
+        let builds = BuildActions {
+            dirs: AppDirs::for_os(Os::Windows, &vars),
+            os: Os::Windows,
+        };
+        let packed = root.path().join("AppData/Local/Programs/ACNH-Universal");
+        std::fs::create_dir_all(packed.join("game/analysis")).unwrap();
+        let launcher = packed.join("acnh-app.exe");
+        let player = packed.join("acnh.exe");
+        std::fs::write(&launcher, b"").unwrap();
+        std::fs::write(&player, b"").unwrap();
+        std::fs::write(packed.join("acnhrecomp.ico"), b"").unwrap();
+        std::fs::write(packed.join("game/analysis/main.bin"), b"").unwrap();
+
+        let setup = player_setup(&builds, &launcher).unwrap();
+        assert_eq!(setup.program, player);
+        assert_eq!(
+            value(&setup.env, "NX_GAME_ROOT").map(PathBuf::from),
+            Some(packed.join("game"))
+        );
+        assert_eq!(
+            value(&setup.env, "NX_DATA_ROOT").map(PathBuf::from),
+            Some(builds.dirs.data_root())
+        );
+        assert!(!PathBuf::from(value(&setup.env, "NX_DATA_ROOT").unwrap()).starts_with(&packed));
+        assert!(!setup.build_missing);
+        assert_eq!(acnh_core::steam::assets_dir_for(&launcher, None), packed);
+    }
+
+    #[test]
+    fn windows_launcher_without_game_opens_build_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let vars = Vars {
+            home: root.path().join("home"),
+            data: root.path().join("AppData/Local"),
+            config: root.path().join("AppData/Roaming"),
+        };
+        let builds = BuildActions {
+            dirs: AppDirs::for_os(Os::Windows, &vars),
+            os: Os::Windows,
+        };
+        let launcher = root.path().join("release/acnh-app.exe");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, b"").unwrap();
+        let setup = player_setup(&builds, &launcher).unwrap();
+        assert!(setup.build_missing);
+        assert_eq!(value(&setup.env, "NX_GAME_ROOT"), None);
     }
 }
