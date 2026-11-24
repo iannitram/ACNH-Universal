@@ -653,6 +653,17 @@ void page_game() {
             ImGui::Dummy(ImVec2(0, 6 * g_scale));
         }
     }
+#if defined(__ANDROID__)
+    ImGui::Dummy(ImVec2(0, 6 * g_scale));
+    row("game.start_screen", "game.start_screen.desc", [&](float w) {
+        if (ImGui::Button(tr("game.start_screen.button"), ImVec2(w, 0))) {
+            game_clock_save();
+            save_settings();
+            plat::open_start_screen();
+        }
+        page_nav_item();
+    });
+#endif
 }
 
 bool lsfg_available() {

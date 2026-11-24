@@ -354,8 +354,14 @@ final class Relay {
         String message = r.isNull("message") ? "" : r.optString("message");
         switch (r.optString("kind")) {
             case "sign_in_choice":
+                String legacy = r.optBoolean("allow_not_now") && DropboxAuth.hasLegacyDownloadToken(a)
+                        ? t("Your earlier Dropbox sign-in was for downloading the game only (read-only), so save sync "
+                                        + "needs one new sign-in to also sync your island.\n\n",
+                                "O seu login anterior no Dropbox era só para baixar o jogo (somente leitura), então a "
+                                        + "sincronização precisa de um novo login para também sincronizar a sua ilha.\n\n")
+                        : "";
                 b.setTitle(t("Save sync", "Sincronização do save"))
-                        .setMessage((message.isEmpty() ? "" : message + "\n\n") + t(
+                        .setMessage((message.isEmpty() ? "" : message + "\n\n") + legacy + t(
                                 "Keep your island in your Dropbox, so it goes with you to your other devices: the app "
                                         + "fetches it before the game starts and puts it back when you leave.",
                                 "Guarde a sua ilha no seu Dropbox, para ela ir com você para os seus outros aparelhos: o "

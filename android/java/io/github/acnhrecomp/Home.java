@@ -110,6 +110,16 @@ public class Home extends Activity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (!Relay.running() && intent != null && intent.getBooleanExtra("pick", false)) {
+            GameDownload.finished = false;
+            show(null);
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         Relay.detach(this);
@@ -318,6 +328,11 @@ public class Home extends Activity {
                                 + "the island on this device, or sign in to Dropbox again.",
                             "As configurações da sincronização neste aparelho não podem ser lidas. Desligue a "
                                 + "sincronização para jogar com a ilha deste aparelho, ou entre no Dropbox de novo.")
+                        : state == Relay.OFF && DropboxAuth.hasLegacyDownloadToken(this)
+                        ? t("Off. Your earlier Dropbox sign-in was for downloading the game only (read-only). Set up "
+                                + "save sync to sign in once more for both the download and your island.",
+                            "Desligada. O seu login anterior no Dropbox era só para baixar o jogo (somente leitura). "
+                                + "Ligue a sincronização para entrar de novo para o download e a sua ilha.")
                         : t("Off. Set it up to keep your island in your Dropbox and play it on your other devices.",
                             "Desligada. Ligue para guardar a sua ilha no seu Dropbox e jogar nos seus outros aparelhos."),
                 15, Screen.TEXT));
