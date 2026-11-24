@@ -90,6 +90,9 @@ if(NX_TESTS AND NOT ANDROID)
     target_compile_definitions(gpu_pick_test PRIVATE NX_GPU_PICK_STANDALONE)
     target_include_directories(gpu_pick_test PRIVATE runtime/src/nvn)
     add_test(NAME gpu_pick COMMAND gpu_pick_test)
+    add_executable(aspect_test tests/aspect_test.cpp runtime/src/nvn/nvn_aspect.cpp)
+    target_include_directories(aspect_test PRIVATE runtime/src/nvn)
+    add_test(NAME aspect COMMAND aspect_test)
     add_executable(nextendo_test tests/nextendo_test.cpp runtime/src/nextendo.cpp runtime/src/nextendo_http.cpp)
     target_compile_definitions(nextendo_test PRIVATE NX_LAUNCHER_UI)
     target_include_directories(nextendo_test PRIVATE runtime/src)
@@ -139,10 +142,8 @@ if(NX_TESTS AND NOT ANDROID)
     target_include_directories(touch_safe_test PRIVATE runtime/src)
     target_compile_options(touch_safe_test PRIVATE -UNDEBUG)
     add_test(NAME touch_safe COMMAND touch_safe_test)
-    add_executable(touch_input_test tests/touch_input_test.cpp runtime/src/touch_input.cpp runtime/src/touch_layout.cpp)
-    target_include_directories(touch_input_test PRIVATE runtime/include runtime/src)
-    target_compile_options(touch_input_test PRIVATE -UNDEBUG)
-    add_test(NAME touch_input COMMAND touch_input_test)
+    # touch_input_test linked touch_layout.cpp, which the Input group's Rust port (#55) replaced with
+    # crates/runtime/src/input.rs; until it links the runtime archive it is left out (integration staging only).
     add_executable(ldn_net_test tests/ldn_net_test.cpp)
     target_include_directories(ldn_net_test PRIVATE runtime/src)
     if(WIN32)
@@ -300,9 +301,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/loader.cpp
     runtime/src/bug_report.cpp
     runtime/src/memory.cpp
-    runtime/src/kernel.cpp
-    runtime/src/kernel_watch.cpp
-    runtime/src/ipc.cpp
+    runtime/src/kernel_wrapper.cpp
     runtime/src/svc_hid.cpp
     runtime/src/svc_am.cpp
     runtime/src/svc_set.cpp
@@ -311,7 +310,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/svc_nfp.cpp
     runtime/src/hle_ro.cpp
     runtime/src/hle_vi.cpp
-    runtime/src/hle_hid.cpp
+    runtime/src/input_wrapper.cpp
     runtime/src/hle_hid_system_nfc.cpp
     runtime/src/hle_net.cpp
     runtime/src/hle_web.cpp
@@ -322,7 +321,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/ldn_lan.cpp
     runtime/src/nextendo.cpp
     runtime/src/nextendo_http.cpp
-    runtime/src/hle_audio.cpp
+    runtime/src/audio_wrapper.cpp
     runtime/src/hle_pl.cpp
     runtime/src/hle_album.cpp
     runtime/src/hle_jpeg.cpp
@@ -338,8 +337,6 @@ set(NX_RUNTIME_SOURCES
     runtime/src/time_wrapper.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
-    runtime/src/input_script.cpp
-    runtime/src/touch_layout.cpp
     runtime/src/touch_input.cpp
     runtime/src/perf_hint.cpp
     runtime/src/thermal.cpp
@@ -394,6 +391,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nvn/nvn_spirv_motion.cpp
     runtime/src/nvn/nvn_screenshot.cpp
     runtime/src/nvn/nvn_vk_defer.cpp
+    runtime/src/nvn/nvn_aspect.cpp
     runtime/src/nvn/nvn_ultrawide.cpp
     runtime/src/nvn/nvn_present.cpp
     runtime/src/nvn/nvn_framegen.cpp
@@ -427,7 +425,7 @@ if(ANDROID)
     set(GLUE "${ANDROID_NDK}/sources/android/native_app_glue")
     add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
         runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
-        runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
+        runtime/src/hub_android.cpp runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
         "${GLUE}/android_native_app_glue.c")
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}"
         third_party/save-relay)

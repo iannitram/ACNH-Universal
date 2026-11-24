@@ -24,7 +24,7 @@ while IFS= read -r f; do sources+=("$f"); done < <(
 )
 sources+=(runtime/src/platform_mac.cpp runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp
           runtime/src/app_icon.cpp runtime/src/save_storage.cpp runtime/src/save_profiles.cpp
-          runtime/src/mod_manager.cpp runtime/src/appgame_ios.mm)
+          runtime/src/mod_manager.cpp runtime/src/saves_wrapper.cpp runtime/src/appgame_ios.mm)
 for f in "games/$game"/*.cpp; do sources+=("$f"); done
 
 imgui=()

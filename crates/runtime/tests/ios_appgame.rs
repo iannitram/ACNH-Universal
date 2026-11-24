@@ -1,13 +1,15 @@
 //! The iPhone and iPad game download's plan and checks (issue #231) on every runner, with decoy
 //! files (made-up bytes, never game data): what `appgame_ios.rs` returns to the player's
-//! Objective-C++, minus the Keychain, Dropbox and the `URLSession`.
+//! Objective-C++, minus the Keychain, Dropbox and the `URLSession`. The manifest, resume rule and
+//! install are `acnh_core::appgame`'s (tested in `crates/core/tests/appgame_download.rs`); this
+//! file tests the stepwise driving that is iOS's own.
 #![cfg(not(any(target_os = "ios", target_os = "android")))]
 
 #[allow(dead_code)]
 #[path = "../src/appgame.rs"]
 mod appgame;
 
-use appgame::{api_arg, done_json, finish_json, installed, plan_json, PENDING};
+use appgame::{api_arg, finish_json, installed, installed_matches, plan_json, PENDING};
 use sha2::{Digest, Sha256};
 use std::fs;
 
@@ -26,7 +28,7 @@ fn manifest(files: &[(&str, Vec<u8>)], build: &str, abi: &str) -> Vec<u8> {
         })
         .collect();
     format!(
-        r#"{{"version":1,"build_id":"{build}","abi":"{abi}","files":[{}]}}"#,
+        r#"{{"version":1,"build_id":"{build}","nx_game_abi":"{abi}","files":[{}]}}"#,
         list.join(",")
     )
     .into_bytes()
@@ -50,8 +52,8 @@ fn plan_check_and_install_the_way_the_player_drives_them() {
     assert_eq!(plan["ok"], true, "{plan}");
     assert_eq!(plan["installed"], false);
     assert_eq!(plan["total"], 500);
+    // An empty file needs no request, and is not listed.
     assert_eq!(plan["remaining"], 500);
-    // The empty file needs no request.
     let fetch = plan["fetch"].as_array().unwrap();
     assert_eq!(fetch.len(), 2);
     assert_eq!(fetch[0]["path"], "analysis/main.bin");
@@ -67,7 +69,6 @@ fn plan_check_and_install_the_way_the_player_drives_them() {
     fs::create_dir_all(partial.join("analysis")).unwrap();
     fs::write(partial.join("romfs.pak"), &files[1].1).unwrap();
     fs::write(partial.join("analysis/main.bin"), &files[0].1[..40]).unwrap();
-    assert_eq!(done_json(root.path(), "romfs.pak")["verified"], true);
     let again = plan_json(root.path(), &bytes, ABI, BUILD, 60);
     assert_eq!(
         again["ok"], true,
@@ -80,19 +81,50 @@ fn plan_check_and_install_the_way_the_player_drives_them() {
     assert_eq!(finish_json(root.path())["ok"], false);
     assert!(!installed(root.path()));
     fs::write(partial.join("analysis/main.bin"), &files[0].1).unwrap();
-    assert_eq!(
-        done_json(root.path(), "analysis/main.bin")["verified"],
-        true
-    );
+    // The player never reports a finished file: the plan after the last chunk sees every file complete, hashes it and
+    // marks it checked (an empty one too, a hash of nothing), and has nothing left to fetch.
+    let last = plan_json(root.path(), &bytes, ABI, BUILD, 0);
+    assert_eq!(last["remaining"], 0, "{last}");
+    assert!(last["fetch"].as_array().unwrap().is_empty(), "{last}");
     assert_eq!(finish_json(root.path())["ok"], true);
     assert!(installed(root.path()));
     assert!(!root.path().join(PENDING).exists());
-    // Now it is the installed game.
+    assert!(!root.path().join("game.verified.txt").exists());
+    // Now it is the installed game, and `game/` holds its manifest.
     assert_eq!(
         plan_json(root.path(), &bytes, ABI, BUILD, 0)["installed"],
         true
     );
-    acnh_core::appgame::download::remove_all(root.path()).unwrap();
+    assert_eq!(
+        fs::read(root.path().join("game/manifest.json")).unwrap(),
+        bytes
+    );
+    // game/ is read-only, so removing it needs the files writable again (as Android's does).
+    assert!(fs::metadata(root.path().join("game/romfs.pak"))
+        .unwrap()
+        .permissions()
+        .readonly());
+}
+
+#[test]
+fn a_wrong_hash_is_deleted_and_fetched_again_from_zero() {
+    let root = tempfile::tempdir().unwrap();
+    let files = decoys();
+    let bytes = manifest(&files, BUILD, ABI);
+    assert_eq!(
+        plan_json(root.path(), &bytes, ABI, BUILD, 1 << 30)["ok"],
+        true
+    );
+    fs::write(root.path().join(PENDING), &bytes).unwrap();
+    let partial = root.path().join("game.partial");
+    fs::write(partial.join("romfs.pak"), vec![9u8; 400]).unwrap();
+    // The plan after the last chunk hashes the complete file, deletes the wrong one and lists it from 0.
+    let again = plan_json(root.path(), &bytes, ABI, BUILD, 1 << 30);
+    assert!(!partial.join("romfs.pak").exists());
+    assert_eq!(again["fetch"][1]["path"], "romfs.pak");
+    assert_eq!(again["fetch"][1]["offset"], 0);
+    // Nothing was marked checked, so finishing refuses.
+    assert_eq!(finish_json(root.path())["ok"], false);
 }
 
 #[test]
@@ -117,13 +149,26 @@ fn refusals_name_both_sides_and_write_nothing() {
     }
     assert!(!root.path().join("game.partial").exists());
 
+    // Same build, another ABI: refused too, naming both. Any case, and a list of builds, match.
+    let abi_only = manifest(&decoys(), BUILD, "ffffffffffff");
+    let plan = plan_json(root.path(), &abi_only, ABI, BUILD, 1 << 30);
+    assert_eq!(plan["code"], "refused");
+    assert!(plan["error"].as_str().unwrap().contains("ffffffffffff"));
     let ok = manifest(&decoys(), BUILD, ABI);
+    let lower = format!("cccccccccccccccccccccccccccccccc, {}", BUILD.to_lowercase());
+    assert_eq!(
+        plan_json(root.path(), &ok, ABI, &lower, 1 << 30)["ok"],
+        true
+    );
+
     let space = plan_json(root.path(), &ok, ABI, BUILD, 10);
     assert_eq!(space["code"], "no_space");
     assert!(
         !root.path().join(PENDING).exists(),
         "nothing waits after a refusal"
     );
+    let bad = plan_json(root.path(), b"not a manifest", ABI, BUILD, 1 << 30);
+    assert_eq!(bad["code"], "manifest");
 }
 
 #[test]
@@ -133,4 +178,45 @@ fn the_dropbox_arg_is_ascii_and_names_the_ios_folder() {
         r#"{"path":"/acnh-universal-game/ios/romfs.pak"}"#
     );
     assert!(api_arg("fonts/é.ttf").is_ascii());
+}
+
+#[test]
+fn a_downloaded_game_of_another_build_or_runtime_is_not_the_one_this_app_plays() {
+    let root = tempfile::tempdir().unwrap();
+    // No game/ yet.
+    assert!(!installed_matches(root.path(), ABI, BUILD));
+    let game = root.path().join("game");
+    fs::create_dir_all(&game).unwrap();
+    // An unreadable manifest.
+    fs::write(game.join("manifest.json"), b"not a manifest").unwrap();
+    assert!(!installed_matches(root.path(), ABI, BUILD));
+
+    fs::write(game.join("manifest.json"), manifest(&decoys(), BUILD, ABI)).unwrap();
+    assert!(installed_matches(root.path(), ABI, BUILD));
+    // Any case, a list of builds, and empty (none known) accept.
+    assert!(installed_matches(
+        root.path(),
+        ABI,
+        &format!("cccccccccccccccccccccccccccccccc, {}", BUILD.to_lowercase())
+    ));
+    assert!(installed_matches(root.path(), "", ""));
+    // The app was updated to another build, or another runtime: the old game must be downloaded again.
+    assert!(!installed_matches(
+        root.path(),
+        ABI,
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    ));
+    assert!(!installed_matches(root.path(), "ffffffffffff", BUILD));
+
+    // And the plan for the matching manifest replaces it: the old game/ stays until the new one is whole.
+    let newer = manifest(&decoys(), "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", ABI);
+    let plan = plan_json(
+        root.path(),
+        &newer,
+        ABI,
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        1 << 30,
+    );
+    assert_eq!(plan["installed"], false, "{plan}");
+    assert!(game.join("manifest.json").is_file());
 }

@@ -58,7 +58,13 @@ pub const APPLE_GUEST_SHIFT: u64 = 0xC0_0000_0000;
 pub fn ported(service: Service) -> bool {
     matches!(
         service,
-        Service::Config | Service::Time | Service::Saves | Service::Files
+        Service::Config
+            | Service::Time
+            | Service::Saves
+            | Service::Files
+            | Service::Input
+            | Service::Audio
+            | Service::Kernel
     )
 }
 
@@ -83,7 +89,12 @@ pub mod relay;
 pub mod appgame;
 #[cfg(target_os = "ios")]
 pub mod appgame_ios;
+pub mod audio;
 pub mod config;
 pub mod files;
+#[cfg(target_os = "android")]
+pub mod hub_android;
+pub mod input;
+pub mod kernel;
 pub mod saves;
 pub mod time;

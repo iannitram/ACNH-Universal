@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "nvn_shaders.h"
+#include "nvn_aspect.h"
 #include "nvn_ultrawide.h"
 #include "nvn_vk.h"
 #include "ui/ui.h"
@@ -68,6 +69,7 @@ VkSemaphore g_acquired = VK_NULL_HANDLE, g_rendered = VK_NULL_HANDLE;
 VkBool32 g_depth_clip_control = VK_FALSE;
 VkBool32 g_fragment_interlock = VK_FALSE;  // fragmentShaderPixelInterlock (vk_fragment_interlock)
 bool g_dynamic_rendering = true;  // vkCmdBeginRendering usable (core 1.3 or VK_KHR_dynamic_rendering)
+bool g_descriptor_update_template = false;  // core 1.1 or VK_KHR_descriptor_update_template
 // Intel's Windows driver of the 101.2xxx branch and older (Gen9, Skylake to Comet Lake: HD 530/620/630): it crashed in
 // its dynamic rendering (vk_intel_windows_legacy, nvn_renderpass.cpp).
 bool g_intel_windows_legacy = false;
@@ -309,6 +311,12 @@ bool init() {
     if (api < VK_API_VERSION_1_3 && has_extension(dext, "VK_KHR_dynamic_rendering")) {
         dexts.push_back("VK_KHR_dynamic_rendering");
         *tail = &fdyn, tail = &fdyn.pNext;
+    }
+    if (api < VK_API_VERSION_1_1 && has_extension(dext, "VK_KHR_descriptor_update_template")) {
+        dexts.push_back("VK_KHR_descriptor_update_template");
+        g_descriptor_update_template = true;
+    } else if (api >= VK_API_VERSION_1_1) {
+        g_descriptor_update_template = true;
     }
     if (has_extension(dext, "VK_EXT_fragment_shader_interlock")) {
         dexts.push_back("VK_EXT_fragment_shader_interlock");
@@ -763,6 +771,7 @@ uint32_t vk_queue_family() { return g_family; }
 bool vk_depth_clip_control() { return g_depth_clip_control; }
 bool vk_fragment_interlock() { return g_fragment_interlock; }
 bool vk_dynamic_rendering() { return g_dynamic_rendering; }
+bool vk_descriptor_update_template() { return g_descriptor_update_template; }
 bool vk_intel_windows_legacy() { return g_intel_windows_legacy; }
 const VkPhysicalDeviceFeatures& vk_features() { return g_features; }
 bool vk_robust_buffer_access2() { return g_robust2; }
@@ -1315,9 +1324,9 @@ void present_image(const int32_t* crop, Record&& record) {
         // Fit with bars, as the present pass does (nvn_present.cpp): a picture of another shape than the window keeps
         // its own (a fixed aspect ratio setting, and while the window is being resized).
         const float cw = float(blit.srcOffsets[1].x - blit.srcOffsets[0].x), ch = float(blit.srcOffsets[1].y - blit.srcOffsets[0].y);
-        const float tw = float(g_sc_extent.width), th = float(g_sc_extent.height), fit = std::min(tw / cw, th / ch);
-        int32_t bw = std::min(int32_t(tw), int32_t(cw * fit + 0.5f)), bh = std::min(int32_t(th), int32_t(ch * fit + 0.5f));
-        int32_t bx = (int32_t(tw) - bw) / 2, by = (int32_t(th) - bh) / 2;
+        const float tw = float(g_sc_extent.width), th = float(g_sc_extent.height);
+        const LetterboxRect lb = compute_letterbox(cw, ch, tw, th);
+        const int32_t bw = lb.px_w, bh = lb.px_h, bx = lb.px_x, by = lb.px_y;
         blit.dstOffsets[0] = {bx, by, 0};
         blit.dstOffsets[1] = {bx + bw, by + bh, 1};
         if (bw < int32_t(tw) || bh < int32_t(th)) {
@@ -1332,7 +1341,7 @@ void present_image(const int32_t* crop, Record&& record) {
             p_vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0,
                                    nullptr, 0, nullptr);
         }
-        plat::set_picture_box(float(bx) / tw, float(by) / th, float(bw) / tw, float(bh) / th);  // mouse clicks (hle_hid.cpp)
+        plat::set_picture_box(lb.x, lb.y, lb.w, lb.h);  // mouse clicks (hle_hid.cpp)
         p_vkCmdBlitImage(g_cb, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
     }

@@ -20,12 +20,16 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.app.job.JobInfo;
+import android.app.job.JobScheduler;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.SystemClock;
@@ -60,9 +64,10 @@ public class GameDownload extends Service {
     // Where the game waits, inside save-relay's Dropbox app folder.
     static final String REMOTE = "/acnh-universal-game/android";
     static final String DIR = "game";
-    private static final String CHANNEL = "download";
-    private static final int NOTE = 1;
+    static final String CHANNEL = "download";
+    static final int NOTE = 1;
     static final int DONE_NOTE = 2;  // the "ready" or "stopped" note, which outlives the service
+    private static final int JOB_ID = 230;
     private static final int TRIES = 30;  // network errors in a row before it stops
 
     // What the home screen draws while it is open (read on its own thread; written here).
@@ -71,9 +76,15 @@ public class GameDownload extends Service {
     static volatile String status = "", error;
     static volatile boolean finished;
 
+    interface ProgressSink {
+        void onProgress(String text, long done, long total);
+        void onFinish(String fail);
+    }
+
     // One worker per process, whatever happens to service instances.
     private static Thread worker;
-    private PowerManager.WakeLock wake;
+    private static volatile PowerManager.WakeLock sharedWake;
+    private static volatile ProgressSink activeSink;
 
     // An error a retry cannot fix: the download stops with this message.
     static final class Fatal extends Exception {
@@ -88,9 +99,62 @@ public class GameDownload extends Service {
     }
     static File partialDir(Context c) { return new File(c.getFilesDir(), DIR + ".partial"); }
 
-    // Starts the service from the foreground (the home screen). Throws when Android refuses.
+    static void ensureChannel(Context c) {
+        NotificationManager nm = c.getSystemService(NotificationManager.class);
+        nm.createNotificationChannel(new NotificationChannel(CHANNEL, "Game download", NotificationManager.IMPORTANCE_LOW));
+    }
+
+    // Starts the user-initiated data transfer job on Android 14+ (API 34+), or the dataSync
+    // foreground service on older Android. Throws when Android refuses.
     static void start(Context c) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            JobScheduler js = c.getSystemService(JobScheduler.class);
+            JobInfo job = new JobInfo.Builder(JOB_ID, new ComponentName(c, GameDownloadJob.class))
+                    .setUserInitiated(true)
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)
+                    .setPersisted(true)
+                    .build();
+            if (js != null && js.schedule(job) == JobScheduler.RESULT_SUCCESS) {
+                return;
+            }
+        }
         c.startForegroundService(new Intent(c, GameDownload.class));
+    }
+
+    static void startWorker(Context c, ProgressSink sink) {
+        final Context appCtx = c.getApplicationContext();
+        synchronized (GameDownload.class) {
+            activeSink = sink;
+            if (worker == null || !worker.isAlive()) {
+                running = true;
+                finished = false;
+                error = null;
+                if (sharedWake == null) {
+                    sharedWake = appCtx.getSystemService(PowerManager.class)
+                            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "acnh:download");
+                }
+                if (!sharedWake.isHeld()) {
+                    sharedWake.acquire();
+                }
+                worker = new Thread(() -> new Runner(appCtx).work(), "game-download");
+                worker.start();
+            }
+        }
+    }
+
+    static void stopWorker() {
+        synchronized (GameDownload.class) {
+            if (worker != null) worker.interrupt();
+        }
+        Runner.cancelAll();
+        running = false;
+        releaseWake();
+    }
+
+    private static void releaseWake() {
+        try {
+            if (sharedWake != null && sharedWake.isHeld()) sharedWake.release();
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -98,75 +162,70 @@ public class GameDownload extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        NotificationManager nm = getSystemService(NotificationManager.class);
-        nm.createNotificationChannel(new NotificationChannel(CHANNEL, "Game download", NotificationManager.IMPORTANCE_LOW));
-        Notification n = note("Starting the download", 0, 0);
+        ensureChannel(this);
+        Notification n = buildNote(this, "Starting the download", 0, 0);
         startForeground(NOTE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-        synchronized (GameDownload.class) {
-            if (worker == null || !worker.isAlive()) {
-                running = true;
-                finished = false;
-                error = null;
-                if (wake == null) {
-                    wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "acnh:download");
-                    wake.acquire();
-                }
-                worker = new Thread(this::work, "game-download");
-                worker.start();
+        startWorker(this, new ProgressSink() {
+            @Override
+            public void onProgress(String text, long have, long all) {
+                getSystemService(NotificationManager.class).notify(NOTE, buildNote(GameDownload.this, text, have, all));
             }
-        }
+
+            @Override
+            public void onFinish(String fail) {
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                postDoneNotification(GameDownload.this, fail);
+                stopSelf();
+            }
+        });
         return START_NOT_STICKY;
     }
 
     // Android 15 and later: a dataSync service gets about 6 hours a day. Stop cleanly; what is fetched stays.
     @Override
     public void onTimeout(int startId, int fgsType) {
-        synchronized (GameDownload.class) { if (worker != null) worker.interrupt(); }
-        cancelAll();
         error = "The download paused (Android's daily limit for downloads in the background). Open the app to go on.";
-        running = false;
-        release();
+        stopWorker();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
     @Override
     public void onDestroy() {
-        synchronized (GameDownload.class) { if (worker != null) worker.interrupt(); }
-        cancelAll();
-        release();
+        stopWorker();
         super.onDestroy();
-    }
-
-    private void release() {
-        try { if (wake != null && wake.isHeld()) wake.release(); } catch (Exception ignored) {}
     }
 
     // The app's launcher intent: brings the existing task (Home, or the game when it runs) to the front instead of
     // stacking a new Home on a running game.
-    private PendingIntent openHome() {
-        Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
-        if (open == null) open = new Intent(this, Home.class);
+    static PendingIntent openHome(Context c) {
+        Intent open = c.getPackageManager().getLaunchIntentForPackage(c.getPackageName());
+        if (open == null) open = new Intent(c, Home.class);
         open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-        return PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        return PendingIntent.getActivity(c, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
-    private Notification note(String text, long have, long all) {
-        Notification.Builder b = new Notification.Builder(this, CHANNEL)
+    static Notification buildNote(Context c, String text, long have, long all) {
+        Notification.Builder b = new Notification.Builder(c, CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_sys_download)
                 .setContentTitle("ACNH Recomp: game download")
                 .setContentText(text)
-                .setContentIntent(openHome())
+                .setContentIntent(openHome(c))
                 .setOnlyAlertOnce(true)
                 .setOngoing(true);
         if (all > 0) b.setProgress(1000, (int) (have * 1000 / all), false);
         return b.build();
     }
 
-    private void update(String text) {
-        if (stale()) return;
-        status = text;
-        getSystemService(NotificationManager.class).notify(NOTE, note(text, done, total));
+    static void postDoneNotification(Context c, String fail) {
+        Notification.Builder b = new Notification.Builder(c, CHANNEL)
+                .setSmallIcon(fail == null ? android.R.drawable.stat_sys_download_done : android.R.drawable.stat_notify_error)
+                .setContentTitle(fail == null ? "ACNH Recomp: the game is ready" : "ACNH Recomp: the download stopped")
+                .setContentText(fail == null ? "Open the app to play." : fail)
+                .setStyle(new Notification.BigTextStyle().bigText(fail == null ? "Open the app to play." : fail))
+                .setAutoCancel(true)
+                .setContentIntent(openHome(c));
+        c.getSystemService(NotificationManager.class).notify(DONE_NOTE, b.build());
     }
 
     static String gb(long bytes) { return String.format(Locale.ROOT, "%.2f GB", bytes / 1e9); }
@@ -176,35 +235,42 @@ public class GameDownload extends Service {
         long size;
     }
 
-    private void work() {
-        String fail = null;
-        try {
-            run();
-        } catch (InterruptedException e) {
-            fail = error != null ? error : "The download stopped. Open the app to go on.";
-        } catch (Exception e) {
-            fail = e.getMessage() == null ? e.toString() : e.getMessage();
+    private static final class Runner {
+        private final Context ctx;
+        private volatile long last;
+
+        Runner(Context ctx) {
+            this.ctx = ctx;
         }
-        error = fail;
-        finished = fail == null;
-        running = false;
-        release();
-        stopForeground(STOP_FOREGROUND_REMOVE);
-        Notification.Builder b = new Notification.Builder(this, CHANNEL)
-                .setSmallIcon(fail == null ? android.R.drawable.stat_sys_download_done : android.R.drawable.stat_notify_error)
-                .setContentTitle(fail == null ? "ACNH Recomp: the game is ready" : "ACNH Recomp: the download stopped")
-                .setContentText(fail == null ? "Open the app to play." : fail)
-                .setStyle(new Notification.BigTextStyle().bigText(fail == null ? "Open the app to play." : fail))
-                .setAutoCancel(true)
-                .setContentIntent(openHome());
-        getSystemService(NotificationManager.class).notify(DONE_NOTE, b.build());
-        stopSelf();
-    }
+
+        private void update(String text) {
+            if (stale()) return;
+            status = text;
+            ProgressSink sink = activeSink;
+            if (sink != null) sink.onProgress(text, done, total);
+        }
+
+        private void work() {
+            String fail = null;
+            try {
+                run();
+            } catch (InterruptedException e) {
+                fail = error != null ? error : "The download stopped. Open the app to go on.";
+            } catch (Exception e) {
+                fail = e.getMessage() == null ? e.toString() : e.getMessage();
+            }
+            error = fail;
+            finished = fail == null;
+            running = false;
+            releaseWake();
+            ProgressSink sink = activeSink;
+            if (sink != null) sink.onFinish(fail);
+        }
 
     // Waits for the Dropbox sign-in the home screen started (DropboxAuth), up to ten minutes.
     private void awaitSignIn() throws Exception {
         long until = SystemClock.elapsedRealtime() + 10 * 60 * 1000;
-        while (!DropboxAuth.signedIn(this)) {
+        while (!DropboxAuth.signedIn(ctx)) {
             String failed = DropboxAuth.failure();
             if (failed != null) throw new Fatal("Dropbox sign-in: " + failed);
             if (SystemClock.elapsedRealtime() > until) throw new Fatal("The Dropbox sign-in did not finish. Try again.");
@@ -235,7 +301,7 @@ public class GameDownload extends Service {
         synchronized (GameDownload.class) { gen = ++generation; }
         runOf.set(gen);
         awaitSignIn();
-        File part = partialDir(this), game = gameDir(this);
+        File part = partialDir(ctx), game = gameDir(ctx);
         if (!part.isDirectory() && !part.mkdirs()) throw new Fatal("cannot make " + part);
         update("Reading the game's file list");
         byte[] raw = withRetries(() -> fetch(REMOTE + "/manifest.json", 0, null, false));
@@ -285,11 +351,11 @@ public class GameDownload extends Service {
         total = all;
         done = have;
         if (fetch.isEmpty() && installedList.isFile()) {
-            GameDownload.deleteTree(part);
+            Runner.deleteTree(part);
             status = "The game is up to date.";
             return;
         }
-        long free = getFilesDir().getUsableSpace();
+        long free = ctx.getFilesDir().getUsableSpace();
         if (free < need + 500_000_000L)
             throw new Fatal("Not enough free space: the game needs " + gb(need + 500_000_000L) + " more, and "
                     + gb(free) + " is free.");
@@ -468,7 +534,7 @@ public class GameDownload extends Service {
 
     // Waits until the network is up and not metered: 11 GB never goes over mobile data.
     private void awaitUnmetered() throws InterruptedException {
-        ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+        ConnectivityManager cm = ctx.getSystemService(ConnectivityManager.class);
         while (true) {
             Network n = cm.getActiveNetwork();
             NetworkCapabilities caps = n == null ? null : cm.getNetworkCapabilities(n);
@@ -514,10 +580,6 @@ public class GameDownload extends Service {
         return s.append("\"}").toString();
     }
 
-    private volatile long last;
-
-    // One request to Dropbox's download endpoint. With `into` null, returns the whole body; else appends from byte
-    // `from` to `into` and returns null.
     private byte[] fetch(String path, long from, File into, boolean retried) throws Exception {
         awaitUnmetered();
         if (stale()) throw new InterruptedException();
@@ -529,7 +591,7 @@ public class GameDownload extends Service {
         // Android's HTTP stack adds a form Content-Type to a POST without one, which this endpoint refuses (400).
         c.setRequestProperty("Content-Type", "application/octet-stream");
         c.setRequestProperty("Accept-Encoding", "identity");
-        c.setRequestProperty("Authorization", "Bearer " + DropboxAuth.access(this, retried));
+        c.setRequestProperty("Authorization", "Bearer " + DropboxAuth.access(ctx, retried));
         c.setRequestProperty("Dropbox-API-Arg", apiArg(path));
         if (from > 0) c.setRequestProperty("Range", "bytes=" + from + "-");
         try {
@@ -545,7 +607,7 @@ public class GameDownload extends Service {
                     throw new Fatal("The game's files are not in Dropbox yet (" + path.substring(1) + " in save-relay's "
                             + "app folder). If your computer is still uploading them, try again when it is done.");
                 if (code == 401) {
-                    DropboxAuth.signOut(this);
+                    DropboxAuth.signOut(ctx);
                     throw new Fatal("Dropbox refused the sign-in. Sign in again.");
                 }
                 if (code >= 400 && code < 500 && code != 408 && code != 429)
@@ -597,4 +659,5 @@ public class GameDownload extends Service {
         if (kids != null) for (File k : kids) deleteTree(k);
         f.delete();
     }
+}
 }

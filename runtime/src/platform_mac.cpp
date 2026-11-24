@@ -64,6 +64,7 @@
 #if TARGET_OS_IPHONE
 // The small .ipa's first-start download (runtime/src/appgame_ios.mm; issue #231).
 extern "C" bool nx_appgame_first_start();      // blocks until the game is installed (true) or given up (false)
+extern "C" bool nx_appgame_game_matches();      // the downloaded game is of this app's build and runtime
 extern "C" const char* nx_appgame_game_dir();  // Library/Application Support/game
 #endif
 
@@ -1148,11 +1149,15 @@ void game_thread() {
     try {
 #if TARGET_OS_IPHONE
         // The small .ipa holds no game: offer to download it (Dropbox, in the background, resumable) before anything
-        // else. Returns when the game is there or the person said Not now (the boot then says what is missing).
+        // else. Returns when the game is there or the person said Not now (the boot then says what is missing). Also
+        // when the game root is the downloaded game and it is of another build or runtime than this app's (the app was
+        // updated; Library/Application Support/game outlives that): the matching one replaces it, whole or not at all.
         {
             std::error_code ec;
-            if (!std::filesystem::is_regular_file(std::filesystem::u8path(nx::plat::game_root() + "/analysis/main.bin"), ec))
-                nx_appgame_first_start();
+            const std::string root = nx::plat::game_root();
+            const bool missing =
+                !std::filesystem::is_regular_file(std::filesystem::u8path(root + "/analysis/main.bin"), ec);
+            if (missing || (root == nx_appgame_game_dir() && !nx_appgame_game_matches())) nx_appgame_first_start();
         }
         // On this thread, so the main thread keeps the run loop the prompts need. Returns when the game may boot.
         if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_before_game(root);

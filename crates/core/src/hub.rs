@@ -791,9 +791,10 @@ fn handshake(t: &mut dyn Transport, key: &[u8], target: Os, server: bool) -> Res
 
 mod prepared;
 mod service;
-pub use prepared::{pull_prepared, serve_prepared};
+pub use prepared::{pull_prepared, pull_prepared_app, pull_prepared_app_with, serve_prepared};
 pub use service::{
-    pair_hub, pull_hub, pull_hub_prepared, read_fleet, report_hub, report_hub_build, serve_request,
+    pair_hub, pull_hub, pull_hub_prepared, pull_hub_prepared_app, pull_hub_prepared_app_with,
+    read_fleet, report_hub, report_hub_build, serve_request,
 };
 
 // Reject traversal, Windows aliases, duplicate names, file/directory collisions and our

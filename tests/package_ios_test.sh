@@ -233,7 +233,7 @@ files, prepared, build_id = sys.argv[1:4]
 m = json.load(open(os.path.join(files, "manifest.json")))
 assert m["version"] == 1
 assert m["build_id"] == build_id.upper(), m["build_id"]
-assert len(m["abi"]) == 12 and all(c in "0123456789abcdef" for c in m["abi"]), m["abi"]
+assert len(m["nx_game_abi"]) == 12 and all(c in "0123456789abcdef" for c in m["nx_game_abi"]), m["nx_game_abi"]
 listed = {e["path"]: e for e in m["files"]}
 expected = {"analysis/main.bin", "aoc/1/data", "fonts/shared.ttf", "romfs.pak", "spirv.pak"}
 assert set(listed) == expected, sorted(listed)
@@ -258,20 +258,29 @@ say "--small: no game/ in the .ipa; the manifest lists every staged file with ma
 # A second run replaces the staged files; a new ABI can be given.
 printf 'newer' > "$small/spirv.pak"
 env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" --abi 0123456789ab "$small_out" > /dev/null
-python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["abi"]=="0123456789ab"; assert [f["size"] for f in m["files"] if f["path"]=="spirv.pak"]==[5]' "$files/manifest.json" \
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["nx_game_abi"]=="0123456789ab"; assert [f["size"] for f in m["files"] if f["path"]=="spirv.pak"]==[5]' "$files/manifest.json" \
     || die "a second --small run did not replace the staged files"
 [ ! -e "$small_out/acnh-universal-game/ios.old" ] || die "--small left ios.old behind"
 say "--small again replaces the staged files and takes --abi"
 
-# The prepared folder's game.ini names its build: --build-id may be left out, and a different one is refused.
-printf '# decoy\nbuild_id = FEDCBA9876543210FEDCBA9876543210\n' > "$small/game.ini"
+# The prepared folder's version.ini (as Prepare writes it) names its build: --build-id may be left out, and a different
+# one is refused. A game.ini does the same when there is no version.ini; version.ini wins when both are there.
+printf '# Written by acnh_core::prepare: the version this folder holds and its build profile.\nbuild_id = FEDCBA9876543210FEDCBA9876543210\nversion = 3.0.2\ntitle_version = 0\nhooks = -\n' > "$small/version.ini"
 refuse "--build-id that is not the prepared folder's build" "is not the build of the prepared folder" "$work/out-small-bad" \
     env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" "$work/out-small-bad"
 env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" "$work/out-small-ini" > /dev/null
 python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["build_id"]=="FEDCBA9876543210FEDCBA9876543210"' \
-    "$work/out-small-ini/acnh-universal-game/ios/manifest.json" || die "--small did not take the build id from game.ini"
+    "$work/out-small-ini/acnh-universal-game/ios/manifest.json" || die "--small did not take the build id from version.ini"
+printf 'build_id = 11111111111111111111111111111111\n' > "$small/game.ini"
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" "$work/out-small-both" > /dev/null
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["build_id"]=="FEDCBA9876543210FEDCBA9876543210"' \
+    "$work/out-small-both/acnh-universal-game/ios/manifest.json" || die "game.ini won over version.ini"
+rm "$small/version.ini"
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" "$work/out-small-gameini" > /dev/null
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["build_id"]=="11111111111111111111111111111111"' \
+    "$work/out-small-gameini/acnh-universal-game/ios/manifest.json" || die "--small did not take the build id from game.ini"
 rm "$small/game.ini"
-say "--small takes the build id from the prepared folder's game.ini and refuses a different --build-id"
+say "--small takes the build id from the prepared folder's version.ini (else game.ini) and refuses a different --build-id"
 
 # Under CI, empty decoys: the manifest lists them with size 0 and the hash of nothing.
 env CI=1 bash "$script" smallci "$build" --small "$decoy" --build-id "$build_id" "$work/out-small-ci" > /dev/null
