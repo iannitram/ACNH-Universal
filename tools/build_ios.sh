@@ -146,9 +146,13 @@ runtime_lib=$cargo_target/$rust_target/release/libacnh_runtime.a
 runtime_header=$(find "$cargo_target/$rust_target/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
 
 # ---- libvpx (the movies: tools/build_libvpx.sh; without it the game's movies are black frames, issue #253) ----------
-vpx_root=$root/private/third_party/libvpx-ios
+# NX_VPX_DIR (Prepare sets it beside the prepared folder, which survives; the source copy it runs in is made anew each
+# time) holds libvpx's clone, build and result; it needs git, make, perl and the network the first time only.
+export NX_VPX_DIR=${NX_VPX_DIR:-$root/private/third_party}
+vpx_root=$NX_VPX_DIR/libvpx-ios
 if [ ! -f "$vpx_root/$sdk/lib/libvpx.a" ]; then
-    "$root/tools/build_libvpx.sh" "$sdk"
+    "$root/tools/build_libvpx.sh" "$sdk" ||
+        { echo "error: libvpx could not be built (needs git, make, perl and the network, once): the movies would be black" >&2; exit 1; }
 fi
 [ -f "$vpx_root/$sdk/lib/libvpx.a" ] && [ -f "$vpx_root/$sdk/include/vpx/vpx_decoder.h" ] ||
     { echo "error: libvpx for $sdk is missing under $vpx_root/$sdk (tools/build_libvpx.sh $sdk)" >&2; exit 1; }

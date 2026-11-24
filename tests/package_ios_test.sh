@@ -61,16 +61,33 @@ case "${stamp#* }" in ''|*[!0-9]*) die "VCODE is not an integer: ${stamp#* }" ;;
 # VCODE rises with the commit count (stamps from a scratch repo, one commit apart).
 rise=$work/rise
 git init -q "$rise"
+mkdir "$rise/tools"
+cp "$root/tools/build_version.sh" "$rise/tools/"
 git -C "$rise" -c user.name=t -c user.email=t@t.invalid commit -q --allow-empty -m one
-first=$(cd "$rise" && . "$root/tools/build_version.sh" && echo "$VCODE")
+first=$(cd "$rise" && . "$rise/tools/build_version.sh" && echo "$VCODE")
 git -C "$rise" -c user.name=t -c user.email=t@t.invalid commit -q --allow-empty -m two
-second=$(cd "$rise" && . "$root/tools/build_version.sh" && echo "$VCODE")
+second=$(cd "$rise" && . "$rise/tools/build_version.sh" && echo "$VCODE")
 [ "$second" -gt "$first" ] || die "VCODE did not rise across commits ($first, $second)"
 printf 'x\n' > "$rise/f"
 git -C "$rise" add f
-dirty=$(cd "$rise" && . "$root/tools/build_version.sh" && echo "$VNAME")
+dirty=$(cd "$rise" && . "$rise/tools/build_version.sh" && echo "$VNAME")
 case "$dirty" in *-dirty) ;; *) die "a dirty tree is not marked: $dirty" ;; esac
-say "Info.plist stamps: rendered values, VCODE integer that rises, dirty marked"
+# A packaged source has no .git of its own (release.yml's `git archive` copy under the launcher's data folder), and may
+# sit inside another repository whose tags mean nothing: git is ignored there, BUILD_VERSION is read, else 0.0.0 / 10000.
+outer=$work/outer
+git init -q "$outer"
+git -C "$outer" -c user.name=t -c user.email=t@t.invalid commit -q --allow-empty -m one
+git -C "$outer" tag laptop-2025
+mkdir -p "$outer/data/source/abc/tools"
+cp "$root/tools/build_version.sh" "$outer/data/source/abc/tools/"
+pkg=$outer/data/source/abc
+fallback=$(cd "$pkg" && . tools/build_version.sh && echo "$BASE_VER $VCODE")
+[ "$fallback" = "0.0.0 10000" ] || die "a packaged source without BUILD_VERSION gave: $fallback"
+printf 'BASE_VER=0.12.0\nCOMMITS=345\n' > "$pkg/BUILD_VERSION"
+printf 'deadbeefcafe\n' > "$pkg/SOURCE"
+packaged=$(cd "$pkg" && . tools/build_version.sh && echo "$BASE_VER $VCODE $VNAME")
+[ "$packaged" = "0.12.0 1200345 0.12.0+deadbee" ] || die "a packaged source gave: $packaged"
+say "Info.plist stamps: rendered values, VCODE integer that rises, dirty marked, packaged source"
 
 # A prepared game of empty files: the five names that ship, and names that must never ship.
 make_decoy() {

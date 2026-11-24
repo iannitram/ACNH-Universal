@@ -265,6 +265,11 @@ jobs:
         with:
           path: private/third_party/ios
           key: ios-deps-sdl3-3.4.18-mvk-1.3.0-${{ runner.os }}-${{ hashFiles('tools/build_ios.sh') }}
+      - name: Cache libvpx for iOS
+        uses: actions/cache@v4
+        with:
+          path: private/third_party/libvpx-ios
+          key: libvpx-ios-${{ runner.os }}-${{ hashFiles('tools/build_libvpx.sh') }}
       - name: iOS simulator app (stub game)
         run: bash tools/build_ios.sh iphonesimulator
       - name: iOS device app (stub game)
