@@ -125,6 +125,22 @@ adb push private/acnh/users.txt "$D/"
 
 Saves are written to `user/device_save` on the phone; copy it back the same way with `adb pull`.
 
+### Save sync
+
+Or let save-relay carry the island through your Dropbox, as the iPad and the computers do (issue #81). *Set up save
+sync (Dropbox)* on the home screen signs in with save-relay's Dropbox app in the browser. It is one sign-in for both:
+signing in to download the game turns save sync on too, so you never sign in twice. The first game start also
+offers it once, and *Not now* is remembered as `relay.ask = 0` in the game folder's `config.ini`. From then on the app pulls the island before the game starts, and the game starts only
+once that pull went through: when Dropbox cannot be reached it offers *Retry*, when both islands changed it shows
+both and you keep one (save-relay keeps a backup of the other), and when another device has the island open it
+starts only on *Play anyway*. The game pushes the island when you quit it and when the app goes to the background; a
+push that could not go is sent first at the next start. The Dropbox token is only in a file in the app's private
+storage (readable by the app alone); save-relay's settings are there too, never in the game folder. Pushing while
+the app is in the background keeps the phone marked as the one playing; only quitting the game clears it. *Turn off
+save sync* (on the home screen, and on the screens that wait for a sign-in or show an error) stops the syncing only:
+the island on the phone stays and the Dropbox sign-in stays for the download. *Sign out of Dropbox* ends both. An
+install signed in to Dropbox before this, for the download only, is asked to sign in once more for save sync.
+
 ## Playing
 
 Open **ACNH Recomp** on the phone. The first start takes a minute or two: shaders are prepared once, then kept.

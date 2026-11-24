@@ -1,4 +1,4 @@
-//! The iPad-only half of `apple.rs` (issue #172): the Keychain credential store, the UIKit
+//! The iPad-only half of `relay.rs` (issue #172): the Keychain credential store, the UIKit
 //! alerts, the background task around the push, and the C exports the player calls.
 //!
 //! The alerts are `UIAlertController`s presented on the main thread from the game's thread,
@@ -238,7 +238,7 @@ fn present(alert: &Alert, tx: Sender<Answer>) -> bool {
     true
 }
 
-/// The alerts, as the `Prompt` of `apple.rs`.
+/// The alerts, as the `Prompt` of `relay.rs`.
 pub struct UiPrompt;
 
 impl Prompt for UiPrompt {
@@ -433,6 +433,9 @@ impl Settings for PlayerSettings {
 /// True once `before_game` has returned: the push waits for it.
 static BOOTED: AtomicBool = AtomicBool::new(false);
 
+/// True when that start pulled (sync on): a game started with sync off never pushes.
+static PULLED: AtomicBool = AtomicBool::new(false);
+
 fn data_root(raw: *const c_char) -> Option<PathBuf> {
     if raw.is_null() {
         return None;
@@ -451,6 +454,7 @@ fn with_player(data_root: &Path, work: impl FnOnce(&Player<'_>) + std::panic::Un
             connector,
             prompt: &UiPrompt,
             booted: &BOOTED,
+            pulled: &PULLED,
             settings: &PlayerSettings,
             log: Box::new(log),
         };
@@ -491,7 +495,8 @@ pub extern "C" fn acnh_relay_after_game(data_root: *const c_char) {
 /// When the app has gone to the background (`SDL_EVENT_DID_ENTER_BACKGROUND`, from SDL's event
 /// watch on the main thread): begins a background task here, pushes on a worker thread and
 /// returns at once, so the main thread keeps its run loop. The worker, or the expiration
-/// handler, ends the task. Does nothing before the game has booted.
+/// handler, ends the task. The game goes on, so it is a checkpoint (`Player::checkpoint`): the
+/// iPad stays marked as the one playing. Does nothing before the game has booted.
 #[no_mangle]
 pub extern "C" fn acnh_relay_background(data_root: *const c_char) {
     let Some(root) = self::data_root(data_root) else {
@@ -506,10 +511,27 @@ pub extern "C" fn acnh_relay_background(data_root: *const c_char) {
     let spawned = std::thread::Builder::new()
         .name("relay push".into())
         .spawn(move || {
-            with_player(&root, |player| player.after_game());
+            with_player(&root, |player| player.checkpoint());
             worker.end();
         });
     if spawned.is_err() {
         task.end();
     }
+}
+
+/// When the app comes back to the front (`SDL_EVENT_WILL_ENTER_FOREGROUND`, from the same event
+/// watch): a "playing here" mark the background push could not write back is written now
+/// (`Player::resume`), on a worker, so the main thread keeps its run loop. Does nothing unless
+/// that push left one waiting.
+#[no_mangle]
+pub extern "C" fn acnh_relay_foreground(data_root: *const c_char) {
+    let Some(root) = self::data_root(data_root) else {
+        return;
+    };
+    if !BOOTED.load(Ordering::SeqCst) || !PULLED.load(Ordering::SeqCst) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("relay mark".into())
+        .spawn(move || with_player(&root, |player| player.resume()));
 }

@@ -422,8 +422,16 @@ if(ANDROID)
     set(GLUE "${ANDROID_NDK}/sources/android/native_app_glue")
     add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
         runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
+        runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
         "${GLUE}/android_native_app_glue.c")
-    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}")
+    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}"
+        third_party/save-relay)
+    # Save sync (issue #81): the Rust runtime library (crates/runtime, with save-relay's C interface, feature ffi),
+    # built for aarch64-linux-android by tools/build_android.sh; the generic block below links it. relay_android.cpp
+    # and save-relay's JNI glue (third_party/save-relay) call into it.
+    if(NOT NX_RUNTIME_ARCHIVE)
+        message(FATAL_ERROR "NX_RUNTIME_ARCHIVE is not set: run tools/build_android.sh (it builds libacnh_runtime.a)")
+    endif()
     # Our ANativeActivity_onCreate (platform_android.cpp) runs first, on the UI thread, then calls the glue's.
     set_source_files_properties("${GLUE}/android_native_app_glue.c" PROPERTIES
         COMPILE_DEFINITIONS "ANativeActivity_onCreate=glue_ANativeActivity_onCreate")
@@ -522,7 +530,7 @@ elseif(IOS)
         "-framework Metal" "-framework MetalKit" "-framework QuartzCore" "-framework CoreGraphics"
         "-framework CoreFoundation" "-framework Foundation" "-framework UIKit" "-framework IOSurface"
         "-framework CoreVideo" "-framework GameController" "-framework AVFoundation"
-        "-framework Security")  # Security: the Keychain holds the save sync app password (crates/runtime, apple_ios.rs)
+        "-framework Security")  # Security: the Keychain holds the save sync app password (crates/runtime, relay_ios.rs)
     # iOS code signing refuses to load a library copied into Documents (runtime/src/game_folder.cpp): the game's
     # code is linked in, as the macOS default.
     target_link_libraries(${NX_GAME} PRIVATE ${NX_GAME_LIBS})

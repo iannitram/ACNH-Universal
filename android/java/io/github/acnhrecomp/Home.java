@@ -7,6 +7,8 @@
 // shortcut "Change game folder" (res/xml/shortcuts.xml) asks again.
 // Or the game comes from the owner's own Dropbox (issue #230): "Download the game" signs in (DropboxAuth) and
 // GameDownload fetches it into the app's private storage, <files>/gamedata, which then is the game folder.
+// Save sync (issue #81, Relay): before the game starts, the island is pulled from the owner's Dropbox through
+// save-relay, with its dialogs here; "Set up save sync" signs in (the first start also offers it once).
 package io.github.acnhrecomp;
 
 import android.app.Activity;
@@ -70,6 +72,13 @@ public class Home extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        if (Relay.running()) {  // a pull is waiting (on a dialog, or the browser's sign-in): this screen shows it
+            box = Screen.page(this, "ACNH Recomp");
+            box.addView(Screen.text(this, t("Syncing your island with Dropbox...", "Sincronizando a sua ilha com o Dropbox..."),
+                    16, Screen.TEXT));
+            Relay.attach(this);
+            return;
+        }
         String error = getIntent().getStringExtra("error");
         if ("restart".equals(error)) {  // another folder than the game loaded in this process: a new process takes it
             restartProcess();
@@ -100,8 +109,16 @@ public class Home extends Activity {
     }
 
     @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Relay.detach(this);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        Relay.attach(this);
+        if (Relay.running()) return;
         // the game being prepared, or prepared and its end not seen yet: its screen (Android can bring this task to
         // the front with Home on top when the preparation's notification is tapped)
         if (PrepareService.active() || (PrepareService.phase == PrepareService.FINISHED && PrepareService.result != null)) {
@@ -166,8 +183,10 @@ public class Home extends Activity {
             return;
         }
         if (url != null) {
-            say(t("Sign in to Dropbox in the browser, allow ACNH Recomp's access, then come back here.",
-                    "Entre no Dropbox no navegador, permita o acesso do ACNH Recomp e volte aqui."), false);
+            say(t("Sign in to Dropbox in the browser, allow ACNH Recomp's access, then come back here. The same "
+                            + "sign-in turns save sync on: your island then goes through your Dropbox too.",
+                    "Entre no Dropbox no navegador, permita o acesso do ACNH Recomp e volte aqui. O mesmo login liga "
+                            + "a sincronização: a sua ilha passa a ir pelo seu Dropbox também."), false);
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
         }
         tick();
@@ -237,14 +256,20 @@ public class Home extends Activity {
         if (GameDownload.downloaded(this))
             box.addView(Screen.button(this, t("Play the downloaded game", "Jogar o jogo baixado"), Screen.GREEN,
                     v -> check(GameDownload.gameDir(this).getAbsolutePath(), false)));
+        showSync();
         if (DropboxAuth.signedIn(this))
-            box.addView(Screen.button(this, t("Sign out of Dropbox", "Sair do Dropbox"), Screen.WHITE, v -> {
+            box.addView(Screen.button(this, t("Sign out of Dropbox (ends save sync and the download)",
+                    "Sair do Dropbox (encerra a sincronização e o download)"), Screen.WHITE, v -> {
                 if (GameDownload.running) {
                     say(t("Wait for the download to finish first.", "Espere o download terminar."), true);
                     return;
                 }
-                DropboxAuth.signOut(this);
+                boolean done = DropboxAuth.signOutAll(this);  // the download's sign-in and save sync's are one
                 show(null);
+                if (done) say(t("Signed out of Dropbox: save sync and the download are off on this device.",
+                        "Saiu do Dropbox: a sincronização e o download estão desligados neste aparelho."), false);
+                else say(t("The Dropbox sign-out could not remove everything. Try again.",
+                        "Não foi possível remover tudo ao sair do Dropbox. Tente de novo."), true);
             }));
 
         for (final String f : found())
@@ -252,6 +277,60 @@ public class Home extends Activity {
                             + (f.startsWith("/storage/emulated") ? t("phone", "celular") : t("memory card", "cartão de memória"))
                             + ")", Screen.GREEN, v -> check(f, false)));
         box.addView(Screen.button(this, t("Choose the game folder", "Escolher a pasta do jogo"), Screen.BLUE, v -> pick()));
+    }
+
+    // Save sync: its state, and the sign-in (or turning it off). The pull itself runs when the game starts.
+    private void showSync() {
+        int state = Relay.state(this);
+        box.addView(Screen.heading(this, t("Save sync", "Sincronização do save")));
+        box.addView(Screen.text(this, state == Relay.ON
+                        ? t("On: your island goes through your Dropbox, fetched before the game starts and put back when "
+                                + "you leave.", "Ligada: a sua ilha passa pelo seu Dropbox, buscada antes de o jogo "
+                                + "começar e devolvida quando você sai.")
+                        : state == Relay.SIGN_IN_AGAIN
+                        ? t("Dropbox needs a new sign-in on this device before the game can start.",
+                            "O Dropbox precisa de um novo login neste aparelho antes de o jogo começar.")
+                        : state == Relay.BROKEN
+                        ? t("Save sync's settings on this device cannot be read. Turn save sync off to play with "
+                                + "the island on this device, or sign in to Dropbox again.",
+                            "As configurações da sincronização neste aparelho não podem ser lidas. Desligue a "
+                                + "sincronização para jogar com a ilha deste aparelho, ou entre no Dropbox de novo.")
+                        : t("Off. Set it up to keep your island in your Dropbox and play it on your other devices.",
+                            "Desligada. Ligue para guardar a sua ilha no seu Dropbox e jogar nos seus outros aparelhos."),
+                15, Screen.TEXT));
+        if (state == Relay.SIGN_IN_AGAIN || state == Relay.BROKEN)
+            box.addView(Screen.button(this, t("Sign in to Dropbox again", "Entrar no Dropbox de novo"), Screen.BLUE,
+                    v -> setUpSync()));
+        else if (state == Relay.OFF)
+            box.addView(Screen.button(this, t("Set up save sync (Dropbox)", "Ligar a sincronização (Dropbox)"),
+                    Screen.BLUE, v -> setUpSync()));
+        if (state != Relay.OFF)  // also the way out when the sign-in is gone: the game then starts with sync off
+            box.addView(Screen.button(this, t("Turn off save sync (the download stays signed in)",
+                    "Desligar a sincronização (o download continua com login)"), Screen.WHITE, v -> {
+                boolean done = Relay.turnOff(this);
+                show(null);
+                if (done) say(t("Save sync is off on this device. Your island here stays as it is.",
+                        "A sincronização está desligada neste aparelho. A sua ilha aqui fica como está."), false);
+                else say(t("Save sync is off, but not everything could be removed. Try again.",
+                        "A sincronização foi desligada, mas nem tudo pôde ser removido. Tente de novo."), true);
+            }));
+    }
+
+    private void setUpSync() {
+        if (busy || GameDownload.running) return;
+        busy = true;
+        say(t("Sign in to Dropbox in the browser, allow ACNH Recomp's access, then come back here.",
+                "Entre no Dropbox no navegador, permita o acesso do ACNH Recomp e volte aqui."), false);
+        new Thread(() -> {
+            final String failed = Relay.signIn(false);
+            runOnUiThread(() -> {
+                busy = false;
+                if (isFinishing()) return;
+                show(null);
+                if (failed == null) say(t("Save sync is on.", "A sincronização está ligada."), false);
+                else say(t("Dropbox sign-in: ", "Login no Dropbox: ") + failed, true);
+            });
+        }, "save sync setup").start();
     }
 
     private void say(String text, boolean error) {
@@ -464,10 +543,9 @@ public class Home extends Activity {
                     else say(explain(why), true);  // not saved: a new process would not know the folder
                     return;
                 }
-                Intent game = new Intent();
-                game.setClassName(getPackageName(), "android.app.NativeActivity");
-                startActivity(game);
-                finish();
+                // The island first (save sync: Relay), then the game, which starts once the pull lets it.
+                if (!quiet) say(t("Syncing your island...", "Sincronizando a sua ilha..."), false);
+                Relay.beforeGame(this, folder);
             });
         }).start();
     }

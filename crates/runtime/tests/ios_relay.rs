@@ -1,18 +1,18 @@
 //! The iPad's save-relay flow (issue #172) with fakes, on every runner: save-relay's in-memory
 //! remote and credential store, a temporary data root, and a prompt that blocks until the test
 //! answers it, so "the game has not booted" is checked as "`before_game` has not returned".
-//! Only the Keychain, UIKit and the C exports are iOS-only (`apple_ios.rs`).
+//! Only the Keychain, UIKit and the C exports are iOS-only (`relay_ios.rs`).
 #![cfg(not(any(target_os = "ios", target_os = "android")))]
 
 #[allow(dead_code)] // `Live` is the iPad's connector; the tests bring a fake
-#[path = "../src/apple.rs"]
-mod apple;
+#[path = "../src/relay.rs"]
+mod relay;
 
 use acnh_core::launch::{Keep, Relay, Sync as RelaySync};
 use acnh_core::relay::SaveRelay;
 use acnh_core::savecard::SaveCard;
 use acnh_core::{saves, Error};
-use apple::{
+use relay::{
     decide, describe_card, Action, Blocked, BlockedAnswer, Connector, FileSettings, HeldAnswer,
     Player, Prompt, Roots, SignInAnswer, SignInForm,
 };
@@ -43,6 +43,8 @@ struct Gate {
     inner: Arc<MemoryRemote>,
     password_ok: bool,
     broken: Arc<AtomicBool>,
+    /// The next puts of `playing.json` fail as a dropped connection.
+    fail_mark_puts: Arc<AtomicUsize>,
 }
 
 impl Gate {
@@ -67,6 +69,18 @@ impl Remote for Gate {
         self.inner.get(path)
     }
     fn put(&self, path: &str, bytes: &[u8], pre: &Precondition) -> save_relay::Result<String> {
+        let failing = self.fail_mark_puts.load(Ordering::SeqCst);
+        if path.ends_with("playing.json")
+            && failing > 0
+            && self
+                .fail_mark_puts
+                .compare_exchange(failing, failing - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            return Err(save_relay::Error::Unreachable(
+                "the connection dropped".into(),
+            ));
+        }
         self.check()?;
         self.inner.put(path, bytes, pre)
     }
@@ -120,6 +134,7 @@ struct FakeConnector {
     remote: Arc<MemoryRemote>,
     accepted: Mutex<String>,
     broken: Arc<AtomicBool>,
+    fail_mark_puts: Arc<AtomicUsize>,
 }
 
 impl Connector for FakeConnector {
@@ -149,6 +164,7 @@ impl Connector for FakeConnector {
             inner: self.remote.clone(),
             password_ok: secret.expose() == *self.accepted.lock().unwrap(),
             broken: self.broken.clone(),
+            fail_mark_puts: self.fail_mark_puts.clone(),
         };
         Ok(Some(
             SaveRelay::new(Arc::new(gate), store, config.device).with_root(config.root),
@@ -176,7 +192,7 @@ impl Connector for FakeConnector {
                 server: server.to_string(),
                 user: user.to_string(),
                 root: save_relay::cli::DEFAULT_ROOT.to_string(),
-                device: save_relay::layout::device_slug(apple::DEVICE),
+                device: save_relay::layout::device_slug(relay::DEVICE),
             })
             .map_err(|e| Error::Saves(e.to_string()))
     }
@@ -302,6 +318,7 @@ struct Fx {
     remote: Arc<MemoryRemote>,
     creds: Creds,
     booted: AtomicBool,
+    pulled: AtomicBool,
     settings: FileSettings,
     failures: Failures,
     connector: FakeConnector,
@@ -326,6 +343,7 @@ impl Fx {
                 remote: remote.clone(),
                 accepted: Mutex::new(PASSWORD.into()),
                 broken: Arc::new(AtomicBool::new(false)),
+                fail_mark_puts: Arc::new(AtomicUsize::new(0)),
             },
             remote,
             creds: Creds {
@@ -333,6 +351,7 @@ impl Fx {
                 unreadable: AtomicBool::new(false),
             },
             booted: AtomicBool::new(false),
+            pulled: AtomicBool::new(false),
             settings: FileSettings(data_root.join("config.ini")),
             failures: Failures::default(),
             log: Mutex::new(Vec::new()),
@@ -357,6 +376,7 @@ impl Fx {
             connector: &self.connector,
             prompt,
             booted: &self.booted,
+            pulled: &self.pulled,
             settings: &self.settings,
             log: Box::new(|line| self.log.lock().unwrap().push(line.to_string())),
         }
@@ -1040,4 +1060,92 @@ fn the_sign_in_answer_never_prints_its_password() {
     };
     let shown = format!("{answer:?} {:?}", Reply::SignIn(answer.clone()));
     assert!(!shown.contains(PASSWORD), "{shown}");
+}
+
+// ---- the background push (a checkpoint): the iPad stays the one playing ------------------------
+
+fn ipad_mark(fx: &Fx) -> Option<String> {
+    let manifest = save_relay::manifest::Manifest::from_json(&saves::relay_manifest()).unwrap();
+    let layout = save_relay::layout::Layout::new(save_relay::cli::DEFAULT_ROOT).unwrap();
+    let (bytes, _) = fx.remote.get(&layout.playing_path(&manifest.id)).ok()?;
+    save_relay::presence::Mark::from_json(&String::from_utf8_lossy(&bytes))
+        .ok()
+        .map(|mark| mark.device)
+}
+
+#[test]
+fn a_background_push_keeps_the_ipad_playing_and_leaves_another_devices_mark_alone() {
+    let fx = Fx::new("checkpoint");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("ipad"));
+    // To the background: pushed, still marked.
+    fs::write(fx.saves().join("main.dat"), "main paused").unwrap();
+    fx.player(&fx.no_prompt()).checkpoint();
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("ipad"));
+    let (desktop, desktop_saves) = fx.other("desktop");
+    assert!(matches!(
+        desktop.pull(&desktop_saves, None).unwrap(),
+        RelaySync::Held { .. }
+    ));
+    // The desktop takes it over with Play anyway; the iPad's next background push leaves its mark.
+    desktop.pull_anyway(&desktop_saves, None).unwrap();
+    assert_eq!(read_main(&desktop_saves), "main paused");
+    fx.player(&fx.no_prompt()).checkpoint();
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("desktop"));
+    assert!(fx.log_text().contains("another device (desktop"));
+    // The quit clears only the iPad's own mark: the desktop's stays.
+    fx.player(&fx.no_prompt()).after_game();
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("desktop"));
+}
+
+#[test]
+fn a_failed_mark_after_a_good_background_push_reports_the_push_and_comes_back_on_foreground() {
+    let fx = Fx::new("ios-remark");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    fs::write(fx.saves().join("main.dat"), "main paused").unwrap();
+    fx.connector.fail_mark_puts.store(2, Ordering::SeqCst);
+    fx.player(&fx.no_prompt()).checkpoint();
+    assert!(fx
+        .log_text()
+        .contains("could not be marked as playing again"));
+    assert!(!fx.roots.dirs().data.join("push-waiting").exists());
+    assert_eq!(ipad_mark(&fx), None);
+    assert!(fx.roots.dirs().data.join("mark-waiting").exists());
+    // Back to the front (acnh_relay_foreground): marked again, and the push did go.
+    fx.player(&fx.no_prompt()).resume();
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("ipad"));
+    assert!(!fx.roots.dirs().data.join("mark-waiting").exists());
+    let (desktop, desktop_saves) = fx.other("desktop");
+    assert!(matches!(
+        desktop.pull(&desktop_saves, None).unwrap(),
+        RelaySync::Held { .. }
+    ));
+    desktop.pull_anyway(&desktop_saves, None).unwrap();
+    assert_eq!(read_main(&desktop_saves), "main paused");
+}
+
+#[test]
+fn a_background_push_with_nothing_new_keeps_the_mark_and_one_against_a_newer_island_overwrites_nothing(
+) {
+    let fx = Fx::new("ios-noop-newer");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    fx.player(&fx.no_prompt()).checkpoint();
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("ipad"));
+    // The desktop plays anyway and pushes a newer island; the iPad changed its own too.
+    let (desktop, desktop_saves) = fx.other("desktop");
+    desktop.pull_anyway(&desktop_saves, None).unwrap();
+    fs::write(desktop_saves.join("main.dat"), "main desktop newer").unwrap();
+    desktop.push(&desktop_saves, None).unwrap();
+    fs::write(fx.saves().join("main.dat"), "main ipad also").unwrap();
+    fx.player(&fx.no_prompt()).checkpoint();
+    assert!(fx.log_text().contains("the push is waiting"));
+    let (laptop, laptop_saves) = fx.other("laptop");
+    laptop.pull_anyway(&laptop_saves, None).unwrap();
+    assert_eq!(read_main(&laptop_saves), "main desktop newer");
 }

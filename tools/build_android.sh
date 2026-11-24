@@ -103,11 +103,30 @@ elif [ ! -d "$GEN/main" ]; then
 fi
 mkdir -p "$(dirname "$OUT")"
 
+# The Rust runtime library (save sync, issue #81: crates/runtime with save-relay's C interface), linked into
+# lib<game>.so. Its Rust has no C of its own; the NDK's clang is the linker cargo is told about all the same.
+echo "== the Rust runtime library (cargo, aarch64-linux-android)"
+command -v cargo >/dev/null 2>&1 || { echo "cargo not found (install Rust: https://rustup.rs)"; exit 1; }
+if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed | grep -qx aarch64-linux-android; then
+  echo "the Rust target aarch64-linux-android is missing: rustup target add aarch64-linux-android"; exit 1
+fi
+NDK_BIN=$NDK/toolchains/llvm/prebuilt/$HOST/bin
+CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android29-clang \
+CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android29-clang AR_aarch64_linux_android=$NDK_BIN/llvm-ar \
+  cargo build -p acnh-runtime --release --target aarch64-linux-android -j "$JOBS"
+CARGO_OUT=${CARGO_TARGET_DIR:-$PWD/target}
+case "$CARGO_OUT" in /*) ;; *) CARGO_OUT=$PWD/$CARGO_OUT ;; esac
+RUNTIME_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_runtime.a
+[ -f "$RUNTIME_LIB" ] || { echo "$RUNTIME_LIB was not built"; exit 1; }
+RUNTIME_HEADER=$(find "$CARGO_OUT/aarch64-linux-android/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
+[ -n "$RUNTIME_HEADER" ] || { echo "acnh_runtime.h was not generated"; exit 1; }
+
 echo "== configure ($BUILD)"
 cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_STL=c++_shared \
   -DANDROID_PLATFORM=android-29 -DNX_GAME=$GAME -DNX_GEN_DIR="$GEN" -DNX_LAUNCHER=OFF \
-  -DNX_VULKAN_SDK="$PWD/private/third_party/Vulkan-Headers-1.4.357" > "$OUT.cmake.log" 2>&1 ||
+  -DNX_VULKAN_SDK="$PWD/private/third_party/Vulkan-Headers-1.4.357" \
+  -DNX_RUNTIME_ARCHIVE="$RUNTIME_LIB" -DNX_RUNTIME_INCLUDE="$(dirname "$RUNTIME_HEADER")" > "$OUT.cmake.log" 2>&1 ||
   { tail -20 "$OUT.cmake.log"; exit 1; }
 
 TARGETS="$GAME nx_prepare_jni"
@@ -159,6 +178,11 @@ rm -rf "${OUT:?}/assets"
 tools/bundle_mods.sh "$OUT/assets"
 # Mbed TLS is linked into the game library (Nextendo Online): Apache 2.0 asks for its licence text in the package.
 mkdir -p "$OUT/assets/licenses" && cp "$BUILD/_deps/mbedtls-src/LICENSE" "$OUT/assets/licenses/LICENSE-mbedtls.txt"
+# save-relay (MIT: its C interface and JNI glue in lib<game>.so, its Java wrapper ported in android/java/org/saverelay)
+# and the Rust crates linked into lib<game>.so with the runtime library: the list (crate, version, licence) and each
+# crate's own licence texts (tools/rust_licenses.py: offline, no local paths; it fails rather than ship without them).
+cp third_party/save-relay/LICENSE "$OUT/assets/licenses/LICENSE-save-relay.txt"
+python3 tools/rust_licenses.py "$OUT/assets/licenses" || { echo "the Rust crates' licence notices were not made"; exit 1; }
 # Capstone (BSD 3-clause, LLVM's licence for its tables) and tmouh's SpeedFix (CC BY-NC 4.0: its attribution) are built
 # into libacnh_prepare.so (the recompiler): their notices
 cp third_party/capstone/LICENSE.TXT "$OUT/assets/licenses/LICENSE-capstone.txt"

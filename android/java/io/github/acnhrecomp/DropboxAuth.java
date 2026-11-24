@@ -1,14 +1,21 @@
-// Dropbox sign-in for the in-app game download (issue #230; SPEC M18 and the Dropbox exception). It reuses
-// save-relay's Dropbox app (owner's choice, 2026-11-23: "Reuse Save Relay's app"): an App folder app, so the token
-// reaches only that app's own folder, Apps/<app>/, where the prepared game's files wait in
-// acnh-universal-game/android/. OAuth 2 with PKCE, no client secret; the browser comes back to the redirect
-// save-relay registered, http://127.0.0.1:53710/, which a small server in this app answers. The refresh token is
-// kept in the app's private preferences; nothing of the sign-in leaves the device but the calls to Dropbox.
+// Dropbox sign-in, for the save sync (issue #81) and the in-app game download (issue #230; SPEC M18 and the Dropbox
+// exception). Both use save-relay's Dropbox app (owner's choice, 2026-11-23: "Reuse Save Relay's app"): an App
+// folder app, so the token reaches only that app's own folder, Apps/<app>/, where save-relay keeps the island and the
+// prepared game's files wait in acnh-universal-game/android/. The sign-in is save-relay's own (its C interface,
+// save_relay_sign_in_start / _finish, through org.saverelay.SaveRelay): OAuth 2 with PKCE, no client secret, its
+// scopes (account_info.read, files.metadata.read/write, files.content.read/write), the browser coming back to the
+// redirect save-relay registered, http://127.0.0.1:53710/, which a small server in this app answers and hands to
+// save-relay. save-relay exchanges the code and files the refresh token in the app's credential store (Relay); the
+// game download reads it from there too. One sign-in serves both (owner's decision, 2026-11-23): signing in for the
+// download turns save sync on too, so the player never signs in twice. "Turn off save sync" stops the syncing only
+// (the token stays for the download); "Sign out of Dropbox" ends both. An install signed in before this, for the
+// download only (read-only scopes, its refresh token in the private preferences), keeps downloading with that token;
+// save sync asks it to sign in once more. Nothing of the sign-in leaves the device but the calls to Dropbox.
 package io.github.acnhrecomp;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.util.Base64;
+import android.net.Uri;
 
 import org.json.JSONObject;
 
@@ -23,8 +30,6 @@ import java.net.URL;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
 
 final class DropboxAuth {
     // save-relay's Dropbox app key (save-relay src/clients.rs: a public PKCE client, App folder access).
@@ -37,11 +42,27 @@ final class DropboxAuth {
 
     private static SharedPreferences prefs(Context c) { return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
 
-    static boolean signedIn(Context c) { return !prefs(c).getString("refresh", "").isEmpty(); }
+    // The refresh token the download uses: save-relay's (the current sign-in), else an older install's own.
+    private static String refresh(Context c) {
+        String relay = Relay.dropboxRefresh(c);
+        return relay != null ? relay : prefs(c).getString("refresh", "");
+    }
 
-    static void signOut(Context c) { prefs(c).edit().clear().apply(); }
+    static boolean signedIn(Context c) { return !refresh(c).isEmpty(); }
 
-    private static String b64(byte[] b) { return Base64.encodeToString(b, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP); }
+    // Dropbox no longer takes the token: forgotten (the download's cache and save-relay's token), so the next try
+    // signs in again. Save sync stays set up and asks for that sign-in before the game.
+    static void signOut(Context c) {
+        prefs(c).edit().clear().apply();
+        Relay.dropDropboxToken(c);
+    }
+
+    // Home's "Sign out of Dropbox": the download's sign-in and save sync both end on this device. False when
+    // something was left behind (the home screen says so).
+    static boolean signOutAll(Context c) {
+        prefs(c).edit().clear().apply();
+        return Relay.signOut(c);
+    }
 
     private static String enc(String s) {
         try {
@@ -52,14 +73,43 @@ final class DropboxAuth {
     }
 
     private static ServerSocket waiting;
-    private static int generation;
+    private static int generation, finished;
     private static String failed;  // why the current sign-in failed, or null
 
     // Why the latest sign-in failed (GameDownload waits on it), or null while it runs or when it worked.
     static synchronized String failure() { return failed; }
 
-    // Starts the loopback server and returns the address to open in the browser. A newer start supersedes an older
-    // one, whose outcome is then ignored.
+    // The latest sign-in's number (start's), for await and cancel.
+    static synchronized int current() { return generation; }
+
+    // Waits for sign-in `gen` to end: null when it worked, else why not (a newer start supersedes it).
+    static synchronized String await(int gen) {
+        while (finished < gen && generation == gen) {
+            try {
+                DropboxAuth.class.wait();
+            } catch (InterruptedException e) {
+                return "interrupted";
+            }
+        }
+        if (generation != gen) return "another sign-in started";
+        return failed;
+    }
+
+    // Stops sign-in `gen` waiting for the browser.
+    static synchronized void cancel(int gen) {
+        if (gen == generation && waiting != null) {
+            try { waiting.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private static String envelopeError(JSONObject envelope) {
+        JSONObject e = envelope.optJSONObject("error");
+        String m = e == null ? "" : e.optString("message");
+        return m.isEmpty() ? "save-relay could not sign in" : m;
+    }
+
+    // Starts save-relay's sign-in and the loopback server, and returns the address to open in the browser. A newer
+    // start supersedes an older one, whose outcome is then ignored.
     static synchronized String start(final Context ctx) throws Exception {
         if (waiting != null) {
             try { waiting.close(); } catch (Exception ignored) {}
@@ -67,23 +117,23 @@ final class DropboxAuth {
         }
         failed = null;
         final int gen = ++generation;
-        SecureRandom rnd = new SecureRandom();
-        byte[] v = new byte[48], s = new byte[16];
-        rnd.nextBytes(v);
-        rnd.nextBytes(s);
-        final String verifier = b64(v), state = b64(s);
-        String challenge = b64(MessageDigest.getInstance("SHA-256").digest(verifier.getBytes(StandardCharsets.US_ASCII)));
+        DropboxAuth.class.notifyAll();  // an older await ends: superseded
+        final Context app = ctx.getApplicationContext();
+        appContext = app;
+        JSONObject started = new JSONObject(Relay.saveRelay(app).signInStart("dropbox", REDIRECT, "Android", null));
+        if (!started.optBoolean("ok")) throw new Exception(envelopeError(started));
+        final String url = started.getJSONObject("data").getString("url");
+        final String state = Uri.parse(url).getQueryParameter("state");
+        if (state == null) throw new Exception("save-relay's sign-in has no state");
         final ServerSocket server = new ServerSocket(PORT, 4, InetAddress.getByName("127.0.0.1"));
         server.setSoTimeout(15 * 60 * 1000);  // fifteen minutes to sign in
         waiting = server;
-        final Context app = ctx.getApplicationContext();
-        appContext = app;
         new Thread(() -> {
             String error;
             try {
-                error = serve(app, server, verifier, state);
+                error = serve(app, server, state);
             } catch (Exception e) {
-                error = e.getMessage() == null ? e.toString() : e.getMessage();
+                error = server.isClosed() ? "cancelled" : e.getMessage() == null ? e.toString() : e.getMessage();
             } finally {
                 try { server.close(); } catch (Exception ignored) {}
                 synchronized (DropboxAuth.class) {
@@ -91,17 +141,19 @@ final class DropboxAuth {
                 }
             }
             synchronized (DropboxAuth.class) {
-                if (gen == generation && !signedIn(app)) failed = error == null ? "no sign-in came back" : error;
+                if (gen == generation) {
+                    failed = error == null ? null : error;
+                    if (error == null && !signedIn(app)) failed = "no sign-in came back";
+                    finished = gen;
+                    DropboxAuth.class.notifyAll();
+                }
             }
         }, "dropbox-sign-in").start();
-        return "https://www.dropbox.com/oauth2/authorize?client_id=" + APP_KEY + "&response_type=code"
-                + "&code_challenge=" + challenge + "&code_challenge_method=S256&token_access_type=offline"
-                + "&scope=" + enc("files.metadata.read files.content.read") + "&redirect_uri=" + enc(REDIRECT)
-                + "&state=" + state;
+        return url;
     }
 
-    // Answers requests until one carries the code (or an error) for this sign-in.
-    private static String serve(Context app, ServerSocket server, String verifier, String state) throws Exception {
+    // Answers requests until one carries this sign-in's answer, then hands it to save-relay.
+    private static String serve(Context app, ServerSocket server, String state) throws Exception {
         while (true) {
             Socket s = server.accept();
             try {
@@ -111,9 +163,11 @@ final class DropboxAuth {
                 // Read the rest of the request (to the blank line): closing with it unread resets the connection,
                 // and the browser would show an error instead of the page below.
                 for (String h = firstLine(in); !h.isEmpty(); h = firstLine(in)) {}
-                String query = "";
-                int q = line.indexOf('?'), sp = line.lastIndexOf(' ');
-                if (line.startsWith("GET ") && q > 0) query = line.substring(q + 1, sp > q ? sp : line.length());
+                String target = "", query = "";
+                int sp = line.lastIndexOf(' ');
+                if (line.startsWith("GET ") && sp > 4) target = line.substring(4, sp);
+                int q = target.indexOf('?');
+                if (q >= 0) query = target.substring(q + 1);
                 String code = param(query, "code"), err = param(query, "error"), got = param(query, "state");
                 if ((code == null && err == null) || !state.equals(got)) {
                     // a favicon, a stray request, or an older sign-in's page reloaded: not this sign-in's answer
@@ -127,18 +181,22 @@ final class DropboxAuth {
                 }
                 String error = null;
                 try {
-                    JSONObject t = token("grant_type=authorization_code&code=" + enc(code) + "&client_id=" + APP_KEY
-                            + "&code_verifier=" + enc(verifier) + "&redirect_uri=" + enc(REDIRECT));
-                    prefs(app).edit().putString("refresh", t.getString("refresh_token"))
-                            .putString("access", t.getString("access_token"))
-                            .putLong("expires", System.currentTimeMillis() + t.optLong("expires_in", 14400) * 1000).apply();
+                    // save-relay checks the state, exchanges the code with its PKCE verifier and files the token.
+                    JSONObject done = new JSONObject(Relay.saveRelay(app).signInFinish("http://127.0.0.1:" + PORT + target));
+                    if (!done.optBoolean("ok")) error = envelopeError(done);
+                    else {  // an older download-only sign-in, or one kept after sync was turned off: replaced
+                        prefs(app).edit().clear().apply();
+                        Relay.signedIn(app);
+                    }
                 } catch (Exception e) {
                     error = e.getMessage() == null ? e.toString() : e.getMessage();
                 }
                 reply(s.getOutputStream(), 200, error == null ? back() : page("Dropbox sign-in failed: " + error));
                 return error;
-            } catch (java.net.SocketTimeoutException | java.net.SocketException e) {
+            } catch (java.net.SocketTimeoutException e) {
                 // one bad connection (a preconnect that never sends): wait for the next
+            } catch (java.net.SocketException e) {
+                if (server.isClosed()) throw e;  // cancelled
             } finally {
                 try { s.close(); } catch (Exception ignored) {}
             }
@@ -166,7 +224,7 @@ final class DropboxAuth {
         String app = "intent://signed-in#Intent;scheme=acnhrecomp;package=io.github.acnhrecomp;end";
         return "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
                 + "<body style='font-family:sans-serif;padding:2em;background:#fffae8;color:#5c4632;text-align:center'>"
-                + "<h2>Signed in to Dropbox</h2><p>The game download is running in ACNH Recomp.</p>"
+                + "<h2>Signed in to Dropbox</h2><p>Go back to ACNH Recomp.</p>"
                 + "<p><a href='" + app + "' style='display:inline-block;padding:16px 28px;border-radius:26px;"
                 + "background:#5aaa5a;color:white;font-size:20px;text-decoration:none'>Back to ACNH Recomp</a></p>"
                 + "<script>location.replace('" + app + "')</script>";
@@ -202,7 +260,7 @@ final class DropboxAuth {
         c.disconnect();
         if (code == 400 || code == 401) {
             if (body.contains("invalid_grant") && form.startsWith("grant_type=refresh_token")) {
-                prefs(appContext).edit().clear().apply();
+                signOut(appContext);
                 throw new GameDownload.Fatal("Dropbox no longer accepts this device's sign-in. Sign in again.");
             }
             throw new GameDownload.Fatal("Dropbox refused the sign-in (" + code + (body.isEmpty() ? "" : ": " + body) + ")");
@@ -220,11 +278,12 @@ final class DropboxAuth {
         return b.toByteArray();
     }
 
-    // A current access token, refreshed when it is within five minutes of expiring (or when `force`).
+    // A current access token for the download, refreshed when it is within five minutes of expiring (or when
+    // `force`). Only the access token is cached here; the refresh token stays where its sign-in put it.
     static synchronized String access(Context c, boolean force) throws Exception {
         appContext = c.getApplicationContext();
         SharedPreferences p = prefs(c);
-        String refresh = p.getString("refresh", "");
+        String refresh = refresh(c);
         if (refresh.isEmpty()) throw new GameDownload.Fatal("Not signed in to Dropbox. Tap Download to sign in.");
         String access = p.getString("access", "");
         if (!force && !access.isEmpty() && p.getLong("expires", 0) - System.currentTimeMillis() > 5 * 60 * 1000) return access;

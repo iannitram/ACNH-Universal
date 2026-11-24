@@ -112,6 +112,182 @@ impl SaveRelay {
     }
 }
 
+/// What a checkpoint did with this device's `playing.json` (the "playing here" mark).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Remark {
+    /// This device is marked as playing again.
+    Kept,
+    /// Another device holds the mark (it took the island over, say with Play anyway): it is left
+    /// as it is.
+    Elsewhere { device: String, since: String },
+    /// The mark could not be written back (the network, the token): the caller retries later
+    /// (`SaveRelay::remark`). The push itself went.
+    Failed(String),
+    /// The island moved on on the server (another device pushed this revision since this device
+    /// last synced): no mark is written, and this device is behind; its next push meets the
+    /// newer island as save-relay's push always does (a conflict when both changed), never
+    /// overwriting it.
+    MovedOn { revision: u64 },
+    /// The push did not sync (offline, a conflict), so save-relay left the mark as it was.
+    Untouched,
+}
+
+/// A checkpoint's outcome: the push's answer, and what became of the mark.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpointed {
+    pub sync: Sync,
+    pub remark: Remark,
+}
+
+impl SaveRelay {
+    /// A push while the game keeps running (the app went to the background): the island goes up
+    /// as a quit's push would, but this device stays the one playing. save-relay's push is the
+    /// quit's (`Intent::Exit`; save-relay has no checkpoint push): once synced it removes this
+    /// device's `playing.json` (only if it is this device's) and ends the play session. A
+    /// checkpoint puts both back right after, best effort and in this order: the session start
+    /// (so the quit's card counts the whole session), the launcher card, then the mark
+    /// (`remark`), which is written only where no mark is or this device's is, never over another
+    /// device's. Once the push went, the answer is the push's, whatever the mark: a mark that could
+    /// not be written back is `Remark::Failed`, for the caller to retry. A push that did not sync
+    /// touched neither, and neither is touched here.
+    pub fn checkpoint(&self, save_dir: &Path) -> Result<Checkpointed> {
+        let manifest = self.parse_manifest()?;
+        let id = manifest.id.clone();
+        // An unreadable session is no session: the push must not wait on it.
+        let session = self.store.load_session(&id).ok().flatten();
+        let layout = Layout::new(&self.root).map_err(|e| Error::Saves(e.to_string()))?;
+        let s = self.session(layout);
+        let game = Game {
+            manifest,
+            saves_dir: save_dir.to_path_buf(),
+        };
+        let report = sync::push(&s, &game, &self.store, None).map_err(map_err)?;
+        let synced = matches!(
+            report.sync.action,
+            Action::Noop | Action::Adopted | Action::Pulled | Action::Pushed
+        );
+        let remark = if synced {
+            if let Some(session) = &session {
+                // Best effort: a session that cannot be saved costs the card its play time only.
+                let _ = self.store.save_session(session);
+            }
+            let since = session.as_ref().map_or(s.now, |session| session.started);
+            Some((since, report.sync.revision))
+        } else {
+            None
+        };
+        // Best effort too: the card is the launcher's picture of the island, not the island.
+        let _ = persist_card(save_dir, &report, self.version);
+        let sync = map_sync_with_local(report, save_dir);
+        let remark = match remark {
+            Some((since, revision)) => self.write_mark(&id, since, revision),
+            None => Remark::Untouched,
+        };
+        Ok(Checkpointed { sync, remark })
+    }
+
+    /// This device's mark written back, as `checkpoint` does: for a later retry after
+    /// `Remark::Failed` (the app came back to the front). The session's start and the last synced
+    /// revision are read again here.
+    pub fn remark(&self) -> Result<Remark> {
+        let manifest = self.parse_manifest()?;
+        let session = self.store.load_session(&manifest.id).ok().flatten();
+        let revision = self
+            .store
+            .load_last(&manifest.id)
+            .ok()
+            .flatten()
+            .map(|last| last.revision);
+        let since = session.map_or(self.now(), |session| session.started);
+        Ok(self.write_mark(&manifest.id, since, revision))
+    }
+
+    /// `playing.json` for this device, only where there is none (`Precondition::Absent`) or this
+    /// device's (`Precondition::Match` on its etag): another device's mark stays, and is named.
+    /// Tried twice, reading the mark again each time (another device may write it meanwhile).
+    fn write_mark(&self, id: &str, since: u64, revision_read: Option<u64>) -> Remark {
+        use save_relay::presence::Mark;
+        use save_relay::remote::Precondition;
+        let layout = match Layout::new(&self.root) {
+            Ok(layout) => layout,
+            Err(error) => return Remark::Failed(error.to_string()),
+        };
+        let path = layout.playing_path(id);
+        let mark = Mark {
+            format: save_relay::presence::FORMAT,
+            device: self.device.clone(),
+            since: save_relay::stamp::rfc3339(since),
+            revision_read,
+        };
+        let mut last = String::from("the mark was not written");
+        for _ in 0..2 {
+            let pre = match self.remote.get(&path) {
+                Ok((bytes, etag)) => match Mark::from_json(&String::from_utf8_lossy(&bytes)) {
+                    Ok(other) if other.device != self.device => {
+                        return Remark::Elsewhere {
+                            device: other.device,
+                            since: other.since,
+                        };
+                    }
+                    // This device's own, or a broken mark (no mark): replaced, if still that one.
+                    _ => Precondition::Match(etag),
+                },
+                Err(save_relay::Error::NotFound(_)) => {
+                    if let Err(error) =
+                        save_relay::remote::ensure_dir(&*self.remote, &layout.game_dir(id))
+                    {
+                        last = error.to_string();
+                        continue;
+                    }
+                    Precondition::Absent
+                }
+                Err(error) => {
+                    last = error.to_string();
+                    continue;
+                }
+            };
+            // The island must still be where this device left it: a revision another device
+            // pushed meanwhile (it started, played and quit while this game was in the
+            // background) means this device is behind, and a mark would claim otherwise.
+            match self.server_revision(&layout, id) {
+                Ok(Some(server)) => {
+                    let ours = self
+                        .store
+                        .load_last(id)
+                        .ok()
+                        .flatten()
+                        .map(|last| last.revision);
+                    if ours != Some(server) {
+                        return Remark::MovedOn { revision: server };
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    last = error.to_string();
+                    continue;
+                }
+            }
+            match self.remote.put(&path, mark.to_json().as_bytes(), &pre) {
+                Ok(_) => return Remark::Kept,
+                Err(error) => last = error.to_string(),
+            }
+        }
+        Remark::Failed(last)
+    }
+
+    /// The revision `state.json` names now; `None` when the server has none.
+    fn server_revision(&self, layout: &Layout, id: &str) -> save_relay::Result<Option<u64>> {
+        match self.remote.get(&layout.state_path(id)) {
+            Ok((bytes, _)) => {
+                save_relay::state::ServerState::from_json(&String::from_utf8_lossy(&bytes))
+                    .map(|state| Some(state.revision))
+            }
+            Err(save_relay::Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 impl Relay for SaveRelay {
     fn pull(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
         self.pull_with(save_dir, resolve, false)
@@ -521,19 +697,43 @@ pub fn finish_sign_in_cancellable(
 }
 
 /// Remove save-relay's config and every secret this machine stored for it: Settings' "Turn off
-/// save sync". A machine that was never set up is `Ok(())`.
+/// save sync". A machine that was never set up is `Ok(())`. Best effort: every secret is tried
+/// and the config file is removed even when a secret could not be deleted (an unreadable
+/// credential store must not keep save sync on), and the first failure is returned after.
 pub fn forget(dirs: &AppDirs, creds: &dyn CredentialStore) -> Result<()> {
     let store = LocalStore::new(dirs.clone());
-    if let Some(config) = store.load_config().map_err(map_err)? {
-        for account in service::credential_accounts(&config).map_err(map_err)? {
-            creds.delete(&account).map_err(map_err)?;
+    let mut first: Option<Error> = None;
+    match store.load_config() {
+        Ok(Some(config)) => match service::credential_accounts(&config) {
+            Ok(accounts) => {
+                for account in accounts {
+                    if let Err(error) = creds.delete(&account) {
+                        first.get_or_insert(map_err(error));
+                    }
+                }
+            }
+            Err(error) => {
+                first.get_or_insert(map_err(error));
+            }
+        },
+        Ok(None) => {}
+        Err(error) => {
+            first.get_or_insert(map_err(error));
         }
     }
-    *platform_lock()? = None;
+    if let Ok(mut pending) = platform_lock() {
+        *pending = None;
+    }
     match std::fs::remove_file(dirs.config.join("config.json")) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::Io(error.to_string())),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            first.get_or_insert(Error::Io(error.to_string()));
+        }
+    }
+    match first {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
