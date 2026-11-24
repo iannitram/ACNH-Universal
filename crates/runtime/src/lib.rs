@@ -79,5 +79,7 @@ pub mod relay;
 pub mod audio;
 pub mod config;
 pub mod files;
+#[cfg(target_os = "android")]
+pub mod hub_android;
 pub mod saves;
 pub mod time;
