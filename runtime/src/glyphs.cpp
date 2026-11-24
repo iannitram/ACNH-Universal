@@ -18,6 +18,7 @@
 #include <nx/runtime.h>
 
 #include "config.h"
+#include "glyph_layout.h"
 #include "platform.h"
 
 namespace fs = std::filesystem;
@@ -27,13 +28,14 @@ namespace nx {
 std::string glyph_override(const std::string& romfs_path) {
     if (romfs_path != "Font/ScalableFont.sarc.zs") return {};
     std::string style = config_get("controls.glyphs", "auto");
+    const std::string kind = plat::controller_kind();
     if (style == "auto") {
-        style = plat::controller_kind();
+        style = kind;
         // Pads SDL cannot name mostly follow the Xbox layout and labels (XInput); no pad: the keyboard, original icons.
         if (style == "generic") style = "xbox";
     }
     if (style != "xbox" && style != "playstation" && style != "switch") style = "switch";
-    std::string layout = config_get("input.layout", "console") == "xbox" ? "xbox" : "console";
+    std::string layout = glyph_layout(config_get("input.layout", "auto"), kind);
 
     static std::mutex lock;
     static std::string logged;  // log each choice once: the game may open the archive more than once
