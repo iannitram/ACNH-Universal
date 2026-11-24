@@ -110,6 +110,8 @@ float default_render_scale();
 #if defined(__ANDROID__)
 // The app started again from its launcher activity, and this process ended (settings that take effect at start).
 [[noreturn]] void restart_app();
+// Back to the Android start screen (Home with pick=true: save sync, game folder, download), pushing the island first.
+[[noreturn]] void open_start_screen();
 // Android: `url` in the app `package` when it is installed (Instagram, GitHub), else in the browser (platform_android).
 bool open_url_in_app(const std::string& url, const char* package);  // false: nothing opened it
 // Nextendo's sign-in page (`url`, whose redirect_uri is the loopback listener) in the app's own screen, a WebView

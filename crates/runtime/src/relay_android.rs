@@ -13,8 +13,8 @@
 //! `Context.getFilesDir()`), catches panics, and never logs a secret, the account or a path.
 
 use super::{
-    android_ask_off_file, android_credentials, forget_android, sign_out_android, BridgePrompt,
-    CallbackTransport, Connector, FileStore, Player, Roots, Settings,
+    android_ask_off_file, android_credentials, android_ready, forget_android, sign_out_android,
+    BridgePrompt, CallbackTransport, Connector, FileStore, Player, Roots, Settings,
 };
 use acnh_core::relay::SaveRelay;
 use acnh_core::Result;
@@ -295,22 +295,27 @@ pub unsafe extern "C" fn acnh_relay_android_state(files: *const c_char) -> c_int
 }
 
 /// Whether the game screen may start the game in this process: after `before_game` returned
-/// here, or with save sync not set up. False sends it back to the home screen, which pulls first
-/// (Android can bring the game screen back in a new process, past the home screen).
+/// here, or with save sync off and the first-start offer already opted out of (`relay.ask = 0`).
+/// False sends it back to the home screen, which pulls or shows the first-start sync offer
+/// (Android can bring the game screen back in a new process, past the home screen, e.g. after an
+/// update from a download-only build).
 ///
 /// # Safety
 /// `files` is a NUL-terminated path.
 #[no_mangle]
 pub unsafe extern "C" fn acnh_relay_android_ready(files: *const c_char) -> bool {
-    if PULLED.load(Ordering::SeqCst) {
+    if BOOTED.load(Ordering::SeqCst) || PULLED.load(Ordering::SeqCst) {
         return true;
     }
     let Some(files) = path(files) else {
         return true;
     };
-    // Not pulled in this process: the game starts only with save sync plainly off (a config that
-    // does not read is not off).
-    std::panic::catch_unwind(|| state(&files) == 0).unwrap_or(false)
+    std::panic::catch_unwind(|| {
+        let sync_state = state(&files);
+        let ask_off = sync_state == 0 && PlayerSettings { files: &files }.ask_off();
+        android_ready(false, sync_state, ask_off)
+    })
+    .unwrap_or(false)
 }
 
 /// The app is back in front (`APP_CMD_RESUME`): a "playing here" mark a background push could

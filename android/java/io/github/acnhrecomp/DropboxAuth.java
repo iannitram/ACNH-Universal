@@ -50,6 +50,13 @@ final class DropboxAuth {
 
     static boolean signedIn(Context c) { return !refresh(c).isEmpty(); }
 
+    // True on an install updated from the download-only sign-in (0.11.0-audio or earlier): a read-only refresh token
+    // sits in SharedPreferences, while save-relay has no config yet (Relay.state == OFF). That token only has
+    // files.metadata.read + files.content.read and cannot be upgraded in place, so save sync asks for one new sign-in.
+    static boolean hasLegacyDownloadToken(Context c) {
+        return Relay.state(c) == Relay.OFF && !prefs(c).getString("refresh", "").isEmpty();
+    }
+
     // Dropbox no longer takes the token: forgotten (the download's cache and save-relay's token), so the next try
     // signs in again. Save sync stays set up and asks for that sign-in before the game.
     static void signOut(Context c) {

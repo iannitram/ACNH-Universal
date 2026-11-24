@@ -13,10 +13,10 @@ use acnh_core::launch::{Keep, Relay as _};
 use acnh_core::relay::SaveRelay;
 use acnh_core::{saves, Error};
 use relay::{
-    android_credentials, android_vars, describe_card, for_android, forget_android, header_lines,
-    parse_wire, sign_in_again_message, sign_out_android, BridgePrompt, CallbackTransport,
-    Connector, FileSettings, FileStore, Player, Prompt, Roots, Settings, SignInAnswer, SignInForm,
-    ANDROID_DEVICE, DOWNLOAD_ACCOUNT,
+    android_credentials, android_ready, android_vars, describe_card, for_android, forget_android,
+    header_lines, parse_wire, sign_in_again_message, sign_out_android, BridgePrompt,
+    CallbackTransport, Connector, FileSettings, FileStore, Player, Prompt, Roots, Settings,
+    SignInAnswer, SignInForm, ANDROID_DEVICE, DOWNLOAD_ACCOUNT,
 };
 use save_relay::creds::{CredentialStore, Secret};
 use save_relay::http::{Request, Transport};
@@ -1269,4 +1269,78 @@ fn a_checkpoint_does_not_mark_when_the_island_moved_on_before_it() {
         fx.mark().is_none(),
         "no mark claims the phone is playing the newer island"
     );
+}
+
+// ---- issue #262: upgrade from download-only sign-in ------------------------------------------
+
+#[test]
+fn android_ready_requires_home_when_sync_is_off_and_offer_not_answered() {
+    // Process restored directly into NativeActivity (before_game never ran):
+    // sync off + ask_off == false (e.g. upgraded from 0.11.0-audio) must bounce to Home so the
+    // first-start sync offer is shown.
+    assert!(!android_ready(false, 0, false));
+    // Sync off + ask_off == true (user already chose Not now / Turn off): may boot directly.
+    assert!(android_ready(false, 0, true));
+    // Sync on (1), needs sign-in (2), or broken config (3): always bounce to Home to pull/recover.
+    for sync_state in [1, 2, 3] {
+        assert!(!android_ready(false, sync_state, false));
+        assert!(!android_ready(false, sync_state, true));
+    }
+    // Once before_game has run in this process (booted == true), NativeActivity may boot.
+    for sync_state in [0, 1, 2, 3] {
+        assert!(android_ready(true, sync_state, false));
+        assert!(android_ready(true, sync_state, true));
+    }
+}
+
+#[test]
+fn upgraded_install_shows_first_start_offer_and_pulls_after_sign_in() {
+    let fx = Fx::new("upgrade-offer");
+    // Another device already has an island on Dropbox; this upgraded phone has no save-relay
+    // config yet and no relay.ask = 0.
+    let (mac, mac_dir) = fx.device("mac");
+    island(&mac_dir, "from mac");
+    mac.push(&mac_dir, None).unwrap();
+
+    assert!(!fx.settings.ask_off());
+    assert!(!android_ready(false, 0, fx.settings.ask_off()));
+
+    let dirs = fx.roots.dirs();
+    let creds = FileStore::new(fx.creds.path());
+    let mut java = FakeJava::new(&[Some("signed_in")]);
+    java.on_sign_in = Box::new(move || sign_in(&dirs, &creds, REFRESH));
+    let prompt = bridge(&java);
+    let player = fx.player(&prompt);
+    player.before_game();
+
+    let requests = java.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["kind"], "sign_in");
+    assert_eq!(requests[0]["allow_not_now"], true);
+    assert!(fx.booted.load(Ordering::SeqCst));
+    assert!(fx.pulled.load(Ordering::SeqCst));
+    // First sync after the upgrade sign-in is a pull.
+    assert_eq!(read_main(&fx.saves()), "main from mac");
+}
+
+#[test]
+fn upgraded_install_not_now_remembers_opt_out_and_skips_next_start() {
+    let fx = Fx::new("upgrade-not-now");
+    let java = FakeJava::new(&[Some("not_now")]);
+    let prompt = bridge(&java);
+    let player = fx.player(&prompt);
+    player.before_game();
+
+    assert_eq!(java.kinds(), ["sign_in"]);
+    assert!(fx.booted.load(Ordering::SeqCst));
+    assert!(!fx.pulled.load(Ordering::SeqCst));
+    assert!(fx.settings.ask_off());
+    assert!(android_ready(false, 0, fx.settings.ask_off()));
+
+    // Next start does not ask again.
+    let none = FakeJava::new(&[]);
+    let prompt2 = bridge(&none);
+    let player2 = fx.player(&prompt2);
+    player2.before_game();
+    assert!(none.kinds().is_empty());
 }

@@ -205,6 +205,35 @@ void restart_app() {
     exit_process(0);
 }
 
+void open_start_screen() {
+    nx::log("relay: pushing the island before returning to the start screen");
+    relay_after_game();
+    JNIEnv* env = nullptr;
+    if (g_app && g_app->activity->vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) {
+        jobject act = g_app->activity->clazz;
+        jclass actc = env->GetObjectClass(act);
+        jclass ic = env->FindClass("android/content/Intent");
+        if (ic && !env->ExceptionCheck()) {
+            jobject intent = env->NewObject(ic, env->GetMethodID(ic, "<init>", "()V"));
+            jobject pkg = env->CallObjectMethod(act, env->GetMethodID(actc, "getPackageName", "()Ljava/lang/String;"));
+            if (intent && pkg && !env->ExceptionCheck()) {
+                env->CallObjectMethod(intent, env->GetMethodID(ic, "setClassName",
+                                                               "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
+                                      pkg, env->NewStringUTF("io.github.acnhrecomp.Home"));
+                env->CallObjectMethod(intent, env->GetMethodID(ic, "putExtra",
+                                                               "(Ljava/lang/String;Z)Landroid/content/Intent;"),
+                                      env->NewStringUTF("pick"), jboolean(JNI_TRUE));
+                // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK: a new task, this one gone.
+                env->CallObjectMethod(intent, env->GetMethodID(ic, "addFlags", "(I)Landroid/content/Intent;"), 0x10000000 | 0x8000);
+                env->CallVoidMethod(act, env->GetMethodID(actc, "startActivity", "(Landroid/content/Intent;)V"), intent);
+            }
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        nx::log("app: returning to the start screen");
+    }
+    exit_process(0);
+}
+
 bool open_url_in_app(const std::string& url, const char* package) {
     JniScope jni;  // Nextendo's sign-in thread opens the browser and then ends
     JNIEnv* env = jni.env;

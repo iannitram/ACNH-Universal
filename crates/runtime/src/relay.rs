@@ -270,6 +270,20 @@ pub fn android_ask_off_file(files: &Path) -> PathBuf {
     files.join("relay-ask-off")
 }
 
+/// Whether the Android game screen (`NativeActivity`) may boot in this process without bouncing
+/// back to `Home`.
+///
+/// - When `before_game` has already run in this process (`booted`), the game may boot (either a
+///   pull succeeded, or sync is off and the first-start offer was already handled).
+/// - Otherwise (Android restored `NativeActivity` in a new process, bypassing `Home` — for
+///   example after an app update from a download-only build), only boot straight into the game
+///   when save sync is plainly off (`state == 0`) AND the player has already opted out of the
+///   first-start offer (`ask_off`). Otherwise return `false` so `NativeActivity` hands off to
+///   `Home` to pull or show the first-start sync offer.
+pub fn android_ready(booted: bool, state: i32, ask_off: bool) -> bool {
+    booted || (state == 0 && ask_off)
+}
+
 /// The Android app's credential store file (`FileStore`), in its private files folder.
 pub fn android_credentials(files: &Path) -> PathBuf {
     files.join("save-relay-credentials.json")
