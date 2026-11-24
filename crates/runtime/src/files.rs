@@ -60,8 +60,7 @@ pub struct AcnhFilesHost {
     pub trace_enabled: Option<extern "C" fn() -> bool>,
     pub discord_presence_file: Option<extern "C" fn(*const c_char)>,
     pub glyph_override: Option<extern "C" fn(*const c_char, *mut c_char, usize) -> usize>,
-    pub read_asset:
-        Option<extern "C" fn(*const c_char, AcnhFilesBytesCb, *mut c_void) -> bool>,
+    pub read_asset: Option<extern "C" fn(*const c_char, AcnhFilesBytesCb, *mut c_void) -> bool>,
 }
 
 // SAFETY: `AcnhFilesHost` only holds plain function pointers.
