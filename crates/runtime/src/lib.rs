@@ -54,10 +54,9 @@ pub const SERVICES: [Service; 11] = [
 /// `runtime/include/nx/runtime.h`); the address space then starts at `0xC0_0800_0000`.
 pub const APPLE_GUEST_SHIFT: u64 = 0xC0_0000_0000;
 
-/// True once a group is served by Rust; false leaves it to upstream's C++. None are yet.
+/// True once a group is served by Rust; false leaves it to upstream's C++.
 pub fn ported(service: Service) -> bool {
-    let _ = service;
-    false
+    matches!(service, Service::Config | Service::Time)
 }
 
 /// Version of the scaffold's C interface, checked by the player at boot.
@@ -81,3 +80,5 @@ pub mod relay;
 pub mod appgame;
 #[cfg(target_os = "ios")]
 pub mod appgame_ios;
+pub mod config;
+pub mod time;

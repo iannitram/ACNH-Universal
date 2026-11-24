@@ -42,13 +42,7 @@ fn player(manifest: &Path, out: &Path) -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-env-changed=ACNH_BOOT_SMOKE");
     println!("cargo:rerun-if-env-changed=CMAKE_PREFIX_PATH");
     println!("cargo:rerun-if-changed=tests/fake_game");
-    for path in [
-        "CMakeLists.txt",
-        "runtime",
-        "games",
-        "assets",
-        "launcher/launcher.cmake",
-    ] {
+    for path in ["CMakeLists.txt", "runtime", "games", "assets"] {
         println!("cargo:rerun-if-changed=../../{path}");
     }
     println!("cargo:rerun-if-changed=../../Cargo.lock");
@@ -99,7 +93,6 @@ fn player(manifest: &Path, out: &Path) -> Result<(), Box<dyn Error>> {
         .out_dir(out.join("player"))
         .generator("Ninja")
         .define("NX_GAME", &game)
-        .define("NX_LAUNCHER", "OFF")
         .define("NX_GAME_FROM_FOLDER", "ON")
         .define(
             "NX_BOOT_SMOKE",

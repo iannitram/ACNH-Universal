@@ -50,10 +50,10 @@ jobs:
           cp assets/acnhrecomp.png "$D/usr/share/acnh-universal/"
           SRC="$D/usr/share/acnh-universal/source"
           mkdir -p "$SRC"
-          git archive HEAD CMakeLists.txt runtime games recomp tools assets launcher Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
+          git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
           if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
           printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
-          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
+          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
             test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
           done
           cat > "$D/acnh-universal.desktop" <<DESK
@@ -101,10 +101,10 @@ jobs:
           cp assets/acnhrecomp.ico assets/acnhrecomp.png "$N/"
           SRC="$N/source"
           mkdir -p "$SRC"
-          git archive HEAD CMakeLists.txt runtime games recomp tools assets launcher Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
+          git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
           if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
           printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
-          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
+          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
             test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
           done
           find "$N" -type f | tee files.txt
@@ -136,10 +136,10 @@ jobs:
           cp assets/acnhrecomp.icns assets/acnhrecomp.png "$A/Contents/Resources/"
           SRC="$A/Contents/Resources/source"
           mkdir -p "$SRC"
-          git archive HEAD CMakeLists.txt runtime games recomp tools assets launcher Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
+          git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
           if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
           printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
-          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets launcher/launcher.cmake; do
+          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
             test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
           done
           # The same Info.plist the launcher writes when it makes the bundle from a checkout

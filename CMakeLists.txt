@@ -200,11 +200,7 @@ endforeach()
 string(SHA1 NX_GAME_ABI "${NX_ABI_TEXT}")
 string(SUBSTRING "${NX_GAME_ABI}" 0 12 NX_GAME_ABI)
 
-# The launcher (launcher/): the program a player opens first. It has no game code, so it builds from a plain
-# checkout (cmake --build <dir> --target acnhrecomp_launcher) and leaves the game's targets as they are.
-option(NX_LAUNCHER "Build the first-run launcher (acnhrecomp_launcher)" ON)
-if(NX_LAUNCHER AND NOT ANDROID AND NOT IOS)
-    include(launcher/launcher.cmake)
+if(NOT ANDROID AND NOT IOS)
     include(prepare/io/io.cmake)  # preparing the game folder: the player's ExeFS and RomFS, the packs
 endif()
 
@@ -222,7 +218,7 @@ endif()
 # instead of linked into the executable: the player then only needs the folder.
 option(NX_GAME_FROM_FOLDER "Desktop: load the game's code from the game folder" OFF)
 
-# Without the generated code (a checkout with no game data) only the tests, launcher and recompiler above are built.
+# Without the generated code (a checkout with no game data) only the tests and recompiler above are built.
 # Android builds the runtime without it too: the app (lib<game>.so) holds no game code and loads lib<game>_game.so,
 # made from the player's own copy on their computer, from the game folder picked on the phone (docs/ANDROID.md). So
 # does the desktop player (NX_GAME_FROM_FOLDER): the release's, which loads the game folder's library.
@@ -297,7 +293,6 @@ set(NX_RUNTIME_SOURCES
     runtime/src/svc_am.cpp
     runtime/src/svc_set.cpp
     runtime/src/svc_misc.cpp
-    runtime/src/svc_time.cpp
     runtime/src/svc_process.cpp
     runtime/src/hle_fs.cpp
     runtime/src/svc_account.cpp
@@ -324,13 +319,12 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nfp_host.cpp
     runtime/src/acnh_amiibo_hook.cpp
     runtime/src/amiibo_decode.cpp
-    runtime/src/hle_time.cpp
     runtime/src/hle_bcat.cpp
     runtime/src/hle_movie.cpp
     runtime/src/hle_friends.cpp
     runtime/src/hle_ngc.cpp
-    runtime/src/config.cpp
-    runtime/src/game_clock.cpp
+    runtime/src/config_wrapper.cpp
+    runtime/src/time_wrapper.cpp
     runtime/src/mod_fetch.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp

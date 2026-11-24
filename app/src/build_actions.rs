@@ -45,11 +45,18 @@ impl BuildActions {
     }
 
     fn has_contained_game(&self, player: &Path) -> bool {
-        self.os == Os::Mac
-            && player
+        match self.os {
+            Os::Mac => player
                 .parent()
                 .and_then(Path::parent)
-                .is_some_and(|contents| contents.join("Resources/game/analysis/main.bin").is_file())
+                .is_some_and(|contents| {
+                    contents.join("Resources/game/analysis/main.bin").is_file()
+                }),
+            Os::Linux | Os::Windows => player
+                .parent()
+                .is_some_and(|dir| dir.join("game/analysis/main.bin").is_file()),
+            _ => false,
+        }
     }
 
     pub fn launch_location(&self, launcher: &Path) -> (PathBuf, Option<PathBuf>) {
@@ -158,6 +165,12 @@ impl BuildActions {
                 )));
             }
             assemble::assemble(target, &out.join("build"), &self.dirs.install())?;
+            if matches!(target, Os::Linux | Os::Windows) {
+                let launcher_exe = std::env::current_exe()?;
+                let local_data = self.dirs.data.parent().unwrap_or(&self.dirs.data);
+                let app_dir = prepare::app_out_dir_for(target, launcher, local_data, home);
+                prepare::pack_folder(&launcher_exe, &self.dirs.install(), &out, &app_dir)?;
+            }
             Ok(())
         })
     }
@@ -172,6 +185,7 @@ impl BuildActions {
             };
             let launcher = self.launcher_config()?;
             let home = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
                 .map(PathBuf::from)
                 .unwrap_or_default();
             self.build_local(
