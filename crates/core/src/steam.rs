@@ -73,12 +73,12 @@ pub fn assets_dir_for(exe: &Path, appdir: Option<&Path>) -> PathBuf {
     {
         return contents.join("Resources");
     }
-    if folder.join("acnhrecomp.png").is_file() {
+    if folder.join("acnhrecomp.png").is_file() || folder.join("acnhrecomp.ico").is_file() {
         return folder.to_path_buf();
     }
     for ancestor in folder.ancestors() {
         let assets = ancestor.join("assets");
-        if assets.join("acnhrecomp.png").is_file() {
+        if assets.join("acnhrecomp.png").is_file() || assets.join("acnhrecomp.ico").is_file() {
             return assets;
         }
     }
@@ -92,11 +92,12 @@ pub fn assets_dir() -> std::io::Result<PathBuf> {
     Ok(assets_dir_for(&exe, appdir.as_deref()))
 }
 
-/// Build the launcher entry. On Linux, if a packed `ACNH-Universal/acnh-app` folder exists
-/// (either beside `appimage`, in `app_out_dir`, or `exe` itself is inside one), it wins over
-/// `appimage`.
+/// Build the launcher entry. On Linux and Windows, if a packed `ACNH-Universal` folder
+/// exists (either beside `appimage`, in `app_out_dir_for`, or `exe` itself is inside one),
+/// it wins over `appimage`.
 pub fn launcher_shortcut(exe: &Path, appimage: Option<&Path>, name: &str, icon: &Path) -> Shortcut {
-    let app_out = Vars::from_lookup(crate::platform::Os::current(), |k| std::env::var(k).ok())
+    let os = crate::platform::Os::current();
+    let app_out = Vars::from_lookup(os, |k| std::env::var(k).ok())
         .ok()
         .map(|vars| {
             let dirs = crate::platform::AppDirs::new(&vars);
@@ -104,7 +105,7 @@ pub fn launcher_shortcut(exe: &Path, appimage: Option<&Path>, name: &str, icon: 
                 .ok()
                 .and_then(|text| crate::config::Config::parse(&text).ok())
                 .unwrap_or_default();
-            crate::pack_folder::app_out_dir(&cfg, &vars.home)
+            crate::pack_folder::app_out_dir_for(os, &cfg, &vars.data, &vars.home)
         });
     launcher_shortcut_for(exe, appimage, app_out.as_deref(), name, icon)
 }
@@ -146,9 +147,15 @@ fn packed_launcher(exe: &Path, appimage: Option<&Path>, app_out: Option<&Path>) 
     {
         return Some(candidate);
     }
-    app_out
-        .map(|dir| dir.join("ACNH-Universal/acnh-app"))
-        .filter(|path| path.is_file())
+    for name in ["ACNH-Universal/acnh-app.exe", "ACNH-Universal/acnh-app"] {
+        if let Some(candidate) = app_out
+            .map(|dir| dir.join(name))
+            .filter(|path| path.is_file())
+        {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// The shortcut's map, items in this order: "appid" Int(app_id), "AppName" Str(name), "Exe"
@@ -352,6 +359,34 @@ mod launcher_tests {
             Some(&apps),
             "ACNH",
             Path::new("icon.png"),
+        );
+        assert_eq!(
+            shortcut.quoted_exe(),
+            format!("\"{}\"", packed_exe.display())
+        );
+        assert_eq!(shortcut.start_dir, packed.display().to_string());
+        assert_eq!(shortcut.launch_options, "--fullscreen");
+        assert_eq!(
+            shortcut.app_id(),
+            shortcut_app_id(&shortcut.quoted_exe(), "ACNH")
+        );
+    }
+
+    #[test]
+    fn windows_packed_folder_shortcut_uses_exe_and_start_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let programs = root.path().join("Programs");
+        let packed = programs.join("ACNH-Universal");
+        std::fs::create_dir_all(&packed).unwrap();
+        let packed_exe = packed.join("acnh-app.exe");
+        std::fs::write(&packed_exe, b"").unwrap();
+
+        let shortcut = launcher_shortcut_for(
+            &root.path().join("release/acnh-app.exe"),
+            None,
+            Some(&programs),
+            "ACNH",
+            Path::new("acnhrecomp.ico"),
         );
         assert_eq!(
             shortcut.quoted_exe(),
