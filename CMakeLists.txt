@@ -280,7 +280,7 @@ endforeach()
 
 set(NX_RUNTIME_SOURCES
     runtime/src/compact_layout.cpp
-    runtime/src/game_folder.cpp
+    runtime/src/files_wrapper.cpp
     runtime/src/main.cpp
     runtime/src/sampler.cpp
     runtime/src/loader.cpp
@@ -294,7 +294,6 @@ set(NX_RUNTIME_SOURCES
     runtime/src/svc_set.cpp
     runtime/src/svc_misc.cpp
     runtime/src/svc_process.cpp
-    runtime/src/hle_fs.cpp
     runtime/src/svc_nfp.cpp
     runtime/src/hle_ro.cpp
     runtime/src/hle_vi.cpp
@@ -323,7 +322,6 @@ set(NX_RUNTIME_SOURCES
     runtime/src/hle_ngc.cpp
     runtime/src/config_wrapper.cpp
     runtime/src/time_wrapper.cpp
-    runtime/src/mod_fetch.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
     runtime/src/input_script.cpp
