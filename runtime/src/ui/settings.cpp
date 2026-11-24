@@ -1290,8 +1290,10 @@ void page_controls() {
         ImGui::TextWrapped("%s", name.empty() ? tr("controls.none") : name.c_str());
     });
     row("controls.layout", nullptr, [&](float w) {
-        combo("input.layout", "console",
-              {{"console", tr("controls.layout.console")}, {"xbox", tr("controls.layout.xbox")}}, w);
+        combo("input.layout", "auto",
+              {{"auto", tr("controls.layout.auto")}, {"console", tr("controls.layout.console")},
+               {"xbox", tr("controls.layout.xbox")}},
+              w);
     });
     row("controls.glyphs", nullptr, [&](float w) {
         combo("controls.glyphs", "auto",

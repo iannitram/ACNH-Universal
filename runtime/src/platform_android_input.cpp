@@ -80,15 +80,20 @@ uint64_t run_button() {
 }
 
 // Settings > Controls > Confirm / cancel buttons (input.layout), as on the other hosts (platform_sdl.cpp): "console"
-// keeps the game's A on the right face button, "xbox" puts it on the bottom one. Read again when the config changes.
+// keeps the game's A on the right face button, "xbox" puts it on the bottom one, "auto" (the default) chooses by
+// the controller in hand: the right one on Nintendo's own pads, the bottom one on every other (Xbox, PlayStation, a
+// Razer Kishi: their bottom button is the one labelled A or cross). With "console" as the default, an Xbox-labelled
+// pad's A was the game's B: it went through dialogue (A or B) but chose nothing in a menu (A only).
 bool xbox_layout() {
     static uint64_t gen = ~0ull;
-    static bool xbox = false;
+    static std::string layout;
     if (uint64_t g = config_generation(); g != gen) {
         gen = g;
-        xbox = config_get("input.layout", "console") == "xbox";
+        layout = config_get("input.layout", "auto");
     }
-    return xbox;
+    if (layout == "xbox") return true;
+    if (layout == "console") return false;
+    return controller_kind() != "switch";
 }
 
 uint64_t key_to_button(int32_t k) {

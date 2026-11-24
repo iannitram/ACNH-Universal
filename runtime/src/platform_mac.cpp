@@ -358,6 +358,7 @@ float default_render_scale() { return 1.0f; }
 // Input options from config.ini (the settings screen writes them), re-read when the config changes.
 struct InputOptions {
     bool xbox_layout = false;  // confirm on the bottom face button (Xbox/PlayStation habit)
+    bool layout_auto = true;   // input.layout auto: from the pad in hand (Nintendo's own: right; others: bottom)
     int deadzone = 7849;       // of 32767
     bool rumble = true;
     SDL_Scancode keys[22] = {};  // the order of kKeyNames
@@ -370,12 +371,25 @@ const char* const kKeyNames[22][2] = {
     {"zr", "C"},          {"plus", "Return"},  {"minus", "Escape"}, {"dpad_up", "Up"},    {"dpad_down", "Down"},
     {"dpad_left", "Left"}, {"dpad_right", "Right"},
 };
+// Nintendo's own pads (a Switch Pro Controller, Joy-Cons) keep A on the right face button; every other keeps confirm
+// on the bottom one (input.layout auto).
+static bool nintendo_pad(SDL_Gamepad* pad) {
+    const char* t = pad ? SDL_GetGamepadStringForType(SDL_GetGamepadType(pad)) : nullptr;
+    const std::string s = t ? t : "";
+    return s.rfind("switch", 0) == 0 || s.rfind("joycon", 0) == 0 || (pad && SDL_GetGamepadVendor(pad) == 0x057e);
+}
+
 const InputOptions& input_options() {
     static InputOptions o;
     static uint64_t gen = 0;
     if (uint64_t g = nx::config_generation(); g != gen) {
         gen = g;
-        o.xbox_layout = nx::config_get("input.layout", "console") == "xbox";
+        // "auto" (the default): confirm on the bottom face button unless the pad is Nintendo's own (controller_kind).
+        // With "console" as the default an Xbox-labelled pad's A was the game's B: dialogue went on, menus chose
+        // nothing (a Razer Kishi, 2026-11-23).
+        const std::string layout = nx::config_get("input.layout", "auto");
+        o.layout_auto = layout != "xbox" && layout != "console";
+        o.xbox_layout = layout == "xbox";
         o.deadzone = std::clamp(nx::config_get_int("input.deadzone", 24), 5, 50) * 32767 / 100;
         o.rumble = nx::config_get_bool("input.rumble", true);
         for (int k = 0; k < 22; k++) {
@@ -417,8 +431,9 @@ static void read_gamepad(SDL_Gamepad* pad, const InputOptions& opt, PadState& p)
     for (const Map& m : map)
         if (SDL_GetGamepadButton(pad, m.b)) p.buttons |= m.bit;
     bool east = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST), south = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH);
-    if (opt.xbox_layout ? south : east) p.buttons |= kA;
-    if (opt.xbox_layout ? east : south) p.buttons |= kB;
+    const bool bottom_confirm = opt.layout_auto ? !nintendo_pad(pad) : opt.xbox_layout;
+    if (bottom_confirm ? south : east) p.buttons |= kA;
+    if (bottom_confirm ? east : south) p.buttons |= kB;
     if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 12000) p.buttons |= kZL;
     if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 12000) p.buttons |= kZR;
     auto axis = [&](SDL_GamepadAxis a, bool invert) {
