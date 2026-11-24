@@ -22,6 +22,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -30,6 +32,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define VK_NO_PROTOTYPES
@@ -57,7 +60,9 @@ struct Pending {
 std::mutex g_audio;
 std::deque<Pending> g_pending;
 AudioDone g_done = nullptr;
-AAudioStream* g_stream = nullptr;
+std::atomic<AAudioStream*> g_stream{nullptr};
+std::mutex g_stream_lock;  // opening, closing, pausing the stream
+bool g_paused = false;     // under g_stream_lock
 
 aaudio_data_callback_result_t audio_cb(AAudioStream*, void*, void* out, int32_t frames) {
     auto* dst = static_cast<uint8_t*>(out);
@@ -82,35 +87,77 @@ aaudio_data_callback_result_t audio_cb(AAudioStream*, void*, void* out, int32_t 
     for (void* c : finished) g_done(c);
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
+
+void audio_error(AAudioStream* s, void*, aaudio_result_t error);
+
+// A stream on the system's current default output (no device id: Android picks the speaker, wired or Bluetooth
+// headphones, a USB device such as a Razer Kishi's audio). Under g_stream_lock.
+AAudioStream* open_stream() {
+    AAudioStreamBuilder* b = nullptr;
+    if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) return nullptr;
+    AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setChannelCount(b, 2);
+    AAudioStreamBuilder_setSampleRate(b, 48000);
+    AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setDataCallback(b, audio_cb, nullptr);
+    AAudioStreamBuilder_setErrorCallback(b, audio_error, nullptr);
+    AAudioStream* s = nullptr;
+    bool ok = AAudioStreamBuilder_openStream(b, &s) == AAUDIO_OK && (g_paused || AAudioStream_requestStart(s) == AAUDIO_OK);
+    AAudioStreamBuilder_delete(b);
+    if (!ok && s) AAudioStream_close(s), s = nullptr;
+    if (s)
+        log("audio: stream open on device %d, %d Hz, %s", AAudioStream_getDeviceId(s), AAudioStream_getSampleRate(s),
+            g_paused ? "paused" : "playing");
+    return s;
+}
+
+// The output changed (headphones or a USB device plugged in or out, Bluetooth connected): Android disconnects the
+// stream, which then stays silent for good. It was never opened again: sound stopped once a Razer Kishi (USB audio)
+// or headphones came in. Reopened on the new default output, from a thread of its own (AAudio forbids closing a
+// stream in its own callback); the queued buffers carry on into the new stream.
+void audio_error(AAudioStream* s, void*, aaudio_result_t error) {
+    if (error != AAUDIO_ERROR_DISCONNECTED) {
+        log("audio: stream error %d", int(error));
+        return;
+    }
+    std::thread([s] {
+        std::lock_guard lk(g_stream_lock);
+        if (g_stream.load() != s) return;  // already replaced
+        log("audio: output changed: opening the stream again");
+        AAudioStream_requestStop(s);
+        AAudioStream_close(s);
+        g_stream = nullptr;
+        for (int attempt = 0; attempt < 5 && !g_stream.load(); attempt++) {
+            if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(200 * attempt));
+            g_stream = open_stream();
+        }
+        if (!g_stream.load()) log("audio: no output after the change");
+    }).detach();
+}
 }  // namespace
 
 bool audio_open(AudioDone done, int) {
     g_done = done;
     // NX_MUTE=1 (and headless test runs): no device, the callers pace themselves with a timer (as on Windows and macOS).
     if (headless() || std::getenv("NX_MUTE")) return false;
-    AAudioStreamBuilder* b = nullptr;
-    if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) return false;
-    AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
-    AAudioStreamBuilder_setChannelCount(b, 2);
-    AAudioStreamBuilder_setSampleRate(b, 48000);
-    AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    AAudioStreamBuilder_setDataCallback(b, audio_cb, nullptr);
-    bool ok = AAudioStreamBuilder_openStream(b, &g_stream) == AAUDIO_OK && AAudioStream_requestStart(g_stream) == AAUDIO_OK;
-    AAudioStreamBuilder_delete(b);
-    if (!ok && g_stream) AAudioStream_requestStop(g_stream), AAudioStream_close(g_stream), g_stream = nullptr;
-    return ok;
+    std::lock_guard lk(g_stream_lock);
+    g_stream = open_stream();
+    return g_stream.load() != nullptr;
 }
 
 void audio_pause(bool paused) {
-    if (!g_stream) return;
+    std::lock_guard lk(g_stream_lock);
+    g_paused = paused;
+    AAudioStream* s = g_stream.load();
+    if (!s) return;
     if (paused)
-        AAudioStream_requestPause(g_stream);
+        AAudioStream_requestPause(s);
     else
-        AAudioStream_requestStart(g_stream);
+        AAudioStream_requestStart(s);
 }
 
 bool audio_submit(const void* data, size_t bytes, void* ctx) {
-    if (!g_stream) return false;
+    if (!g_stream.load()) return false;  // between a disconnect and the new stream: the caller paces itself
     std::lock_guard lk(g_audio);
     g_pending.push_back({static_cast<const uint8_t*>(data), bytes, 0, ctx});
     return true;
