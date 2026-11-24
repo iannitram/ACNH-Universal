@@ -663,7 +663,11 @@ bool make_swapchain() {
     bool sideways = caps.currentTransform & (VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR | VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR);
     bool pass = present_pass_wanted() && !present_pass_failed();
     g_sc_current = caps.currentExtent;
-    if (pass && sideways && extent.width > extent.height) std::swap(extent.width, extent.height);
+    // The images are in the display's own orientation: with a quarter-turn transform, the surface's current size
+    // turned back (Android's pre-rotation guide). It assumed a portrait display (a phone held sideways), so on a Pixel
+    // Fold, whose inner screen is landscape and whose cover screen is portrait, an upright game or a fold got images
+    // of the wrong shape, which Android squeezed onto the screen.
+    if (pass && sideways) std::swap(extent.width, extent.height);
     if (!pass && (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR))
         ci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     // Some drivers report maxImageExtent in the other orientation: the larger side bounds both.
