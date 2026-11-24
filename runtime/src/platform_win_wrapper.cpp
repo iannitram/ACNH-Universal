@@ -176,11 +176,7 @@ uint64_t read_at(FILE* f, int64_t off, void* buf, uint64_t size) {
     _unlock_file(f);
     return n;
 }
-bool make_dirs(const std::string& path) {
-    std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::u8path(path), ec);
-    return !ec;
-}
+
 
 void log_line(const char* line) { std::fprintf(stderr, "%s\n", line); }
 
@@ -191,12 +187,7 @@ std::string data_root() {
 
 std::string device_locale() { return ""; }
 
-std::string setting(const std::string& key) {
-    std::string env = "NX_";
-    for (char ch : key) env += char(std::toupper(static_cast<unsigned char>(ch)));
-    const char* v = std::getenv(env.c_str());
-    return v ? v : "";
-}
+
 
 }  // namespace nx::plat
 
