@@ -611,8 +611,17 @@ impl Player<'_> {
                         self.prompt
                             .blocked(&Blocked::Error("Save sync stopped unexpectedly.".into()))
                     }));
-                    if shown.is_err() {
-                        std::process::abort();
+                    match shown {
+                        Ok(BlockedAnswer::TurnOff) => {
+                            // The way out of a setup that panics every time: forget it, so the
+                            // next round finds sync off. A panic in the forgetting changes
+                            // nothing; the alert comes back.
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                self.turn_off()
+                            }));
+                        }
+                        Ok(_) => {}
+                        Err(_) => std::process::abort(),
                     }
                 }
             }

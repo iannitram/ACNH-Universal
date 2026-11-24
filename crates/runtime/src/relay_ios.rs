@@ -348,9 +348,15 @@ impl Prompt for UiPrompt {
                 true,
             ),
         };
+        // Offline keeps refuse-until-synced; any other block has a way out (an unreadable
+        // credential store, a token that is gone), which the person chooses.
+        let can_turn_off = *why != Blocked::Offline;
         let mut buttons = vec![("Retry".to_string(), false)];
         if again {
             buttons.push(("Sign in again".to_string(), false));
+        }
+        if can_turn_off {
+            buttons.push(("Turn off save sync".to_string(), false));
         }
         let (tapped, _) = show(Alert {
             title: title.into(),
@@ -358,8 +364,11 @@ impl Prompt for UiPrompt {
             fields: Vec::new(),
             buttons,
         });
+        let turn_off_at = if again { 2 } else { 1 };
         if again && tapped == 1 {
             BlockedAnswer::SignInAgain
+        } else if can_turn_off && tapped == turn_off_at {
+            BlockedAnswer::TurnOff
         } else {
             BlockedAnswer::Retry
         }
