@@ -1152,9 +1152,6 @@ fn settings_that_do_not_read_offer_turn_off_and_keep_the_download_token() {
     let fx = Fx::new("broken-config");
     let dirs = fx.roots.dirs();
     sign_in(&dirs, &fx.creds, REFRESH);
-    fx.creds
-        .set(DOWNLOAD_ACCOUNT, &Secret::new(SECOND))
-        .unwrap();
     fs::write(dirs.config.join("config.json"), b"{ not json").unwrap();
     // The start shows the error with Turn off (never "sync off" by itself), and Turn off boots.
     let java = FakeJava::new(&[Some("turn_off")]);
@@ -1168,7 +1165,10 @@ fn settings_that_do_not_read_offer_turn_off_and_keep_the_download_token() {
     assert!(!dirs.config.join("config.json").exists());
     // The Android turn-off over such settings (forget_android): the relay's token goes (the config
     // no longer names it), the download's stays.
+    // Starting from a real sign-in (no download token filed by hand): the token save-relay filed
+    // is found in the credential file itself and kept for the download.
     sign_in(&dirs, &fx.creds, REFRESH);
+    assert_eq!(fx.creds.get(DOWNLOAD_ACCOUNT).unwrap(), None);
     fs::write(dirs.config.join("config.json"), b"{ not json").unwrap();
     forget_android(&dirs, &fx.creds).unwrap();
     assert!(!dirs.config.join("config.json").exists());
@@ -1176,7 +1176,8 @@ fn settings_that_do_not_read_offer_turn_off_and_keep_the_download_token() {
     assert_eq!(fx.creds.get(&account).unwrap(), None);
     assert_eq!(
         fx.creds.get(DOWNLOAD_ACCOUNT).unwrap().unwrap().expose(),
-        SECOND
+        REFRESH,
+        "the token the sign-in filed is kept for the download, though the config does not read"
     );
 }
 
@@ -1204,4 +1205,68 @@ fn a_game_started_with_sync_off_never_pushes_even_if_sync_is_set_up_while_it_run
         acnh_core::launch::Sync::Done(_)
     ));
     assert!(!dir.join("main.dat").exists(), "nothing was pushed");
+}
+
+// ---- the third review: a mark retried after the island moved on ------------------------------
+
+#[test]
+fn a_retried_mark_is_not_written_when_another_device_pushed_since_and_the_next_push_does_not_overwrite(
+) {
+    let fx = Fx::new("moved-on");
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    island(&fx.saves(), "phone");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    player.before_game();
+    // The phone's checkpoint pushes, the re-mark fails: mark-waiting.
+    island(&fx.saves(), "phone, paused");
+    fx.connector.fail_mark_puts.store(2, Ordering::SeqCst);
+    player.checkpoint();
+    assert!(fx.roots.dirs().data.join("mark-waiting").exists());
+    assert!(fx.mark().is_none());
+    // The Switch starts (no mark: it pulls freely), plays, and quits: a newer revision, its mark
+    // cleared.
+    let (switch, dir) = fx.device("switch");
+    switch.pull(&dir, None).unwrap();
+    assert_eq!(read_main(&dir), "main phone, paused");
+    island(&dir, "switch, played");
+    switch.push(&dir, None).unwrap();
+    assert!(fx.mark().is_none());
+    // The phone comes back: no mark is claimed over the newer island.
+    player.resume();
+    assert!(fx.mark().is_none(), "no stale mark");
+    assert!(!fx.roots.dirs().data.join("mark-waiting").exists());
+    assert!(fx.log_text().contains("the island moved on on the server"));
+    // The phone's next push (its game changed the island too) meets the newer island: a conflict,
+    // left waiting, the Switch's island not overwritten.
+    island(&fx.saves(), "phone, played on");
+    player.after_game();
+    assert!(fx.log_text().contains("the push is waiting"));
+    let (pc, pdir) = fx.device("pc");
+    pc.pull(&pdir, None).unwrap();
+    assert_eq!(read_main(&pdir), "main switch, played");
+}
+
+#[test]
+fn a_checkpoint_does_not_mark_when_the_island_moved_on_before_it() {
+    let fx = Fx::new("moved-on-checkpoint");
+    sign_in(&fx.roots.dirs(), &fx.creds, REFRESH);
+    island(&fx.saves(), "phone");
+    let none = FakeJava::new(&[]);
+    let prompt = bridge(&none);
+    let player = fx.player(&prompt);
+    player.before_game();
+    // The Switch takes over with Play anyway, pushes and quits (its mark cleared, the phone's
+    // overwritten before that): the phone's island did not change, so its checkpoint is no push.
+    let (switch, dir) = fx.device("switch");
+    switch.pull_anyway(&dir, None).unwrap();
+    island(&dir, "switch, newer");
+    switch.push(&dir, None).unwrap();
+    assert!(fx.mark().is_none());
+    player.checkpoint();
+    assert!(
+        fx.mark().is_none(),
+        "no mark claims the phone is playing the newer island"
+    );
 }

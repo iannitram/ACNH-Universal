@@ -123,6 +123,11 @@ pub enum Remark {
     /// The mark could not be written back (the network, the token): the caller retries later
     /// (`SaveRelay::remark`). The push itself went.
     Failed(String),
+    /// The island moved on on the server (another device pushed this revision since this device
+    /// last synced): no mark is written, and this device is behind; its next push meets the
+    /// newer island as save-relay's push always does (a conflict when both changed), never
+    /// overwriting it.
+    MovedOn { revision: u64 },
     /// The push did not sync (offline, a conflict), so save-relay left the mark as it was.
     Untouched,
 }
@@ -241,12 +246,45 @@ impl SaveRelay {
                     continue;
                 }
             };
+            // The island must still be where this device left it: a revision another device
+            // pushed meanwhile (it started, played and quit while this game was in the
+            // background) means this device is behind, and a mark would claim otherwise.
+            match self.server_revision(&layout, id) {
+                Ok(Some(server)) => {
+                    let ours = self
+                        .store
+                        .load_last(id)
+                        .ok()
+                        .flatten()
+                        .map(|last| last.revision);
+                    if ours != Some(server) {
+                        return Remark::MovedOn { revision: server };
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    last = error.to_string();
+                    continue;
+                }
+            }
             match self.remote.put(&path, mark.to_json().as_bytes(), &pre) {
                 Ok(_) => return Remark::Kept,
                 Err(error) => last = error.to_string(),
             }
         }
         Remark::Failed(last)
+    }
+
+    /// The revision `state.json` names now; `None` when the server has none.
+    fn server_revision(&self, layout: &Layout, id: &str) -> save_relay::Result<Option<u64>> {
+        match self.remote.get(&layout.state_path(id)) {
+            Ok((bytes, _)) => {
+                save_relay::state::ServerState::from_json(&String::from_utf8_lossy(&bytes))
+                    .map(|state| Some(state.revision))
+            }
+            Err(save_relay::Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 

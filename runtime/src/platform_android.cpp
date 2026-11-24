@@ -155,11 +155,15 @@ void start_thread(ThreadFn fn, void* arg, size_t stack_size) {
 void exit_thread() { pthread_exit(nullptr); }
 // The game has quit (code 0: the player's quit, a restart for a setting): push the island first, once. A failure
 // exit (the game could not load) pushes nothing. The quit can come by several ways in turn (restart_app pushes, then
-// exit_process; the activity's destroy): the first one pushes, the others find it done.
+// exit_process; the activity's destroy): the first one pushes, the others wait for that push to finish (the mutex
+// is held for the whole push), then find it done, so no _exit cuts it short.
 void relay_after_game() {
-    static std::atomic<bool> done{false};
-    if (done.exchange(true)) return;
+    static std::mutex m;
+    static bool done = false;
+    std::lock_guard lk(m);
+    if (done) return;
     acnh_relay_android_after_game(g_root.c_str(), g_cache_dir.c_str());
+    done = true;
 }
 
 void exit_process(int code) {

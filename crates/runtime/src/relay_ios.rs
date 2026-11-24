@@ -518,3 +518,20 @@ pub extern "C" fn acnh_relay_background(data_root: *const c_char) {
         task.end();
     }
 }
+
+/// When the app comes back to the front (`SDL_EVENT_WILL_ENTER_FOREGROUND`, from the same event
+/// watch): a "playing here" mark the background push could not write back is written now
+/// (`Player::resume`), on a worker, so the main thread keeps its run loop. Does nothing unless
+/// that push left one waiting.
+#[no_mangle]
+pub extern "C" fn acnh_relay_foreground(data_root: *const c_char) {
+    let Some(root) = self::data_root(data_root) else {
+        return;
+    };
+    if !BOOTED.load(Ordering::SeqCst) || !PULLED.load(Ordering::SeqCst) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("relay mark".into())
+        .spawn(move || with_player(&root, |player| player.resume()));
+}

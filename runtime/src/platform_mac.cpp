@@ -925,6 +925,7 @@ void thread_cpu_watch() {
 extern "C" void acnh_relay_before_game(const char* data_root);
 extern "C" void acnh_relay_after_game(const char* data_root);   // synchronous: the game has quit
 extern "C" void acnh_relay_background(const char* data_root);   // returns at once: the push runs on a worker
+extern "C" void acnh_relay_foreground(const char* data_root);   // returns at once: a waiting mark is written on a worker
 
 // The Rust half's log lines go into the player's log (Documents/logs/nx.log).
 extern "C" void nx_relay_log(const char* line) { nx::log("%s", line); }
@@ -949,6 +950,9 @@ static void relay_after_game() {
 static bool background_watch(void*, SDL_Event* e) {
     if (e->type == SDL_EVENT_DID_ENTER_BACKGROUND)
         if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_background(root);
+    // Back to the front: a "playing here" mark the background push could not write back is written now (on a worker).
+    if (e->type == SDL_EVENT_WILL_ENTER_FOREGROUND)
+        if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_foreground(root);
     return true;
 }
 #else

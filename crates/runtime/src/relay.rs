@@ -586,6 +586,12 @@ impl Player<'_> {
                     "another device ({device}, since {since}) has taken the island over while this game runs"
                 ));
             }
+            Remark::MovedOn { revision } => {
+                self.set_flag(&self.roots.mark_waiting(), false);
+                self.log(&format!(
+                    "the island moved on on the server (revision {revision}) while this game was in the background: this device is no longer marked as playing, and its next push meets the newer island"
+                ));
+            }
             Remark::Failed(why) => {
                 self.set_flag(&self.roots.mark_waiting(), true);
                 let why = self.redact(why, None);
@@ -606,6 +612,11 @@ impl Player<'_> {
             return;
         }
         let _one_at_a_time = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Again under the lock: a quit's push that got it first has ended the session, and its
+        // mark-waiting flag with it; no mark comes after that.
+        if !self.roots.mark_waiting().exists() {
+            return;
+        }
         if let Ok(Opened::Sync(relay)) = self.opened() {
             match relay.remark() {
                 Ok(remark) => self.remarked(&remark),
@@ -932,6 +943,16 @@ impl FileStore {
         &self.path
     }
 
+    /// The secret of the first account (by name) starting with `prefix`.
+    pub fn first_with_prefix(&self, prefix: &str) -> save_relay::Result<Option<Secret>> {
+        let _one = FILE_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(self
+            .load()?
+            .into_iter()
+            .find(|(account, _)| account.starts_with(prefix))
+            .map(|(_, secret)| Secret::new(secret)))
+    }
+
     /// Keeps only `accounts` (the download's token on a turn-off whose forget left something). A
     /// file that does not read is an error here, for the caller to remove.
     pub fn retain(&self, accounts: &[&str]) -> save_relay::Result<()> {
@@ -1061,21 +1082,24 @@ fn clear_waiting(dirs: &AppDirs) {
     let _ = std::fs::remove_file(dirs.data.join("mark-waiting"));
 }
 
-/// save-relay's Dropbox refresh token, kept for the download under `DOWNLOAD_ACCOUNT`.
+/// save-relay's Dropbox refresh token, kept for the download under `DOWNLOAD_ACCOUNT`: the one
+/// the config names, or, when the config does not read (or names none), the Dropbox token in the
+/// credential file itself (save-relay files it as `dropbox:<account>`).
 fn keep_for_download(dirs: &AppDirs, creds: &FileStore) {
-    let Ok(Some(config)) = LocalStore::new(dirs.clone()).load_config() else {
-        return;
+    let named = LocalStore::new(dirs.clone())
+        .load_config()
+        .ok()
+        .flatten()
+        .filter(|config| config.server == "dropbox")
+        .and_then(|config| {
+            save_relay::service::token_account(save_relay::service::Service::Dropbox, &config.user)
+                .ok()
+        });
+    let token = match named.map(|account| creds.get(&account)) {
+        Some(Ok(Some(token))) => Some(token),
+        _ => creds.first_with_prefix("dropbox:").ok().flatten(),
     };
-    let Ok(service) = save_relay::service::Service::from_server(&config.server) else {
-        return;
-    };
-    if service != save_relay::service::Service::Dropbox {
-        return;
-    }
-    let Ok(account) = save_relay::service::token_account(service, &config.user) else {
-        return;
-    };
-    if let Ok(Some(token)) = creds.get(&account) {
+    if let Some(token) = token {
         let _ = creds.set(DOWNLOAD_ACCOUNT, &token);
     }
 }
