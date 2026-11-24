@@ -404,6 +404,44 @@ const InputOptions& input_options() {
 
 SDL_Gamepad* g_gamepad = nullptr;  // player 1's controller: the settings screen's name and icons, and rumble
 
+// The kind of a pad from SDL's type for it: "xbox", "playstation", "switch" (the console's own pads, by SDL's name
+// for their type: "switchpro", "joyconleft", ...) or "generic".
+static std::string kind_of_type(SDL_GamepadType type) {
+    switch (type) {
+        case SDL_GAMEPAD_TYPE_XBOX360:
+        case SDL_GAMEPAD_TYPE_XBOXONE: return "xbox";
+        case SDL_GAMEPAD_TYPE_PS3:
+        case SDL_GAMEPAD_TYPE_PS4:
+        case SDL_GAMEPAD_TYPE_PS5: return "playstation";
+        default: {
+            const char* t = SDL_GetGamepadStringForType(type);
+            std::string s = t ? t : "";
+            return s.rfind("switch", 0) == 0 || s.rfind("joycon", 0) == 0 ? "switch" : "generic";
+        }
+    }
+}
+
+// Player 1's controller, or before one has joined the first one connected: kind and name, kept for the other
+// threads. The pad itself is the main thread's (sample_gamepads closes it on disconnect), so they read this copy.
+namespace {
+std::mutex g_pad_info_lock;
+std::string g_pad_kind, g_pad_name;
+bool g_pad_info_set = false;  // the main thread has looked (an empty kind then means no pad)
+}  // namespace
+
+static void cache_pad_info(SDL_Gamepad* pad) {
+    std::string kind, name;
+    if (pad) {
+        kind = kind_of_type(SDL_GetGamepadType(pad));
+        const char* n = SDL_GetGamepadName(pad);
+        name = n ? n : "";
+    }
+    std::lock_guard lk(g_pad_info_lock);
+    g_pad_kind = std::move(kind);
+    g_pad_name = std::move(name);
+    g_pad_info_set = true;
+}
+
 // ---- several controllers, one per player (hle_hid.cpp reads players 2.. through read_player_pad) ---------------
 
 namespace {
@@ -430,6 +468,8 @@ static void read_gamepad(SDL_Gamepad* pad, const InputOptions& opt, PadState& p)
     };
     for (const Map& m : map)
         if (SDL_GetGamepadButton(pad, m.b)) p.buttons |= m.bit;
+    // The Guide/Home button opens the settings screen, as Minus+Plus does (ui_pad).
+    if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_GUIDE)) p.buttons |= kPlus | kMinus;
     bool east = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST), south = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH);
     const bool bottom_confirm = opt.layout_auto ? !nintendo_pad(pad) : opt.xbox_layout;
     if (bottom_confirm ? south : east) p.buttons |= kA;
@@ -477,6 +517,12 @@ static void sample_gamepads(const InputOptions& opt, PadState (&players)[kMaxPla
             if (known) continue;
             if (SDL_Gamepad* pad = SDL_OpenGamepad(ids[i])) {
                 nx::log("input: controller %s, joins on its first button", SDL_GetGamepadName(pad) ? SDL_GetGamepadName(pad) : "?");
+                // Which SDL driver reads it (GUID byte 0: 'h' HIDAPI, 'm' MFi/GameController framework).
+                char guid[40] = {};
+                SDL_GUIDToString(SDL_GetGamepadGUIDForID(ids[i]), guid, sizeof guid);
+                const char* type = SDL_GetGamepadStringForType(SDL_GetGamepadType(pad));
+                nx::log("input: backend SDL3 type=%s vendor:product=%04x:%04x guid=%s", type ? type : "?",
+                        SDL_GetGamepadVendor(pad), SDL_GetGamepadProduct(pad), guid);
                 waiting.push_back(pad);
             }
         }
@@ -504,6 +550,7 @@ static void sample_gamepads(const InputOptions& opt, PadState (&players)[kMaxPla
         else joining[k] = false;
     }
     g_gamepad = g_pads[0];
+    cache_pad_info(g_pads[0] ? g_pads[0] : (waiting.empty() ? nullptr : waiting.front()));
 }
 
 static void sample_input() {
@@ -632,27 +679,35 @@ void set_fullscreen(bool on) {
 void set_master_volume(float v) { g_volume = std::clamp(v, 0.0f, 1.0f); }
 
 std::string controller_name() {
-    SDL_Gamepad* pad = g_gamepad;
-    const char* n = pad ? SDL_GetGamepadName(pad) : nullptr;
-    return n ? n : "";
+    {
+        std::lock_guard lk(g_pad_info_lock);
+        if (g_pad_info_set && !g_pad_name.empty()) return g_pad_name;
+    }
+    // Before the main thread has sampled (the game opens its fonts while booting): the first connected pad.
+    std::string name;
+    int n = 0;
+    if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
+        if (n > 0) {
+            const char* s = SDL_GetGamepadNameForID(ids[0]);
+            name = s ? s : "";
+        }
+        SDL_free(ids);
+    }
+    return name;
 }
 
 std::string controller_kind() {
-    SDL_Gamepad* pad = g_gamepad;
-    if (!pad) return "";
-    switch (SDL_GetGamepadType(pad)) {
-        case SDL_GAMEPAD_TYPE_XBOX360:
-        case SDL_GAMEPAD_TYPE_XBOXONE: return "xbox";
-        case SDL_GAMEPAD_TYPE_PS3:
-        case SDL_GAMEPAD_TYPE_PS4:
-        case SDL_GAMEPAD_TYPE_PS5: return "playstation";
-        default: {
-            // The console's own pads, by SDL's name for their type ("switchpro", "joyconleft", ...).
-            const char* t = SDL_GetGamepadStringForType(SDL_GetGamepadType(pad));
-            std::string s = t ? t : "";
-            return s.rfind("switch", 0) == 0 || s.rfind("joycon", 0) == 0 ? "switch" : "generic";
-        }
+    {
+        std::lock_guard lk(g_pad_info_lock);
+        if (g_pad_info_set && !g_pad_kind.empty()) return g_pad_kind;
     }
+    std::string kind;
+    int n = 0;
+    if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
+        if (n > 0) kind = kind_of_type(SDL_GetGamepadTypeForID(ids[0]));
+        SDL_free(ids);
+    }
+    return kind;
 }
 
 void rumble(float low_freq, float high_freq, uint32_t duration_ms) {
