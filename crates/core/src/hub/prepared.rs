@@ -34,6 +34,9 @@ fn allowed(path: &str) -> bool {
     }
     match parts.as_slice() {
         ["libacnh_game.so" | "romfs.pak" | "spirv.pak"] => true,
+        ["analysis" | "aoc", rest @ ..] if !rest.is_empty() => {
+            rest.iter().all(|component| overlay_component(component))
+        }
         ["fonts", file] => {
             *file == "shared.ttf" || (0..=5).any(|n| *file == format!("shared_{n}.ttf"))
         }
@@ -206,7 +209,7 @@ fn make_manifest(root: &Path) -> Result<Manifest> {
             hash,
         });
     }
-    for dir in ["fonts", "mods"] {
+    for dir in ["analysis", "aoc", "fonts", "mods"] {
         collect(root, dir, &mut files)?;
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -322,6 +325,54 @@ fn recover_install(dest: &Path, backup: &Path, stage: &Path) -> Result<bool> {
     Ok(has_game)
 }
 
+fn pull_verified_to_stage(
+    t: &mut dyn Transport,
+    dirs: &AppDirs,
+    device: &str,
+    target: Os,
+    stage_dir: &Path,
+) -> Result<()> {
+    target_android(target)?;
+    let peer = trusted(dirs, device)?;
+    let key = pairing_key(&peer)?;
+    let mut channel = handshake_for(t, &key, target, false, DATA_WIRE)?;
+    let text = channel.receive(t, b"prepared-manifest/v1", MAX_MANIFEST)?;
+    let manifest: Manifest =
+        serde_json::from_slice(&text).map_err(|_| hub_error("invalid prepared data manifest"))?;
+    validate(&manifest)?;
+    let digest = Sha256::digest(&text);
+    for (i, entry) in manifest.files.iter().enumerate() {
+        let path = file_path(stage_dir, &entry.path, true)?;
+        let mut output = crate::platform::open_private_new(&path)?;
+        let mut hash = Sha256::new();
+        let mut remaining = entry.size;
+        let mut index = 0u64;
+        while remaining > 0 {
+            let len = remaining.min(CHUNK_SIZE as u64) as usize;
+            let mut aad = digest.to_vec();
+            aad.extend_from_slice(&(i as u64).to_be_bytes());
+            aad.extend_from_slice(&index.to_be_bytes());
+            let bytes = channel.receive(t, &aad, len)?;
+            if bytes.len() != len {
+                return Err(hub_error("prepared chunk has wrong size"));
+            }
+            output.write_all(&bytes)?;
+            hash.update(&bytes);
+            remaining -= len as u64;
+            index += 1;
+        }
+        output.sync_all()?;
+        if format!("{:x}", hash.finalize()) != entry.hash {
+            return Err(hub_error("prepared file failed verification"));
+        }
+    }
+    channel.send(t, &digest, vec![1])?;
+    if channel.receive(t, &digest, 1)? != [1] {
+        return Err(hub_error("hub did not finish the prepared transfer"));
+    }
+    Ok(())
+}
+
 /// Receive a verified prepared Android tree into `data_root/game`, preserving its siblings
 /// (including the client's saves and settings). `data_root` must be app-private storage,
 /// with `game/` reserved for files managed by this transfer.
@@ -334,13 +385,6 @@ pub fn pull_prepared(
 ) -> Result<()> {
     (|| {
         target_android(target)?;
-        let peer = trusted(dirs, device)?;
-        let key = pairing_key(&peer)?;
-        let mut channel = handshake_for(t, &key, target, false, DATA_WIRE)?;
-        let text = channel.receive(t, b"prepared-manifest/v1", MAX_MANIFEST)?;
-        let manifest: Manifest = serde_json::from_slice(&text)
-            .map_err(|_| hub_error("invalid prepared data manifest"))?;
-        validate(&manifest)?;
         require_dir(data_root)?;
         let _lock = lock_install(data_root)?;
         let dest = data_root.join("game");
@@ -349,36 +393,7 @@ pub fn pull_prepared(
         let had_old = recover_install(&dest, &backup, &stage_path)?;
         fs::create_dir(&stage_path)?;
         let stage = Staging(stage_path);
-        let digest = Sha256::digest(&text);
-        for (i, entry) in manifest.files.iter().enumerate() {
-            let path = file_path(&stage.0, &entry.path, true)?;
-            let mut output = crate::platform::open_private_new(&path)?;
-            let mut hash = Sha256::new();
-            let mut remaining = entry.size;
-            let mut index = 0u64;
-            while remaining > 0 {
-                let len = remaining.min(CHUNK_SIZE as u64) as usize;
-                let mut aad = digest.to_vec();
-                aad.extend_from_slice(&(i as u64).to_be_bytes());
-                aad.extend_from_slice(&index.to_be_bytes());
-                let bytes = channel.receive(t, &aad, len)?;
-                if bytes.len() != len {
-                    return Err(hub_error("prepared chunk has wrong size"));
-                }
-                output.write_all(&bytes)?;
-                hash.update(&bytes);
-                remaining -= len as u64;
-                index += 1;
-            }
-            output.sync_all()?;
-            if format!("{:x}", hash.finalize()) != entry.hash {
-                return Err(hub_error("prepared file failed verification"));
-            }
-        }
-        channel.send(t, &digest, vec![1])?;
-        if channel.receive(t, &digest, 1)? != [1] {
-            return Err(hub_error("hub did not finish the prepared transfer"));
-        }
+        pull_verified_to_stage(t, dirs, device, target, &stage.0)?;
         if had_old {
             fs::rename(&dest, &backup)?;
         }
@@ -394,6 +409,46 @@ pub fn pull_prepared(
         Ok(())
     })()
     .map_err(transfer_error)
+}
+
+/// Receive a verified prepared Android tree into a staging folder inside `private_dir`
+/// and install it into `<private_dir>/game/` through [`crate::appgame::install`].
+pub fn pull_prepared_app(
+    t: &mut dyn Transport,
+    dirs: &AppDirs,
+    device: &str,
+    target: Os,
+    private_dir: &Path,
+    free_bytes: u64,
+) -> Result<PathBuf> {
+    let ci = std::env::var_os("CI").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| !v.is_empty());
+    pull_prepared_app_with(t, dirs, device, target, private_dir, free_bytes, ci)
+}
+
+/// Like [`pull_prepared_app`], with an explicit `ci` flag for deterministic host tests.
+pub fn pull_prepared_app_with(
+    t: &mut dyn Transport,
+    dirs: &AppDirs,
+    device: &str,
+    target: Os,
+    private_dir: &Path,
+    free_bytes: u64,
+    ci: bool,
+) -> Result<PathBuf> {
+    target_android(target)?;
+    require_dir(private_dir)?;
+    let _lock = lock_install(private_dir)?;
+    let staged = tempfile::Builder::new()
+        .prefix(".prepared-pull-")
+        .tempdir_in(private_dir)?;
+    pull_verified_to_stage(t, dirs, device, target, staged.path()).map_err(transfer_error)?;
+    let dest = private_dir.join(crate::appgame::GAME_DIR);
+    let mut copy = |from: &Path, to: &Path| -> Result<()> {
+        fs::copy(from, to)?;
+        Ok(())
+    };
+    crate::appgame::install_with(staged.path(), private_dir, &dest, free_bytes, ci, &mut copy)
 }
 
 #[cfg(test)]
@@ -440,12 +495,16 @@ mod tests {
             "mods/ptbr/romfs/con.pack",
             "mods/ptbr/romfs/config.ini",
             "fonts/../romfs.pak",
-            "analysis/main.bin",
+            "analysis/../secret.keys",
+            "aoc/secret.keys",
+            "mods/ptbr/romfs/analysis/main.bin",
             "user/device_save",
             "exefs/main",
         ] {
             assert!(!allowed(path), "{path}");
         }
+        assert!(allowed("analysis/main.bin"));
+        assert!(allowed("aoc/1/data"));
         assert!(allowed("fonts/shared.ttf"));
         assert!(allowed("mods/custom/romfs/Layout/test.bflyt"));
         assert!(allowed(

@@ -77,7 +77,7 @@ jobs:
           host=$(rustc -vV | sed -n 's/^host: //p')
           test -n "$(cargo tree -e normal --target "$host" -p acnh-app -i save-relay)"
           test -n "$(cargo tree -e normal --target "$host" -p acnh-cli -i save-relay)"
-      - name: Rust emitter matches Python and Unicorn (Linux)
+      - name: Rust emitter matches Unicorn (Linux)
         if: runner.os == 'Linux'
         run: |
           python3 -m venv "$RUNNER_TEMP/recomp-oracle"

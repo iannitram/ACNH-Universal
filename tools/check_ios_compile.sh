@@ -22,7 +22,7 @@ sources=()
 while IFS= read -r f; do sources+=("$f"); done < <(
     sed -n '/^set(NX_RUNTIME_SOURCES/,/^)/p' CMakeLists.txt | grep -o 'runtime/src/[^ )]*\.cpp' | sort -u
 )
-sources+=(runtime/src/platform_mac.cpp runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp
+sources+=(runtime/src/platform_mac_wrapper.cpp runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp
           runtime/src/app_icon.cpp runtime/src/save_storage.cpp runtime/src/save_profiles.cpp
           runtime/src/mod_manager.cpp)
 for f in "games/$game"/*.cpp; do sources+=("$f"); done

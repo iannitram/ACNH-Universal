@@ -2006,6 +2006,15 @@ pub unsafe extern "C" fn acnh_user_last_opened(out: *mut AcnhUserInfo) {
     unsafe { *out = u.to_ffi() };
 }
 
+/// Returns `"save"` for the first user or `"save_<uid hex>"` for others.
+pub fn user_save_dir_name(lo: u64, hi: u64) -> String {
+    if lo == ACNH_FIRST_USER_LO && hi == ACNH_FIRST_USER_HI {
+        String::from("save")
+    } else {
+        format!("save_{}", hex_uid(lo, hi))
+    }
+}
+
 /// Returns `"save"` for the first user or `"save_<uid hex>"` for others, via `cb`.
 #[no_mangle]
 pub extern "C" fn acnh_user_save_dir(
@@ -2014,11 +2023,7 @@ pub extern "C" fn acnh_user_save_dir(
     cb: Option<AcnhSavesStringCb>,
     ctx: *mut c_void,
 ) {
-    let s = if lo == ACNH_FIRST_USER_LO && hi == ACNH_FIRST_USER_HI {
-        String::from("save")
-    } else {
-        format!("save_{}", hex_uid(lo, hi))
-    };
+    let s = user_save_dir_name(lo, hi);
     emit_string(cb, ctx, &s);
 }
 
