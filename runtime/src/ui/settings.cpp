@@ -1198,6 +1198,11 @@ void page_video() {
         combo("video.anisotropy", "game",
               {{"game", console("video.aniso.game")}, {"2", "2x"}, {"4", "4x"}, {"8", "8x"}, {"16", "16x"}}, w);
     });
+    // Read live (ported from upstream Nycolazs/ACNHRecomp PR #102, MIT): low draws shadow maps at half size (nvn_ultrawide.cpp), off skips them (nvn_draw.cpp).
+    row("video.shadows", "video.shadows.desc", [&](float w) {
+        combo("video.shadows", "on",
+              {{"on", console("common.on")}, {"low", tr("video.shadows.low")}, {"off", tr("common.off")}}, w);
+    });
 
     // FSR 1: a spatial upscale of the finished picture to a window larger than it (what DLSS and FSR do better).
     section("video.section.legacy");
