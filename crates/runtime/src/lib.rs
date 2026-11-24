@@ -64,6 +64,7 @@ pub fn ported(service: Service) -> bool {
             | Service::Files
             | Service::Input
             | Service::Audio
+            | Service::Kernel
     )
 }
 
@@ -87,5 +88,6 @@ pub mod files;
 #[cfg(target_os = "android")]
 pub mod hub_android;
 pub mod input;
+pub mod kernel;
 pub mod saves;
 pub mod time;

@@ -289,9 +289,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/loader.cpp
     runtime/src/bug_report.cpp
     runtime/src/memory.cpp
-    runtime/src/kernel.cpp
-    runtime/src/kernel_watch.cpp
-    runtime/src/ipc.cpp
+    runtime/src/kernel_wrapper.cpp
     runtime/src/svc_hid.cpp
     runtime/src/svc_am.cpp
     runtime/src/svc_set.cpp
