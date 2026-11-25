@@ -226,7 +226,7 @@ unzip -tq "$ipa3" > /dev/null || die "--small archive fails unzip -t"
 bash "$root/tools/check_release_files.sh" < "$work/small.list" > /dev/null || die "--small list fails the release check"
 files=$small_out/acnh-universal-game/ios
 [ -f "$files/manifest.json" ] || die "--small wrote no manifest.json"
-small_ls=$(ls -A "$small_out" | sort | tr '\n' ' ')
+small_ls=$(ls -A "$small_out" | LC_ALL=C sort | tr '\n' ' ')
 [ "$small_ls" = "ACNH-Universal-smallv.ipa acnh-universal-game " ] || die "--small left other files in the out folder: $small_ls"
 python3 - "$files" "$small" "$build_id" <<'PY' || die "the manifest does not match the files"
 import hashlib, json, os, sys
