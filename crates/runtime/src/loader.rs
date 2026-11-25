@@ -31,7 +31,7 @@ pub type HleFn = extern "C" fn(*mut AcnhCpu);
 #[derive(Clone, Copy)]
 pub struct AcnhFuncEntry {
     pub offset: u64,
-    pub fn_ptr: Option<HleFn>,
+    pub fn_ptr: Option<extern "C" fn(*mut AcnhCpu)>,
 }
 
 #[repr(C)]
@@ -182,7 +182,7 @@ fn copy_str_to_buf(s: &str, out: *mut c_char, cap: usize) -> usize {
         // SAFETY: `out` is valid for `cap` bytes per caller contract.
         unsafe {
             if n > 0 {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, n);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), n);
             }
             *out.add(n) = 0;
         }
@@ -1371,7 +1371,10 @@ pub extern "C" fn acnh_loader_fatal(msg: *const c_char) -> ! {
 }
 
 #[no_mangle]
-pub extern "C" fn acnh_loader_register_hle(name: *const c_char, fn_ptr: Option<HleFn>) {
+pub extern "C" fn acnh_loader_register_hle(
+    name: *const c_char,
+    fn_ptr: Option<extern "C" fn(*mut AcnhCpu)>,
+) {
     let Some(fp) = fn_ptr else {
         return;
     };
@@ -1382,7 +1385,9 @@ pub extern "C" fn acnh_loader_register_hle(name: *const c_char, fn_ptr: Option<H
 }
 
 #[no_mangle]
-pub extern "C" fn acnh_loader_hle_lookup(name: *const c_char) -> Option<HleFn> {
+pub extern "C" fn acnh_loader_hle_lookup(
+    name: *const c_char,
+) -> Option<extern "C" fn(*mut AcnhCpu)> {
     hle_lookup_internal(cstr_or_empty(name))
 }
 
@@ -1392,7 +1397,10 @@ pub extern "C" fn acnh_loader_hle_address(name: *const c_char) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn acnh_loader_hle_address_or(name: *const c_char, fallback: Option<HleFn>) -> u64 {
+pub extern "C" fn acnh_loader_hle_address_or(
+    name: *const c_char,
+    fallback: Option<extern "C" fn(*mut AcnhCpu)>,
+) -> u64 {
     hle_address_or_internal(cstr_or_empty(name), fallback.unwrap_or(missing_stub))
 }
 
@@ -1402,7 +1410,10 @@ pub extern "C" fn acnh_loader_hle_current_name() -> *const c_char {
 }
 
 #[no_mangle]
-pub extern "C" fn acnh_loader_register_hook(offset: u64, fn_ptr: Option<HleFn>) {
+pub extern "C" fn acnh_loader_register_hook(
+    offset: u64,
+    fn_ptr: Option<extern "C" fn(*mut AcnhCpu)>,
+) {
     if let Some(fp) = fn_ptr {
         hooks().lock().unwrap().insert(offset, fp);
     }
@@ -1778,7 +1789,9 @@ mod tests {
             let init = dt_init_from_memory(base);
             assert_eq!(init, base + 0x100);
             let status_addr = init_status_addr_from_memory(init);
-            assert_eq!(status_addr, Some((base & !0xFFF) + 0x200));
+            // adrp takes the page of its own pc (DT_INIT, at base + 0x100), and a Vec is not
+            // page-aligned, so that page can be the one after base's.
+            assert_eq!(status_addr, Some(((base + 0x100) & !0xFFF) + 0x200));
         }
     }
 

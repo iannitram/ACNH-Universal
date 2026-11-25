@@ -129,7 +129,7 @@ uint64_t host_monotonic_ns() { return nx::plat::monotonic_ns(); }
 
 void host_log_flush() {
 #if defined(__ANDROID__)
-    nx::plat::log_flush();
+    nx::log_flush();
 #endif
 }
 

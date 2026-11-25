@@ -253,3 +253,102 @@ fn download_refuses_insufficient_free_space_before_requests() {
     assert!(!private.join(PARTIAL_DIR).exists());
     assert!(!dest.exists());
 }
+
+#[cfg(feature = "relay")]
+#[test]
+fn remote_download_transport_downloads_and_reports_missing_manifest() {
+    use acnh_core::relay::download_game_from_remote;
+    use save_relay::remote::{Precondition, Remote, RemoteEntry};
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    struct MemRemote(Mutex<BTreeMap<String, Vec<u8>>>);
+    impl Remote for MemRemote {
+        fn get(&self, path: &str) -> save_relay::Result<(Vec<u8>, String)> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(path)
+                .cloned()
+                .map(|b| (b, "etag".into()))
+                .ok_or_else(|| save_relay::Error::NotFound(path.to_owned()))
+        }
+        fn put(&self, path: &str, data: &[u8], _pre: &Precondition) -> save_relay::Result<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(path.to_owned(), data.to_vec());
+            Ok("etag".into())
+        }
+        fn list(&self, _prefix: &str) -> save_relay::Result<Vec<RemoteEntry>> {
+            Ok(vec![])
+        }
+        fn delete(&self, path: &str) -> save_relay::Result<()> {
+            self.0.lock().unwrap().remove(path);
+            Ok(())
+        }
+        fn mkcol(&self, _path: &str) -> save_relay::Result<()> {
+            Ok(())
+        }
+        fn copy(&self, _from: &str, _to: &str) -> save_relay::Result<()> {
+            Ok(())
+        }
+        fn move_to(&self, _from: &str, _to: &str) -> save_relay::Result<()> {
+            Ok(())
+        }
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let private = tmp.path().join("private");
+    let dest = private.join(GAME_DIR);
+    let empty_remote: Arc<dyn Remote> = Arc::new(MemRemote(Mutex::new(BTreeMap::new())));
+    let err =
+        download_game_from_remote(empty_remote, &private, &dest, 1024 * 1024, "linux").unwrap_err();
+    assert!(err.to_string().contains("No prepared game"));
+
+    let mut map = BTreeMap::new();
+    let mut files = Vec::new();
+    for (rel, body) in decoy_entries() {
+        let mut hasher = Sha256::new();
+        hasher.update(&body);
+        let hex: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        files.push(ManifestFile {
+            path: rel.to_string(),
+            size: body.len() as u64,
+            sha256: hex,
+        });
+        map.insert(format!("acnh-universal-game/linux/{rel}"), body);
+    }
+    let manifest = Manifest {
+        version: 1,
+        build_id: BUILD_ID.into(),
+        nx_game_abi: ABI.into(),
+        files,
+    };
+    map.insert(
+        "acnh-universal-game/linux/manifest.json".into(),
+        manifest.to_json().into_bytes(),
+    );
+    let remote: Arc<dyn Remote> = Arc::new(MemRemote(Mutex::new(map)));
+    let installed = download_game_from_remote(remote, &private, &dest, 1024 * 1024, "linux")
+        .expect("remote download should succeed");
+    assert_eq!(installed, dest);
+    assert!(dest.join("analysis/main.bin").is_file());
+    assert!(dest.join("libacnh_game.so").is_file());
+}
+
+#[test]
+fn manifest_allows_omitted_build_id_and_abi() {
+    let raw = br#"{"version":1,"files":[{"path":"romfs.pak","size":3,"sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]}"#;
+    let parsed =
+        Manifest::from_json(raw).expect("manifest without build_id/nx_game_abi should parse");
+    assert!(parsed.build_id.is_empty());
+    assert!(parsed.nx_game_abi.is_empty());
+    parsed
+        .validate("", "")
+        .expect("empty expected build_id/abi validates");
+}

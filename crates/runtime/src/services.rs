@@ -2209,7 +2209,7 @@ pub unsafe extern "C" fn acnh_ldn_visited_island(out: *mut c_char, cap: usize) -
     let s = ldn_visited_island_string();
     let bytes = s.as_bytes();
     let n = bytes.len().min(cap - 1);
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, n);
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), n);
     *out.add(n) = 0;
     n
 }

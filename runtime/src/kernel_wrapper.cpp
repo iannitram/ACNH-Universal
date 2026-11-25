@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -585,6 +586,12 @@ void svc_profile_mark(int role) {
 void svc_profile_report(uint64_t frames, int role) {
     ensure_host();
     acnh_kernel_svc_profile_report(frames, role);
+}
+
+// NX_FRAME_PROFILE, as kernel.rs reads it; nvn_queue.cpp asks for it (the C++ kernel defined it before the Rust port).
+bool frame_profile_on() {
+    static const bool on = std::getenv("NX_FRAME_PROFILE") != nullptr;
+    return on;
 }
 
 void svc_frame_take(uint64_t& total, uint64_t& top_ns, uint32_t& top_imm, uint64_t& top_pc) {
