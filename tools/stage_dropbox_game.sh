@@ -11,6 +11,8 @@
 #   <prepared folder>: Prepare's work folder (analysis/, fonts/, aoc/, romfs.pak, spirv.pak)
 #   <game library>:    libacnh_game.so from tools/build_android.sh (private/acnh/apk/libacnh_game.so)
 set -euo pipefail
+# shellcheck source=tools/remove_tree.sh
+. "$(cd "$(dirname "$0")" && pwd -P)/remove_tree.sh"
 OS=android
 INSTALL=""
 while [ $# -gt 0 ]; do
@@ -29,7 +31,7 @@ if [ "$OS" = "linux" ]; then
   SRC=$1 DEST=$2/acnh-universal-game/linux
   [ -f "$INSTALL/acnh" ] || { echo "missing $INSTALL/acnh"; exit 1; }
   for f in analysis/main.bin romfs.pak spirv.pak; do [ -f "$SRC/$f" ] || { echo "missing $SRC/$f"; exit 1; }; done
-  rm -rf "$DEST.new"
+  remove_tree "$DEST.new" || { echo "error: cannot remove $DEST.new, left from an earlier run" >&2; exit 1; }
   mkdir -p "$DEST.new/root"
   copy "$INSTALL/acnh" "$DEST.new/acnh"
   find "$INSTALL" -maxdepth 1 -type f -name 'lib*.so*' | while read -r lib; do
@@ -48,7 +50,8 @@ else
   SRC=$1 LIB=$2 DEST=$3/acnh-universal-game/android
   for f in analysis/main.bin romfs.pak spirv.pak; do [ -f "$SRC/$f" ] || { echo "missing $SRC/$f"; exit 1; }; done
   [ -f "$LIB" ] || { echo "missing $LIB"; exit 1; }
-  rm -rf "$DEST.new"  # leftovers of an interrupted run would land in the manifest
+  # leftovers of an interrupted run would land in the manifest
+  remove_tree "$DEST.new" || { echo "error: cannot remove $DEST.new, left from an earlier run" >&2; exit 1; }
   mkdir -p "$DEST.new"
   # On APFS a clone (cp -c) costs no space until either copy changes.
   copy "$LIB" "$DEST.new/libacnh_game.so"
@@ -81,8 +84,9 @@ TMP=$(mktemp)
 ) > "$TMP"
 mv "$TMP" "$DEST.new/manifest.json"
 chmod 644 "$DEST.new/manifest.json"
-rm -rf "$DEST.old"
-[ -d "$DEST" ] && mv "$DEST" "$DEST.old"
+# A leftover .old must go first (mv would put DEST inside it); after the swap, failing to remove it is only a warning.
+remove_tree "$DEST.old" || { echo "error: $DEST.old is left from an earlier run and cannot be removed: remove it, then run again" >&2; exit 1; }
+if [ -d "$DEST" ]; then mv "$DEST" "$DEST.old"; fi
 mv "$DEST.new" "$DEST"
-rm -rf "$DEST.old"
+remove_tree "$DEST.old" || echo "warning: could not remove $DEST.old (something keeps writing into it): remove it" >&2
 python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(len(m["files"]), "files,", round(sum(f["size"] for f in m["files"])/1e9, 2), "GB")' "$DEST/manifest.json"

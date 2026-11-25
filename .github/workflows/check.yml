@@ -380,6 +380,8 @@ jobs:
           ACNH_IOS_PREPARE_DIR="$out" cargo test -p acnh-core --test prepare_runner ios_real -- --nocapture
       - name: Package the Mac app (fake app, empty decoys)
         run: bash tests/package_mac_test.sh
+      - name: Stage the Dropbox game folder (decoys, a write during removal)
+        run: bash tests/stage_dropbox_game_test.sh
       - name: Package the iOS device stub
         run: |
           out="$(mktemp -d "$RUNNER_TEMP/acnh-ios-package.XXXXXXXX")"

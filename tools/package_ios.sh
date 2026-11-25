@@ -189,13 +189,14 @@ if [ -n "$game" ]; then
     fi
 fi
 
+# shellcheck source=tools/remove_tree.sh
+. "$root/tools/remove_tree.sh"
 stage=
 made_out=
 [ -d "$out" ] || made_out=1
 cleanup() {
-    if [ -n "$stage" ] && [ -e "$stage" ]; then
-        chmod -R u+w "$stage" 2>/dev/null || true
-        rm -rf "$stage"
+    if [ -n "$stage" ] && ! remove_tree "$stage"; then
+        echo "warning: could not remove $stage (something keeps writing into it): remove it before the next run" >&2
     fi
     if [ -n "$made_out" ]; then rmdir "$out" 2>/dev/null || true; fi
     return 0
@@ -292,10 +293,13 @@ mv -f "$stage/$partial" "$ipa"
 if [ -n "$small" ] && [ -z "$nofolder" ]; then
     # The game files for Dropbox, replacing an earlier set in one rename pair.
     mkdir -p "$out/acnh-universal-game"
-    rm -rf "$out/acnh-universal-game/ios.old"
+    # A leftover ios.old must go first: mv would otherwise put ios inside it rather than rename it.
+    remove_tree "$out/acnh-universal-game/ios.old" ||
+        fail "$out/acnh-universal-game/ios.old is left from an earlier run and cannot be removed: remove it, then run again"
     if [ -e "$out/acnh-universal-game/ios" ]; then mv "$out/acnh-universal-game/ios" "$out/acnh-universal-game/ios.old"; fi
     mv "$stage/acnh-universal-game/ios" "$out/acnh-universal-game/ios"
-    rm -rf "$out/acnh-universal-game/ios.old"
+    remove_tree "$out/acnh-universal-game/ios.old" ||
+        echo "warning: could not remove $out/acnh-universal-game/ios.old (something keeps writing into it): remove it" >&2
 fi
 size=$(stat -f %z "$ipa")
 sha=$(shasum -a 256 "$ipa" | awk '{print $1}')

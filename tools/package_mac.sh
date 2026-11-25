@@ -76,13 +76,18 @@ done < <(find "$app" -type f -print0)
 # --- stage, sign, zip ---
 stage=$out/.ACNH-Universal-$version.partial
 partial=$zip.partial
+# shellcheck source=tools/remove_tree.sh
+. "$root/tools/remove_tree.sh"
 cleanup() {
-  [ ! -e "$stage" ] || { chmod -R u+w "$stage" 2>/dev/null || true; rm -rf "$stage"; }
-  rm -f "$partial"
+  remove_tree "$stage" ||
+    echo "warning: could not remove $stage (something keeps writing into it): remove it before the next run" >&2
+  rm -f "$partial" || true
 }
-trap cleanup EXIT
 mkdir -p "$out"
-cleanup
+# A staging folder or partial zip left by an earlier run is cleared first; one that cannot be removed stops here.
+remove_tree "$stage" || die "$stage is left from an earlier run and cannot be removed: remove it, then run again"
+rm -f "$partial"
+trap cleanup EXIT
 mkdir "$stage"
 bundle=$stage/ACNH-Universal.app
 ditto "$app" "$bundle"
