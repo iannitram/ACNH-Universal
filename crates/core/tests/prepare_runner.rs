@@ -1442,7 +1442,13 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
             if path.is_dir() {
                 stack.push(path);
             } else {
-                on_disk.push(path.strip_prefix(&files).unwrap().display().to_string());
+                // The manifest's paths use '/' on every host; Windows lists them with '\\'.
+                let rel = path.strip_prefix(&files).unwrap();
+                let parts: Vec<String> = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                on_disk.push(parts.join("/"));
             }
         }
     }
