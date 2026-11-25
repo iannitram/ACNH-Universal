@@ -56,6 +56,10 @@ struct Fake {
     probed: Vec<String>,
     /// The `(build, install)` folders the Mac's app was assembled from and into.
     assembled: Vec<(PathBuf, PathBuf)>,
+    /// What the Version stage writes to version.ini (`IOS_VERSION_INI` when `None`).
+    ini: Option<&'static str>,
+    /// The source folder `root` answers with (the checkout when `None`).
+    source_dir: Option<PathBuf>,
 }
 
 /// A script call without the `env PATH=...` a Mac that has Homebrew puts before it.
@@ -123,8 +127,21 @@ impl ScriptRunner for Fake {
         Ok(())
     }
 
-    fn version(&mut self, _req: &Request) -> Result<(), Error> {
+    fn version(&mut self, req: &Request) -> Result<(), Error> {
+        // What the Version stage writes.
+        std::fs::create_dir_all(&req.out).unwrap();
+        std::fs::write(
+            req.out.join("version.ini"),
+            self.ini.unwrap_or(IOS_VERSION_INI),
+        )
+        .unwrap();
         Ok(())
+    }
+
+    fn root(&self) -> PathBuf {
+        self.source_dir
+            .clone()
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
     }
 
     fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
@@ -1267,6 +1284,20 @@ fn ios_request(name: &str) -> (Request, PathBuf) {
     (req, delivery)
 }
 
+/// The game's RomFS and one translated shader, so the two packs can be made.
+fn ios_pack_inputs(req: &mut Request) {
+    let romfs = req.out.join("game-romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    std::fs::write(romfs.join("a.bin"), b"a").unwrap();
+    req.game.romfs = romfs;
+    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
+    std::fs::write(req.out.join("spirv/a.spv"), b"spv").unwrap();
+}
+
+const IOS_VERSION_INI: &str =
+    "# Written by acnh_core::prepare: the version this folder holds and its build profile.\n\
+    build_id = fcd2bb238abe99e925b4e452df1f41f1\nversion = 3.0.2\ntitle_version = 0\nhooks = -\n";
+
 #[test]
 fn the_delivery_folder_is_the_dropbox_keys_or_homes() {
     let home = Path::new("/Users/user");
@@ -1298,13 +1329,21 @@ fn the_delivery_folder_is_the_dropbox_keys_or_homes() {
 #[test]
 fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
     let (mut req, delivery) = ios_request("ios-order");
-    // The game's RomFS and one translated shader, so the two packs can be made.
-    let romfs = req.out.join("game-romfs");
-    std::fs::create_dir_all(&romfs).unwrap();
-    std::fs::write(romfs.join("a.bin"), b"a").unwrap();
-    req.game.romfs = romfs;
-    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
-    std::fs::write(req.out.join("spirv/a.spv"), b"spv").unwrap();
+    ios_pack_inputs(&mut req);
+    // Decoy bytes (never game data), a stray .DS_Store, and files the game folder must not take.
+    for (name, bytes) in [
+        ("analysis/main.bin", &b"analysis decoy"[..]),
+        ("aoc/1/data", b"aoc decoy"),
+        ("fonts/shared.ttf", b"font decoy"),
+        ("fonts/.DS_Store", b"junk"),
+        ("config.ini", b"x = 1\n"),
+        ("gen/a.cpp", b"decoy"),
+        ("exefs/main", b"decoy"),
+    ] {
+        let path = req.out.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
     let mut fake = Fake::with_ios_tools();
     let mut seen = vec![];
     let ipa = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
@@ -1315,14 +1354,15 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
     assert!(req.out.join("romfs.pak").is_file());
     assert!(req.out.join("spirv.pak").is_file());
     let mut stages = scripted();
-    stages.extend([Stage::Build, Stage::Build, Stage::Build]);
+    stages.extend([Stage::Build; 4]);
     assert_eq!(fake.ran, stages);
     let n = fake.args.len();
     let build = req.out.join("build-ios");
     let version = apple_version();
+    let abi = acnh_core::prepare::nx_game_abi(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
     let mods = req.out.join("bundle-mods");
     assert_eq!(
-        without_env(&fake.args[n - 3]),
+        without_env(&fake.args[n - 4]),
         [
             "tools/build_ios.sh".to_owned(),
             "iphoneos".to_owned(),
@@ -1332,7 +1372,7 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
     );
     // The SpeedFix's files are bundled, then carried in the app.
     assert_eq!(
-        fake.args[n - 2],
+        fake.args[n - 3],
         [
             "env".to_owned(),
             format!("ACNH_MODS_CACHE={}", req.out.join("mods-cache").display()),
@@ -1341,7 +1381,7 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
         ]
     );
     assert_eq!(
-        fake.args[n - 1],
+        fake.args[n - 2],
         [
             "tools/package_ios.sh".to_owned(),
             version.clone(),
@@ -1353,6 +1393,94 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
             mods.join("mods").display().to_string(),
         ]
     );
+    // The small .ipa: the same mods, the build id of version.ini (upper case), the ABI of the
+    // runtime headers, and no game folder from the script (Prepare writes it, below).
+    let small = delivery.join("small");
+    assert_eq!(
+        fake.args[n - 1],
+        [
+            "tools/package_ios.sh".to_owned(),
+            version.clone(),
+            build.display().to_string(),
+            "--small".to_owned(),
+            req.out.display().to_string(),
+            "--build-id".to_owned(),
+            "FCD2BB238ABE99E925B4E452DF1F41F1".to_owned(),
+            "--abi".to_owned(),
+            abi.clone(),
+            "--no-folder".to_owned(),
+            small.display().to_string(),
+            "--mods".to_owned(),
+            mods.join("mods").display().to_string(),
+        ]
+    );
+    // The game folder for Dropbox: every file Prepare wrote, a manifest that matches them.
+    let files = small.join("acnh-universal-game/ios");
+    let manifest = acnh_core::appgame::Manifest::from_json(
+        &std::fs::read(files.join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest.version, 1);
+    assert_eq!(manifest.build_id, "FCD2BB238ABE99E925B4E452DF1F41F1");
+    assert_eq!(manifest.nx_game_abi, abi);
+    let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "analysis/main.bin",
+            "aoc/1/data",
+            "fonts/shared.ttf",
+            "romfs.pak",
+            "spirv.pak"
+        ]
+    );
+    let mut on_disk = vec![];
+    let mut stack = vec![files.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                // The manifest's paths use '/' on every host; Windows lists them with '\\'.
+                let rel = path.strip_prefix(&files).unwrap();
+                let parts: Vec<String> = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                on_disk.push(parts.join("/"));
+            }
+        }
+    }
+    on_disk.sort();
+    let mut listed: Vec<String> = paths.iter().map(|p| (*p).to_owned()).collect();
+    listed.push("manifest.json".to_owned());
+    listed.sort();
+    assert_eq!(
+        on_disk, listed,
+        "the folder holds only what the manifest lists"
+    );
+    for file in &manifest.files {
+        let bytes = std::fs::read(files.join(&file.path)).unwrap();
+        assert_eq!(file.size, bytes.len() as u64, "{}", file.path);
+        assert_eq!(
+            file.sha256,
+            acnh_core::appgame::sha256_file(&files.join(&file.path)).unwrap()
+        );
+        // The file is the prepared one.
+        assert_eq!(bytes, std::fs::read(req.out.join(&file.path)).unwrap());
+    }
+    // Decoys the folder must not take.
+    for decoy in [
+        "gen",
+        "build-ios",
+        "exefs",
+        "config.ini",
+        "version.ini",
+        ".DS_Store",
+    ] {
+        assert!(!files.join(decoy).exists(), "{decoy}");
+    }
     assert_eq!(ipa, delivery.join(format!("ACNH-Universal-{version}.ipa")));
 }
 
@@ -1374,6 +1502,51 @@ fn ios_without_the_transfers_folder_stops_before_the_first_stage() {
         other => panic!("{other:?}"),
     }
     assert!(fake.ran.is_empty() && seen.is_empty());
+}
+
+#[test]
+fn ios_refuses_a_prepared_folder_without_a_build_id_before_any_script() {
+    for ini in [
+        "version = 3.0.2\n",
+        "build_id = \nversion = 3.0.2\n",
+        "build_id = xyz\n",
+    ] {
+        let (req, delivery) = ios_request("ios-bad-build-id");
+        let mut fake = Fake::with_ios_tools();
+        fake.ini = Some(ini);
+        let mut seen = vec![];
+        let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
+            seen.push(s)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::Build(m) if m.contains("32 hex digit build id")),
+            "{error:?}"
+        );
+        assert!(!fake.ran.contains(&Stage::Build), "{ini:?}");
+        assert!(fake
+            .args
+            .iter()
+            .all(|a| !a.iter().any(|x| x.contains("package_ios"))));
+        assert!(!delivery.join("acnh-universal-game").exists());
+    }
+}
+
+#[test]
+fn ios_refuses_when_the_runtime_headers_are_missing_before_any_script() {
+    let (req, _) = ios_request("ios-no-headers");
+    let mut fake = Fake::with_ios_tools();
+    fake.source_dir = Some(req.out.join("empty-source"));
+    let mut seen = vec![];
+    let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Build(m) if m.contains("ABI of the small .ipa is unknown")),
+        "{error:?}"
+    );
+    assert!(!fake.ran.contains(&Stage::Build));
 }
 
 #[test]
@@ -1498,6 +1671,7 @@ fn ios_real_scripts_make_an_ipa_on_the_stub_gen() {
     std::fs::create_dir_all(delivery.parent().unwrap()).unwrap();
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join(".fan-mod-settings"), "false false\n").unwrap();
+    std::fs::write(out.join("version.ini"), IOS_VERSION_INI).unwrap();
     // No game is prepared here: empty files stand in for what the packaging script reads
     // (it allows only empty files under CI).
     std::fs::create_dir_all(out.join("analysis")).unwrap();
@@ -1524,7 +1698,8 @@ fn ios_real_scripts_make_an_ipa_on_the_stub_gen() {
 #[cfg(unix)]
 #[test]
 fn cargo_found_only_under_the_cargo_home_bin_is_put_first_on_the_build_path() {
-    let (req, _) = ios_request("ios-cargo-home");
+    let (mut req, _) = ios_request("ios-cargo-home");
+    ios_pack_inputs(&mut req);
     let mut fake = Fake::with_ios_tools();
     fake.tools
         .retain(|(name, _)| !matches!(*name, "cargo" | "rustup"));
@@ -1532,7 +1707,7 @@ fn cargo_found_only_under_the_cargo_home_bin_is_put_first_on_the_build_path() {
     fake.tools
         .push(("/h/.cargo/bin/rustup", "aarch64-apple-ios\n"));
     prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
-    let build = &fake.args[fake.args.len() - 3];
+    let build = &fake.args[fake.args.len() - 4];
     assert_eq!(build[0], "env");
     assert!(build[1].starts_with("PATH=/h/.cargo/bin:"), "{}", build[1]);
     assert!(build[2].starts_with("NX_VPX_DIR="), "{}", build[2]);
@@ -1541,7 +1716,7 @@ fn cargo_found_only_under_the_cargo_home_bin_is_put_first_on_the_build_path() {
     // With cargo on the PATH the script is called as it is.
     let mut plain = Fake::with_ios_tools();
     prepare_with(&req, Hub::Mac, &mut plain, Path::new("/h"), &mut |_| {}).unwrap();
-    let plain_build = &plain.args[plain.args.len() - 3];
+    let plain_build = &plain.args[plain.args.len() - 4];
     assert!(!plain_build.iter().any(|arg| arg.contains("/h/.cargo/bin")));
     assert_eq!(without_env(plain_build)[0], "tools/build_ios.sh");
 }
@@ -1573,6 +1748,7 @@ fn a_relative_out_is_made_absolute_before_the_work_tree_check_and_the_steps() {
     }
     req.out = PathBuf::from(format!("relative-prepared-{}", std::process::id()));
     let _cleanup = Cleanup(req.out.clone());
+    ios_pack_inputs(&mut req);
     let mut fake = Fake::with_ios_tools();
     // The check is told the absolute folder, and says it is a work tree.
     fake.tools.push(("git", "true\n"));
@@ -1588,7 +1764,7 @@ fn a_relative_out_is_made_absolute_before_the_work_tree_check_and_the_steps() {
     // Outside a work tree the steps name the absolute folder too.
     let mut fake = Fake::with_ios_tools();
     prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
-    let build = without_env(&fake.args[fake.args.len() - 3]);
+    let build = without_env(&fake.args[fake.args.len() - 4]);
     assert!(Path::new(&build[2]).is_absolute(), "{build:?}");
     assert!(Path::new(&build[3]).is_absolute(), "{build:?}");
 }
@@ -1716,10 +1892,14 @@ fn ios_packages_without_the_mods_when_they_cannot_be_fetched() {
     let mut fake = Fake::with_ios_tools();
     fake.fail_bundle = true;
     prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    // The mods, then the big .ipa and the small one (#306): neither package gets --mods.
     let n = fake.args.len();
-    assert!(fake.args[n - 2].iter().any(|a| a == "tools/bundle_mods.sh"));
-    assert_eq!(fake.args[n - 1][0], "tools/package_ios.sh");
-    assert!(!fake.args[n - 1].iter().any(|a| a == "--mods"));
+    assert!(fake.args[n - 3].iter().any(|a| a == "tools/bundle_mods.sh"));
+    for args in &fake.args[n - 2..] {
+        assert_eq!(args[0], "tools/package_ios.sh");
+        assert!(!args.iter().any(|a| a == "--mods"));
+    }
+    assert!(fake.args[n - 1].iter().any(|a| a == "--small"));
 }
 
 #[test]
