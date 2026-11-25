@@ -278,9 +278,10 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Whether `folder` is a bundle's `Contents/Resources/game`, which a copy of the app leaves out.
+/// Whether `folder` is a bundle's `Contents/Resources/game` or `Contents/Resources/mods`,
+/// which a copy of the app leaves out (both are added only by `tools/package_mac.sh`).
 fn skip_game(folder: &Path) -> bool {
-    folder.ends_with("Contents/Resources/game")
+    folder.ends_with("Contents/Resources/game") || folder.ends_with("Contents/Resources/mods")
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
@@ -506,6 +507,12 @@ fn mac(plan: &Plan, tools: &mut dyn Tools) -> Result<PathBuf> {
             }
             None => bundle_from_checkout(plan, &contents)?,
         }
+    }
+    // The bundled mods are added by `tools/package_mac.sh` too, which refuses an app that holds
+    // them: an earlier delivery's `mods/` goes, in place or in a copy.
+    let mods = resources.join("mods");
+    if mods.exists() {
+        fs::remove_dir_all(&mods)?;
     }
     for folder in [&macos, &resources] {
         fs::create_dir_all(folder)?;
