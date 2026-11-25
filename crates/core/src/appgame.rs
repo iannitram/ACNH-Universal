@@ -2,8 +2,9 @@
 //!
 //! Copies only the six prepared game entries (`analysis/`, `romfs.pak`, `spirv.pak`,
 //! `fonts/`, `aoc/` when present, and `libacnh_game.so`) into `<private>/game.partial/`,
-//! resuming over matching-size files, marks them read-only, and atomically renames
-//! `game.partial/` to `<private>/game/`. Writes nowhere outside the given private folder.
+//! resuming over matching-size files, atomically renames `game.partial/` to
+//! `<private>/game/`, then marks the tree read-only (macOS will not rename a directory without
+//! write permission). Writes nowhere outside the given private folder.
 
 use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
@@ -90,14 +91,17 @@ pub fn install_with(
 }
 
 fn finalize_partial(partial: &Path, dest: &Path) -> Result<PathBuf> {
-    make_read_only_recursive(partial)?;
     if dest.exists() {
         remove_tree_writable(dest)?;
     }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Rename first, then make the tree read-only: macOS refuses to rename a directory that has no
+    // write permission when its `..` entry must change (EACCES), so a read-only `game.partial/`
+    // cannot always be moved into place.
     fs::rename(partial, dest)?;
+    make_read_only_recursive(dest)?;
     Ok(dest.to_path_buf())
 }
 

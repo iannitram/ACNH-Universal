@@ -1913,6 +1913,111 @@ fn brew_prefix() -> String {
     .unwrap_or_else(|| "/opt/homebrew".to_owned())
 }
 
+/// Builds `libacnh_runtime` (release, host target) into `<out>/runtime-target` and returns the
+/// static library and the folder holding the `acnh_runtime.h` cbindgen generated for it.
+fn build_runtime(
+    req: &Request,
+    root: &Path,
+    env: &[(String, String)],
+    logs: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let stage = Stage::Build;
+    let target = req.out.join("runtime-target");
+    let cargo = find_cargo(root);
+    // A user's `build.build-dir` would move the build scripts' out dirs away from the target dir.
+    let mut cargo_env = env.to_vec();
+    cargo_env.push((
+        "CARGO_BUILD_BUILD_DIR".to_owned(),
+        target.display().to_string(),
+    ));
+    run_logged(
+        stage,
+        &cargo,
+        &[
+            "build".to_owned(),
+            "-p".to_owned(),
+            "acnh-runtime".to_owned(),
+            "--release".to_owned(),
+            "--target-dir".to_owned(),
+            target.display().to_string(),
+        ],
+        root,
+        &cargo_env,
+        &[],
+        Some(&logs.join("runtime.log")),
+    )?;
+    let release = target.join("release");
+    let lib = release.join(if cfg!(windows) {
+        "acnh_runtime.lib"
+    } else {
+        "libacnh_runtime.a"
+    });
+    if !lib.is_file() {
+        return Err(stage_err(stage, format!("{} was not built", lib.display())));
+    }
+    // Cargo's build-script out dir is `build/<package>/<hash>/out` (newer cargo) or
+    // `build/<package>-<hash>/out` (older): search for the header under any `acnh-runtime*`
+    // directory, and take the newest if there are several.
+    let header = find_runtime_header(&release.join("build"));
+    let include = header
+        .and_then(|h| h.parent().map(Path::to_path_buf))
+        .ok_or_else(|| stage_err(stage, "cbindgen did not generate acnh_runtime.h".to_owned()))?;
+    Ok((lib, include))
+}
+
+/// The newest `<dir>/**/acnh-runtime*/**/out/include/acnh_runtime.h`.
+fn find_runtime_header(dir: &Path) -> Option<PathBuf> {
+    fn walk(dir: &Path, depth: u32, in_runtime: bool, found: &mut Vec<PathBuf>) {
+        if depth > 4 {
+            return;
+        }
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let runtime = in_runtime
+                || entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("acnh-runtime");
+            if runtime {
+                let header = path.join("out/include/acnh_runtime.h");
+                if header.is_file() {
+                    found.push(header);
+                    continue;
+                }
+            }
+            walk(&path, depth + 1, runtime, found);
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, 0, false, &mut found);
+    found
+        .into_iter()
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+}
+
+/// `cargo`: the build tools' search, then the rustup home, which is not always on a GUI's PATH.
+fn find_cargo(root: &Path) -> PathBuf {
+    let found = find_build_tool(root, "cargo");
+    if found.is_file() {
+        return found;
+    }
+    let name = executable(Os::current(), "cargo");
+    let homes = [
+        std::env::var_os("CARGO_HOME").map(PathBuf::from),
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(|h| PathBuf::from(h).join(".cargo")),
+    ];
+    homes
+        .into_iter()
+        .flatten()
+        .map(|h| h.join("bin").join(&name))
+        .find(|p| p.is_file())
+        .unwrap_or(found)
+}
+
 /// The Rust build stage: configures CMake with Ninja and builds the `acnh` target.
 pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
     let stage = Stage::Build;
@@ -1974,6 +2079,15 @@ pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
             ("CXX".to_owned(), "clang++".to_owned()),
         ]
     };
+
+    // The C++ player needs the Rust runtime (config, saves, files, kernel ...): build it for the
+    // host, then hand CMake the archive and cbindgen's header, as tools/build_ios.sh does.
+    let (runtime_lib, runtime_include) = build_runtime(req, root, &env, &logs)?;
+    cmake_args.push(format!("-DNX_RUNTIME_ARCHIVE={}", runtime_lib.display()));
+    cmake_args.push(format!(
+        "-DNX_RUNTIME_INCLUDE={}",
+        runtime_include.display()
+    ));
 
     run_logged(
         stage,
@@ -2654,7 +2768,49 @@ fn collect_manifest_files(
 /// SDL3 on Windows itself, so none of those is checked here.
 pub fn toolchain(os: Os, path: impl AsRef<OsStr>) -> Vec<Missing> {
     let homebrew = [PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")];
-    toolchain_with(os, path, &homebrew)
+    let mut missing = toolchain_with(os, path, &homebrew);
+    // cargo is often only in the rustup home, which a GUI's PATH lacks.
+    if cargo_in_homes(os) {
+        missing.retain(|piece| piece.what != "cargo");
+    }
+    missing
+}
+
+fn cargo_in_homes(os: Os) -> bool {
+    let name = executable(os, "cargo");
+    [
+        std::env::var_os("CARGO_HOME").map(PathBuf::from),
+        std::env::var_os(if os == Os::Windows {
+            "USERPROFILE"
+        } else {
+            "HOME"
+        })
+        .map(|h| PathBuf::from(h).join(".cargo")),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|h| h.join("bin").join(&name).is_file())
+        // The same Homebrew places `find_build_tool` tries (`brew install rust`): an app opened
+        // from the Finder has no Homebrew on its PATH, but the build stage still finds cargo there.
+        || (os != Os::Windows
+            && ["/opt/homebrew/bin", "/usr/local/bin"]
+                .iter()
+                .any(|d| Path::new(d).join(&name).is_file()))
+}
+
+fn missing_cargo(dirs: &[PathBuf], os: Os) -> Option<Missing> {
+    find_tool(dirs, os, "cargo").is_none().then(|| {
+        missing_piece(
+            "cargo",
+            "the player links the Rust runtime it builds.",
+            if os == Os::Windows {
+                "winget install Rustlang.Rustup"
+            } else {
+                "curl https://sh.rustup.rs -sSf | sh"
+            },
+            false,
+        )
+    })
 }
 
 /// `toolchain` with the Homebrew prefixes to try (the seam the tests use).
@@ -2682,9 +2838,11 @@ pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> 
                 true,
             ));
         }
+        missing.extend(missing_cargo(&dirs, os));
         return missing;
     }
 
+    missing.extend(missing_cargo(&dirs, os));
     for (tool, why) in [
         ("clang", "the C compiler the build uses."),
         ("clang++", "the C++ compiler the build uses."),
