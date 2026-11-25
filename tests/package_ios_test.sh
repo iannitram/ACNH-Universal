@@ -214,7 +214,102 @@ rm "$nobin/analysis/main.bin"
 refuse "a game folder without analysis/main.bin" "analysis/main.bin" "$work/out-nobin" \
     env CI=1 bash "$script" nobin "$build" --game "$nobin" "$work/out-nobin"
 
-# 3b. --mods carries the bundled mods beside the player: Payload/ACNH.app/mods/ (the SpeedFix's 60 fps files).
+# 3b. --small (#231): the .ipa has no game/, and the game's files with a manifest are staged for Dropbox. Decoy files with
+# made-up bytes (never game data) so the sizes and hashes mean something; not under CI, which allows only empty files.
+small=$work/decoy-small
+make_decoy "$small"
+printf 'analysis decoy bytes' > "$small/analysis/main.bin"
+head -c 70000 /dev/zero | tr '\0' 'r' > "$small/romfs.pak"
+printf 's' > "$small/spirv.pak"
+printf 'font decoy' > "$small/fonts/shared.ttf"
+: > "$small/aoc/1/data"
+printf 'junk' > "$small/fonts/.DS_Store"
+small_out=$work/out-small
+build_id=0123456789abcdef0123456789ABCDEF
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" "$small_out" > "$work/small.log"
+ipa3=$small_out/ACNH-Universal-smallv.ipa
+[ -f "$ipa3" ] || die "--small wrote no .ipa"
+zipinfo -1 "$ipa3" > "$work/small.list"
+if grep -q '^Payload/ACNH\.app/game' "$work/small.list"; then die "--small archive has a game/ folder"; fi
+unzip -tq "$ipa3" > /dev/null || die "--small archive fails unzip -t"
+bash "$root/tools/check_release_files.sh" < "$work/small.list" > /dev/null || die "--small list fails the release check"
+files=$small_out/acnh-universal-game/ios
+[ -f "$files/manifest.json" ] || die "--small wrote no manifest.json"
+small_ls=$(ls -A "$small_out" | LC_ALL=C sort | tr '\n' ' ')
+[ "$small_ls" = "ACNH-Universal-smallv.ipa acnh-universal-game " ] || die "--small left other files in the out folder: $small_ls"
+python3 - "$files" "$small" "$build_id" <<'PY' || die "the manifest does not match the files"
+import hashlib, json, os, sys
+files, prepared, build_id = sys.argv[1:4]
+m = json.load(open(os.path.join(files, "manifest.json")))
+assert m["version"] == 1
+assert m["build_id"] == build_id.upper(), m["build_id"]
+assert len(m["nx_game_abi"]) == 12 and all(c in "0123456789abcdef" for c in m["nx_game_abi"]), m["nx_game_abi"]
+listed = {e["path"]: e for e in m["files"]}
+expected = {"analysis/main.bin", "aoc/1/data", "fonts/shared.ttf", "romfs.pak", "spirv.pak"}
+assert set(listed) == expected, sorted(listed)
+for path, e in listed.items():
+    data = open(os.path.join(prepared, path), "rb").read()
+    assert e["size"] == len(data), path
+    assert e["sha256"] == hashlib.sha256(data).hexdigest(), path
+    staged = open(os.path.join(files, path), "rb").read()
+    assert staged == data, path
+on_disk = set()
+for base, _, names in os.walk(files):
+    for n in names:
+        on_disk.add(os.path.relpath(os.path.join(base, n), files))
+assert on_disk == expected | {"manifest.json"}, sorted(on_disk)
+# Never anything the prepared folder keeps besides the game (build folders, saves, logs, keys).
+for bad in ("gen", "build", "exefs", "user", "config.ini", "nx.log"):
+    assert not any(p.split("/")[0] == bad for p in on_disk), bad
+PY
+grep -q '^Game files: ' "$work/small.log" || die "--small did not say where the game files are"
+say "--small: no game/ in the .ipa; the manifest lists every staged file with matching sizes and hashes"
+
+# A second run replaces the staged files; a new ABI can be given.
+printf 'newer' > "$small/spirv.pak"
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" --abi 0123456789ab "$small_out" > /dev/null
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["nx_game_abi"]=="0123456789ab"; assert [f["size"] for f in m["files"] if f["path"]=="spirv.pak"]==[5]' "$files/manifest.json" \
+    || die "a second --small run did not replace the staged files"
+[ ! -e "$small_out/acnh-universal-game/ios.old" ] || die "--small left ios.old behind"
+say "--small again replaces the staged files and takes --abi"
+
+# The prepared folder's version.ini (as Prepare writes it) names its build: --build-id may be left out, and a different
+# one is refused. A game.ini does the same when there is no version.ini; version.ini wins when both are there.
+printf '# Written by acnh_core::prepare: the version this folder holds and its build profile.\nbuild_id = FEDCBA9876543210FEDCBA9876543210\nversion = 3.0.2\ntitle_version = 0\nhooks = -\n' > "$small/version.ini"
+refuse "--build-id that is not the prepared folder's build" "is not the build of the prepared folder" "$work/out-small-bad" \
+    env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" --build-id "$build_id" "$work/out-small-bad"
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" "$work/out-small-ini" > /dev/null
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["build_id"]=="FEDCBA9876543210FEDCBA9876543210"' \
+    "$work/out-small-ini/acnh-universal-game/ios/manifest.json" || die "--small did not take the build id from version.ini"
+printf 'build_id = 11111111111111111111111111111111\n' > "$small/game.ini"
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" "$work/out-small-both" > /dev/null
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["build_id"]=="FEDCBA9876543210FEDCBA9876543210"' \
+    "$work/out-small-both/acnh-universal-game/ios/manifest.json" || die "game.ini won over version.ini"
+rm "$small/version.ini"
+env -u CI -u GITHUB_ACTIONS bash "$script" smallv "$build" --small "$small" "$work/out-small-gameini" > /dev/null
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["build_id"]=="11111111111111111111111111111111"' \
+    "$work/out-small-gameini/acnh-universal-game/ios/manifest.json" || die "--small did not take the build id from game.ini"
+rm "$small/game.ini"
+say "--small takes the build id from the prepared folder's version.ini (else game.ini) and refuses a different --build-id"
+
+# Under CI, empty decoys: the manifest lists them with size 0 and the hash of nothing.
+env CI=1 bash "$script" smallci "$build" --small "$decoy" --build-id "$build_id" "$work/out-small-ci" > /dev/null
+python3 - "$work/out-small-ci/acnh-universal-game/ios/manifest.json" <<'PY' || die "the CI manifest is wrong"
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert {e["size"] for e in m["files"]} == {0}
+assert {e["sha256"] for e in m["files"]} == {"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+PY
+say "--small under CI lists empty decoys with the hash of nothing"
+
+refuse "--small without a build id" "build id" "$work/out-small-nobid" \
+    env CI=1 bash "$script" nobid "$build" --small "$decoy" "$work/out-small-nobid"
+refuse "--small with a bad build id" "build id" "$work/out-small-badbid" \
+    env CI=1 bash "$script" badbid "$build" --small "$decoy" --build-id xyz "$work/out-small-badbid"
+refuse "--small with a non-empty game file under CI" "non-empty" "$work/out-small-bad" \
+    env CI=1 bash "$script" smallbad "$build" --small "$bad" --build-id "$build_id" "$work/out-small-bad"
+
+# 3c. --mods carries the bundled mods beside the player: Payload/ACNH.app/mods/ (the SpeedFix's 60 fps files).
 mods=$work/bundled/mods
 make_mods "$mods"
 mods_out=$work/out-mods
@@ -242,6 +337,12 @@ grep -q 'ACNH\.app/mods/speedfix60/romfs/Pack/Decoy.pack$' "$work/mods2.list" ||
 env CI=1 bash "$script" mods3 "$build" --game "$decoy" "$work/out-mods3" --mods "$mods" > /dev/null
 zipinfo -1 "$work/out-mods3/ACNH-Universal-mods3.ipa" > "$work/mods3.list"
 if grep -q FromPrepared "$work/mods3.list"; then die "the prepared folder's mods/ was copied"; fi
+# --small takes --mods too: mods/ in the app, no game/, the Dropbox files staged
+env CI=1 bash "$script" smallmods "$build" --small "$decoy" --build-id "$build_id" "$work/out-small-mods" --mods "$mods" > /dev/null
+zipinfo -1 "$work/out-small-mods/ACNH-Universal-smallmods.ipa" > "$work/smallmods.list"
+grep -q 'ACNH\.app/mods/speedfix60/romfs/Pack/Decoy.pack$' "$work/smallmods.list" || die "--small with --mods lost the mods"
+if grep -q '^Payload/ACNH\.app/game' "$work/smallmods.list"; then die "--small with --mods has a game/ folder"; fi
+[ -f "$work/out-small-mods/acnh-universal-game/ios/manifest.json" ] || die "--small with --mods wrote no manifest"
 # without --mods the archive has no mods/ folder
 if grep -q 'ACNH\.app/mods' "$work/game.list"; then die "an archive made without --mods holds mods/"; fi
 say "--mods carries exactly the bundled mods in the app"

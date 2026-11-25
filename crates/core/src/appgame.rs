@@ -666,6 +666,75 @@ fn download_one(
     unreachable!()
 }
 
+/// How much of `item` a stepwise download (a platform that moves the bytes itself, such as
+/// iOS's background `URLSession`) already holds in `<private_dir>/game.partial/`, by the same
+/// resume rule as `download`: a complete file with the right hash is `item.size`, a shorter one
+/// is its length (the fetch continues from there), and a longer one, or one with the wrong hash,
+/// is deleted and counts as 0. Creates `game.partial/`.
+pub fn partial_bytes(private_dir: &Path, item: &ManifestFile) -> Result<u64> {
+    let partial = private_dir.join(PARTIAL_DIR);
+    fs::create_dir_all(&partial)?;
+    let dst_file = partial.join(&item.path);
+    let Ok(meta) = fs::metadata(&dst_file) else {
+        return Ok(0);
+    };
+    let len = if meta.is_file() { meta.len() } else { u64::MAX };
+    if len < item.size {
+        return Ok(len);
+    }
+    if len == item.size && sha256_file(&dst_file)? == item.sha256 {
+        return Ok(item.size);
+    }
+    set_writable(&dst_file)?;
+    if meta.is_dir() {
+        fs::remove_dir_all(&dst_file)?;
+    } else {
+        fs::remove_file(&dst_file)?;
+    }
+    Ok(0)
+}
+
+/// Check one file a stepwise download finished: true when it has the manifest's size and
+/// SHA-256. A wrong one is deleted (so the next `partial_bytes` is 0) and is `Ok(false)`.
+pub fn verify_partial(private_dir: &Path, item: &ManifestFile) -> Result<bool> {
+    let dst_file = private_dir.join(PARTIAL_DIR).join(&item.path);
+    if let Ok(meta) = fs::metadata(&dst_file) {
+        if meta.is_file() && meta.len() == item.size && sha256_file(&dst_file)? == item.sha256 {
+            return Ok(true);
+        }
+        set_writable(&dst_file)?;
+        fs::remove_file(&dst_file)?;
+    }
+    Ok(false)
+}
+
+/// Finish a stepwise download: every file of `manifest_bytes` must be in `game.partial/` with its
+/// size (the caller has checked the hashes, `verify_partial`); the manifest is written beside
+/// them and `game.partial/` becomes `dest` in one rename, read-only, as `download` does.
+pub fn install_partial(private_dir: &Path, dest: &Path, manifest_bytes: &[u8]) -> Result<PathBuf> {
+    check_dest_inside_private(private_dir, dest)?;
+    let manifest = Manifest::from_json(manifest_bytes)?;
+    let partial = private_dir.join(PARTIAL_DIR);
+    for item in &manifest.files {
+        validate_manifest_path(&item.path)?;
+        let ok = fs::metadata(partial.join(&item.path))
+            .map(|m| m.is_file() && m.len() == item.size)
+            .unwrap_or(false);
+        if !ok {
+            return Err(Error::Io(format!(
+                "{} is not complete: the game was not installed",
+                item.path
+            )));
+        }
+    }
+    let manifest_dst = partial.join("manifest.json");
+    if manifest_dst.exists() {
+        set_writable(&manifest_dst)?;
+    }
+    fs::write(&manifest_dst, manifest_bytes)?;
+    finalize_partial(&partial, dest)
+}
+
 /// Compute lowercase hex SHA-256 of a file.
 pub fn sha256_file(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;

@@ -162,12 +162,25 @@ fi
 ios_short_version=${BASE_VER%%-*}
 ios_short_version=${ios_short_version%%+*}
 echo "iOS version $VNAME (CFBundleShortVersionString=$ios_short_version, CFBundleVersion=$VCODE)"
+# The game build the recompiled code is for (Prepare's version.ini beside gen/, else a game.ini there): the small .ipa
+# refuses a downloaded game of another build, since the code is linked in. NX_APPGAME_BUILDS overrides; none known
+# accepts any.
+appgame_builds=${NX_APPGAME_BUILDS:-}
+if [ -z "$appgame_builds" ]; then
+    for ini in "$gen/../version.ini" "$gen/../game.ini"; do
+        [ -f "$ini" ] || continue
+        appgame_builds=$(sed -n 's/^[[:space:]]*build_id[[:space:]]*=[[:space:]]*\([0-9A-Fa-f]\{32\}\)[[:space:]]*$/\1/p' "$ini" \
+            | head -n 1 | tr 'a-f' 'A-F')
+        [ -n "$appgame_builds" ] && break
+    done
+fi
 cmake -S "$root" -B "$build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$sdk" -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
     -DNX_GAME=acnh -DNX_GEN_DIR="$gen" -DNX_GAME_FROM_FOLDER=OFF \
     -DNX_BUILD_VERSION="$VNAME" \
+    -DNX_APPGAME_BUILDS="$appgame_builds" \
     -DNX_IOS_SHORT_VERSION="$ios_short_version" -DNX_IOS_BUNDLE_VERSION="$VCODE" \
     -DNX_VULKAN_INCLUDE="$vulkan" -DNX_VPX_IOS="$vpx_root" -DNX_IOS_MOLTENVK="$mv_prefix/lib/libMoltenVK.a" \
     -DNX_RUNTIME_ARCHIVE="$runtime_lib" ${runtime_header:+-DNX_RUNTIME_INCLUDE="$(dirname "$runtime_header")"} \

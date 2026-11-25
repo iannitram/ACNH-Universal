@@ -49,6 +49,9 @@ serde_json = "1"
 acnh-core = { path = "../core", features = ["relay"] }
 save-relay = { git = "https://github.com/iannitram/save-relay" }
 serde_json = "1"
+# `tests/ios_appgame.rs`: decoy files and their hashes.
+sha2 = "0.10"
+tempfile = "3"
 
 [build-dependencies]
 cbindgen = { version = "0.27", default-features = false }
