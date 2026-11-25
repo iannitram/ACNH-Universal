@@ -34,7 +34,7 @@ pub const SFCO: u32 = 0x4F43_4653;
 
 // ---- C-ABI structs -----------------------------------------------------------------------------
 
-#[repr(C, align(16))]
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AcnhV128 {
     pub u64: [u64; 2],

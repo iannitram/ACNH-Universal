@@ -73,10 +73,9 @@ pub struct AcnhUserInfo {
     pub nickname: [c_char; 32],
 }
 
-pub type AcnhSavesStringCb = Option<extern "C" fn(*const c_char, usize, *mut c_void)>;
-pub type AcnhSavesFoundCb =
-    Option<extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void)>;
-pub type AcnhSavesUserCb = Option<extern "C" fn(*const AcnhUserInfo, *mut c_void)>;
+pub type AcnhSavesStringCb = extern "C" fn(*const c_char, usize, *mut c_void);
+pub type AcnhSavesFoundCb = extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void);
+pub type AcnhSavesUserCb = extern "C" fn(*const AcnhUserInfo, *mut c_void);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UserRecord {
@@ -178,7 +177,11 @@ fn cstr_opt(ptr: *const c_char) -> Option<String> {
     Some(s.to_string_lossy().into_owned())
 }
 
-fn emit_string(cb: AcnhSavesStringCb, ctx: *mut c_void, s: &str) {
+fn emit_string(
+    cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
+    ctx: *mut c_void,
+    s: &str,
+) {
     if let Some(cb) = cb {
         cb(s.as_ptr().cast::<c_char>(), s.len(), ctx);
     }
@@ -1600,7 +1603,10 @@ pub unsafe extern "C" fn acnh_saves_set_host(host: *const AcnhSavesHost) {
 
 /// Returns `<data root>/user/device_save` via `cb`.
 #[no_mangle]
-pub extern "C" fn acnh_saves_save_dir(cb: AcnhSavesStringCb, ctx: *mut c_void) {
+pub extern "C" fn acnh_saves_save_dir(
+    cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
+    ctx: *mut c_void,
+) {
     let s = path_utf8(&device_dir(&host_data_root()));
     emit_string(cb, ctx, &s);
 }
@@ -1616,14 +1622,20 @@ pub extern "C" fn acnh_saves_has_save() -> bool {
 
 /// Returns `"YYYY-MM-DD HH:MM"` of `main.dat` (or `""` if missing) via `cb`.
 #[no_mangle]
-pub extern "C" fn acnh_saves_last_modified(cb: AcnhSavesStringCb, ctx: *mut c_void) {
+pub extern "C" fn acnh_saves_last_modified(
+    cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
+    ctx: *mut c_void,
+) {
     let s = last_modified_str(&device_dir(&host_data_root()));
     emit_string(cb, ctx, &s);
 }
 
 /// Detects emulator, recomp, and SD-card ACNH saves, invoking `cb` for each `(label, path)`.
 #[no_mangle]
-pub extern "C" fn acnh_saves_detect_emulator_saves(cb: AcnhSavesFoundCb, ctx: *mut c_void) {
+pub extern "C" fn acnh_saves_detect_emulator_saves(
+    cb: Option<extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void)>,
+    ctx: *mut c_void,
+) {
     let root = host_data_root();
     let own = fs::canonicalize(device_dir(&root)).ok();
     let mut s = Scan {
@@ -1693,7 +1705,7 @@ pub extern "C" fn acnh_saves_detect_emulator_saves(cb: AcnhSavesFoundCb, ctx: *m
 #[no_mangle]
 pub extern "C" fn acnh_saves_looks_like_acnh_save(
     dir: *const c_char,
-    why_cb: AcnhSavesStringCb,
+    why_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     why_ctx: *mut c_void,
 ) -> bool {
     let Some(dir_str) = cstr_opt(dir) else {
@@ -1719,7 +1731,7 @@ pub extern "C" fn acnh_saves_looks_like_acnh_save(
 #[no_mangle]
 pub extern "C" fn acnh_saves_import_save(
     from: *const c_char,
-    err_cb: AcnhSavesStringCb,
+    err_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     err_ctx: *mut c_void,
 ) -> bool {
     let Some(from_str) = cstr_opt(from) else {
@@ -1740,9 +1752,9 @@ pub extern "C" fn acnh_saves_import_save(
 #[no_mangle]
 pub extern "C" fn acnh_saves_export_save(
     to: *const c_char,
-    written_cb: AcnhSavesStringCb,
+    written_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     written_ctx: *mut c_void,
-    err_cb: AcnhSavesStringCb,
+    err_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     err_ctx: *mut c_void,
 ) -> bool {
     let Some(to_str) = cstr_opt(to) else {
@@ -1818,9 +1830,9 @@ pub extern "C" fn acnh_saves_export_save(
 #[no_mangle]
 pub extern "C" fn acnh_saves_backup_now(
     automatic: bool,
-    out_cb: AcnhSavesStringCb,
+    out_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     out_ctx: *mut c_void,
-    err_cb: AcnhSavesStringCb,
+    err_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     err_ctx: *mut c_void,
 ) {
     let _lk = saves_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -1836,14 +1848,20 @@ pub extern "C" fn acnh_saves_backup_now(
 
 /// Returns `<data root>/user/backups/<island folder>` via `cb`.
 #[no_mangle]
-pub extern "C" fn acnh_saves_backups_folder(cb: AcnhSavesStringCb, ctx: *mut c_void) {
+pub extern "C" fn acnh_saves_backups_folder(
+    cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
+    ctx: *mut c_void,
+) {
     let s = path_utf8(&backups_dir(&host_data_root()));
     emit_string(cb, ctx, &s);
 }
 
 /// Lists all backups across all islands, invoking `cb` for each `"<island folder>/<backup>"`.
 #[no_mangle]
-pub extern "C" fn acnh_saves_list_backups(cb: AcnhSavesStringCb, ctx: *mut c_void) {
+pub extern "C" fn acnh_saves_list_backups(
+    cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
+    ctx: *mut c_void,
+) {
     let _lk = saves_lock().lock().unwrap_or_else(|e| e.into_inner());
     let root = host_data_root();
     for item in all_backups(&root) {
@@ -1855,7 +1873,7 @@ pub extern "C" fn acnh_saves_list_backups(cb: AcnhSavesStringCb, ctx: *mut c_voi
 #[no_mangle]
 pub extern "C" fn acnh_saves_restore_backup(
     name: *const c_char,
-    err_cb: AcnhSavesStringCb,
+    err_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     err_ctx: *mut c_void,
 ) -> bool {
     let Some(name_str) = cstr_opt(name) else {
@@ -1893,7 +1911,10 @@ pub extern "C" fn acnh_saves_restore_backup(
 
 /// Enumerates all local Switch users, invoking `cb` for each `AcnhUserInfo`.
 #[no_mangle]
-pub extern "C" fn acnh_users_all(cb: AcnhSavesUserCb, ctx: *mut c_void) {
+pub extern "C" fn acnh_users_all(
+    cb: Option<extern "C" fn(*const AcnhUserInfo, *mut c_void)>,
+    ctx: *mut c_void,
+) {
     let users = users_all_vec();
     if let Some(cb) = cb {
         for u in &users {
@@ -2018,7 +2039,12 @@ pub fn user_save_dir_name(lo: u64, hi: u64) -> String {
 
 /// Returns `"save"` for the first user or `"save_<uid hex>"` for others, via `cb`.
 #[no_mangle]
-pub extern "C" fn acnh_user_save_dir(lo: u64, hi: u64, cb: AcnhSavesStringCb, ctx: *mut c_void) {
+pub extern "C" fn acnh_user_save_dir(
+    lo: u64,
+    hi: u64,
+    cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
+    ctx: *mut c_void,
+) {
     let s = user_save_dir_name(lo, hi);
     emit_string(cb, ctx, &s);
 }

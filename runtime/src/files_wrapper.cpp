@@ -130,7 +130,7 @@ size_t host_glyph_override(const char* rel, char* buf, size_t cap) {
     return copy_string_to_buf(g, buf, cap);
 }
 
-bool host_read_asset(const char* rel, AcnhFilesBytesCb cb, void* ctx) {
+bool host_read_asset(const char* rel, void (*cb)(const uint8_t*, size_t, void*), void* ctx) {
 #if defined(__ANDROID__)
     if (!rel || !cb) return false;
     std::string out;

@@ -26,15 +26,12 @@ const K_CALL_CACHE_SIZE: usize = 1 << K_CALL_CACHE_BITS;
 const K_MAX_FAST_MODULES: usize = 4;
 
 pub type HleFn = extern "C" fn(*mut AcnhCpu);
-/// [`HleFn`] as it crosses the C boundary: nullable, spelled out so cbindgen emits a plain
-/// function-pointer typedef (an `Option` of an alias would become an opaque struct).
-pub type AcnhHleFn = Option<extern "C" fn(*mut AcnhCpu)>;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AcnhFuncEntry {
     pub offset: u64,
-    pub fn_ptr: AcnhHleFn,
+    pub fn_ptr: Option<extern "C" fn(*mut AcnhCpu)>,
 }
 
 #[repr(C)]
@@ -513,7 +510,7 @@ fn is_leaf_fn(fn_ptr: HleFn) -> bool {
         || p == hle_strlen as *const () as usize
 }
 
-fn hle_lookup_internal(name: &str) -> AcnhHleFn {
+fn hle_lookup_internal(name: &str) -> Option<HleFn> {
     if let Some((fn_ptr, _)) = libc_lookup(name) {
         return Some(fn_ptr);
     }
@@ -635,7 +632,7 @@ fn build_fast_module(mi: &AcnhModuleInfo) -> FastModule {
     }
 }
 
-fn fast_lookup(m: &FastModule, off: u64) -> AcnhHleFn {
+fn fast_lookup(m: &FastModule, off: u64) -> Option<HleFn> {
     let blk = (off >> 6) as usize;
     let mut idx = *m.block.get(blk)? as usize;
     while m.funcs[idx].offset < off {
@@ -1374,7 +1371,10 @@ pub extern "C" fn acnh_loader_fatal(msg: *const c_char) -> ! {
 }
 
 #[no_mangle]
-pub extern "C" fn acnh_loader_register_hle(name: *const c_char, fn_ptr: AcnhHleFn) {
+pub extern "C" fn acnh_loader_register_hle(
+    name: *const c_char,
+    fn_ptr: Option<extern "C" fn(*mut AcnhCpu)>,
+) {
     let Some(fp) = fn_ptr else {
         return;
     };
@@ -1385,7 +1385,9 @@ pub extern "C" fn acnh_loader_register_hle(name: *const c_char, fn_ptr: AcnhHleF
 }
 
 #[no_mangle]
-pub extern "C" fn acnh_loader_hle_lookup(name: *const c_char) -> AcnhHleFn {
+pub extern "C" fn acnh_loader_hle_lookup(
+    name: *const c_char,
+) -> Option<extern "C" fn(*mut AcnhCpu)> {
     hle_lookup_internal(cstr_or_empty(name))
 }
 
@@ -1395,7 +1397,10 @@ pub extern "C" fn acnh_loader_hle_address(name: *const c_char) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn acnh_loader_hle_address_or(name: *const c_char, fallback: AcnhHleFn) -> u64 {
+pub extern "C" fn acnh_loader_hle_address_or(
+    name: *const c_char,
+    fallback: Option<extern "C" fn(*mut AcnhCpu)>,
+) -> u64 {
     hle_address_or_internal(cstr_or_empty(name), fallback.unwrap_or(missing_stub))
 }
 
@@ -1405,7 +1410,10 @@ pub extern "C" fn acnh_loader_hle_current_name() -> *const c_char {
 }
 
 #[no_mangle]
-pub extern "C" fn acnh_loader_register_hook(offset: u64, fn_ptr: AcnhHleFn) {
+pub extern "C" fn acnh_loader_register_hook(
+    offset: u64,
+    fn_ptr: Option<extern "C" fn(*mut AcnhCpu)>,
+) {
     if let Some(fp) = fn_ptr {
         hooks().lock().unwrap().insert(offset, fp);
     }
