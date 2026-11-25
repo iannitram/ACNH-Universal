@@ -286,7 +286,12 @@ impl FirstRunVm {
                 .chain(["Delete".into(), "Pair".into(), "Back".into()])
                 .collect(),
             Step::GetBuild => vec![],
-            Step::BuildFailed(_) => vec!["Retry".into(), "Copy log".into(), "Back".into()],
+            Step::BuildFailed(_) if self.retry == Some(Request::CloudDownloadAndSync) => vec![
+                "Retry".into(),
+                "Choose a local game folder".into(),
+                "Copy log".into(),
+            ],
+            Step::BuildFailed(_) => vec!["Retry".into(), "Copy log".into()],
             Step::DeviceAndSteam if self.steam_applicable => {
                 vec![
                     "Change profile".into(),
@@ -446,10 +451,20 @@ impl FirstRunVm {
                     self.request(request);
                 }
             }
-            Step::BuildFailed(reason) if index == 1 => {
+            Step::BuildFailed(_)
+                if index == 1 && self.retry == Some(Request::CloudDownloadAndSync) =>
+            {
+                self.pulling = false;
+                self.go(Step::PickFolder);
+                self.request(Request::Folders(self.folder.clone()));
+            }
+            Step::BuildFailed(reason)
+                if (index == 2 && self.retry == Some(Request::CloudDownloadAndSync))
+                    || (index == 1 && self.retry != Some(Request::CloudDownloadAndSync)) =>
+            {
                 self.request = Some(Request::CopyLog(reason));
             }
-            Step::BuildFailed(_) => self.go(Step::FindGame),
+            Step::BuildFailed(_) => {}
             Step::DeviceAndSteam if index == 0 => self.go(Step::ChooseProfile),
             Step::DeviceAndSteam => self.finish_setup(index == 1 && self.steam_applicable),
             Step::ChooseProfile => {
@@ -597,6 +612,9 @@ impl FirstRunVm {
             Step::FindGame => self.go(Step::Welcome),
             Step::PickFolder => self.go(Step::FindGame),
             Step::FolderRejected(_) => self.go(Step::PickFolder),
+            Step::BuildFailed(_) if self.retry == Some(Request::CloudDownloadAndSync) => {
+                self.go(Step::Welcome);
+            }
             Step::FindHub | Step::NoHubFound | Step::BuildFailed(_) => self.go(Step::FindGame),
             Step::Pair if self.pair_from_address => self.go(Step::EnterAddress),
             Step::Pair => self.go(Step::FindHub),
@@ -939,5 +957,12 @@ mod tests {
         let _ = vm.take_request();
         vm.event(Event::CloudSyncFinished(Err("no manifest".into())));
         assert_eq!(vm.step, Step::BuildFailed("no manifest".into()));
+        assert_eq!(
+            vm.options(),
+            vec!["Retry", "Choose a local game folder", "Copy log"]
+        );
+        vm.activate(1);
+        assert_eq!(vm.step, Step::PickFolder);
+        assert!(matches!(vm.take_request(), Some(Request::Folders(_))));
     }
 }

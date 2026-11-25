@@ -340,3 +340,15 @@ fn remote_download_transport_downloads_and_reports_missing_manifest() {
     assert!(dest.join("analysis/main.bin").is_file());
     assert!(dest.join("libacnh_game.so").is_file());
 }
+
+#[test]
+fn manifest_allows_omitted_build_id_and_abi() {
+    let raw = br#"{"version":1,"files":[{"path":"romfs.pak","size":3,"sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]}"#;
+    let parsed =
+        Manifest::from_json(raw).expect("manifest without build_id/nx_game_abi should parse");
+    assert!(parsed.build_id.is_empty());
+    assert!(parsed.nx_game_abi.is_empty());
+    parsed
+        .validate("", "")
+        .expect("empty expected build_id/abi validates");
+}
