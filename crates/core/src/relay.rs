@@ -57,6 +57,11 @@ impl SaveRelay {
         self
     }
 
+    /// The underlying `save-relay` remote (Dropbox, Google Drive, or Nextcloud).
+    pub fn remote(&self) -> &Arc<dyn Remote> {
+        &self.remote
+    }
+
     /// Set a custom clock for testing.
     pub fn with_clock(
         mut self,
@@ -392,6 +397,85 @@ fn platform_lock() -> Result<std::sync::MutexGuard<'static, Option<PendingPlatfo
     PLATFORM_SIGN_IN
         .lock()
         .map_err(|_| Error::Saves("the save sync sign-in is unavailable".into()))
+}
+
+/// [`crate::appgame::DownloadTransport`] backed by any `save-relay` [`Remote`].
+pub struct RemoteDownloadTransport {
+    remote: Arc<dyn Remote>,
+    base: String,
+}
+
+impl RemoteDownloadTransport {
+    pub fn new(remote: Arc<dyn Remote>, base: impl Into<String>) -> Self {
+        Self {
+            remote,
+            base: base.into().trim_matches('/').to_owned(),
+        }
+    }
+
+    fn remote_path(&self, rel: &str) -> String {
+        let rel = rel.trim_start_matches('/');
+        if self.base.is_empty() {
+            rel.to_owned()
+        } else {
+            format!("{}/{rel}", self.base)
+        }
+    }
+}
+
+impl crate::appgame::DownloadTransport for RemoteDownloadTransport {
+    fn fetch_manifest(&mut self) -> Result<Vec<u8>> {
+        let path = self.remote_path("manifest.json");
+        self.remote
+            .get(&path)
+            .map(|(bytes, _)| bytes)
+            .map_err(|err| match err {
+                save_relay::Error::NotFound(_) => Error::BadGameFolder(
+                    "No prepared game for this platform was found in your cloud folder yet. You can choose a local game folder instead."
+                        .into(),
+                ),
+                other => map_err(other),
+            })
+    }
+
+    fn fetch_range(
+        &mut self,
+        path: &str,
+        offset: u64,
+        out: &mut dyn std::io::Write,
+    ) -> Result<u64> {
+        let full = self.remote_path(path);
+        let (bytes, _) = self.remote.get(&full).map_err(map_err)?;
+        let start = usize::try_from(offset)
+            .unwrap_or(bytes.len())
+            .min(bytes.len());
+        let slice = &bytes[start..];
+        out.write_all(slice)?;
+        Ok(slice.len() as u64)
+    }
+}
+
+/// Download the prepared game for `os` from `acnh-universal-game/<os>` on `remote` into `dest`
+/// under `private_dir`.
+pub fn download_game_from_remote(
+    remote: Arc<dyn Remote>,
+    private_dir: &Path,
+    dest: &Path,
+    free_bytes: u64,
+    os: &str,
+) -> Result<std::path::PathBuf> {
+    use crate::appgame::{download, DownloadTransport, Manifest};
+    let mut transport = RemoteDownloadTransport::new(remote, format!("acnh-universal-game/{os}"));
+    let manifest_bytes = transport.fetch_manifest()?;
+    let manifest = Manifest::from_json(&manifest_bytes)?;
+    download(
+        private_dir,
+        dest,
+        free_bytes,
+        &manifest.build_id,
+        &manifest.nx_game_abi,
+        &mut transport,
+    )
 }
 
 /// Open the save-relay machine setup this app shares with the `save-relay` CLI: its config
