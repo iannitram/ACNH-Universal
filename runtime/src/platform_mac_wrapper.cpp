@@ -978,7 +978,9 @@ void game_thread() {
             const std::string root = nx::plat::game_root();
             const bool missing =
                 !std::filesystem::is_regular_file(std::filesystem::u8path(root + "/analysis/main.bin"), ec);
-            if (missing || (root == nx_appgame_game_dir() && !nx_appgame_game_matches())) nx_appgame_first_start();
+            const bool mismatched = !missing && root == nx_appgame_game_dir() && !nx_appgame_game_matches();
+            if ((missing || mismatched) && !nx_appgame_first_start() && mismatched)
+                nx::fatal("the downloaded game is for another version of this app: open the app again to download the matching one");
         }
         // On this thread, so the main thread keeps the run loop the prompts need. Returns when the game may boot.
         if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_before_game(root);

@@ -46,7 +46,9 @@ void nx_relay_log(const char* line);  // platform_mac.cpp: one line into the pla
 
 namespace {
 
-constexpr int64_t kChunk = 128ll << 20;  // bytes per background task
+// Big, so an 11 GB game is a dozen relaunches of the app while locked, not ~90 (each task started from the background is
+// scheduled at the system's discretion and rate limited).
+constexpr int64_t kChunk = 1024ll << 20;  // bytes per background task
 constexpr int kRetries = 6;              // a chunk or the plan failing this many times in a row stops the download
 NSString* const kSessionId = @"io.github.acnhrecomp.game-download";
 NSString* const kPending = @"game.manifest.pending.json";  // appgame.rs: PENDING
@@ -291,6 +293,15 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
 
 }  // namespace
 
+// The system's completion handler for the session's events: kept before the session exists (it starts delivering at once).
+static void (^g_background_done)(void);
+static id background_lock() {
+    static id lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
 @interface NXGameDownloader : NSObject <NSURLSessionDownloadDelegate>
 @property(nonatomic, strong) NSURLSession* session;
 @property(nonatomic, strong) dispatch_queue_t queue;  // all state below, and every step
@@ -305,13 +316,14 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
 @property(nonatomic, assign) bool active, halted;
 @property(nonatomic, strong) NSNumber* current;
 @property(nonatomic, copy) NSString* chunk_error;  // what went wrong with the chunk whose task just finished
-@property(nonatomic, copy) void (^background_done)(void);
+@property(nonatomic, strong) NSDate* begin_after;  // the next task waits until then (a retry): the system runs it, even with the app suspended
 + (instancetype)shared;
 - (dispatch_semaphore_t)begin;
 - (NSString*)raw_api_arg:(NSString*)path;
 - (void)step;
 - (void)stop:(NSString*)failure;
 - (void)retry:(NSString*)text;
+- (void)retry_later:(NSString*)text;
 @end
 
 @implementation NXGameDownloader
@@ -424,7 +436,7 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
     NSDictionary* tok = take(acnh_appgame_token());
     if (!ok(tok)) {
         if ([tok[@"reauth"] boolValue]) { [self stop:@"Dropbox needs you to sign in again."]; return; }
-        [self retry:why(tok)];
+        [self retry_later:why(tok)];
         return;
     }
     NSMutableURLRequest* r = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kRemoteHost]];
@@ -438,6 +450,7 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
     self.active = true;
     self.current = @(t.taskIdentifier);
     self.chunk_error = nil;
+    if (self.begin_after) { t.earliestBeginDate = self.begin_after; self.begin_after = nil; }
     [t resume];
     show_progress([self status_text], self.total ? (double)self.base / self.total : 0);
 }
@@ -455,8 +468,19 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
     return [NSString stringWithFormat:@"%@ of %@", gb((double)(self.base + self.inflight)), gb((double)self.total)];
 }
 
-// A transient failure: try again after a pause, a few times. On self.queue.
+// A transient failure of a chunk: try again after a pause, a few times. The next task carries the pause as its
+// earliestBeginDate, so the system starts it even when the app is suspended (a timer there would never fire). On self.queue.
 - (void)retry:(NSString*)text {
+    self.failures++;
+    note([NSString stringWithFormat:@"failed (%d): %@", self.failures, text]);
+    if (self.failures >= kRetries) { [self stop:text]; return; }
+    self.begin_after = [NSDate dateWithTimeIntervalSinceNow:MIN(60, 5 << self.failures)];
+    self.current = nil;
+    [self step];
+}
+
+// The same for a failure before a task exists (no token): only a timer is left, and it runs while the app is awake.
+- (void)retry_later:(NSString*)text {
     self.failures++;
     note([NSString stringWithFormat:@"failed (%d): %@", self.failures, text]);
     if (self.failures >= kRetries) { [self stop:text]; return; }
@@ -567,8 +591,8 @@ bool parse_description(NSString* d, NSString** path, int64_t* offset, int64_t* l
 }
 
 - (void)URLSessionDidFinishEventsForBackgroundURLSession:(NSURLSession*)s {
-    void (^done)(void) = self.background_done;
-    self.background_done = nil;
+    void (^done)(void);
+    @synchronized(background_lock()) { done = g_background_done; g_background_done = nil; }
     if (done) dispatch_async(dispatch_get_main_queue(), done);
 }
 
@@ -584,8 +608,8 @@ void handle_events(id, SEL, UIApplication*, NSString* identifier, void (^complet
     note(@"the system relaunched the app for the game download");
     // The session exists again, so its events are delivered; the delegate runs the chain from them (a claimed task
     // finishing starts the next chunk), with no game thread: SDL_main does not run until a scene connects.
-    NXGameDownloader* d = [NXGameDownloader shared];
-    d.background_done = [completion copy];
+    @synchronized(background_lock()) { g_background_done = [completion copy]; }  // before the session is made
+    [NXGameDownloader shared];
 }
 
 __attribute__((constructor)) void install_background_hook() {
@@ -679,7 +703,7 @@ NSData* load_manifest(bool resuming) {
 
 // Called on the game's thread before the game boots, when the game root has no analysis/main.bin. True when the game is
 // now installed under Application Support/game; false when the person said Not now or the download stopped.
-extern "C" bool nx_appgame_first_start() {
+static bool first_start_impl() {
     @autoreleasepool {
         wait_until_active();  // a background launch has nobody to ask, and the game must not boot there
         NXGameDownloader* d = [NXGameDownloader shared];  // first: events of a download from before reach the delegate
@@ -718,6 +742,13 @@ extern "C" bool nx_appgame_first_start() {
             }
         }
     }
+}
+
+extern "C" bool nx_appgame_first_start() {
+    bool r = first_start_impl();
+    // Whatever the outcome, the black alert-level window must not stay over the game (or the sync prompt after this).
+    dispatch_async(dispatch_get_main_queue(), ^{ close_window(); });
+    return r;
 }
 
 // Where the game is: platform_mac.cpp's game root looks here when the bundle has no game/.
