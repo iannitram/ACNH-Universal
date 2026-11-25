@@ -142,14 +142,16 @@ fn packed_launcher(exe: &Path, appimage: Option<&Path>, app_out: Option<&Path>) 
     }
     if let Some(candidate) = appimage
         .and_then(Path::parent)
-        .map(|dir| dir.join("ACNH-Universal/acnh-app"))
+        .map(|dir| dir.join("ACNH-Universal").join("acnh-app"))
         .filter(|path| path.is_file())
     {
         return Some(candidate);
     }
-    for name in ["ACNH-Universal/acnh-app.exe", "ACNH-Universal/acnh-app"] {
+    // One component per join: a "/" inside a component stays in the path as written on Windows,
+    // so the shortcut would name `...\ACNH-Universal/acnh-app.exe`.
+    for name in ["acnh-app.exe", "acnh-app"] {
         if let Some(candidate) = app_out
-            .map(|dir| dir.join(name))
+            .map(|dir| dir.join("ACNH-Universal").join(name))
             .filter(|path| path.is_file())
         {
             return Some(candidate);

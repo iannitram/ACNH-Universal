@@ -2,8 +2,9 @@
 //!
 //! Copies only the six prepared game entries (`analysis/`, `romfs.pak`, `spirv.pak`,
 //! `fonts/`, `aoc/` when present, and `libacnh_game.so`) into `<private>/game.partial/`,
-//! resuming over matching-size files, marks them read-only, and atomically renames
-//! `game.partial/` to `<private>/game/`. Writes nowhere outside the given private folder.
+//! resuming over matching-size files, atomically renames `game.partial/` to
+//! `<private>/game/`, then marks the tree read-only (macOS will not rename a directory without
+//! write permission). Writes nowhere outside the given private folder.
 
 use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
@@ -90,14 +91,17 @@ pub fn install_with(
 }
 
 fn finalize_partial(partial: &Path, dest: &Path) -> Result<PathBuf> {
-    make_read_only_recursive(partial)?;
     if dest.exists() {
         remove_tree_writable(dest)?;
     }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Rename first, then make the tree read-only: macOS refuses to rename a directory that has no
+    // write permission when its `..` entry must change (EACCES), so a read-only `game.partial/`
+    // cannot always be moved into place.
     fs::rename(partial, dest)?;
+    make_read_only_recursive(dest)?;
     Ok(dest.to_path_buf())
 }
 
@@ -400,17 +404,19 @@ impl Manifest {
         };
         let build_id = match root.get("build_id") {
             Some(JsonVal::Str(s)) => s.clone(),
+            None => String::new(),
             _ => {
                 return Err(Error::BadGameFolder(
-                    "manifest.json is missing build_id".into(),
+                    "manifest.json build_id must be a string".into(),
                 ))
             }
         };
         let nx_game_abi = match root.get("nx_game_abi") {
             Some(JsonVal::Str(s)) => s.clone(),
+            None => String::new(),
             _ => {
                 return Err(Error::BadGameFolder(
-                    "manifest.json is missing nx_game_abi".into(),
+                    "manifest.json nx_game_abi must be a string".into(),
                 ))
             }
         };
@@ -471,13 +477,13 @@ impl Manifest {
     /// Validate that the manifest matches the expected `build_id` and `NX_GAME_ABI`,
     /// and that every file entry has a safe relative path and valid SHA-256 hex digest.
     pub fn validate(&self, expected_build_id: &str, expected_abi: &str) -> Result<()> {
-        if self.build_id != expected_build_id {
+        if !expected_build_id.is_empty() && self.build_id != expected_build_id {
             return Err(Error::Unsupported(format!(
                 "game build id mismatch: expected {expected_build_id}, got {}",
                 self.build_id
             )));
         }
-        if self.nx_game_abi != expected_abi {
+        if !expected_abi.is_empty() && self.nx_game_abi != expected_abi {
             return Err(Error::Unsupported(format!(
                 "NX_GAME_ABI mismatch: expected {expected_abi}, got {}",
                 self.nx_game_abi
@@ -510,6 +516,7 @@ fn validate_manifest_path(path: &str) -> Result<()> {
         || path.contains('\\')
         || path.starts_with("manifest.json")
         || path.starts_with("user/")
+        || path.starts_with("root/user/")
     {
         return Err(Error::BadGameFolder(format!(
             "invalid file path in manifest.json: {path}"

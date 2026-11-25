@@ -508,16 +508,113 @@ fn cloud_download_and_sync(dirs: &AppDirs) -> acnh_core::Result<()> {
     let relay = acnh_core::relay::open(&sr_dirs, &creds, transport)?
         .ok_or_else(|| acnh_core::Error::Saves("Save sync is not set up. Sign in first.".into()))?;
     std::fs::create_dir_all(&dirs.data)?;
-    acnh_core::relay::download_game_from_remote(
-        Arc::clone(relay.remote()),
+    let game_dir = acnh_core::relay::download_game_from_relay(
+        &relay,
         &dirs.data,
         &dirs.data.join("game"),
         u64::MAX,
         os_slug(Os::current()),
     )?;
+    if Os::current() != Os::Android && Os::current() != Os::Ios {
+        install_downloaded_desktop_game(&game_dir, &dirs.install())?;
+    }
     let save_dir = dirs.data_root().join("user/device_save");
     std::fs::create_dir_all(&save_dir)?;
     let _ = relay.pull_with(&save_dir, None, false)?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn install_downloaded_desktop_game(game_dir: &Path, install_dir: &Path) -> acnh_core::Result<()> {
+    make_tree_writable(game_dir)?;
+    std::fs::create_dir_all(install_dir)?;
+    move_game_tree(game_dir, game_dir, install_dir)?;
+    let manifest_src = game_dir.join("manifest.json");
+    if manifest_src.is_file() {
+        move_file_replace(&manifest_src, &install_dir.join("manifest.json"), false)?;
+    }
+    let _ = std::fs::remove_dir_all(game_dir);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn make_tree_writable(path: &Path) -> acnh_core::Result<()> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(());
+    };
+    let mut perms = meta.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = perms.mode();
+        perms.set_mode(if meta.is_dir() {
+            mode | 0o700
+        } else {
+            mode | 0o200
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        perms.set_readonly(false);
+    }
+    std::fs::set_permissions(path, perms)?;
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            make_tree_writable(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn move_game_tree(root: &Path, dir: &Path, install_dir: &Path) -> acnh_core::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| acnh_core::Error::Io(e.to_string()))?;
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str == "manifest.json"
+            || rel_str == "root/config.ini"
+            || rel_str == "root/user"
+            || rel_str.starts_with("root/user/")
+        {
+            continue;
+        }
+        if path.is_dir() {
+            move_game_tree(root, &path, install_dir)?;
+        } else if path.is_file() {
+            let executable = rel_str == "acnh"
+                || rel_str.ends_with(".exe")
+                || rel_str.contains(".so")
+                || rel_str.ends_with(".dylib");
+            move_file_replace(&path, &install_dir.join(rel), executable)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn move_file_replace(src: &Path, dst: &Path, executable: bool) -> acnh_core::Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if dst.exists() {
+        let _ = make_tree_writable(dst);
+        let _ = std::fs::remove_file(dst);
+    }
+    if std::fs::rename(src, dst).is_err() {
+        std::fs::copy(src, dst)?;
+        let _ = std::fs::remove_file(src);
+    }
+    #[cfg(unix)]
+    if executable {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o755))?;
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
     Ok(())
 }
 
