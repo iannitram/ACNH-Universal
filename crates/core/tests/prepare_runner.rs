@@ -48,6 +48,8 @@ struct Fake {
     ran: Vec<Stage>,
     args: Vec<Vec<String>>,
     fail_at: Option<Stage>,
+    /// Fails the script `tools/bundle_mods.sh` (the network is down), whatever the stage.
+    fail_bundle: bool,
     root: Option<PathBuf>,
     /// The programs `probe` finds (and what they print); the others are not there.
     tools: Vec<(&'static str, &'static str)>,
@@ -100,6 +102,9 @@ impl ScriptRunner for Fake {
     fn run(&mut self, stage: Stage, args: &[String]) -> Result<(), Vec<String>> {
         self.ran.push(stage);
         self.args.push(args.to_vec());
+        if self.fail_bundle && args.iter().any(|a| a == "tools/bundle_mods.sh") {
+            return Err(vec!["curl: could not resolve host".to_owned()]);
+        }
         if self.fail_at == Some(stage) {
             return Err(vec!["boom at /home/me/x".to_owned()]);
         }
@@ -1212,6 +1217,46 @@ fn rust_version_reads_build_id_and_writes_version_ini() {
 
 /// A dropbox folder with `_transfers/ACNH-Universal/` in it, and the request that delivers to
 /// its `ios` folder.
+/// The version the Apple deliveries are named with: `tools/build_version.sh`'s short build
+/// (`<BASE_VER>-<VCODE>`, as the script prints them in this checkout), not the crate's 0.0.0.
+fn apple_version() -> String {
+    let output = std::process::Command::new("bash")
+        .arg("tools/build_version.sh")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output();
+    // Where the script cannot run (Windows runners have no usable bash), Prepare's
+    // package_version falls back to the crate version, and so does this.
+    let Some(output) = output.ok().filter(|o| o.status.success()) else {
+        return env!("CARGO_PKG_VERSION").to_owned();
+    };
+    let text = String::from_utf8(output.stdout).unwrap();
+    let value = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .unwrap()
+            .to_owned()
+    };
+    let version = format!(
+        "{}-{}",
+        value("BASE_VER").split('+').next().unwrap(),
+        value("VCODE")
+    );
+    // The package scripts refuse a `+`; the name is the build's, not the crate's.
+    assert!(!version.contains('+'), "{version}");
+    assert!(version.contains('-'), "{version}");
+    assert!(
+        version
+            .split('-')
+            .next_back()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            >= 1100,
+        "{version}"
+    );
+    version
+}
+
 fn ios_request(name: &str) -> (Request, PathBuf) {
     let mut req = request(name, Os::Ios);
     let dropbox = req.out.join("dropbox");
@@ -1270,12 +1315,14 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
     assert!(req.out.join("romfs.pak").is_file());
     assert!(req.out.join("spirv.pak").is_file());
     let mut stages = scripted();
-    stages.extend([Stage::Build, Stage::Build]);
+    stages.extend([Stage::Build, Stage::Build, Stage::Build]);
     assert_eq!(fake.ran, stages);
     let n = fake.args.len();
     let build = req.out.join("build-ios");
+    let version = apple_version();
+    let mods = req.out.join("bundle-mods");
     assert_eq!(
-        without_env(&fake.args[n - 2]),
+        without_env(&fake.args[n - 3]),
         [
             "tools/build_ios.sh".to_owned(),
             "iphoneos".to_owned(),
@@ -1283,21 +1330,30 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
             build.display().to_string(),
         ]
     );
+    // The SpeedFix's files are bundled, then carried in the app.
+    assert_eq!(
+        fake.args[n - 2],
+        [
+            "env".to_owned(),
+            format!("ACNH_MODS_CACHE={}", req.out.join("mods-cache").display()),
+            "tools/bundle_mods.sh".to_owned(),
+            mods.display().to_string()
+        ]
+    );
     assert_eq!(
         fake.args[n - 1],
         [
             "tools/package_ios.sh".to_owned(),
-            env!("CARGO_PKG_VERSION").to_owned(),
+            version.clone(),
             build.display().to_string(),
             "--game".to_owned(),
             req.out.display().to_string(),
             delivery.display().to_string(),
+            "--mods".to_owned(),
+            mods.join("mods").display().to_string(),
         ]
     );
-    assert_eq!(
-        ipa,
-        delivery.join(format!("ACNH-Universal-{}.ipa", env!("CARGO_PKG_VERSION")))
-    );
+    assert_eq!(ipa, delivery.join(format!("ACNH-Universal-{version}.ipa")));
 }
 
 #[test]
@@ -1476,7 +1532,7 @@ fn cargo_found_only_under_the_cargo_home_bin_is_put_first_on_the_build_path() {
     fake.tools
         .push(("/h/.cargo/bin/rustup", "aarch64-apple-ios\n"));
     prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
-    let build = &fake.args[fake.args.len() - 2];
+    let build = &fake.args[fake.args.len() - 3];
     assert_eq!(build[0], "env");
     assert!(build[1].starts_with("PATH=/h/.cargo/bin:"), "{}", build[1]);
     assert!(build[2].starts_with("NX_VPX_DIR="), "{}", build[2]);
@@ -1485,7 +1541,7 @@ fn cargo_found_only_under_the_cargo_home_bin_is_put_first_on_the_build_path() {
     // With cargo on the PATH the script is called as it is.
     let mut plain = Fake::with_ios_tools();
     prepare_with(&req, Hub::Mac, &mut plain, Path::new("/h"), &mut |_| {}).unwrap();
-    let plain_build = &plain.args[plain.args.len() - 2];
+    let plain_build = &plain.args[plain.args.len() - 3];
     assert!(!plain_build.iter().any(|arg| arg.contains("/h/.cargo/bin")));
     assert_eq!(without_env(plain_build)[0], "tools/build_ios.sh");
 }
@@ -1508,7 +1564,15 @@ fn ios_refuses_a_prepared_folder_inside_a_git_work_tree() {
 #[test]
 fn a_relative_out_is_made_absolute_before_the_work_tree_check_and_the_steps() {
     let (mut req, _) = ios_request("ios-relative");
-    req.out = PathBuf::from("relative-prepared");
+    // A relative folder is made in the test's working folder: removed again on the way out.
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    req.out = PathBuf::from(format!("relative-prepared-{}", std::process::id()));
+    let _cleanup = Cleanup(req.out.clone());
     let mut fake = Fake::with_ios_tools();
     // The check is told the absolute folder, and says it is a work tree.
     fake.tools.push(("git", "true\n"));
@@ -1524,7 +1588,7 @@ fn a_relative_out_is_made_absolute_before_the_work_tree_check_and_the_steps() {
     // Outside a work tree the steps name the absolute folder too.
     let mut fake = Fake::with_ios_tools();
     prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
-    let build = without_env(&fake.args[fake.args.len() - 2]);
+    let build = without_env(&fake.args[fake.args.len() - 3]);
     assert!(Path::new(&build[2]).is_absolute(), "{build:?}");
     assert!(Path::new(&build[3]).is_absolute(), "{build:?}");
 }
@@ -1571,7 +1635,7 @@ fn mac_skips_upstreams_native_executable() {
     std::fs::write(req.out.join("build/acnh"), "synthetic executable").unwrap();
     let mut fake = Fake::with_mac_tools();
     prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
-    assert!(!fake.ran[..fake.ran.len() - 1].contains(&Stage::Build));
+    assert!(!fake.ran[..fake.ran.len() - 2].contains(&Stage::Build));
 }
 
 #[test]
@@ -1595,24 +1659,67 @@ fn mac_runs_the_stages_the_packs_the_assembly_and_the_package_script() {
     assert!(req.out.join("romfs.pak").is_file());
     assert!(req.out.join("spirv.pak").is_file());
     let mut stages = scripted();
-    stages.push(Stage::Build);
+    stages.extend([Stage::Build, Stage::Build]);
     assert_eq!(fake.ran, stages);
     let install = req.out.join("install");
+    let version = apple_version();
+    let mods = req.out.join("bundle-mods");
     assert_eq!(fake.assembled, [(req.out.join("build"), install.clone())]);
+    let n = fake.args.len();
+    // The SpeedFix's files are bundled, then carried in the app.
     assert_eq!(
-        fake.args.last().unwrap(),
-        &[
-            "tools/package_mac.sh".to_owned(),
-            env!("CARGO_PKG_VERSION").to_owned(),
-            install.join("ACNH-Universal.app").display().to_string(),
-            req.out.display().to_string(),
-            delivery.display().to_string(),
+        fake.args[n - 2],
+        [
+            "env".to_owned(),
+            format!("ACNH_MODS_CACHE={}", req.out.join("mods-cache").display()),
+            "tools/bundle_mods.sh".to_owned(),
+            mods.display().to_string()
         ]
     );
     assert_eq!(
-        zip,
-        delivery.join(format!("ACNH-Universal-{}.zip", env!("CARGO_PKG_VERSION")))
+        fake.args[n - 1],
+        [
+            "tools/package_mac.sh".to_owned(),
+            version.clone(),
+            install.join("ACNH-Universal.app").display().to_string(),
+            req.out.display().to_string(),
+            delivery.display().to_string(),
+            "--mods".to_owned(),
+            mods.join("mods").display().to_string(),
+        ]
     );
+    assert_eq!(zip, delivery.join(format!("ACNH-Universal-{version}.zip")));
+}
+
+#[test]
+fn mac_packages_without_the_mods_when_they_cannot_be_fetched() {
+    let (req, delivery) = mac_request("mac-no-mods");
+    let mut fake = Fake::with_mac_tools();
+    fake.fail_bundle = true;
+    let zip = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    let n = fake.args.len();
+    assert!(fake.args[n - 2].iter().any(|a| a == "tools/bundle_mods.sh"));
+    assert_eq!(fake.args[n - 1][0], "tools/package_mac.sh");
+    assert!(!fake.args[n - 1].iter().any(|a| a == "--mods"));
+    assert!(zip.starts_with(&delivery));
+}
+
+#[test]
+fn ios_packages_without_the_mods_when_they_cannot_be_fetched() {
+    let (mut req, _) = ios_request("ios-no-mods");
+    let romfs = req.out.join("game-romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    std::fs::write(romfs.join("a.bin"), b"a").unwrap();
+    req.game.romfs = romfs;
+    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
+    std::fs::write(req.out.join("spirv/a.spv"), b"spv").unwrap();
+    let mut fake = Fake::with_ios_tools();
+    fake.fail_bundle = true;
+    prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    let n = fake.args.len();
+    assert!(fake.args[n - 2].iter().any(|a| a == "tools/bundle_mods.sh"));
+    assert_eq!(fake.args[n - 1][0], "tools/package_ios.sh");
+    assert!(!fake.args[n - 1].iter().any(|a| a == "--mods"));
 }
 
 #[test]

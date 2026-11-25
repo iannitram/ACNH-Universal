@@ -10,15 +10,15 @@
 //! verified on a device: whether a controller can answer the alerts (docs/IOS.md).
 
 use super::{
-    Blocked, BlockedAnswer, Connector, HeldAnswer, Live, Player, Prompt, Roots, Settings,
-    SignInAnswer, SignInForm, StatusOut, SyncNow, SyncNowSlot, SyncReady,
+    Blocked, BlockedAnswer, Bounded, Connector, FinalPush, HeldAnswer, Live, Player, Prompt, Roots,
+    Settings, SignInAnswer, SignInForm, StatusOut, SyncNow, SyncNowSlot, SyncReady,
 };
 use acnh_core::launch::Keep;
 use acnh_core::savecard::SaveCard;
 use block2::RcBlock;
-use dispatch2::run_on_main;
+use dispatch2::{run_on_main, DispatchQueue};
 use objc2::rc::Retained;
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{MainThreadMarker, NSArray, NSString};
 use objc2_ui_kit::{
     UIAlertAction, UIAlertActionStyle, UIAlertController, UIAlertControllerStyle, UIApplication,
     UISceneActivationState, UIScreen, UITextAutocapitalizationType, UITextAutocorrectionType,
@@ -348,9 +348,15 @@ impl Prompt for UiPrompt {
                 true,
             ),
         };
+        // Offline keeps refuse-until-synced; any other block has a way out (an unreadable
+        // credential store, a token that is gone), which the person chooses.
+        let can_turn_off = *why != Blocked::Offline;
         let mut buttons = vec![("Retry".to_string(), false)];
         if again {
             buttons.push(("Sign in again".to_string(), false));
+        }
+        if can_turn_off {
+            buttons.push(("Turn off save sync".to_string(), false));
         }
         let (tapped, _) = show(Alert {
             title: title.into(),
@@ -358,8 +364,11 @@ impl Prompt for UiPrompt {
             fields: Vec::new(),
             buttons,
         });
+        let turn_off_at = if again { 2 } else { 1 };
         if again && tapped == 1 {
             BlockedAnswer::SignInAgain
+        } else if can_turn_off && tapped == turn_off_at {
+            BlockedAnswer::TurnOff
         } else {
             BlockedAnswer::Retry
         }
@@ -387,10 +396,22 @@ impl BackgroundTask {
         task
     }
 
+    /// Off the main thread the end is queued (`exec_async`), never waited for: the main thread
+    /// may be parked waiting for this very caller (`acnh_relay_terminate`), and a synchronous
+    /// dispatch to it would stall both until the wait gave up.
     fn end(&self) {
         let id = self.0.swap(0, Ordering::SeqCst);
-        if id != 0 {
-            run_on_main(move |mtm| UIApplication::sharedApplication(mtm).endBackgroundTask(id));
+        if id == 0 {
+            return;
+        }
+        let end = move |mtm| UIApplication::sharedApplication(mtm).endBackgroundTask(id);
+        match MainThreadMarker::new() {
+            Some(mtm) => end(mtm),
+            None => DispatchQueue::main().exec_async(move || {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    end(mtm);
+                }
+            }),
         }
     }
 }
@@ -487,16 +508,62 @@ pub extern "C" fn acnh_relay_before_game(data_root: *const c_char) {
     }
 }
 
-/// When the game quits: pushes the island, inside a background task, and returns when the push
-/// has finished or been left waiting for the next start. Does nothing before the game has booted.
+/// The final push of this process: claimed once, by the game's end or by the terminate.
+static FINAL_PUSH: FinalPush = FinalPush::new();
+
+/// How long the main thread waits for the final push while iOS ends the app: well under the
+/// five seconds `applicationWillTerminate:` gets before the watchdog.
+const TERMINATE_BOUND: std::time::Duration = std::time::Duration::from_millis(3000);
+
+/// When the game quits (the game's thread, which may block): pushes the island, inside a
+/// background task, and returns when the push has finished or been left waiting for the next
+/// start. Does nothing before the game has booted. The final push runs once: when another
+/// caller has it, this returns at once.
 #[no_mangle]
 pub extern "C" fn acnh_relay_after_game(data_root: *const c_char) {
     let Some(root) = self::data_root(data_root) else {
         return;
     };
+    FINAL_PUSH.run(|| {
+        let task = BackgroundTask::begin();
+        with_player(&root, |player| player.after_game());
+        task.end();
+    });
+}
+
+/// When iOS is ending the app (`SDL_EVENT_TERMINATING`, the main thread, about five seconds
+/// before the watchdog): a background task is begun, the push runs on a worker and the main
+/// thread waits at most `TERMINATE_BOUND` for it. A push that is not done by then is not
+/// continued: UIKit ends the process once `applicationWillTerminate:` returns, background task
+/// or not. What saves the island is the waiting mark, written before the push waits for its
+/// turn or sends a byte (`Player::push_island`), so the next start sends it first. The worker
+/// must not wait on the main thread (this one is parked), hence `BackgroundTask::end` queues.
+/// When another caller has the final push, returns at once.
+#[no_mangle]
+pub extern "C" fn acnh_relay_terminate(data_root: *const c_char) {
+    let Some(root) = self::data_root(data_root) else {
+        return;
+    };
+    if !BOOTED.load(Ordering::SeqCst) {
+        log("relay: no push yet: the game has not booted");
+        return;
+    }
+    if FINAL_PUSH.is_claimed() {
+        return;
+    }
     let task = BackgroundTask::begin();
-    with_player(&root, |player| player.after_game());
-    task.end();
+    let worker = task.clone();
+    let outcome = FINAL_PUSH.run_bounded(TERMINATE_BOUND, move || {
+        with_player(&root, |player| player.after_game());
+        worker.end();
+    });
+    match outcome {
+        Bounded::Done => {}
+        Bounded::Late => {
+            log("relay: the final push is not done in time: left waiting for the next start")
+        }
+        Bounded::Taken => task.end(),
+    }
 }
 
 /// When the app has gone to the background (`SDL_EVENT_DID_ENTER_BACKGROUND`, from SDL's event

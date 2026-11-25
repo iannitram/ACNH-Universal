@@ -13,8 +13,8 @@ use acnh_core::relay::SaveRelay;
 use acnh_core::savecard::SaveCard;
 use acnh_core::{saves, Error};
 use relay::{
-    decide, describe_card, Action, Blocked, BlockedAnswer, Connector, FileSettings, HeldAnswer,
-    Player, Prompt, Roots, SignInAnswer, SignInForm, SyncNow, SyncReady,
+    decide, describe_card, Action, Blocked, BlockedAnswer, Bounded, Connector, FileSettings,
+    FinalPush, HeldAnswer, Player, Prompt, Roots, SignInAnswer, SignInForm, SyncNow, SyncReady,
 };
 use save_relay::creds::{self, CredentialStore, MemoryStore, Secret};
 use save_relay::local::{Config, LocalStore};
@@ -47,6 +47,8 @@ struct Gate {
     offline: Arc<AtomicBool>,
     /// The next puts of `playing.json` fail as a dropped connection.
     fail_mark_puts: Arc<AtomicUsize>,
+    /// Every put waits while this is set (a slow server, a big island).
+    stall: Arc<AtomicBool>,
 }
 
 impl Gate {
@@ -74,6 +76,9 @@ impl Remote for Gate {
         self.inner.get(path)
     }
     fn put(&self, path: &str, bytes: &[u8], pre: &Precondition) -> save_relay::Result<String> {
+        while self.stall.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let failing = self.fail_mark_puts.load(Ordering::SeqCst);
         if path.ends_with("playing.json")
             && failing > 0
@@ -141,6 +146,7 @@ struct FakeConnector {
     broken: Arc<AtomicBool>,
     offline: Arc<AtomicBool>,
     fail_mark_puts: Arc<AtomicUsize>,
+    stall: Arc<AtomicBool>,
 }
 
 impl Connector for FakeConnector {
@@ -172,6 +178,7 @@ impl Connector for FakeConnector {
             broken: self.broken.clone(),
             offline: self.offline.clone(),
             fail_mark_puts: self.fail_mark_puts.clone(),
+            stall: self.stall.clone(),
         };
         Ok(Some(
             SaveRelay::new(Arc::new(gate), store, config.device).with_root(config.root),
@@ -353,6 +360,7 @@ impl Fx {
                 broken: Arc::new(AtomicBool::new(false)),
                 offline: Arc::new(AtomicBool::new(false)),
                 fail_mark_puts: Arc::new(AtomicUsize::new(0)),
+                stall: Arc::new(AtomicBool::new(false)),
             },
             remote,
             creds: Creds {
@@ -930,6 +938,89 @@ fn cancelling_the_sign_in_offers_retry_and_sign_in_again_and_a_retry_that_gets_4
     });
 }
 
+/// The way out of a broken setup (the iPad's blocked alert offers "Turn off save sync" on an
+/// error and a cancelled sign-in, never offline): save-relay's config and secret go, Not now is
+/// remembered, and the game boots with sync off and with nothing more asked.
+fn turned_off(fx: &Fx) {
+    assert!(fx.creds.get(&account()).unwrap().is_none());
+    assert!(!fx
+        .roots
+        .library
+        .join("save-relay/config/config.json")
+        .exists());
+    let ini = fs::read_to_string(fx.roots.data_root.join("config.ini")).unwrap();
+    assert!(ini.contains("relay.ask = 0"), "{ini}");
+    assert!(!fx.pulled.load(Ordering::SeqCst));
+    assert!(fx.booted.load(Ordering::SeqCst));
+    // The next start asks nothing and boots with sync off.
+    run(fx, |game| game.finish());
+    assert!(!fx.pulled.load(Ordering::SeqCst));
+}
+
+#[test]
+fn turn_off_on_an_error_screen_boots_with_sync_off_and_asks_nothing_again() {
+    let fx = Fx::new("turn-off-error");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    fx.connector.broken.store(true, Ordering::SeqCst);
+    run(&fx, |game| {
+        let Shown::Blocked(Blocked::Error(_)) = game.shown() else {
+            panic!("expected the error screen")
+        };
+        assert!(!game.returned());
+        game.reply(Reply::Blocked(BlockedAnswer::TurnOff));
+        game.finish();
+    });
+    turned_off(&fx);
+    assert_eq!(read_main(&fx.saves()), "main v1");
+}
+
+#[test]
+fn turn_off_after_a_cancelled_sign_in_boots_with_sync_off() {
+    let fx = Fx::new("turn-off-cancel");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    *fx.connector.accepted.lock().unwrap() = SECOND.into();
+    run(&fx, |game| {
+        let Shown::SignIn(_) = game.shown() else {
+            panic!("expected the form")
+        };
+        game.reply(Reply::SignIn(SignInAnswer::Cancel));
+        let Shown::Blocked(Blocked::SignInCancelled) = game.shown() else {
+            panic!("expected the cancelled screen")
+        };
+        game.reply(Reply::Blocked(BlockedAnswer::TurnOff));
+        game.finish();
+    });
+    turned_off(&fx);
+}
+
+#[test]
+fn a_blank_ipad_set_up_from_the_prompt_pulls_the_macs_island_without_a_conflict_or_held_screen() {
+    // #76 check 4: another device ("mac") has pushed an island; this iPad has no island, no
+    // user/device_save and no save-relay config yet.
+    let fx = Fx::new("blank-ipad");
+    let (mac, mac_saves) = fx.other("mac");
+    island(&mac_saves, "mac-1");
+    mac.push(&mac_saves, None).unwrap();
+    assert!(!fx.saves().exists());
+    run(&fx, |game| {
+        let Shown::SignIn(form) = game.shown() else {
+            panic!("expected the sign-in form")
+        };
+        assert!(form.allow_not_now);
+        game.reply(submit(PASSWORD));
+        // No conflict screen and no held-island screen: `finish` fails on any other screen.
+        game.finish();
+    });
+    assert!(fx.pulled.load(Ordering::SeqCst));
+    assert_eq!(read_main(&fx.saves()), "main mac-1");
+    assert_eq!(
+        fs::read_to_string(fx.saves().join("Villager0/personal.dat")).unwrap(),
+        "villager mac-1"
+    );
+}
+
 #[test]
 fn a_synced_quit_pushes_the_island_and_clears_the_waiting_mark() {
     let fx = Fx::new("quit");
@@ -1029,6 +1120,23 @@ fn a_panic_shows_the_error_screen_and_never_boots_without_syncing() {
         game.finish();
     });
     assert!(fx.booted.load(Ordering::SeqCst));
+}
+
+#[test]
+fn turn_off_on_the_panic_screen_forgets_the_setup_and_boots_with_sync_off() {
+    let fx = Fx::new("panic-turn-off");
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    fx.connector.panic_once.store(true, Ordering::SeqCst);
+    run(&fx, |game| {
+        let Shown::Blocked(Blocked::Error(_)) = game.shown() else {
+            panic!("expected the error screen")
+        };
+        assert!(!game.returned());
+        game.reply(Reply::Blocked(BlockedAnswer::TurnOff));
+        game.finish();
+    });
+    turned_off(&fx);
 }
 
 #[test]
@@ -1328,4 +1436,90 @@ fn sync_now_offline_or_on_a_broken_server_waits_for_the_next_start() {
     fs::remove_file(fx.roots.dirs().config.join("config.json")).unwrap();
     assert_eq!(player.sync_now_ready(false), SyncReady::Off);
     assert_eq!(player.sync_now(), SyncNow::Off);
+}
+
+// ---- the final push on terminate (issue #76) -------------------------------------------------
+
+#[test]
+fn a_second_final_push_while_one_runs_returns_at_once_and_runs_nothing() {
+    static FINAL: FinalPush = FinalPush::new();
+    let (release, held) = channel::<()>();
+    let (started_tx, started) = channel::<()>();
+    let first = std::thread::spawn(move || {
+        FINAL.run(|| {
+            started_tx.send(()).unwrap();
+            let _ = held.recv_timeout(Duration::from_secs(20));
+        })
+    });
+    started.recv_timeout(Duration::from_secs(20)).unwrap();
+    let ran = AtomicBool::new(false);
+    let begun = Instant::now();
+    // Both entry points, the blocking one and the bounded one, find it taken.
+    assert_eq!(
+        FINAL.run(|| ran.store(true, Ordering::SeqCst)),
+        Bounded::Taken
+    );
+    let bounded = FINAL.run_bounded(Duration::from_secs(10), || panic!("must not run"));
+    assert_eq!(bounded, Bounded::Taken);
+    assert!(begun.elapsed() < Duration::from_secs(1), "it waited");
+    assert!(!ran.load(Ordering::SeqCst));
+    release.send(()).unwrap();
+    assert_eq!(first.join().unwrap(), Bounded::Done);
+    // Done is taken too: a late caller does not push twice.
+    assert_eq!(FINAL.run(|| panic!("must not run")), Bounded::Taken);
+}
+
+#[test]
+fn a_final_push_over_the_bound_returns_late_leaves_the_island_waiting_and_goes_on() {
+    static FINAL: FinalPush = FinalPush::new();
+    let fx = Arc::new(Fx::new("terminate-late"));
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    fs::write(fx.saves().join("main.dat"), "main after-play").unwrap();
+    fx.connector.stall.store(true, Ordering::SeqCst);
+
+    let worker = fx.clone();
+    let begun = Instant::now();
+    let outcome = FINAL.run_bounded(Duration::from_millis(300), move || {
+        worker.player(&worker.no_prompt()).after_game();
+    });
+    assert_eq!(outcome, Bounded::Late);
+    assert!(begun.elapsed() < Duration::from_secs(5), "it blocked");
+    // Still uploading, and already marked: a kill now leaves the push for the next start.
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    assert_eq!(
+        FINAL.run_bounded(Duration::from_millis(10), || panic!("must not run")),
+        Bounded::Taken
+    );
+
+    // The server answers: the push finishes on its worker and clears the mark.
+    fx.connector.stall.store(false, Ordering::SeqCst);
+    let start = Instant::now();
+    while fx.roots.dirs().data.join("push-waiting").exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the push never finished"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (desktop, desktop_saves) = fx.other("desktop");
+    desktop.pull(&desktop_saves, None).unwrap();
+    assert_eq!(read_main(&desktop_saves), "main after-play");
+}
+
+#[test]
+fn a_final_push_inside_the_bound_is_done_and_clears_the_mark() {
+    static FINAL: FinalPush = FinalPush::new();
+    let fx = Arc::new(Fx::new("terminate-done"));
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    fs::write(fx.saves().join("main.dat"), "main after-play").unwrap();
+    let worker = fx.clone();
+    let outcome = FINAL.run_bounded(Duration::from_secs(20), move || {
+        worker.player(&worker.no_prompt()).after_game();
+    });
+    assert_eq!(outcome, Bounded::Done);
+    assert!(!fx.roots.dirs().data.join("push-waiting").exists());
 }

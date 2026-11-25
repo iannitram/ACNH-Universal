@@ -121,37 +121,129 @@ fn build_ios_args(gen: &Path, build: &Path) -> Vec<String> {
 
 /// The arguments of `tools/package_ios.sh`: the game inside the `.ipa` comes from the
 /// prepared folder `game`.
-fn package_ios_args(version: &str, build: &Path, game: &Path, delivery: &Path) -> Vec<String> {
-    vec![
+/// The bundled mods (`bundle_mods_args`) go beside the player in the app: `--mods <folder>`,
+/// when they could be made (they are optional: only the 60 fps setting needs them).
+fn package_ios_args(
+    version: &str,
+    build: &Path,
+    game: &Path,
+    delivery: &Path,
+    mods: Option<&Path>,
+) -> Vec<String> {
+    let mut args = vec![
         "tools/package_ios.sh".to_owned(),
         version.to_owned(),
         build.display().to_string(),
         "--game".to_owned(),
         game.display().to_string(),
         delivery.display().to_string(),
+    ];
+    if let Some(mods) = mods {
+        args.extend(["--mods".to_owned(), mods.display().to_string()]);
+    }
+    args
+}
+
+/// The arguments of `tools/bundle_mods.sh`: the pt-BR translation and the SpeedFix's files
+/// (the 60 fps `video.frame_rate` needs them) are put in `<dest>/mods/`, which the Apple
+/// packages carry beside the player, as the APK does.
+///
+/// The two zips are cached in `cache` (`ACNH_MODS_CACHE`), a folder of the prepared folder:
+/// the installed app's source copy is replaced on every Prepare, so a cache in it would
+/// download them again each time.
+fn bundle_mods_args(dest: &Path, cache: &Path) -> Vec<String> {
+    vec![
+        "env".to_owned(),
+        format!("ACNH_MODS_CACHE={}", cache.display()),
+        "tools/bundle_mods.sh".to_owned(),
+        dest.display().to_string(),
     ]
+}
+
+/// Where a prepare leaves the bundled mods it made for the package: the folder
+/// `bundle_mods.sh` is given, the `mods/` inside it, and the folder of its cached zips.
+fn bundled_mods_folder(out: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let dest = out.join("bundle-mods");
+    let mods = dest.join("mods");
+    (dest, mods, out.join("mods-cache"))
 }
 
 /// The arguments of `tools/package_mac.sh`: the contained app is the assembled `app`, with
 /// the prepared folder `game` inside it.
-fn package_mac_args(version: &str, app: &Path, game: &Path, delivery: &Path) -> Vec<String> {
-    vec![
+fn package_mac_args(
+    version: &str,
+    app: &Path,
+    game: &Path,
+    delivery: &Path,
+    mods: Option<&Path>,
+) -> Vec<String> {
+    let mut args = vec![
         "tools/package_mac.sh".to_owned(),
         version.to_owned(),
         app.display().to_string(),
         game.display().to_string(),
         delivery.display().to_string(),
-    ]
+    ];
+    if let Some(mods) = mods {
+        args.extend(["--mods".to_owned(), mods.display().to_string()]);
+    }
+    args
 }
 
-/// The version the Apple packages are named with: the engine's.
-fn package_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+/// The short build version the Apple packages are named with: `<BASE_VER>-<VCODE>` from
+/// `tools/build_version.sh` (for example `0.11.0-1100891`), which the package scripts take
+/// (they refuse the `+` of the long form). `base` has any `+build` suffix cut off.
+fn short_build_version(base: &str, vcode: &str) -> Option<String> {
+    let base = base.split('+').next().unwrap_or(base).trim();
+    let vcode = vcode.trim();
+    let version = format!("{base}-{vcode}");
+    let plain = |c: char| c.is_ascii_alphanumeric() || c == '.' || c == '-';
+    (!base.is_empty()
+        && !vcode.is_empty()
+        && vcode.chars().all(|c| c.is_ascii_digit())
+        && version.chars().all(plain))
+    .then_some(version)
+}
+
+/// The version the Apple packages are named with. In a git checkout (`root` has a `.git`)
+/// it is `tools/build_version.sh`'s, run there. A packaged source has no `.git` (the release
+/// makes it with `git archive`), so the script would print 0.0.0: the release writes the
+/// script's output to `BUILD_VERSION` in the source instead, and that is read. When neither
+/// answers, the engine's own version.
+fn package_version(root: &Path) -> String {
+    let fallback = || env!("CARGO_PKG_VERSION").to_owned();
+    let text = if root.join(".git").exists() {
+        let Ok(output) = std::process::Command::new("bash")
+            .arg("tools/build_version.sh")
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            return fallback();
+        };
+        if !output.status.success() {
+            return fallback();
+        }
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    } else {
+        match std::fs::read_to_string(root.join("BUILD_VERSION")) {
+            Ok(text) => text,
+            Err(_) => return fallback(),
+        }
+    };
+    let value = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .unwrap_or("")
+            .to_owned()
+    };
+    short_build_version(&value("BASE_VER"), &value("VCODE")).unwrap_or_else(fallback)
 }
 
 /// The `.zip` a Mac prepare makes in `delivery` (`package_mac.sh` names it).
-fn zip_path(delivery: &Path) -> PathBuf {
-    delivery.join(format!("ACNH-Universal-{}.zip", package_version()))
+fn zip_path(delivery: &Path, version: &str) -> PathBuf {
+    delivery.join(format!("ACNH-Universal-{version}.zip"))
 }
 
 /// The prepared folder of `os`'s own target in `dirs`: on the Mac `<data root>/prepared/`
@@ -165,8 +257,8 @@ pub fn prepared_folder(os: Os, dirs: &AppDirs) -> PathBuf {
 }
 
 /// The `.ipa` an iOS prepare makes in `delivery` (`package_ios.sh` names it).
-fn ipa_path(delivery: &Path) -> PathBuf {
-    delivery.join(format!("ACNH-Universal-{}.ipa", package_version()))
+fn ipa_path(delivery: &Path, version: &str) -> PathBuf {
+    delivery.join(format!("ACNH-Universal-{version}.ipa"))
 }
 
 /// A build tool a hub is missing, and how to install it. Required pieces stop a prepare
@@ -2432,6 +2524,36 @@ fn run_stages(
     }
 }
 
+/// One script of the Build stage, to its end; a failure is the Build error.
+fn run_script(runner: &mut dyn ScriptRunner, args: &[String], home: &Path) -> Result<()> {
+    runner
+        .run(Stage::Build, args)
+        .map_err(|log| build_error(Stage::Build, &log, home))?;
+    runner
+        .finish()
+        .map_err(|log| build_error(Stage::Build, &log, home))
+}
+
+/// Makes the bundled mods for the package. They are optional (only `video.frame_rate = 60`
+/// needs them, and they come from the network on a first run): when the script fails (offline,
+/// the release asset gone or changed) the package goes without them, and the mods are fetched
+/// from the hub or the first run with a network. Returns the folder to pass as `--mods`.
+fn bundle_mods_optional(
+    runner: &mut dyn ScriptRunner,
+    dest: &Path,
+    cache: &Path,
+    mods: &Path,
+) -> Option<PathBuf> {
+    // A leftover from an earlier run must not be packaged when this one fails.
+    let _ = std::fs::remove_dir_all(dest);
+    let args = bundle_mods_args(dest, cache);
+    let made = runner
+        .run(Stage::Build, &args)
+        .and_then(|()| runner.finish())
+        .is_ok();
+    made.then(|| mods.to_path_buf())
+}
+
 /// What the `ios` target does after the shared stages (which made the Mac player there too,
 /// as upstream's script cannot stop before it; the iOS build does not use it): the two packs
 /// when they are missing, the `iphoneos` build under the prepared folder, and the `.ipa` in
@@ -2465,18 +2587,13 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
     // libvpx's clone and build outlast the source copy, which is made anew each prepare.
     env.push(format!("NX_VPX_DIR={}", req.out.join("vpx-ios").display()));
     build_args.splice(0..0, env);
-    for args in [
-        build_args,
-        package_ios_args(package_version(), &build, &req.out, delivery),
-    ] {
-        runner
-            .run(Stage::Build, &args)
-            .map_err(|log| build_error(Stage::Build, &log, home))?;
-        runner
-            .finish()
-            .map_err(|log| build_error(Stage::Build, &log, home))?;
-    }
-    Ok(ipa_path(delivery))
+    let version = package_version(&runner.root());
+    let (mods_dest, mods, mods_cache) = bundled_mods_folder(&req.out);
+    run_script(runner, &build_args, home)?;
+    let mods = bundle_mods_optional(runner, &mods_dest, &mods_cache, &mods);
+    let args = package_ios_args(&version, &build, &req.out, delivery, mods.as_deref());
+    run_script(runner, &args, home)?;
+    Ok(ipa_path(delivery, &version))
 }
 
 /// What the `mac` target does after the shared stages: the two packs when they are missing,
@@ -2498,16 +2615,12 @@ fn mac_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
     let app = runner
         .assemble(&req.out.join("build"), install)
         .map_err(|e| build_error(Stage::Build, &[e.to_string()], home))?;
-    runner
-        .run(
-            Stage::Build,
-            &package_mac_args(package_version(), &app, &req.out, delivery),
-        )
-        .map_err(|log| build_error(Stage::Build, &log, home))?;
-    runner
-        .finish()
-        .map_err(|log| build_error(Stage::Build, &log, home))?;
-    Ok(zip_path(delivery))
+    let version = package_version(&runner.root());
+    let (mods_dest, mods, mods_cache) = bundled_mods_folder(&req.out);
+    let mods = bundle_mods_optional(runner, &mods_dest, &mods_cache, &mods);
+    let args = package_mac_args(&version, &app, &req.out, delivery, mods.as_deref());
+    run_script(runner, &args, home)?;
+    Ok(zip_path(delivery, &version))
 }
 
 /// What the `android` target does after the shared stages: ensures `romfs.pak` and `spirv.pak`,
@@ -3182,5 +3295,48 @@ fn redact_hex_run(run: &str, redacted: &mut String) {
         redacted.push_str("<hex>");
     } else {
         redacted.push_str(run);
+    }
+}
+
+#[cfg(test)]
+mod apple_version_tests {
+    use super::{package_version, short_build_version};
+
+    #[test]
+    fn a_packaged_source_without_git_is_named_by_its_build_version_file() {
+        let root = std::env::temp_dir().join(format!("acnh-pkg-version-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // No .git, no file: the engine's own version, never git's 0.0.0 of a bare folder.
+        assert_eq!(package_version(&root), env!("CARGO_PKG_VERSION"));
+        std::fs::write(
+            root.join("BUILD_VERSION"),
+            "BASE_VER=0.11.0\nVNAME=0.11.0\nVCODE=1100891\n",
+        )
+        .unwrap();
+        assert_eq!(package_version(&root), "0.11.0-1100891");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_short_build_is_the_base_and_the_code_without_a_plus() {
+        assert_eq!(
+            short_build_version("0.11.0", "1100891").as_deref(),
+            Some("0.11.0-1100891")
+        );
+        assert_eq!(
+            short_build_version("0.11.0+abc1234", "1100891").as_deref(),
+            Some("0.11.0-1100891")
+        );
+        assert_eq!(
+            short_build_version("0.0.0", "10042\n").as_deref(),
+            Some("0.0.0-10042")
+        );
+        // What the package scripts would refuse is never made.
+        assert_eq!(short_build_version("", "1100891"), None);
+        assert_eq!(short_build_version("0.11.0", ""), None);
+        assert_eq!(short_build_version("0.11.0", "11x"), None);
+        assert_eq!(short_build_version("0.11 0", "1100"), None);
+        assert_eq!(short_build_version("../0", "1100"), None);
     }
 }
