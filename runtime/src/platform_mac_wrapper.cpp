@@ -355,6 +355,11 @@ uint64_t window_generation() { return 1; }
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 float default_render_scale() { return 1.0f; }
+#if !TARGET_OS_IPHONE
+// No save sync inside the game on the Mac: the launcher syncs (platform.h, SaveSync). The iPad's is below.
+SaveSync save_sync_status() { return {}; }
+bool save_sync_now() { return false; }
+#endif
 
 // ---- input: first SDL gamepad + keyboard (sampled on the main thread) -----------------------------------------
 
@@ -913,6 +918,31 @@ extern "C" bool nx_relay_remember_not_now() {
 static void relay_after_game() {
     if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
 }
+
+// The Saves page's Sync now (platform.h, SaveSync): the background push on a worker (relay_ios.rs), and what the page
+// shows of it. Offered wherever the player has a data root, the relay's island.
+extern "C" bool acnh_relay_sync_now(const char* data_root);  // returns at once
+extern "C" void acnh_relay_sync_status(const char* data_root, int* ready, int* outcome, uint64_t* last, char* service,
+                                       size_t cap);
+
+namespace nx::plat {
+SaveSync save_sync_status() {
+    SaveSync s;
+    const char* root = std::getenv("NX_DATA_ROOT");
+    if (!root) return s;
+    s.offered = true;
+    uint64_t last = 0;
+    char service[64] = {};
+    acnh_relay_sync_status(root, &s.ready, &s.outcome, &last, service, sizeof service);
+    s.last_unix = int64_t(last);
+    s.service = service;
+    return s;
+}
+bool save_sync_now() {
+    const char* root = std::getenv("NX_DATA_ROOT");
+    return root && acnh_relay_sync_now(root);
+}
+}  // namespace nx::plat
 
 // The app went to the background. SDL's WILL_ENTER_BACKGROUND is UIKit's resign-active, which also fires for
 // Control Center or a notification pulled over the game, so the push waits for DID_ENTER_BACKGROUND. The watch runs
