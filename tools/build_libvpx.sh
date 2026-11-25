@@ -17,11 +17,28 @@ TAG=v1.16.0
 target=${1:-}
 case "$target" in android|iphoneos|iphonesimulator) ;; *) sed -n 7,10p "$0"; exit 2 ;; esac
 
-src=$root/private/third_party/libvpx-src-$TAG
+# NX_VPX_DIR moves the clone, the builds and the results out of the checkout: Prepare keeps them beside the prepared
+# folder, as its copy of the source is made anew every time. Default: private/third_party.
+work=${NX_VPX_DIR:-$root/private/third_party}
+final=$work
+src=$work/libvpx-src-$TAG
 if [ ! -d "$src/.git" ]; then
     rm -rf "$src"
+    mkdir -p "$work"
     git clone --quiet --depth 1 --branch "$TAG" https://chromium.googlesource.com/webm/libvpx "$src"
 fi
+# libvpx's configure and makefiles cannot cope with a space in a path (the Mac's ~/Library/Application Support has
+# one): build in a scratch folder without one, then copy the result to its place under $final.
+staged=0
+case "$work" in
+*[[:space:]]*)
+    staged=1
+    work=$(mktemp -d "${TMPDIR:-/tmp}/nxvpx.XXXXXX")
+    case "$work" in *[[:space:]]*) work=$(mktemp -d /tmp/nxvpx.XXXXXX) ;; esac
+    trap 'rm -rf "$work"' EXIT
+    cp -R "$src" "$work/libvpx-src-$TAG"
+    src=$work/libvpx-src-$TAG ;;
+esac
 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 common=(--disable-vp8-encoder --disable-vp9-encoder --enable-vp8-decoder --enable-vp9-decoder --disable-examples
         --disable-tools --disable-docs --disable-unit-tests --disable-install-bins --disable-install-srcs
@@ -33,28 +50,29 @@ if [ "$target" = android ]; then
     [ -d "$NDK" ] || { echo "NDK not found: $NDK"; exit 1; }
     host=$( [ "$(uname)" = Darwin ] && echo darwin-x86_64 || echo linux-x86_64 )
     bin=$NDK/toolchains/llvm/prebuilt/$host/bin
-    out=$root/private/third_party/libvpx-android
+    out=$work/libvpx-android
     vpxtarget=arm64-android-gcc
     export CC=$bin/aarch64-linux-android29-clang CXX=$bin/aarch64-linux-android29-clang++ AR=$bin/llvm-ar
     export AS=$CC LD=$CC STRIP=$bin/llvm-strip NM=$bin/llvm-nm
     extra=()
 else
     sdk=$target
+    extra=()
     sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
-    out=$root/private/third_party/libvpx-ios/$target
+    out=$work/libvpx-ios/$target
     if [ "$target" = iphoneos ]; then
         vpxtarget=arm64-darwin-gcc
         minflag=-miphoneos-version-min=15.0
+        extra=(--extra-cflags=-miphoneos-version-min=15.0)  # configure adds its own -miphoneos-version-min=7.0 first
     else
         vpxtarget=generic-gnu  # libvpx has no simulator target: plain C (the Simulator is for checking, not speed)
         minflag=-mios-simulator-version-min=15.0
     fi
     export CC="$(xcrun --sdk "$sdk" -f clang) -isysroot $sysroot $minflag" CXX="$(xcrun --sdk "$sdk" -f clang++) -isysroot $sysroot $minflag"
     export AR=$(xcrun --sdk "$sdk" -f ar) LD="$CC" AS="$CC"
-    extra=()
 fi
 
-build=$root/private/third_party/libvpx-build-$target
+build=$work/libvpx-build-$target
 rm -rf "$build" "$out"
 mkdir -p "$build"
 (
@@ -66,4 +84,11 @@ mkdir -p "$build"
 )
 [ -f "$out/lib/libvpx.a" ] || { echo "no $out/lib/libvpx.a"; exit 1; }
 cp "$src/LICENSE" "$out/LICENSE"
+if [ "$staged" = 1 ]; then
+    dest=$final${out#"$work"}
+    rm -rf "$dest"
+    mkdir -p "$(dirname "$dest")"
+    cp -R "$out" "$dest"
+    out=$dest
+fi
 echo "libvpx $TAG for $target: $out/lib/libvpx.a ($(du -h "$out/lib/libvpx.a" | cut -f1))"

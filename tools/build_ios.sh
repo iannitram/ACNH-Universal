@@ -12,6 +12,9 @@
 # .github/workflows/build-ios.yml: a static libMoltenVK.a from the Khronos release, and an SDL3 iOS CMake build.
 # This script follows that shape; no code is copied. MoltenVK is Apache-2.0, SDL3 zlib.
 #
+# It builds libvpx for the SDK too (tools/build_libvpx.sh, into private/third_party/libvpx-ios/<sdk>) when it is not
+# there, so the game's movies play, and refuses a configure that dropped it.
+#
 # It also builds the Rust runtime library (save-relay in the player, issue #172): cargo build -p acnh-runtime --release
 # --target aarch64-apple-ios (aarch64-apple-ios-sim for the simulator), and fails unless the SDL3 it built has the
 # GameController joystick driver (SDL_JOYSTICK_MFI), which the pads need.
@@ -142,6 +145,18 @@ runtime_lib=$cargo_target/$rust_target/release/libacnh_runtime.a
 [ -f "$runtime_lib" ] || { echo "error: $runtime_lib was not built" >&2; exit 1; }
 runtime_header=$(find "$cargo_target/$rust_target/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
 
+# ---- libvpx (the movies: tools/build_libvpx.sh; without it the game's movies are black frames, issue #253) ----------
+# NX_VPX_DIR (Prepare sets it beside the prepared folder, which survives; the source copy it runs in is made anew each
+# time) holds libvpx's clone, build and result; it needs git, make, perl and the network the first time only.
+export NX_VPX_DIR=${NX_VPX_DIR:-$root/private/third_party}
+vpx_root=$NX_VPX_DIR/libvpx-ios
+if [ ! -f "$vpx_root/$sdk/lib/libvpx.a" ]; then
+    "$root/tools/build_libvpx.sh" "$sdk" ||
+        { echo "error: libvpx could not be built (needs git, make, perl and the network, once): the movies would be black" >&2; exit 1; }
+fi
+[ -f "$vpx_root/$sdk/lib/libvpx.a" ] && [ -f "$vpx_root/$sdk/include/vpx/vpx_decoder.h" ] ||
+    { echo "error: libvpx for $sdk is missing under $vpx_root/$sdk (tools/build_libvpx.sh $sdk)" >&2; exit 1; }
+
 # ---- the app ----------------------------------------------------------------------------------------------------
 . "$root/tools/build_version.sh"
 ios_short_version=${BASE_VER%%-*}
@@ -154,9 +169,10 @@ cmake -S "$root" -B "$build" -G Ninja \
     -DNX_GAME=acnh -DNX_GEN_DIR="$gen" -DNX_GAME_FROM_FOLDER=OFF \
     -DNX_BUILD_VERSION="$VNAME" \
     -DNX_IOS_SHORT_VERSION="$ios_short_version" -DNX_IOS_BUNDLE_VERSION="$VCODE" \
-    -DNX_VULKAN_INCLUDE="$vulkan" -DNX_IOS_MOLTENVK="$mv_prefix/lib/libMoltenVK.a" \
+    -DNX_VULKAN_INCLUDE="$vulkan" -DNX_VPX_IOS="$vpx_root" -DNX_IOS_MOLTENVK="$mv_prefix/lib/libMoltenVK.a" \
     -DNX_RUNTIME_ARCHIVE="$runtime_lib" ${runtime_header:+-DNX_RUNTIME_INCLUDE="$(dirname "$runtime_header")"} \
     -DCMAKE_PREFIX_PATH="$sdl_prefix" -DSDL3_DIR="$sdl_prefix/lib/cmake/SDL3"
+grep -q 'NX_NO_VPX' "$build/build.ninja" && { echo "error: the app is configured without libvpx (NX_NO_VPX): the movies would be black" >&2; exit 1; }
 cmake --build "$build" --target acnh --parallel "$jobs"
 
 app=$build/ACNH.app
