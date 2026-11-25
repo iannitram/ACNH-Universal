@@ -131,9 +131,13 @@ struct SaveSync {
     int outcome = kSyncNone;  // SaveSyncOutcome: the last Sync now's
     int64_t last_unix = 0;  // when the island last synced in this game (0: not yet)
     std::string service;    // "Dropbox", "Nextcloud"; "" when unknown
+    bool can_set_up = false;  // iOS: sync is off after Not now, and save_sync_set_up() brings the setup prompt back
 };
 SaveSync save_sync_status();  // files and the credential store only, no network: a few times a second at most
 bool save_sync_now();         // uploads on a worker thread and returns at once; false when it did not start
+// iOS: clears relay.ask (a "Not now" at the first start), so the next start shows the save sync setup prompt again.
+// False when it could not be saved; elsewhere always false (Android's start screen has its own setup button).
+bool save_sync_set_up();
 #if defined(__ANDROID__)
 // The app started again from its launcher activity, and this process ended (settings that take effect at start).
 [[noreturn]] void restart_app();

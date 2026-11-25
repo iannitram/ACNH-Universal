@@ -1497,6 +1497,11 @@ void save_sync_section() {
         if (reason && !running) ImGui::TextWrapped("%s", reason);
         if (s.last_unix > 0) ImGui::TextWrapped("%s", trf("saves.sync.last", sync_time(s.last_unix)).c_str());
         ImGui::PopStyleColor();
+        // Not now at the first start left sync off: nothing else brings the setup prompt back.
+        if (s.can_set_up && button(tr("saves.sync.setup"), w)) {
+            toast(tr(plat::save_sync_set_up() ? "saves.sync.setup.done" : "saves.sync.setup.error"));
+            read_at = -100;
+        }
     });
 }
 

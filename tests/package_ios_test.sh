@@ -235,7 +235,7 @@ unzip -tq "$ipa3" > /dev/null || die "--small archive fails unzip -t"
 bash "$root/tools/check_release_files.sh" < "$work/small.list" > /dev/null || die "--small list fails the release check"
 files=$small_out/acnh-universal-game/ios
 [ -f "$files/manifest.json" ] || die "--small wrote no manifest.json"
-small_ls=$(ls -A "$small_out" | sort | tr '\n' ' ')
+small_ls=$(ls -A "$small_out" | LC_ALL=C sort | tr '\n' ' ')
 [ "$small_ls" = "ACNH-Universal-smallv.ipa acnh-universal-game " ] || die "--small left other files in the out folder: $small_ls"
 python3 - "$files" "$small" "$build_id" <<'PY' || die "the manifest does not match the files"
 import hashlib, json, os, sys
@@ -343,6 +343,12 @@ grep -q 'ACNH\.app/mods/speedfix60/romfs/Pack/Decoy.pack$' "$work/mods2.list" ||
 env CI=1 bash "$script" mods3 "$build" --game "$decoy" "$work/out-mods3" --mods "$mods" > /dev/null
 zipinfo -1 "$work/out-mods3/ACNH-Universal-mods3.ipa" > "$work/mods3.list"
 if grep -q FromPrepared "$work/mods3.list"; then die "the prepared folder's mods/ was copied"; fi
+# --small takes --mods too: mods/ in the app, no game/, the Dropbox files staged
+env CI=1 bash "$script" smallmods "$build" --small "$decoy" --build-id "$build_id" "$work/out-small-mods" --mods "$mods" > /dev/null
+zipinfo -1 "$work/out-small-mods/ACNH-Universal-smallmods.ipa" > "$work/smallmods.list"
+grep -q 'ACNH\.app/mods/speedfix60/romfs/Pack/Decoy.pack$' "$work/smallmods.list" || die "--small with --mods lost the mods"
+if grep -q '^Payload/ACNH\.app/game' "$work/smallmods.list"; then die "--small with --mods has a game/ folder"; fi
+[ -f "$work/out-small-mods/acnh-universal-game/ios/manifest.json" ] || die "--small with --mods wrote no manifest"
 # without --mods the archive has no mods/ folder
 if grep -q 'ACNH\.app/mods' "$work/game.list"; then die "an archive made without --mods holds mods/"; fi
 say "--mods carries exactly the bundled mods in the app"

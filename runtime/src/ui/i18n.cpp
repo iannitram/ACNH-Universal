@@ -532,6 +532,9 @@ const Entry kEn[] = {
     {"saves.sync.signed_out", "Not signed in to {}: nothing was sent. The next start asks you to sign in again and sends it then."},
     {"saves.sync.offline", "No connection: the island is sent at the next start, or try again."},
     {"saves.sync.error", "Save sync failed: the island is sent at the next start (nx.log says why)."},
+    {"saves.sync.setup", "Set up save sync"},
+    {"saves.sync.setup.done", "The setup prompt comes back the next time you start the game: quit and open it again."},
+    {"saves.sync.setup.error", "Could not save the setting (nx.log says why)."},
 };
 
 const Entry kPtBr[] = {
@@ -839,6 +842,9 @@ const Entry kPtBr[] = {
     {"saves.sync.signed_out", "Sem login em {}: nada foi enviado. A próxima abertura pede para entrar de novo e envia então."},
     {"saves.sync.offline", "Sem conexão: a ilha é enviada na próxima abertura, ou tente de novo."},
     {"saves.sync.error", "A sincronização falhou: a ilha é enviada na próxima abertura (o nx.log diz por quê)."},
+    {"saves.sync.setup", "Configurar a sincronização"},
+    {"saves.sync.setup.done", "A tela de configuração volta na próxima vez que você abrir o jogo: saia e abra de novo."},
+    {"saves.sync.setup.error", "Não foi possível salvar a configuração (o nx.log diz por quê)."},
 };
 
 const Entry kEs[] = {
@@ -1135,6 +1141,9 @@ const Entry kEs[] = {
     {"saves.sync.signed_out", "Sin sesión en {}: no se ha enviado nada. El próximo inicio te pide que vuelvas a entrar y la envía entonces."},
     {"saves.sync.offline", "Sin conexión: la isla se envía en el próximo inicio, o vuelve a intentarlo."},
     {"saves.sync.error", "La sincronización ha fallado: la isla se envía en el próximo inicio (nx.log dice por qué)."},
+    {"saves.sync.setup", "Configurar la sincronización"},
+    {"saves.sync.setup.done", "La pantalla de configuración vuelve la próxima vez que abras el juego: sal y ábrelo de nuevo."},
+    {"saves.sync.setup.error", "No se pudo guardar el ajuste (nx.log dice por qué)."},
 };
 
 const Entry kFr[] = {
@@ -1421,6 +1430,9 @@ const Entry kFr[] = {
     {"saves.sync.signed_out", "Non connecté à {} : rien n'a été envoyé. Le prochain démarrage vous demande de vous reconnecter et l'envoie alors."},
     {"saves.sync.offline", "Pas de connexion : l'île est envoyée au prochain démarrage, ou réessayez."},
     {"saves.sync.error", "La synchronisation a échoué : l'île est envoyée au prochain démarrage (nx.log dit pourquoi)."},
+    {"saves.sync.setup", "Configurer la synchronisation"},
+    {"saves.sync.setup.done", "L'écran de configuration revient au prochain lancement du jeu : quittez puis rouvrez-le."},
+    {"saves.sync.setup.error", "Impossible d'enregistrer le réglage (nx.log dit pourquoi)."},
 };
 
 const Entry kDe[] = {

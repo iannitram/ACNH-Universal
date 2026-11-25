@@ -30,7 +30,7 @@ usage() {
     echo "usage: tools/package_ios.sh <version> <build dir> --game <prepared folder> <out folder>" >&2
     echo "       tools/package_ios.sh <version> <build dir> --no-game <out folder>" >&2
     echo "       tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> [--abi <12 hex>] [--no-folder] <out folder>" >&2
-    echo "       (any one may end with: --mods <mods folder>)" >&2
+    echo "       (any of the three may end with: --mods <mods folder>)" >&2
     exit 2
 }
 fail() { echo "error: $*" >&2; exit 1; }
