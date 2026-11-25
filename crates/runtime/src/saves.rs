@@ -1396,7 +1396,7 @@ fn volumes() -> Vec<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        v = subdirs(Path::new("/Volumes"));
+        v.extend(subdirs(Path::new("/Volumes")));
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {

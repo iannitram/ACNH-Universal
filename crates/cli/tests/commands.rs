@@ -168,12 +168,18 @@ fn steam_add_writes_the_appimage_shortcut_with_persistent_artwork() {
     let icon = AppDirs::new(&vars).data.join("steam-launcher-icon.png");
     assert_eq!(fs::read(&icon).unwrap(), b"fake icon");
     let file = user.join("config/shortcuts.vdf");
+    let prev_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &home);
     let expected = steam::launcher_shortcut(
         Path::new("unused"),
         Some(&appimage),
         "Animal Crossing: New Horizons",
         &icon,
     );
+    match prev_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
     let mut shortcuts = vec![];
     steam::upsert(&mut shortcuts, &expected).unwrap();
     assert_eq!(vdf::read(&fs::read(file).unwrap()).unwrap(), shortcuts);

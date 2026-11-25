@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdlib>
+#include <ctime>
 #include <mach/mach.h>
 #include <sys/mman.h>
 
@@ -18,6 +19,8 @@ namespace plat {
 bool reserve(uint64_t, uint64_t) { return false; } // thunk is optional
 bool commit(uint64_t addr, uint64_t size) { return mprotect(reinterpret_cast<void*>(addr), size, PROT_READ | PROT_WRITE) == 0; }
 void decommit(uint64_t addr, uint64_t size) { mprotect(reinterpret_cast<void*>(addr), size, PROT_NONE); }
+// memory_wrapper.cpp times its waits with this; the player's own copy is in platform_mac_wrapper.cpp.
+uint64_t monotonic_ns() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 }
 }
 
