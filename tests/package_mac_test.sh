@@ -25,6 +25,8 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok: $*"; }
+# shellcheck source=tests/race_rm.sh
+. "$root/tests/race_rm.sh"
 # Run the script under CI, as the macOS job does.
 ci() { CI=1 "$script" "$@"; }
 # `refused <reason text> <script args>`: the script exits non-zero and its message has the reason.
@@ -84,6 +86,35 @@ ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" <"$work/stub
 ! grep -q 'Contents/Resources/game/' "$work/stub.list" || fail "stub zip holds a game folder"
 grep -q '^ACNH-Universal.app/Contents/MacOS/acnh$' "$work/stub.list" || fail "stub zip is missing the player"
 pass "stub zip"
+
+# ---- Finder or Dropbox writing into the staging folder while it is removed: the zip still succeeds, nothing left ----
+race_bin=$work/race-bin
+make_race_rm "$race_bin"
+export RACE_MARKS=$work/race-marks
+mkdir -p "$RACE_MARKS"
+out=$work/out-race
+PATH="$race_bin:$PATH" ci race "$app" --no-game "$out" >"$work/race.log" 2>&1 \
+  || { cat "$work/race.log" >&2; fail "a write into the staging folder during clean-up failed the package"; }
+[ -e "$RACE_MARKS/.ACNH-Universal-race.partial" ] || fail "the racing rm never ran on the staging folder"
+[ "$(ls -A "$out")" = "ACNH-Universal-race.zip" ] || fail "the raced run left files behind: $(ls -A "$out")"
+unset RACE_MARKS
+# A leftover staging folder that cannot be removed stops the run with a clear message.
+stuck_bin=$work/stuck-bin
+mkdir -p "$stuck_bin"
+cat >"$stuck_bin/rm" <<'SHIM'
+#!/bin/bash
+for a in "$@"; do case "$a" in */.ACNH-Universal-*.partial) echo "rm: $a: Directory not empty" >&2; exit 1 ;; esac; done
+exec /bin/rm "$@"
+SHIM
+chmod +x "$stuck_bin/rm"
+mkdir -p "$out/.ACNH-Universal-stuck.partial"
+if PATH="$stuck_bin:$PATH" REMOVE_TREE_WAIT=0 ci stuck "$app" --no-game "$out" >"$work/stuck.log" 2>&1; then
+  fail "a leftover staging folder that cannot be removed did not stop the run"
+fi
+grep -q 'left from an earlier run' "$work/stuck.log" || { cat "$work/stuck.log" >&2; fail "no clear message for a stuck staging folder"; }
+[ ! -e "$out/ACNH-Universal-stuck.zip" ] || fail "a zip was written although the staging folder was stuck"
+chmod -R u+w "$out/.ACNH-Universal-stuck.partial"; rm -rf "$out/.ACNH-Universal-stuck.partial"
+pass "a write into the staging folder during clean-up does not fail the zip"
 
 # ---- empty decoys: the game's names, and others that must never be copied ----
 prep=$work/prepared

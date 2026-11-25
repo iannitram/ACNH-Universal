@@ -2875,9 +2875,8 @@ fn stage_game_delivery(
     let staging = parent.join(format!(".{name}.new"));
     let backup = parent.join(format!(".{name}.old"));
 
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging)?;
-    }
+    // A leftover of an interrupted run would land in the manifest.
+    remove_dir_retrying(&staging)?;
     std::fs::create_dir_all(&staging)?;
 
     if let Some(game_lib) = game_lib {
@@ -2910,17 +2909,47 @@ fn stage_game_delivery(
     // Write manifest.json last so an incomplete folder is never mistaken for a finished one.
     std::fs::write(staging.join("manifest.json"), manifest.to_json().as_bytes())?;
 
-    if backup.exists() {
-        std::fs::remove_dir_all(&backup)?;
-    }
+    // A leftover backup must go first: the rename below needs its name free.
+    remove_dir_retrying(&backup)?;
     if delivery.exists() {
         std::fs::rename(delivery, &backup)?;
     }
     std::fs::rename(&staging, delivery)?;
-    if backup.exists() {
-        let _ = std::fs::remove_dir_all(&backup);
-    }
+    // The delivery is in place: an old copy that will not go is left for the next run.
+    let _ = remove_dir_retrying(&backup);
     Ok(())
+}
+
+/// Removes a folder in the Dropbox delivery folder, trying again while Finder or the Dropbox
+/// client writes into it (a `.DS_Store` written during the walk makes the removal fail with
+/// "Directory not empty"). A folder that is not there is already removed.
+fn remove_dir_retrying(dir: &Path) -> std::io::Result<()> {
+    remove_dir_retrying_with(dir, 5, std::time::Duration::from_secs(1), &mut |d| {
+        std::fs::remove_dir_all(d)
+    })
+}
+
+fn remove_dir_retrying_with(
+    dir: &Path,
+    tries: u32,
+    wait: std::time::Duration,
+    remove: &mut dyn FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        if std::fs::symlink_metadata(dir).is_err() {
+            return Ok(());
+        }
+        match remove(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if attempt >= tries => return Err(e),
+            Err(_) => {
+                attempt += 1;
+                std::thread::sleep(wait);
+            }
+        }
+    }
 }
 
 fn copy_dir_follow_symlinks(src: &Path, dst: &Path) -> Result<()> {
@@ -3439,5 +3468,73 @@ mod apple_version_tests {
         assert_eq!(short_build_version("0.11.0", "11x"), None);
         assert_eq!(short_build_version("0.11 0", "1100"), None);
         assert_eq!(short_build_version("../0", "1100"), None);
+    }
+}
+
+#[cfg(test)]
+mod remove_dir_retrying_tests {
+    use super::remove_dir_retrying_with;
+    use std::io::{Error, ErrorKind};
+    use std::time::Duration;
+
+    fn folder(tag: &str) -> std::path::PathBuf {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("acnh-remove-{tag}-"))
+            .tempdir()
+            .unwrap()
+            .keep();
+        std::fs::write(dir.join("file"), b"x").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_write_during_the_removal_is_tried_again_until_the_folder_goes() {
+        let dir = folder("race");
+        let mut calls = 0;
+        // Finder or Dropbox writes a .DS_Store into the folder twice while it is being removed.
+        let result = remove_dir_retrying_with(&dir, 5, Duration::ZERO, &mut |d| {
+            calls += 1;
+            if calls < 3 {
+                std::fs::write(d.join(".DS_Store"), b"").unwrap();
+                return Err(Error::other("Directory not empty"));
+            }
+            std::fs::remove_dir_all(d)
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls, 3);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_folder_that_never_goes_is_an_error_after_the_last_try() {
+        let dir = folder("stuck");
+        let mut calls = 0;
+        let result = remove_dir_retrying_with(&dir, 4, Duration::ZERO, &mut |_| {
+            calls += 1;
+            Err(Error::other("Directory not empty"))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 4);
+        assert!(dir.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_that_is_not_there_or_goes_first_is_already_removed() {
+        let missing =
+            std::env::temp_dir().join(format!("acnh-remove-missing-{}", std::process::id()));
+        let mut calls = 0;
+        let counting = &mut |_: &std::path::Path| {
+            calls += 1;
+            Ok(())
+        };
+        assert!(remove_dir_retrying_with(&missing, 5, Duration::ZERO, counting).is_ok());
+        assert_eq!(calls, 0);
+        let dir = folder("gone");
+        let result = remove_dir_retrying_with(&dir, 5, Duration::ZERO, &mut |d| {
+            std::fs::remove_dir_all(d).unwrap();
+            Err(Error::from(ErrorKind::NotFound))
+        });
+        assert!(result.is_ok());
     }
 }

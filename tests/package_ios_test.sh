@@ -26,6 +26,8 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 say() { echo "ok: $*"; }
+# shellcheck source=tests/race_rm.sh
+. "$root/tests/race_rm.sh"
 die() { echo "FAIL: $*" >&2; exit 1; }
 
 if [ -z "${RUNNER_TEMP:-}" ]; then
@@ -368,6 +370,48 @@ refuse "a mods folder without the SpeedFix" "speedfix60" "$work/out-badmods" \
     env CI=1 bash "$script" badmods "$build" --no-game "$work/out-badmods" --mods "$badm"
 refuse "a missing mods folder" "not a folder" "$work/out-badmods" \
     env CI=1 bash "$script" badmods "$build" --no-game "$work/out-badmods" --mods "$work/bundled-missing"
+
+# 3d. Finder or Dropbox writing into the staging folder (or the old game folder) while it is removed: the finished
+# package still succeeds and nothing is left behind (the 1101018 Prepare run stopped this way in a Dropbox folder).
+race_bin=$work/race-bin
+make_race_rm "$race_bin"
+export RACE_MARKS=$work/race-marks
+mkdir -p "$RACE_MARKS"
+PATH="$race_bin:$PATH" env CI=1 bash "$script" race "$build" --no-game "$work/out-race" > "$work/race.log" 2>&1 \
+    || { cat "$work/race.log" >&2; die "a write into the staging folder during clean-up failed the package"; }
+[ -e "$RACE_MARKS/.ACNH-Universal-race.partial" ] || die "the racing rm never ran on the staging folder"
+[ -f "$work/out-race/ACNH-Universal-race.ipa" ] || die "the raced run wrote no .ipa"
+[ "$(ls -A "$work/out-race")" = "ACNH-Universal-race.ipa" ] || die "the raced run left the staging folder behind"
+rm -f "$RACE_MARKS"/*
+for run in 1 2; do # the second run replaces the game folder, so ios.old is removed while being written to
+    PATH="$race_bin:$PATH" env -u CI -u GITHUB_ACTIONS bash "$script" racesm "$build" --small "$small" --build-id "$build_id" \
+        "$work/out-race-small" > "$work/race-small.log" 2>&1 \
+        || { cat "$work/race-small.log" >&2; die "a write during clean-up failed --small (run $run)"; }
+done
+[ -e "$RACE_MARKS/ios.old" ] || die "the racing rm never ran on ios.old"
+[ -f "$work/out-race-small/acnh-universal-game/ios/manifest.json" ] || die "the raced --small run lost the game folder"
+[ ! -e "$work/out-race-small/acnh-universal-game/ios.old" ] || die "the raced --small run left ios.old behind"
+[ "$(ls -A "$work/out-race-small" | LC_ALL=C sort | tr '\n' ' ')" = "ACNH-Universal-racesm.ipa acnh-universal-game " ] \
+    || die "the raced --small run left other files: $(ls -A "$work/out-race-small")"
+unset RACE_MARKS
+# A leftover ios.old that cannot be removed stops the run with a clear message, and ios is not moved inside it.
+stuck_bin=$work/stuck-bin
+mkdir -p "$stuck_bin"
+cat > "$stuck_bin/rm" <<'SHIM'
+#!/bin/bash
+for a in "$@"; do case "$a" in */ios.old) echo "rm: $a: Directory not empty" >&2; exit 1 ;; esac; done
+exec /bin/rm "$@"
+SHIM
+chmod +x "$stuck_bin/rm"
+mkdir -p "$work/out-race-small/acnh-universal-game/ios.old"
+if PATH="$stuck_bin:$PATH" REMOVE_TREE_WAIT=0 env -u CI -u GITHUB_ACTIONS bash "$script" racesm "$build" --small "$small" \
+    --build-id "$build_id" "$work/out-race-small" > "$work/stuck.log" 2>&1; then
+    die "a leftover ios.old that cannot be removed did not stop the run"
+fi
+grep -q 'ios.old is left from an earlier run' "$work/stuck.log" || { cat "$work/stuck.log" >&2; die "no clear message for a stuck ios.old"; }
+[ -f "$work/out-race-small/acnh-universal-game/ios/manifest.json" ] || die "the game folder in place was moved"
+[ ! -e "$work/out-race-small/acnh-universal-game/ios.old/ios" ] || die "ios was moved inside the leftover ios.old"
+say "a write into the staging folder or ios.old during clean-up does not fail the package"
 
 # 4. Past 4 GB: zip -qry makes a ZIP64 archive that unzip -t passes.
 big=$work/big
