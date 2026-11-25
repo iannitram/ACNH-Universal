@@ -296,7 +296,10 @@ fn bad_manifests_are_refused() {
         assert!(parsed.is_err(), "{bad}");
     }
     assert!(Manifest::from_json(b"not json").is_err());
-    assert!(Manifest::from_json(br#"{"version":1,"files":[]}"#).is_err());
+    // No build id or ABI: parses (they default to empty) but never validates.
+    assert!(Manifest::from_json(br#"{"version":1,"files":[]}"#)
+        .and_then(|m| m.validate(BUILD_ID, ABI))
+        .is_err());
     let ok = manifest(entry("a.bin", &hash));
     Manifest::from_json(ok.as_bytes())
         .unwrap()
