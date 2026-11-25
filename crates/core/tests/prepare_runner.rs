@@ -54,6 +54,10 @@ struct Fake {
     probed: Vec<String>,
     /// The `(build, install)` folders the Mac's app was assembled from and into.
     assembled: Vec<(PathBuf, PathBuf)>,
+    /// What the Version stage writes to version.ini (`IOS_VERSION_INI` when `None`).
+    ini: Option<&'static str>,
+    /// The source folder `root` answers with (the checkout when `None`).
+    source_dir: Option<PathBuf>,
 }
 
 /// A script call without the `env PATH=...` a Mac that has Homebrew puts before it.
@@ -120,8 +124,18 @@ impl ScriptRunner for Fake {
     fn version(&mut self, req: &Request) -> Result<(), Error> {
         // What the Version stage writes.
         std::fs::create_dir_all(&req.out).unwrap();
-        std::fs::write(req.out.join("version.ini"), IOS_VERSION_INI).unwrap();
+        std::fs::write(
+            req.out.join("version.ini"),
+            self.ini.unwrap_or(IOS_VERSION_INI),
+        )
+        .unwrap();
         Ok(())
+    }
+
+    fn root(&self) -> PathBuf {
+        self.source_dir
+            .clone()
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
     }
 
     fn recompile(&mut self, _req: &Request) -> Result<(), Error> {
@@ -1473,6 +1487,51 @@ fn ios_without_the_transfers_folder_stops_before_the_first_stage() {
         other => panic!("{other:?}"),
     }
     assert!(fake.ran.is_empty() && seen.is_empty());
+}
+
+#[test]
+fn ios_refuses_a_prepared_folder_without_a_build_id_before_any_script() {
+    for ini in [
+        "version = 3.0.2\n",
+        "build_id = \nversion = 3.0.2\n",
+        "build_id = xyz\n",
+    ] {
+        let (req, delivery) = ios_request("ios-bad-build-id");
+        let mut fake = Fake::with_ios_tools();
+        fake.ini = Some(ini);
+        let mut seen = vec![];
+        let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
+            seen.push(s)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::Build(m) if m.contains("32 hex digit build id")),
+            "{error:?}"
+        );
+        assert!(!fake.ran.contains(&Stage::Build), "{ini:?}");
+        assert!(fake
+            .args
+            .iter()
+            .all(|a| !a.iter().any(|x| x.contains("package_ios"))));
+        assert!(!delivery.join("acnh-universal-game").exists());
+    }
+}
+
+#[test]
+fn ios_refuses_when_the_runtime_headers_are_missing_before_any_script() {
+    let (req, _) = ios_request("ios-no-headers");
+    let mut fake = Fake::with_ios_tools();
+    fake.source_dir = Some(req.out.join("empty-source"));
+    let mut seen = vec![];
+    let error = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Build(m) if m.contains("ABI of the small .ipa is unknown")),
+        "{error:?}"
+    );
+    assert!(!fake.ran.contains(&Stage::Build));
 }
 
 #[test]
