@@ -555,6 +555,8 @@ fn make_tree_writable(path: &Path) -> acnh_core::Result<()> {
     }
     #[cfg(not(unix))]
     {
+        // Windows has only the read-only attribute: clearing it is what "writable" means there.
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
     }
     std::fs::set_permissions(path, perms)?;
