@@ -54,6 +54,7 @@ bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t no
 #endif
 
 #include "platform_sdl.h"
+#include "glyph_layout.h"
 #include "sdl_audio_frame.h"
 #include "sdl_audio_queue.h"
 #include "nfp_host.h"
@@ -192,6 +193,9 @@ uint64_t window_generation() { return 1; }
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 float default_render_scale() { return 1.0f; }
+// No save sync inside the game here: the launcher syncs (platform.h, SaveSync).
+SaveSync save_sync_status() { return {}; }
+bool save_sync_now() { return false; }
 
 // ---- input: first SDL gamepad + keyboard (sampled on the main thread) -----------------------------------------
 
@@ -214,9 +218,9 @@ const char* const kKeyNames[22][2] = {
 // Nintendo's own pads (a Switch Pro Controller, Joy-Cons) keep A on the right face button; every other keeps confirm
 // on the bottom one (input.layout auto).
 static bool nintendo_pad(SDL_Gamepad* pad) {
-    const char* t = pad ? SDL_GetGamepadStringForType(SDL_GetGamepadType(pad)) : nullptr;
-    const std::string s = t ? t : "";
-    return s.rfind("switch", 0) == 0 || s.rfind("joycon", 0) == 0 || (pad && SDL_GetGamepadVendor(pad) == 0x057e);
+    if (!pad) return false;
+    const char* t = SDL_GetGamepadStringForType(SDL_GetGamepadType(pad));
+    return nx::nintendo_pad_by(t ? t : "", SDL_GetGamepadVendor(pad));
 }
 
 const InputOptions& input_options() {
@@ -420,12 +424,7 @@ std::string controller_kind() {
         case SDL_GAMEPAD_TYPE_PS3:
         case SDL_GAMEPAD_TYPE_PS4:
         case SDL_GAMEPAD_TYPE_PS5: return "playstation";
-        default: {
-            // The console's own pads, by SDL's name for their type ("switchpro", "joyconleft", ...).
-            const char* t = SDL_GetGamepadStringForType(SDL_GetGamepadType(pad));
-            std::string s = t ? t : "";
-            return s.rfind("switch", 0) == 0 || s.rfind("joycon", 0) == 0 ? "switch" : "generic";
-        }
+        default: return nintendo_pad(pad) ? "switch" : "generic";
     }
 }
 

@@ -12,6 +12,9 @@
 #if !defined(__ANDROID__)
 #include <SDL3/SDL.h>
 #endif
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -36,6 +39,9 @@
 #include "bug_report.h"
 #include "config.h"
 #include "touch_layout.h"
+#if NX_TOUCH_IOS
+#include "touch_input.h"
+#endif
 #include "game_clock.h"
 #include "platform.h"
 #include "saves.h"
@@ -55,6 +61,15 @@ namespace nx::ui {
 namespace {
 
 namespace fs = std::filesystem;
+
+// Android and iOS: a phone or tablet. Its texts say so where the desktop's speak of a computer, a window or what only a
+// PC can offer: PER_DEVICE("<key>") is "<key>.mobile" there (i18n.cpp), the desktop's own key elsewhere.
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+constexpr bool kMobile = true;
+#else
+constexpr bool kMobile = false;
+#endif
+#define PER_DEVICE(key) (kMobile ? key ".mobile" : key)
 
 ImU32 rgb(int r, int g, int b, int a = 255) { return IM_COL32(r, g, b, a); }
 
@@ -439,7 +454,7 @@ bool button(const char* text, float width = 0) {
     return res;
 }
 
-#if defined(__ANDROID__)
+#if NX_TOUCH_SETTINGS
 // Settings > Controls > Edit layout (#42): the screen in small, with the on-screen buttons where they are drawn. A
 // finger drags a button, and the group it belongs to (the face buttons and the d-pad move as a whole), to where it
 // should be; input.touch_layout keeps the offsets (touch_layout.cpp). Reset puts every button back.
@@ -447,7 +462,12 @@ bool g_touch_edit = false;
 
 void touch_layout_editor() {
     ImGuiIO& io = ImGui::GetIO();
-    const float aspect = io.DisplaySize.y > 0 ? io.DisplaySize.x / io.DisplaySize.y : 16.0f / 9.0f;
+    float aspect = io.DisplaySize.y > 0 ? io.DisplaySize.x / io.DisplaySize.y : 16.0f / 9.0f;
+#if NX_TOUCH_IOS
+    // The game lays the buttons out inside the safe area (touch_input.cpp): preview, hit test and clamp use its shape,
+    // so the stored offsets mean the same thing in the editor and in play (and acnh_buttons keeps one cached aspect).
+    aspect = plat::touch_input_layout_aspect();
+#endif
     const float w = ImGui::GetContentRegionAvail().x, h = w / aspect;
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("##touch_layout", ImVec2(w, h));
@@ -600,7 +620,7 @@ void page_game() {
     row("video.show_fps", "video.show_fps.desc", [&](float w) { toggle("video.show_fps", config_show_fps(), w); });
 
     section("game.section.time");
-    row("game.time_travel.sync", "game.time_travel.sync.desc", [&](float w) { toggle("game.time_travel_enabled", true, w); });
+    row("game.time_travel.sync", PER_DEVICE("game.time_travel.sync.desc"), [&](float w) { toggle("game.time_travel_enabled", true, w); });
     if (!config_get_bool("game.time_travel_enabled", true)) {
         static int s_year = 2020, s_month = 1, s_day = 1, s_hour = 0, s_minute = 0;
         static uint64_t s_time_fields_gen = 0;
@@ -967,7 +987,7 @@ void page_online() {
     }
     section("online.section.local");
     const bool busy = ldn_enabled();  // held until the session ends (hle_ldn.cpp): no switch to touch
-    row("online.enabled", tr(busy ? "online.enabled.busy" : "online.enabled.desc"), [&](float w) {
+    row("online.enabled", tr(busy ? "online.enabled.busy" : PER_DEVICE("online.enabled.desc")), [&](float w) {
         if (busy) ImGui::TextDisabled("%s", tr("common.on"));
         else toggle("online.enabled", false, w);
     });
@@ -982,7 +1002,7 @@ void page_online() {
     const LinkStatus s = link_status();
     {
         static bool shown = false;
-        row("online.address", tr("online.address.desc"), [&](float w) {
+        row("online.address", tr(PER_DEVICE("online.address.desc")), [&](float w) {
             ImGui::TextUnformatted(shown ? address.c_str() : "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2");
             const float half = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
             if (ImGui::Button(tr(shown ? "online.hide" : "online.show"), ImVec2(half, 0))) shown = !shown;
@@ -1029,7 +1049,7 @@ void page_online() {
 void page_video() {
     // Essential settings stay visible. The Advanced toggle (session-only) reveals fine-tuning rows below.
     section("video.section.screen");
-#if !defined(__ANDROID__)  // a phone's game is always the whole screen
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)  // a phone's or tablet's game is always the whole screen
     row("video.display", nullptr, [&](float w) {
         combo("video.fullscreen", "0", {{"0", tr("video.display.windowed")}, {"1", tr("video.display.fullscreen")}}, w);
     });
@@ -1053,10 +1073,10 @@ void page_video() {
     for (const char* r : {"360", "432", "480", "540", "720", "900", "1080", "1440"})
         resolutions.push_back({r, std::string(r) + "p"});
     resolutions.push_back({"2160", "2160p (4K)"});
-    row("video.resolution", "video.resolution.desc", [&](float w) {
+    row("video.resolution", PER_DEVICE("video.resolution.desc"), [&](float w) {
         combo("video.resolution", plat::kDefaultResolution, resolutions, w);
     });
-    row("video.aspect", "video.aspect.desc", [&](float w) {
+    row("video.aspect", PER_DEVICE("video.aspect.desc"), [&](float w) {
         combo("video.aspect", plat::kDefaultAspect,
               {{"auto", tr("video.aspect.screen")}, {"16:9", console("video.aspect.original")}, {"16:10", "16:10"},
                {"4:3", "4:3"}, {"21:9", "21:9"}, {"32:9", "32:9"}, {"20:9", trf("video.aspect.phone", "20:9")},
@@ -1103,13 +1123,13 @@ void page_video() {
     });
 
     section("video.section.performance");
-    row("video.preset", "video.preset.desc", [&](float w) {
+    row("video.preset", PER_DEVICE("video.preset.desc"), [&](float w) {
         combo("video.preset", "custom",
               {{"custom", tr("video.preset.custom")}, {"quality", tr("video.preset.quality")},
-               {"balanced", tr("video.preset.balanced")}, {"low", tr("video.preset.low")}},
+               {"balanced", tr("video.preset.balanced")}, {"low", tr(PER_DEVICE("video.preset.low"))}},
               w);
     });
-    row("video.framerate", "video.framerate.desc", [&](float w) {
+    row("video.framerate", PER_DEVICE("video.framerate.desc"), [&](float w) {
         // No choice yet: 30, as config.cpp applies.
         choice("video.frame_rate", config_get("video.frame_rate", "30"),
                {{"30", console("video.framerate.30")}, {"60", tr("video.framerate.60")}}, w, [&](const std::string& v) {
@@ -1126,7 +1146,7 @@ void page_video() {
     const bool nvidia = false;
     const std::string method = aa == "fxaa" ? "fxaa" : "off";
 #endif
-    row("video.aa", "video.aa.desc", [&](float w) {
+    row("video.aa", PER_DEVICE("video.aa.desc"), [&](float w) {
         Choices methods;
 #if defined(_WIN32)
         if (nvidia || method == "dlaa") methods.push_back({"dlaa", tr("video.aa.dlss")});
@@ -1155,9 +1175,9 @@ void page_video() {
 #else
     const bool temporal_on = false;
 #endif
-    const char* fg_desc = fg == "lsfg"  ? (lsfg ? "video.framegen.desc" : "video.framegen.missing")
+    const char* fg_desc = fg == "lsfg"  ? (lsfg ? "video.framegen.desc" : PER_DEVICE("video.framegen.missing"))
                           : fg == "fsr" ? (temporal_on ? "video.framegen.fsr.desc" : "video.framegen.fsr.needs")
-                                        : temporal_on ? "video.framegen.builtin.desc" : "video.framegen.builtin.only";
+                                        : temporal_on ? "video.framegen.builtin.desc" : PER_DEVICE("video.framegen.builtin.only");
     row("video.framegen", fg_desc, [&](float w) { combo("video.frame_gen", fg_default, fg_choices, w); });
 
     section("video.section.advanced");
@@ -1168,7 +1188,7 @@ void page_video() {
     // Upscaling quality, supersampling, HDR, filtering, legacy FSR 1, GPU / shaders — tweak only if needed.
     section("video.section.aa");
     if (method != "fxaa")
-        row("video.supersample", "video.supersample.desc", [&](float w) {
+        row("video.supersample", PER_DEVICE("video.supersample.desc"), [&](float w) {
             combo("video.antialiasing", "off",
                   {{"off", tr("video.supersample.native")}, {"ssaa15", tr("video.supersample.15")}, {"ssaa2", tr("video.supersample.2")}}, w);
         });
@@ -1191,7 +1211,7 @@ void page_video() {
         // FSR's own RCAS, or ours after DLSS (nvn_temporal.cpp)
         row("video.sharpness", nullptr, [&](float w) { slider("video.temporal_sharpness_pct", 0, 100, 60, "%d%%", w); });
     }
-    row("video.hdr", "video.hdr.desc", [&](float w) {
+    row("video.hdr", PER_DEVICE("video.hdr.desc"), [&](float w) {
         combo("video.hdr", "off", {{"off", tr("video.hdr.off")}, {"scrgb", "scRGB"}, {"hdr10", "HDR10"}}, w);
     });
     if (config_get("video.hdr", "off") != "off") {  // read live by the present pass (nvn_present.cpp)
@@ -1205,7 +1225,7 @@ void page_video() {
             combo("video.hdr_gamma", "2.2", {{"2.2", "2.2"}, {"srgb", "sRGB"}}, w);
         });
     }
-    row("video.aniso", "video.aniso.desc", [&](float w) {
+    row("video.aniso", PER_DEVICE("video.aniso.desc"), [&](float w) {
         combo("video.anisotropy", "game",
               {{"game", console("video.aniso.game")}, {"2", "2x"}, {"4", "4x"}, {"8", "8x"}, {"16", "16x"}}, w);
     });
@@ -1217,13 +1237,13 @@ void page_video() {
 
     // FSR 1: a spatial upscale of the finished picture to a window larger than it (what DLSS and FSR do better).
     section("video.section.legacy");
-    row("video.upscaler", "video.upscaler.desc", [&](float w) {
+    row("video.upscaler", PER_DEVICE("video.upscaler.desc"), [&](float w) {
         combo("video.upscaler", plat::kDefaultUpscaler, {{"linear", tr("video.upscaler.linear")}, {"fsr", tr("video.upscaler.fsr")}}, w);
     });
     if (config_get("video.upscaler", plat::kDefaultUpscaler) == "fsr")
         row("video.sharpness", nullptr, [&](float w) { slider("video.fsr_sharpness_pct", 0, 100, 80, "%d%%", w); });
 
-#if !defined(__ANDROID__)  // one GPU in a phone
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)  // one GPU in a phone or tablet
     row("video.gpu", nullptr, [&](float w) {
         combo("video.gpu", "auto",
               {{"auto", tr("common.auto")}, {"discrete", tr("video.gpu.discrete")}, {"integrated", tr("video.gpu.integrated")}}, w);
@@ -1273,11 +1293,11 @@ void page_video() {
 
 void page_audio() {
     row("audio.volume", nullptr, [&](float w) { slider("audio.volume", 0, 100, 100, "%d%%", w); });
-    row("audio.reverb", "audio.reverb.desc", [&](float w) { toggle("audio.reverb", true, w); });
-#if !defined(__ANDROID__)
+    row("audio.reverb", PER_DEVICE("audio.reverb.desc"), [&](float w) { toggle("audio.reverb", true, w); });
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)  // 5.1 outputs are a desktop's
     row("audio.surround", "audio.surround.desc", [&](float w) { toggle("audio.surround", false, w); });
 #endif
-    row("audio.background", nullptr, [&](float w) { toggle("audio.mute_background", false, w); });
+    row(PER_DEVICE("audio.background"), nullptr, [&](float w) { toggle("audio.mute_background", false, w); });
 }
 
 // Keyboard bindings: the action, its config key and its default key (SDL scancode name).
@@ -1312,7 +1332,7 @@ const char* arrow_for(const char* key) {
 void page_controls() {
     std::string name = plat::controller_name();
     row("controls.device", nullptr, [&](float) {
-        ImGui::TextWrapped("%s", name.empty() ? tr("controls.none") : name.c_str());
+        ImGui::TextWrapped("%s", name.empty() ? tr(PER_DEVICE("controls.none")) : name.c_str());
     });
     row("controls.layout", nullptr, [&](float w) {
         combo("input.layout", "auto",
@@ -1328,8 +1348,8 @@ void page_controls() {
     });
     row("controls.rumble", nullptr, [&](float w) { toggle("input.rumble", true, w); });
     row("controls.deadzone", nullptr, [&](float w) { slider("input.deadzone", 5, 50, 24, "%d%%", w); });
-#if defined(__ANDROID__)
-    // Phones: the on-screen controls instead of keyboard keys.
+#if NX_TOUCH_SETTINGS
+    // Phones and tablets: the on-screen controls (on iPhone and iPad beside the keyboard's keys, for a keyboard on an iPad).
     row("controls.touch", "controls.touch.desc", [&](float w) { toggle("input.touch_controls", true, w); });
     row("controls.touch_opacity", nullptr, [&](float w) { slider("input.touch_opacity", 10, 100, 60, "%d%%", w); });
     row("controls.touch_size", nullptr, [&](float w) { slider("input.touch_size", 50, 150, 100, "%d%%", w); });
@@ -1341,7 +1361,8 @@ void page_controls() {
         });
         if (g_touch_edit) touch_layout_editor();
     }
-#else
+#endif
+#if !defined(__ANDROID__)
     ImGui::Dummy(ImVec2(0, 6 * g_scale));
     ImGui::PushFont(nullptr);
     ImGui::TextUnformatted(tr("controls.keyboard"));
@@ -1418,6 +1439,67 @@ void do_import(const std::string& from) {
 
 double g_backups_listed = -100;  // when the Saves page last read the backups (-100: at once)
 
+// When the island synced, as the player reads it: the time today, the date and time before.
+std::string sync_time(int64_t unix) {
+    const std::tm at = local_tm_from_unix(unix), today = local_tm_from_unix(int64_t(std::time(nullptr)));
+    char text[32] = {};
+    const bool same_day = at.tm_year == today.tm_year && at.tm_yday == today.tm_yday;
+    std::strftime(text, sizeof text, same_day ? "%H:%M" : "%Y-%m-%d %H:%M", &at);
+    return text;
+}
+
+// What a Sync now came to, as its toast says it.
+std::string sync_outcome(const plat::SaveSync& s, const std::string& service) {
+    switch (s.outcome) {
+    case plat::kSyncSynced: return trf("saves.sync.done", sync_time(s.last_unix ? s.last_unix : int64_t(std::time(nullptr))));
+    case plat::kSyncNothingNew: return trf("saves.sync.nothing_new", service);
+    case plat::kSyncNewer: return trf("saves.sync.newer", service);
+    case plat::kSyncTakenOver: return tr("saves.sync.taken");
+    case plat::kSyncWasOff: return tr("saves.sync.was_off");
+    case plat::kSyncWasSignedOut: return trf("saves.sync.signed_out", service);
+    case plat::kSyncOffline: return tr("saves.sync.offline");
+    default: return tr("saves.sync.error");
+    }
+}
+
+// The Saves page's Sync now (issue #260; platform.h SaveSync), where save sync runs inside the game (Android, iOS):
+// the island goes up as when the app goes to the background, on the relay's own worker thread, never here. It only
+// uploads: a newer island on the server is left for the next start to settle. The state is read a few times a
+// second at most (files and the credential store, no network), and the outcome is a toast once it comes.
+void save_sync_section() {
+    static plat::SaveSync s;
+    static double read_at = -100;
+    static bool waiting = false;  // pressed: its outcome is toasted when it comes
+    const double now = ImGui::GetTime();
+    if (now - read_at > (waiting ? 0.25 : 1.0)) s = plat::save_sync_status(), read_at = now;
+    if (!s.offered) return;
+    const std::string service = s.service.empty() ? std::string(tr("saves.sync.service")) : s.service;
+    if (waiting && s.outcome != plat::kSyncRunning) waiting = false, toast(sync_outcome(s, service));
+    const bool running = waiting || s.ready == plat::kSyncBusy;
+    const char* reason = nullptr;  // why it cannot run now (it is disabled), or what pressing it will say
+    bool blocked = true;
+    switch (s.ready) {
+    case plat::kSyncReady: blocked = false; break;
+    case plat::kSyncBusy: reason = tr("saves.sync.running"); break;
+    case plat::kSyncStartedOff: reason = tr("saves.sync.started_off"); break;
+    case plat::kSyncSignedOut: blocked = false, reason = tr("saves.sync.signed_out_note"); break;
+    default: reason = tr("saves.sync.off"); break;
+    }
+    row("saves.sync", trf("saves.sync.desc", service).c_str(), [&](float w) {
+        ImGui::BeginDisabled(running || blocked);
+        const std::string label = std::string(tr(running ? "saves.sync.busy" : "saves.sync.button")) + "###sync_now";
+        if (button(label.c_str(), w)) {
+            if (plat::save_sync_now()) waiting = true;
+            read_at = -100;  // its state at once: busy now
+        }
+        ImGui::EndDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.47f, 0.39f, 0.31f, 1.0f));
+        if (reason && !running) ImGui::TextWrapped("%s", reason);
+        if (s.last_unix > 0) ImGui::TextWrapped("%s", trf("saves.sync.last", sync_time(s.last_unix)).c_str());
+        ImGui::PopStyleColor();
+    });
+}
+
 void page_saves() {
     bool has = saves::has_save();
     row("saves.current", nullptr, [&](float) {
@@ -1426,6 +1508,7 @@ void page_saves() {
         else
             ImGui::TextWrapped("%s", tr("saves.none"));
     });
+    save_sync_section();
     float bw = std::min(ImGui::GetContentRegionAvail().x, 300.0f * g_scale);
     if (button(tr("saves.open_folder"), bw)) {
         std::error_code ec;
@@ -1473,7 +1556,7 @@ void page_saves() {
         }
     }
     ImGui::Dummy(ImVec2(0, 6 * g_scale));
-    ImGui::TextUnformatted(tr("saves.detected"));
+    ImGui::TextUnformatted(tr(PER_DEVICE("saves.detected")));
     static std::vector<saves::Found> found;
     static double scanned = -100;
     if (ImGui::GetTime() - scanned > 5) found = saves::detect_emulator_saves(), scanned = ImGui::GetTime();
@@ -1556,7 +1639,7 @@ void report_section() {
     ImGui::Dummy(ImVec2(0, 4 * g_scale));
     ImGui::TextColored(ImVec4(0.42f, 0.31f, 0.21f, 1), "%s", tr("report.title"));
     if (failed_before) ImGui::TextColored(ImVec4(0.80f, 0.33f, 0.30f, 1), "%s", tr("report.prev_failed"));
-    ImGui::TextWrapped("%s", tr("report.desc"));
+    ImGui::TextWrapped("%s", tr(PER_DEVICE("report.desc")));
     int state = g_report.load();
     if (state == 1) {
         ImGui::TextUnformatted(tr("report.working"));
@@ -1608,7 +1691,7 @@ void page_discord() {
 void page_about() {
     ImGui::TextWrapped("%s", trf("about.version", NX_VERSION_STRING).c_str());
     ImGui::Dummy(ImVec2(0, 6 * g_scale));
-    ImGui::TextWrapped("%s", tr("about.desc"));
+    ImGui::TextWrapped("%s", tr(PER_DEVICE("about.desc")));
     ImGui::Dummy(ImVec2(0, 6 * g_scale));
     ImGui::TextWrapped("%s", tr("about.author"));
 #if !defined(__ANDROID__)
@@ -2156,7 +2239,7 @@ void settings_hint(float scale, float t) {
     }
     auto fade = [a](int r, int g, int b, int alpha) { return rgb(r, g, b, int(float(alpha) * a)); };
     ImGuiIO& io = ImGui::GetIO();
-    const char* text = tr("app.hint_open");
+    const char* text = tr(PER_DEVICE("app.hint_open"));
     ImVec2 ts = ImGui::CalcTextSize(text);
     const float h = ts.y + 20.0f * scale, ir = h * 0.5f - 5.0f * scale, gap = 10.0f * scale, pad = 18.0f * scale;
     const float w = 5.0f * scale + ir * 2 + gap + ts.x + pad;

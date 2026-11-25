@@ -235,7 +235,8 @@ unzip -tq "$ipa3" > /dev/null || die "--small archive fails unzip -t"
 bash "$root/tools/check_release_files.sh" < "$work/small.list" > /dev/null || die "--small list fails the release check"
 files=$small_out/acnh-universal-game/ios
 [ -f "$files/manifest.json" ] || die "--small wrote no manifest.json"
-[ "$(ls -A "$small_out" | sort | tr '\n' ' ')" = "ACNH-Universal-smallv.ipa acnh-universal-game " ] || die "--small left other files in the out folder"
+small_ls=$(ls -A "$small_out" | sort | tr '\n' ' ')
+[ "$small_ls" = "ACNH-Universal-smallv.ipa acnh-universal-game " ] || die "--small left other files in the out folder: $small_ls"
 python3 - "$files" "$small" "$build_id" <<'PY' || die "the manifest does not match the files"
 import hashlib, json, os, sys
 files, prepared, build_id = sys.argv[1:4]
@@ -371,5 +372,11 @@ mkfile -n 4200m "$big/sparse.bin"
 unzip -tq "$work/big.zip" > /dev/null || die "the 4.2 GB archive fails unzip -t"
 rm -f "$big/sparse.bin" "$work/big.zip"
 say "zip -qry past 4 GB makes an archive that unzip -t passes"
+
+[ "$(/usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$template")" = public.app-category.simulation-games ] \
+    || die "ios/Info.plist.in lacks LSApplicationCategoryType simulation-games (Game Mode)"
+[ -n "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$template")" ] \
+    || die "ios/Info.plist.in lacks NSLocalNetworkUsageDescription"
+say "Info.plist template has the Game Mode category and the local-network text"
 
 echo "package_ios tests passed"

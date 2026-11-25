@@ -137,6 +137,13 @@ jobs:
         with:
           cache-bin: false
       - run: cargo build --release -p acnh-app -p acnh-cli
+      - name: Save relay is linked
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          for pkg in acnh-app acnh-cli; do
+            test -n "$(cargo tree -e normal --target "$host" -p "$pkg" -i save-relay)" \
+              || { echo "save-relay is not linked into $pkg"; exit 1; }
+          done
       - name: App bundle
         run: |
           A="ACNH-Universal.app"
