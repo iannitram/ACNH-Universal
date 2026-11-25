@@ -1223,9 +1223,12 @@ fn apple_version() -> String {
     let output = std::process::Command::new("bash")
         .arg("tools/build_version.sh")
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-        .output()
-        .unwrap();
-    assert!(output.status.success());
+        .output();
+    // Where the script cannot run (Windows runners have no usable bash), Prepare's
+    // package_version falls back to the crate version, and so does this.
+    let Some(output) = output.ok().filter(|o| o.status.success()) else {
+        return env!("CARGO_PKG_VERSION").to_owned();
+    };
     let text = String::from_utf8(output.stdout).unwrap();
     let value = |key: &str| {
         text.lines()
