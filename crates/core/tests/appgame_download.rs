@@ -253,3 +253,125 @@ fn download_refuses_insufficient_free_space_before_requests() {
     assert!(!private.join(PARTIAL_DIR).exists());
     assert!(!dest.exists());
 }
+
+#[test]
+fn download_replaces_an_older_game_and_handles_empty_files() {
+    let tmp = TempDir::new().unwrap();
+    let private = tmp.path().join("private");
+    let dest = private.join(GAME_DIR);
+    let mut first = FakeTransport::from_files(BUILD_ID, ABI, decoy_entries());
+    download(&private, &dest, 1 << 30, BUILD_ID, ABI, &mut first).unwrap();
+
+    let mut newer = decoy_entries();
+    newer[3] = ("romfs.pak", vec![b'N'; 300]);
+    newer.push(("aoc/empty.bin", Vec::new()));
+    let mut second = FakeTransport::from_files(BUILD_ID, ABI, newer);
+    download(&private, &dest, 1 << 30, BUILD_ID, ABI, &mut second).unwrap();
+    assert_eq!(fs::read(dest.join("romfs.pak")).unwrap(), vec![b'N'; 300]);
+    assert_eq!(fs::metadata(dest.join("aoc/empty.bin")).unwrap().len(), 0);
+    assert!(!private.join(PARTIAL_DIR).exists());
+}
+
+#[test]
+fn bad_manifests_are_refused() {
+    let hash = "a".repeat(64);
+    let entry = |path: &str, sha: &str| format!(r#"{{"path":"{path}","size":1,"sha256":"{sha}"}}"#);
+    let manifest = |files: String| {
+        format!(
+            r#"{{"version":1,"build_id":"{BUILD_ID}","nx_game_abi":"{ABI}","files":[{files}]}}"#
+        )
+    };
+    for bad in [
+        manifest(entry("../x", &hash)),
+        manifest(entry("/abs", &hash)),
+        manifest(entry("", &hash)),
+        manifest(entry("a.bin", "zz")),
+        manifest(format!(
+            "{},{}",
+            entry("a.bin", &hash),
+            entry("a.bin", &hash)
+        )),
+    ] {
+        let parsed = Manifest::from_json(bad.as_bytes()).and_then(|m| m.validate(BUILD_ID, ABI));
+        assert!(parsed.is_err(), "{bad}");
+    }
+    assert!(Manifest::from_json(b"not json").is_err());
+    assert!(Manifest::from_json(br#"{"version":1,"files":[]}"#).is_err());
+    let ok = manifest(entry("a.bin", &hash));
+    Manifest::from_json(ok.as_bytes())
+        .unwrap()
+        .validate(BUILD_ID, ABI)
+        .unwrap();
+}
+
+fn item(path: &str, data: &[u8]) -> ManifestFile {
+    ManifestFile {
+        path: path.to_owned(),
+        size: data.len() as u64,
+        sha256: sha256_hex(data),
+    }
+}
+
+#[test]
+fn the_stepwise_api_applies_the_same_resume_rule() {
+    let tmp = TempDir::new().unwrap();
+    let private = tmp.path().join("private");
+    let partial = private.join(PARTIAL_DIR);
+    let whole = vec![7u8; 100];
+    let (a, b, c) = (
+        item("a.bin", &whole),
+        item("sub/b.bin", &whole),
+        item("c.bin", &whole),
+    );
+
+    // Nothing yet: 0, and game.partial/ exists.
+    assert_eq!(acnh_core::appgame::partial_bytes(&private, &a).unwrap(), 0);
+    assert!(partial.is_dir());
+    fs::create_dir_all(partial.join("sub")).unwrap();
+    // A shorter file continues from its length; a whole one with the right hash is complete;
+    // a whole one with the wrong hash, and a longer one, start again (and are deleted).
+    fs::write(partial.join("a.bin"), &whole[..40]).unwrap();
+    fs::write(partial.join("sub/b.bin"), &whole).unwrap();
+    fs::write(partial.join("c.bin"), vec![9u8; 100]).unwrap();
+    assert_eq!(acnh_core::appgame::partial_bytes(&private, &a).unwrap(), 40);
+    assert_eq!(
+        acnh_core::appgame::partial_bytes(&private, &b).unwrap(),
+        100
+    );
+    assert_eq!(acnh_core::appgame::partial_bytes(&private, &c).unwrap(), 0);
+    assert!(!partial.join("c.bin").exists());
+    fs::write(partial.join("c.bin"), vec![9u8; 150]).unwrap();
+    assert_eq!(acnh_core::appgame::partial_bytes(&private, &c).unwrap(), 0);
+    assert!(!partial.join("c.bin").exists());
+
+    // verify_partial: right is true; wrong is false and deletes the file.
+    fs::write(partial.join("a.bin"), &whole).unwrap();
+    assert!(acnh_core::appgame::verify_partial(&private, &a).unwrap());
+    fs::write(partial.join("c.bin"), vec![9u8; 100]).unwrap();
+    assert!(!acnh_core::appgame::verify_partial(&private, &c).unwrap());
+    assert!(!partial.join("c.bin").exists());
+
+    // install_partial refuses while a file is missing, then installs read-only with the manifest.
+    let manifest = Manifest {
+        version: 1,
+        build_id: BUILD_ID.to_owned(),
+        nx_game_abi: ABI.to_owned(),
+        files: vec![a.clone(), b.clone(), c.clone()],
+    }
+    .to_json()
+    .into_bytes();
+    let dest = private.join(GAME_DIR);
+    assert!(acnh_core::appgame::install_partial(&private, &dest, &manifest).is_err());
+    assert!(!dest.exists());
+    fs::write(partial.join("c.bin"), &whole).unwrap();
+    acnh_core::appgame::install_partial(&private, &dest, &manifest).unwrap();
+    assert!(!partial.exists());
+    assert_eq!(fs::read(dest.join("manifest.json")).unwrap(), manifest);
+    assert_eq!(fs::read(dest.join("sub/b.bin")).unwrap(), whole);
+    assert!(fs::metadata(dest.join("a.bin"))
+        .unwrap()
+        .permissions()
+        .readonly());
+    // A destination outside the private folder is refused.
+    assert!(acnh_core::appgame::install_partial(&private, tmp.path(), &manifest).is_err());
+}

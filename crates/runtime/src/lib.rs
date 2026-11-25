@@ -86,6 +86,13 @@ pub extern "C" fn acnh_runtime_abi_version() -> u32 {
 #[cfg(any(target_os = "ios", target_os = "android"))]
 pub mod relay;
 
+/// The iPhone and iPad game download (issue #231): the plan and the checks (`appgame.rs`,
+/// platform-free, tested on every runner in `tests/ios_appgame.rs`) and the Dropbox sign-in and
+/// C exports (`appgame_ios.rs`) the player's Objective-C++ calls.
+#[cfg(target_os = "ios")]
+pub mod appgame;
+#[cfg(target_os = "ios")]
+pub mod appgame_ios;
 pub mod audio;
 pub mod config;
 pub mod files;
