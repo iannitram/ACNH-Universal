@@ -103,6 +103,12 @@ app=$build/ACNH.app
 exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")
 case "$exe" in ''|.|..|*/*) fail "invalid CFBundleExecutable" ;; esac
 [ ! -L "$app/$exe" ] && [ -f "$app/$exe" ] || fail "app executable must be a regular file, not a symlink"
+# The version stamps (tools/build_version.sh via tools/build_ios.sh): dotted numbers and one integer that rises per commit;
+# an unrendered template ("${...}") or a name like "0.11.0+abc" would be refused by the device or SideStore.
+short_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist" 2>/dev/null || true)
+bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist" 2>/dev/null || true)
+case "$short_version" in ''|*[!0-9.]*|.*|*.|*..*) fail "CFBundleShortVersionString is not dotted numbers: '$short_version'" ;; esac
+case "$bundle_version" in ''|*[!0-9]*) fail "CFBundleVersion is not a number: '$bundle_version'" ;; esac
 # Require every Mach-O slice to be for iOS devices; Simulator and macOS are not installable on a device.
 [ "$(lipo -archs "$app/$exe")" = arm64 ] || fail "executable must be arm64"
 platforms=$(vtool -show-build "$app/$exe" | awk '$1 == "platform" {print $2}')

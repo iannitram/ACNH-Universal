@@ -61,7 +61,8 @@ struct Fake {
 /// A script call without the `env PATH=...` a Mac that has Homebrew puts before it.
 fn without_env(args: &[String]) -> &[String] {
     if args.first().is_some_and(|program| program == "env") {
-        &args[2..]
+        let set = args[1..].iter().take_while(|arg| arg.contains('=')).count();
+        &args[1 + set..]
     } else {
         args
     }
@@ -1531,7 +1532,9 @@ fn cargo_found_only_under_the_cargo_home_bin_is_put_first_on_the_build_path() {
     let build = &fake.args[fake.args.len() - 3];
     assert_eq!(build[0], "env");
     assert!(build[1].starts_with("PATH=/h/.cargo/bin:"), "{}", build[1]);
-    assert_eq!(build[2], "tools/build_ios.sh");
+    assert!(build[2].starts_with("NX_VPX_DIR="), "{}", build[2]);
+    assert!(build[2].ends_with("/vpx-ios"), "{}", build[2]);
+    assert_eq!(build[3], "tools/build_ios.sh");
     // With cargo on the PATH the script is called as it is.
     let mut plain = Fake::with_ios_tools();
     prepare_with(&req, Hub::Mac, &mut plain, Path::new("/h"), &mut |_| {}).unwrap();

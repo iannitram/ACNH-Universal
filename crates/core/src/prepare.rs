@@ -2577,15 +2577,16 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
             .into_iter()
             .filter(|dir| dir.is_dir()),
     );
+    let mut env = vec!["env".to_owned()];
     if !dirs.is_empty() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(dirs.into_iter().chain(std::env::split_paths(&path)))
             .map_err(|e| Error::Build(format!("cannot make the PATH: {e}")))?;
-        build_args.splice(
-            0..0,
-            ["env".to_owned(), format!("PATH={}", path.to_string_lossy())],
-        );
+        env.push(format!("PATH={}", path.to_string_lossy()));
     }
+    // libvpx's clone and build outlast the source copy, which is made anew each prepare.
+    env.push(format!("NX_VPX_DIR={}", req.out.join("vpx-ios").display()));
+    build_args.splice(0..0, env);
     let version = package_version(&runner.root());
     let (mods_dest, mods, mods_cache) = bundled_mods_folder(&req.out);
     run_script(runner, &build_args, home)?;
