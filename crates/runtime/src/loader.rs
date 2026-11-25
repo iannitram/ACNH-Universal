@@ -182,7 +182,7 @@ fn copy_str_to_buf(s: &str, out: *mut c_char, cap: usize) -> usize {
         // SAFETY: `out` is valid for `cap` bytes per caller contract.
         unsafe {
             if n > 0 {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, n);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), n);
             }
             *out.add(n) = 0;
         }
@@ -1789,7 +1789,9 @@ mod tests {
             let init = dt_init_from_memory(base);
             assert_eq!(init, base + 0x100);
             let status_addr = init_status_addr_from_memory(init);
-            assert_eq!(status_addr, Some((base & !0xFFF) + 0x200));
+            // adrp takes the page of its own pc (DT_INIT, at base + 0x100), and a Vec is not
+            // page-aligned, so that page can be the one after base's.
+            assert_eq!(status_addr, Some(((base + 0x100) & !0xFFF) + 0x200));
         }
     }
 

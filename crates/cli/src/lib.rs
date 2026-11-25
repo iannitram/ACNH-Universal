@@ -48,10 +48,11 @@ use std::process::Command;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::sync::SyncEnv;
 
-const USAGE: &str = "usage: acnh-universal check|build|play|sync|steam-add|hub|fleet\n\
+const USAGE: &str = "usage: acnh-universal check|build|play|sync|steam-add|hub|fleet|cloud-upload\n\
 play [--profile <id>] [--keep relay|here] [--anyway]\n\
 sync setup --server <url> --user <name> [--device <name>] (app password on standard input)\n\
 sync sign-in gdrive|dropbox | sync status | sync off | sync push [--keep relay|here]\n\
+cloud-upload --os linux --install <folder> --prepared <folder>\n\
 exit codes: play 3 conflict, 4 held, 5 relay unreachable, 6 push conflict after the game ran; the game's own failure is 1\n\
 hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>]\n\
 hub pair --address <ip:port> --name <device> --peer <hub> [--target <os>]\n\
@@ -85,6 +86,8 @@ struct Options {
     user: Option<String>,
     device: Option<String>,
     sync_arg: Option<String>,
+    os: Option<String>,
+    install: Option<PathBuf>,
 }
 
 fn parse(args: &[String]) -> std::result::Result<Options, String> {
@@ -154,7 +157,7 @@ fn parse(args: &[String]) -> std::result::Result<Options, String> {
             }
             "--game" | "--target" | "--out" | "--profile" | "--address" | "--name" | "--peer"
             | "--hub" | "--prepared" | "--version" | "--build-id" | "--last-sync" | "--free"
-            | "--keep" | "--server" | "--user" | "--device" => {
+            | "--keep" | "--server" | "--user" | "--device" | "--os" | "--install" => {
                 let value = match inline {
                     Some(value) => {
                         index += 1;
@@ -209,6 +212,8 @@ fn set_value(options: &mut Options, flag: &str, value: String) -> std::result::R
         "--server" => options.server = Some(value),
         "--user" => options.user = Some(value),
         "--device" => options.device = Some(value),
+        "--os" => options.os = Some(value),
+        "--install" => options.install = Some(PathBuf::from(value)),
         _ => return Err(format!("unknown option {flag}\n{USAGE}")),
     }
     Ok(())
@@ -281,6 +286,8 @@ pub fn run(args: Vec<String>, cx: &mut Context<'_>) -> i32 {
         "steam-add" => steam_add(&options),
         "hub" => hub_command(&options, cx),
         "fleet" => fleet_command(&options),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        "cloud-upload" => cloud_upload(&options, cx),
         _ => {
             println!("{USAGE}");
             return 2;
@@ -939,6 +946,53 @@ fn fleet_command(_options: &Options) -> Result<i32> {
     for record in records {
         println!("{}", fleet::to_line(&record)?);
     }
+    Ok(0)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn cloud_upload(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
+    let os = options.os.as_deref().unwrap_or("linux");
+    if os != "linux" {
+        return Err(Error::Unsupported(format!(
+            "cloud-upload currently supports --os linux only (got {os})"
+        )));
+    }
+    let install = options
+        .install
+        .as_deref()
+        .ok_or_else(|| Error::Env("--install <folder> is required".into()))?;
+    let prepared = options
+        .prepared
+        .as_deref()
+        .ok_or_else(|| Error::Env("--prepared <folder> is required".into()))?;
+    let sr_dirs = cx.sync.dirs()?;
+    let relay = acnh_core::relay::open(
+        &sr_dirs,
+        cx.sync.creds,
+        std::sync::Arc::clone(&cx.sync.transport),
+    )?
+    .ok_or_else(|| {
+        Error::Saves("save sync is not set up (run sync sign-in dropbox first)".into())
+    })?;
+    let files = acnh_core::relay::collect_linux_cloud_files(install, prepared)?;
+    let err = &mut *cx.err;
+    let manifest = acnh_core::relay::upload_game_to_dropbox(
+        &relay,
+        os,
+        &files,
+        options.build_id.as_deref().unwrap_or(""),
+        "",
+        &mut |msg| {
+            let _ = writeln!(err, "{msg}");
+        },
+    )?;
+    let total_bytes: u64 = manifest.files.iter().map(|f| f.size).sum();
+    let _ = writeln!(
+        cx.out,
+        "Uploaded {} files ({:.2} GB) to /acnh-universal-game/{os}/",
+        manifest.files.len(),
+        total_bytes as f64 / 1_000_000_000.0
+    );
     Ok(0)
 }
 

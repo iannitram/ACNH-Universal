@@ -18,13 +18,25 @@ for header in "$vulkan/include/vulkan/vulkan.h" "$sdl3/include/SDL3/SDL.h"; do
     fi
 done
 
+# The player links the Rust runtime (NX_RUST_RUNTIME), so the wrappers compile against the header cbindgen
+# generates for it: build.rs writes it on any host build, with the same text the iOS build gets.
+cargo build -p acnh-runtime --quiet
+cargo_target=${CARGO_TARGET_DIR:-target}
+runtime_header=$(find "$cargo_target/debug/build" -name acnh_runtime.h -path '*acnh-runtime*' -print0 |
+    xargs -0 ls -t | head -n 1)
+[ -n "$runtime_header" ] || { echo "error: cbindgen's acnh_runtime.h was not generated" >&2; exit 1; }
+if grep -q 'Option_' "$runtime_header"; then
+    echo "error: $runtime_header wraps an Option in a struct: callback aliases must be Option<extern \"C\" fn>" >&2
+    exit 1
+fi
+
 sources=()
 while IFS= read -r f; do sources+=("$f"); done < <(
     sed -n '/^set(NX_RUNTIME_SOURCES/,/^)/p' CMakeLists.txt | grep -o 'runtime/src/[^ )]*\.cpp' | sort -u
 )
-sources+=(runtime/src/platform_mac_wrapper.cpp runtime/src/memguard_mac.cpp runtime/src/cpu_profile.cpp
+sources+=(runtime/src/platform_mac_wrapper.cpp runtime/src/cpu_profile.cpp
           runtime/src/app_icon.cpp runtime/src/save_storage.cpp runtime/src/save_profiles.cpp
-          runtime/src/mod_manager.cpp)
+          runtime/src/mod_manager.cpp runtime/src/saves_wrapper.cpp)
 for f in "games/$game"/*.cpp; do sources+=("$f"); done
 
 imgui=()
@@ -41,7 +53,7 @@ fi
 
 common=(-std=c++20 -fsyntax-only -Wno-deprecated-declarations -Wno-\#warnings
         -Iruntime/include -Iruntime/src -I"games/$game" -I"$sdl3/include" -I"$vulkan/include"
-        -DNX_NO_VPX -DNX_NO_VORBIS -DNX_VERSION_STRING='"dev"')
+        -DNX_RUST_RUNTIME -I"$(dirname "$runtime_header")" -DNX_NO_VPX -DNX_NO_VORBIS -DNX_VERSION_STRING='"dev"')
 if [ "${#imgui[@]}" -gt 0 ]; then common+=("${imgui[@]}"); fi
 
 status=0
