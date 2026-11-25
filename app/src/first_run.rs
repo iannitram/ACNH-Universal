@@ -480,8 +480,94 @@ fn run(
             })()
             .map_err(|error| safe_error(error, &vars.home)),
         },
+        Request::CloudDownloadAndSync => Event::CloudSyncFinished(
+            cloud_download_and_sync(dirs).map_err(|e| safe_error(e, &vars.home)),
+        ),
+        Request::SystemPickFolder(start) => Event::SystemPicked(pick_folder_native(&start)),
         Request::CopyLog(_) => unreachable!("clipboard stays on the window thread"),
     }
+}
+
+fn os_slug(os: Os) -> &'static str {
+    match os {
+        Os::Linux => "linux",
+        Os::Windows => "windows",
+        Os::Mac => "macos",
+        Os::Android => "android",
+        Os::Ios => "ios",
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn cloud_download_and_sync(dirs: &AppDirs) -> acnh_core::Result<()> {
+    let sr_vars = save_relay::platform::PathVars::current()
+        .map_err(|e| acnh_core::Error::Saves(e.to_string()))?;
+    let sr_dirs = save_relay::platform::AppDirs::from_vars(&sr_vars);
+    let creds = save_relay::creds::KeyringStore::new();
+    let transport = Arc::new(save_relay::http::UreqTransport::new());
+    let relay = acnh_core::relay::open(&sr_dirs, &creds, transport)?
+        .ok_or_else(|| acnh_core::Error::Saves("Save sync is not set up. Sign in first.".into()))?;
+    std::fs::create_dir_all(&dirs.data)?;
+    acnh_core::relay::download_game_from_remote(
+        Arc::clone(relay.remote()),
+        &dirs.data,
+        &dirs.data.join("game"),
+        u64::MAX,
+        os_slug(Os::current()),
+    )?;
+    let save_dir = dirs.data_root().join("user/device_save");
+    std::fs::create_dir_all(&save_dir)?;
+    let _ = relay.pull_with(&save_dir, None, false)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn cloud_download_and_sync(_dirs: &AppDirs) -> acnh_core::Result<()> {
+    Err(acnh_core::Error::Unsupported(
+        "Cloud download uses the mobile app downloader on this platform.".into(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn pick_folder_native(start: &Path) -> Option<PathBuf> {
+    let start_str = start.to_string_lossy().into_owned();
+    if let Ok(out) = std::process::Command::new("kdialog")
+        .args(["--getexistingdirectory", &start_str])
+        .output()
+    {
+        if out.status.success() {
+            let picked = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !picked.is_empty() {
+                return Some(PathBuf::from(picked));
+            }
+        }
+    }
+    let zenity_start = if start_str.ends_with('/') {
+        start_str
+    } else {
+        format!("{start_str}/")
+    };
+    if let Ok(out) = std::process::Command::new("zenity")
+        .args([
+            "--file-selection",
+            "--directory",
+            &format!("--filename={zenity_start}"),
+        ])
+        .output()
+    {
+        if out.status.success() {
+            let picked = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !picked.is_empty() {
+                return Some(PathBuf::from(picked));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pick_folder_native(_start: &Path) -> Option<PathBuf> {
+    None
 }
 
 fn add_steam(vars: &Vars, dirs: &AppDirs, folder: &Path) -> acnh_core::Result<()> {

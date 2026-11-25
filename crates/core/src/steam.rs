@@ -295,9 +295,10 @@ mod launcher_tests {
     #[test]
     fn appimage_shortcut_uses_outer_path_and_fullscreen() {
         let image = Path::new("/home/user/Applications/ACNH.AppImage");
-        let shortcut = launcher_shortcut(
+        let shortcut = launcher_shortcut_for(
             Path::new("/tmp/mount/usr/bin/acnh-app"),
             Some(image),
+            None,
             "ACNH",
             Path::new("icon.png"),
         );
