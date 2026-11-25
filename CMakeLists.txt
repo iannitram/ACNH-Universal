@@ -296,9 +296,8 @@ endforeach()
 set(NX_RUNTIME_SOURCES
     runtime/src/compact_layout.cpp
     runtime/src/files_wrapper.cpp
-    runtime/src/main.cpp
     runtime/src/sampler.cpp
-    runtime/src/loader.cpp
+    runtime/src/loader_wrapper.cpp
     runtime/src/bug_report.cpp
     runtime/src/memory_wrapper.cpp
     runtime/src/kernel_wrapper.cpp
@@ -455,10 +454,10 @@ if(ANDROID)
     # The game's code: lib<game>_game.so, linked against the app's library for the few functions it calls (nx::call,
     # svc, mrs, ...: NX_GAME_API). Never in the APK; tools/build_android.sh leaves it beside, for the game folder.
     if(NX_GAME_LIBS AND NOT NX_ANDROID_GAME_IN_APP)
-        add_library(${NX_GAME}_game SHARED runtime/src/game_abi.cpp)
+        add_library(${NX_GAME}_game SHARED runtime/src/loader_wrapper.cpp)
         target_include_directories(${NX_GAME}_game PRIVATE runtime/include)
         target_compile_options(${NX_GAME}_game PRIVATE -fvisibility=hidden -march=armv8.2-a+crypto)
-        target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}")
+        target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}" NX_GAME_ABI_ONLY)
         target_link_libraries(${NX_GAME}_game PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${NX_GAME_LIBS}>" ${NX_GAME})
         target_link_options(${NX_GAME}_game PRIVATE -Wl,-z,max-page-size=16384)
     endif()
@@ -539,10 +538,10 @@ elseif(APPLE)
         target_compile_definitions(${NX_GAME} PRIVATE NX_GAME_DYNAMIC NX_GAME_ABI="${NX_GAME_ABI}")
         set_target_properties(${NX_GAME} PROPERTIES ENABLE_EXPORTS ON)
         if(NX_GAME_LIBS)
-            add_library(${NX_GAME}_game SHARED runtime/src/game_abi.cpp)
+            add_library(${NX_GAME}_game SHARED runtime/src/loader_wrapper.cpp)
             target_include_directories(${NX_GAME}_game PRIVATE runtime/include)
             target_compile_options(${NX_GAME}_game PRIVATE -fvisibility=hidden)
-            target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}")
+            target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}" NX_GAME_ABI_ONLY)
             target_link_libraries(${NX_GAME}_game PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${NX_GAME_LIBS}>")
             target_link_options(${NX_GAME}_game PRIVATE -undefined dynamic_lookup)
         endif()
@@ -571,10 +570,10 @@ elseif(UNIX)
             foreach(lib ${NX_GAME_LIBS})
                 set_target_properties(${lib} PROPERTIES POSITION_INDEPENDENT_CODE ON)
             endforeach()
-            add_library(${NX_GAME}_game SHARED runtime/src/game_abi.cpp)
+            add_library(${NX_GAME}_game SHARED runtime/src/loader_wrapper.cpp)
             target_include_directories(${NX_GAME}_game PRIVATE runtime/include)
             target_compile_options(${NX_GAME}_game PRIVATE -fvisibility=hidden)
-            target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}")
+            target_compile_definitions(${NX_GAME}_game PRIVATE NX_GAME_ABI="${NX_GAME_ABI}" NX_GAME_ABI_ONLY)
             target_link_libraries(${NX_GAME}_game PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${NX_GAME_LIBS}>")
         endif()
     else()

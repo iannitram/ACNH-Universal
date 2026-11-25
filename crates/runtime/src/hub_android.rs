@@ -213,8 +213,11 @@ pub extern "C" fn acnh_hub_android_pull(
 }
 
 /// Free a string returned by `acnh_hub_android_*`.
+///
+/// # Safety
+/// `ptr` must be null or a string this module returned, freed only once.
 #[no_mangle]
-pub extern "C" fn acnh_hub_android_free(ptr: *mut c_char) {
+pub unsafe extern "C" fn acnh_hub_android_free(ptr: *mut c_char) {
     if !ptr.is_null() {
         // SAFETY: `ptr` was created by `CString::into_raw` in this module.
         unsafe {

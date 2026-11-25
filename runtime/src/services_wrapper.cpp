@@ -303,7 +303,7 @@ namespace ui {
 void ui_open_online();
 }  // namespace ui
 uint64_t texture_at_memory(uint64_t addr);
-void textures_written(uint64_t addr, size_t size);
+void textures_written(uint64_t addr, uint64_t size);  // nvn_objects.cpp: uint64_t, not size_t (they differ on macOS)
 
 namespace {
 

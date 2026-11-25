@@ -37,5 +37,5 @@ slint-build = "1.13"
 # Save sync is desktop-only: Android gets save-relay through its own app (#81) and the iPad's
 # player through its Rust API (#172), so those builds stay free of its dependencies.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-acnh-core = { path = "../crates/core", features = ["hub", "relay"] }
+acnh-core = { path = "../crates/core", features = ["hub", "relay", "cloud-stream"] }
 save-relay = { git = "https://github.com/iannitram/save-relay" }

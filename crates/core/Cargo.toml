@@ -15,6 +15,7 @@ path = "src/lib.rs"
 # `relay` links iannitram/save-relay's library (src/relay.rs); its issue adds the
 # dependency. The core builds without it, so every module is testable with no network.
 relay = ["dep:save-relay"]
+cloud-stream = ["relay", "dep:ureq"]
 # Hub discovery, pairing, and sealed build transfers (src/hub.rs, ADR 0004),
 # adapted from totk-universal with optional dependencies so the base core stays small.
 hub = ["dep:mdns-sd", "dep:spake2", "dep:hmac", "dep:serde", "dep:serde_json", "dep:chacha20poly1305"]
@@ -45,6 +46,8 @@ chacha20poly1305 = { version = "0.11.0", optional = true, features = ["zeroize"]
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
 # Scratch directory beside an archive while zstd writes a replacement for an atomic rename.
 tempfile = "3"
+# Streaming Dropbox download/upload for prepared game data (`cloud-stream` feature, desktop-only).
+ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
 
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 save-relay = { git = "https://github.com/iannitram/save-relay", optional = true, default-features = false, features = ["http", "keyring"] }
