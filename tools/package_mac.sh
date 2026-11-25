@@ -4,12 +4,14 @@
 # Run only from the launcher's prepare (the app's Prepare, or `acnh-universal build --target
 # mac`); nobody runs it by hand, and no workflow names it. CI uses it only on stand-ins:
 # `--no-game`, or a game folder of empty files.
-# usage: tools/package_mac.sh <version> <app> <game folder>|--no-game <out folder>
+# usage: tools/package_mac.sh <version> <app> <game folder>|--no-game <out folder> [--mods <mods folder>]
+# --mods: the folder tools/bundle_mods.sh makes (bundle.txt, ptbr/, speedfix60/). It goes to Contents/Resources/mods,
+# where the player's first start copies the SpeedFix's files into its data root (video.frame_rate = 60 needs them).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd -P)
-usage() { echo "usage: tools/package_mac.sh <version> <app> <game folder>|--no-game <out folder>" >&2; exit 2; }
+usage() { echo "usage: tools/package_mac.sh <version> <app> <game folder>|--no-game <out folder> [--mods <mods folder>]" >&2; exit 2; }
 die() { echo "error: $*" >&2; exit 1; }
-[ "$#" -eq 4 ] || usage
+[ "$#" -eq 4 ] || { [ "$#" -eq 6 ] && [ "$5" = --mods ]; } || usage
 version=$1
 case "$version" in ''|*[!a-zA-Z0-9._-]*|.|..) usage ;; esac
 real() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
@@ -18,6 +20,8 @@ app=$(real "$2")
 out=$(real "$4")
 game=
 [ "$3" = --no-game ] || game=$(real "$3")
+mods=
+[ "$#" -eq 6 ] && { [ -n "$6" ] || die "the mods folder is empty"; mods=$(real "$6"); }
 ci=${CI:-}${GITHUB_ACTIONS:-}
 
 # --- the out folder: nothing is written until every refusal has been checked ---
@@ -43,6 +47,11 @@ if [ -L "$zip" ] || [ -d "$zip" ]; then die "the zip destination must not be a l
 [ ! -L "$app" ] && [ -d "$app/Contents" ] || die "the app must be a folder with a Contents folder"
 [ -f "$app/Contents/Info.plist" ] || die "the app has no Contents/Info.plist"
 [ ! -e "$app/Contents/Resources/game" ] || die "the app already holds a Contents/Resources/game folder"
+[ ! -e "$app/Contents/Resources/mods" ] || [ -z "$mods" ] || die "the app already holds a Contents/Resources/mods folder"
+if [ -n "$mods" ]; then
+  case "$out/" in "$mods/"*) die "the out folder must not be inside the mods folder" ;; esac
+  bash "$root/tools/check_bundled_mods.sh" "$mods" || die "the mods folder is refused"
+fi
 
 # --- the game folder ---
 if [ -n "$game" ]; then
@@ -90,6 +99,16 @@ if [ -n "$game" ]; then
     case "$(basename "$entry")" in analysis|romfs.pak|spirv.pak|fonts|aoc) ;; *) die "game/ holds a name that is not allowed" ;; esac
   done
   chmod -R a-w "$dest"
+fi
+
+if [ -n "$mods" ]; then
+  # Plain copies (no links, no extended attributes); the folder passed check_bundled_mods.sh above.
+  mkdir -p "$bundle/Contents/Resources"
+  ditto --norsrc --noextattr --noqtn "$mods" "$bundle/Contents/Resources/mods"
+  find "$bundle/Contents/Resources/mods" -name .DS_Store -delete
+  # The release check again, over what is in the app now (everything but the game): the one path it lets pass is mods/.
+  (cd "$stage" && find ACNH-Universal.app -path ACNH-Universal.app/Contents/Resources/game -prune -o \( -type f -o -type l \) -print) |
+    bash "$root/tools/check_release_files.sh" >/dev/null || die "the package's file list fails tools/check_release_files.sh"
 fi
 
 # Sign each binary first, then the bundle, so the signature seals the game files too.

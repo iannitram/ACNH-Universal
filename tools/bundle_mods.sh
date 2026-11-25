@@ -2,7 +2,7 @@
 # The mods every package carries (runtime/src/mod_fetch.cpp): the pt-BR fan translation and the SpeedFix's parameter
 # files, from this repository's "mods" release (made from the game's files: never committed). Each zip is checked
 # against its SHA-256 below, extracted into <dest>/mods/<name>/, and <dest>/mods/bundle.txt lists them: the bundle's
-# version (the zips' hashes), then every file. The zips are kept in private/mods_cache/.
+# version (the zips' hashes), then every file. The zips are kept in private/mods_cache/ (or $ACNH_MODS_CACHE).
 #
 # usage: tools/bundle_mods.sh <dest>      (a package's folder: beside the player, the app's Resources, the APK's assets)
 # To change a mod: upload the new zip to the "mods" release (gh release upload mods <zip> --clobber) and put its
@@ -13,7 +13,7 @@ DEST=${1:?usage: tools/bundle_mods.sh <dest>}
 URL=https://github.com/Nycolazs/ACNHRecomp/releases/download/mods
 MODS="ptbr:ACNHRecomp-ptbr-mod.zip:5171d2503bba635e089834e746294bb24feb93f129ce316309305360ed2f20d3
 speedfix60:ACNHRecomp-speedfix60-mod.zip:524bcfc32e7b42af32bf86706ac294283d93cd86a46aa7bc7dbe077acaa16761"
-CACHE=private/mods_cache
+CACHE=${ACNH_MODS_CACHE:-private/mods_cache}
 mkdir -p "$CACHE" "$DEST/mods"
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 VERSION=

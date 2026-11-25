@@ -5,6 +5,10 @@
 #   tools/package_ios.sh <version> <build dir> --game <prepared folder> <out folder>
 #   tools/package_ios.sh <version> <build dir> --no-game <out folder>
 #   tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> [--abi <12 hex>] <out folder>
+#   any of the three may end with: --mods <mods folder>
+#
+# --mods is the folder tools/bundle_mods.sh makes (bundle.txt, ptbr/, speedfix60/). It goes to Payload/ACNH.app/mods,
+# beside the player, where the first start copies the SpeedFix's files into Documents (video.frame_rate = 60 needs them).
 #
 # --game copies only analysis/, romfs.pak, spirv.pak and, when present, fonts/ and aoc/ from the prepared folder into
 # Payload/ACNH.app/game/, as real files, and makes them read-only. --no-game makes no game/ folder.
@@ -25,6 +29,7 @@ usage() {
     echo "usage: tools/package_ios.sh <version> <build dir> --game <prepared folder> <out folder>" >&2
     echo "       tools/package_ios.sh <version> <build dir> --no-game <out folder>" >&2
     echo "       tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> [--abi <12 hex>] <out folder>" >&2
+    echo "       (any one may end with: --mods <mods folder>)" >&2
     exit 2
 }
 fail() { echo "error: $*" >&2; exit 1; }
@@ -92,9 +97,16 @@ case "$1" in
     *) usage ;;
 esac
 [ "$#" -ge 1 ] || fail "the out folder is required: give it as the last argument (it has no default)"
-[ "$#" -eq 1 ] || usage
 [ -n "$1" ] || fail "the out folder is required: give it as the last argument (it has no default)"
-out=$(realpath_py "$1")
+out_arg=$1
+mods=
+if [ "$#" -eq 3 ] && [ "$2" = --mods ]; then
+    [ -n "$3" ] || fail "the mods folder is empty"
+    mods=$(realpath_py "$3")
+    shift 2
+fi
+[ "$#" -eq 1 ] || usage
+out=$(realpath_py "$out_arg")
 case "$out/" in "$root/"*) fail "out folder must be outside the checkout: $out" ;; esac
 
 # Refusals come before anything is created, so they leave the out folder untouched.
@@ -148,6 +160,11 @@ case "$exe" in ''|.|..|*/*) fail "invalid CFBundleExecutable" ;; esac
 platforms=$(vtool -show-build "$app/$exe" | awk '$1 == "platform" {print $2}')
 [ "$platforms" = IOS ] || fail "executable must target iphoneos (not Simulator)"
 
+if [ -n "$mods" ]; then
+    case "$out/" in "$mods/"*) fail "out folder must not be inside the mods folder" ;; esac
+    bash "$root/tools/check_bundled_mods.sh" "$mods" || fail "the mods folder is refused"
+fi
+
 if [ -n "$game" ]; then
     [ -d "$game" ] || fail "game folder not found: $game"
     for need in analysis/main.bin romfs.pak spirv.pak; do
@@ -193,6 +210,11 @@ if [ -n "$game" ] && [ -z "$small" ]; then
         fi
     done
     chmod -R a-w "$copy/game"
+fi
+if [ -n "$mods" ]; then
+    [ ! -e "$copy/mods" ] || fail "the app already holds a mods folder"
+    ditto --norsrc --noextattr --noqtn "$mods" "$copy/mods"
+    find "$copy/mods" -name .DS_Store -delete
 fi
 if [ -n "$small" ]; then
     # The same files, for the Dropbox the small .ipa downloads from, and their manifest (written last).
