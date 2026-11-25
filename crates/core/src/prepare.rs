@@ -121,24 +121,27 @@ fn build_ios_args(gen: &Path, build: &Path) -> Vec<String> {
 
 /// The arguments of `tools/package_ios.sh`: the game inside the `.ipa` comes from the
 /// prepared folder `game`.
-/// The bundled mods (`bundle_mods_args`) go beside the player in the app: `--mods <folder>`.
+/// The bundled mods (`bundle_mods_args`) go beside the player in the app: `--mods <folder>`,
+/// when they could be made (they are optional: only the 60 fps setting needs them).
 fn package_ios_args(
     version: &str,
     build: &Path,
     game: &Path,
     delivery: &Path,
-    mods: &Path,
+    mods: Option<&Path>,
 ) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "tools/package_ios.sh".to_owned(),
         version.to_owned(),
         build.display().to_string(),
         "--game".to_owned(),
         game.display().to_string(),
         delivery.display().to_string(),
-        "--mods".to_owned(),
-        mods.display().to_string(),
-    ]
+    ];
+    if let Some(mods) = mods {
+        args.extend(["--mods".to_owned(), mods.display().to_string()]);
+    }
+    args
 }
 
 /// The arguments of `tools/package_ios.sh --small` (issue #306): the small `.ipa`, with no game
@@ -151,9 +154,9 @@ fn package_ios_small_args(
     build_id: &str,
     abi: &str,
     out: &Path,
-    mods: &Path,
+    mods: Option<&Path>,
 ) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "tools/package_ios.sh".to_owned(),
         version.to_owned(),
         build.display().to_string(),
@@ -165,9 +168,11 @@ fn package_ios_small_args(
         abi.to_owned(),
         "--no-folder".to_owned(),
         out.display().to_string(),
-        "--mods".to_owned(),
-        mods.display().to_string(),
-    ]
+    ];
+    if let Some(mods) = mods {
+        args.extend(["--mods".to_owned(), mods.display().to_string()]);
+    }
+    args
 }
 
 /// The arguments of `tools/bundle_mods.sh`: the pt-BR translation and the SpeedFix's files
@@ -201,17 +206,19 @@ fn package_mac_args(
     app: &Path,
     game: &Path,
     delivery: &Path,
-    mods: &Path,
+    mods: Option<&Path>,
 ) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "tools/package_mac.sh".to_owned(),
         version.to_owned(),
         app.display().to_string(),
         game.display().to_string(),
         delivery.display().to_string(),
-        "--mods".to_owned(),
-        mods.display().to_string(),
-    ]
+    ];
+    if let Some(mods) = mods {
+        args.extend(["--mods".to_owned(), mods.display().to_string()]);
+    }
+    args
 }
 
 /// The short build version the Apple packages are named with: `<BASE_VER>-<VCODE>` from
@@ -2552,6 +2559,36 @@ fn run_stages(
 /// folder `acnh-universal-game/ios/` (issue #306).
 pub const IOS_SMALL_FOLDER: &str = "small";
 
+/// One script of the Build stage, to its end; a failure is the Build error.
+fn run_script(runner: &mut dyn ScriptRunner, args: &[String], home: &Path) -> Result<()> {
+    runner
+        .run(Stage::Build, args)
+        .map_err(|log| build_error(Stage::Build, &log, home))?;
+    runner
+        .finish()
+        .map_err(|log| build_error(Stage::Build, &log, home))
+}
+
+/// Makes the bundled mods for the package. They are optional (only `video.frame_rate = 60`
+/// needs them, and they come from the network on a first run): when the script fails (offline,
+/// the release asset gone or changed) the package goes without them, and the mods are fetched
+/// from the hub or the first run with a network. Returns the folder to pass as `--mods`.
+fn bundle_mods_optional(
+    runner: &mut dyn ScriptRunner,
+    dest: &Path,
+    cache: &Path,
+    mods: &Path,
+) -> Option<PathBuf> {
+    // A leftover from an earlier run must not be packaged when this one fails.
+    let _ = std::fs::remove_dir_all(dest);
+    let args = bundle_mods_args(dest, cache);
+    let made = runner
+        .run(Stage::Build, &args)
+        .and_then(|()| runner.finish())
+        .is_ok();
+    made.then(|| mods.to_path_buf())
+}
+
 /// What the `ios` target does after the shared stages (which made the Mac player there too,
 /// as upstream's script cannot stop before it; the iOS build does not use it): the two packs
 /// when they are missing, the `iphoneos` build under the prepared folder, and the `.ipa` in
@@ -2576,15 +2613,16 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
             .into_iter()
             .filter(|dir| dir.is_dir()),
     );
+    let mut env = vec!["env".to_owned()];
     if !dirs.is_empty() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(dirs.into_iter().chain(std::env::split_paths(&path)))
             .map_err(|e| Error::Build(format!("cannot make the PATH: {e}")))?;
-        build_args.splice(
-            0..0,
-            ["env".to_owned(), format!("PATH={}", path.to_string_lossy())],
-        );
+        env.push(format!("PATH={}", path.to_string_lossy()));
     }
+    // libvpx's clone and build outlast the source copy, which is made anew each prepare.
+    env.push(format!("NX_VPX_DIR={}", req.out.join("vpx-ios").display()));
+    build_args.splice(0..0, env);
     let root = runner.root();
     let version = package_version(&root);
     // The small .ipa's game folder names its build and ABI: refuse before any script runs
@@ -2605,19 +2643,20 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
     }
     let small = delivery.join(IOS_SMALL_FOLDER);
     let (mods_dest, mods, mods_cache) = bundled_mods_folder(&req.out);
-    for args in [
-        build_args,
-        bundle_mods_args(&mods_dest, &mods_cache),
-        package_ios_args(&version, &build, &req.out, delivery, &mods),
-        package_ios_small_args(&version, &build, &req.out, &build_id, &abi, &small, &mods),
-    ] {
-        runner
-            .run(Stage::Build, &args)
-            .map_err(|log| build_error(Stage::Build, &log, home))?;
-        runner
-            .finish()
-            .map_err(|log| build_error(Stage::Build, &log, home))?;
-    }
+    run_script(runner, &build_args, home)?;
+    let mods = bundle_mods_optional(runner, &mods_dest, &mods_cache, &mods);
+    let args = package_ios_args(&version, &build, &req.out, delivery, mods.as_deref());
+    run_script(runner, &args, home)?;
+    let args = package_ios_small_args(
+        &version,
+        &build,
+        &req.out,
+        &build_id,
+        &abi,
+        &small,
+        mods.as_deref(),
+    );
+    run_script(runner, &args, home)?;
     // The game's files and manifest.json for Dropbox, beside the small .ipa; copy
     // `acnh-universal-game/` into `Apps/save-relay/` (docs/IOS.md).
     stage_ios_delivery(
@@ -2650,17 +2689,9 @@ fn mac_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
         .map_err(|e| build_error(Stage::Build, &[e.to_string()], home))?;
     let version = package_version(&runner.root());
     let (mods_dest, mods, mods_cache) = bundled_mods_folder(&req.out);
-    for args in [
-        bundle_mods_args(&mods_dest, &mods_cache),
-        package_mac_args(&version, &app, &req.out, delivery, &mods),
-    ] {
-        runner
-            .run(Stage::Build, &args)
-            .map_err(|log| build_error(Stage::Build, &log, home))?;
-        runner
-            .finish()
-            .map_err(|log| build_error(Stage::Build, &log, home))?;
-    }
+    let mods = bundle_mods_optional(runner, &mods_dest, &mods_cache, &mods);
+    let args = package_mac_args(&version, &app, &req.out, delivery, mods.as_deref());
+    run_script(runner, &args, home)?;
     Ok(zip_path(delivery, &version))
 }
 
