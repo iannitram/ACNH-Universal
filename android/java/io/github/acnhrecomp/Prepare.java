@@ -565,16 +565,13 @@ public class Prepare extends Activity {
 
     private static boolean inPlaceDone(String folder) { return new File(folder, "romfs").isDirectory(); }
 
-    // As Home does: the folder saved, and the app opened into it (Home loads the game and starts it).
+    // Hand the prepared folder to Home so it copies the game into <files>/game/ (#192).
     private void play(String folder) {
-        try (FileOutputStream o = new FileOutputStream(new File(getFilesDir(), "data_root.txt"))) {
-            o.write((folder + "\n").getBytes(StandardCharsets.UTF_8));
-        } catch (Exception e) {
-            // the service saved it already, or Home asks for the folder
-        }
         PrepareService.phase = PrepareService.IDLE;
         getSystemService(NotificationManager.class).cancel(2);
-        Intent h = new Intent(this, Home.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        Intent h = new Intent(this, Home.class)
+                .putExtra("install_from", folder)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         startActivity(h);
         finish();
     }

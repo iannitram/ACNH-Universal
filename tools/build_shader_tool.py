@@ -10,7 +10,7 @@ harness instead of a separate one.
 
 usage: build_shader_tool.py <rid> <dest folder> [ACNHRecomp checkout (default: this one)]
   rid: linux-x64, win-x64, osx-arm64, linux-bionic-arm64 (Android: the NDK's clang on PATH, ANDROID_NDK_ROOT set)
-Needs the .NET 10 SDK. The translator's sources (Ryubing, at the commit tools/setup_acnh.py pins) are downloaded into
+Needs the .NET 10 SDK. The translator's sources (Ryubing, at the commit crates/core/src/prepare.rs pins) are downloaded into
 the checkout's private/third_party/ryubing when missing, checked against their SHA-256 (RYUBING_SHA256).
 """
 import hashlib
@@ -25,7 +25,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# The SHA-256 of Codeberg's archive (.tar.gz) of each Ryubing commit tools/setup_acnh.py may pin (RYUBING): what is
+# The SHA-256 of Codeberg's archive (.tar.gz) of each Ryubing commit crates/core/src/prepare.rs may pin (RYUBING): what is
 # compiled into the shader tool every package carries is exactly that. A new commit there needs its hash here.
 RYUBING_SHA256 = {
     "a82350bb77": "aba9789bdcf3fda9e90f965636e9e85e9dcc299333fbf5451bcf22ecfd608506",
@@ -36,11 +36,11 @@ def fetch_ryubing(repo):
     dest = os.path.join(repo, "private", "third_party", "ryubing")
     if os.path.exists(os.path.join(dest, "Ryujinx.sln")):
         return
-    with open(os.path.join(repo, "tools", "setup_acnh.py"), encoding="utf-8") as f:
-        commit = re.search(r'^RYUBING = "([0-9a-f]+)"', f.read(), re.M).group(1)
+    with open(os.path.join(repo, "crates", "core", "src", "prepare.rs"), encoding="utf-8") as f:
+        commit = re.search(r'const RYUBING:\s*&str\s*=\s*"([0-9a-f]+)"', f.read()).group(1)
     want = RYUBING_SHA256.get(commit)
     if not want:
-        sys.exit(f"Ryubing {commit} (tools/setup_acnh.py) has no SHA-256 in RYUBING_SHA256 (tools/build_shader_tool.py)")
+        sys.exit(f"Ryubing {commit} (crates/core/src/prepare.rs) has no SHA-256 in RYUBING_SHA256 (tools/build_shader_tool.py)")
     url = f"https://codeberg.org/Software_arch/Ryubing/archive/{commit}.tar.gz"
     print("downloading", url, flush=True)
     data = urllib.request.urlopen(url, timeout=120).read()

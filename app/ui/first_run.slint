@@ -1,5 +1,5 @@
 import { InputHints } from "hints.slint";
-import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
 export component FirstRunPage inherits Rectangle {
     in property <int> input-device;
     // "Guided setup" in the first run, "Save sync" when Settings opens the same pages.
@@ -36,14 +36,31 @@ export component FirstRunPage inherits Rectangle {
             background: #354a40;
             Rectangle { width: parent.width * root.progress / 100; height: parent.height; background: #f7d681; }
         }
-        if !root.busy && !root.keypad: Rectangle {
-            min-height: 60px;
-            border-width: 3px;
-            border-color: #f7d681;
-            border-radius: 8px;
-            background: #29453a;
-            Text { text: root.choice; color: white; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
-            TouchArea { clicked => { root.accept(); } }
+        if !root.busy && !root.keypad: ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 8px;
+                for text[index] in root.choices: Rectangle {
+                    min-height: 52px;
+                    border-width: index == root.focus-index ? 3px : 1px;
+                    border-color: index == root.focus-index ? #f7d681 : #354a40;
+                    border-radius: 8px;
+                    background: index == root.focus-index ? #315447 : #223a30;
+                    HorizontalBox {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        Text {
+                            text: text;
+                            color: white;
+                            font-size: 20px;
+                            horizontal-alignment: left;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+                    TouchArea { clicked => { root.choose(index); } }
+                }
+            }
         }
         if root.keypad: Rectangle {
             min-height: Math.ceil(root.choices.length / root.columns) * 42px;
@@ -62,13 +79,13 @@ export component FirstRunPage inherits Rectangle {
         }
         HorizontalBox {
             spacing: 10px;
-            for item[index] in ["Previous", "Next", "Select", root.busy ? "Cancel" : "Back"]: Rectangle {
-                visible: (index == 3 && (!root.busy || root.cancel-available)) || (index != 3 && !root.busy && !root.keypad);
-                min-height: 54px;
+            if !root.busy || root.cancel-available: Rectangle {
+                min-height: 48px;
+                min-width: 140px;
                 border-radius: 6px;
                 background: #29453a;
-                Text { text: item; color: white; font-size: 20px; horizontal-alignment: center; vertical-alignment: center; }
-                TouchArea { clicked => { if index == 0 { root.previous(); } else if index == 1 { root.next(); } else if index == 2 { root.accept(); } else { root.back(); } } }
+                Text { text: root.busy ? "Cancel" : "Back"; color: white; font-size: 18px; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea { clicked => { root.back(); } }
             }
         }
         InputHints {

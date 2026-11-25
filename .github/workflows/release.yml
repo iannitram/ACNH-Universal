@@ -1,7 +1,7 @@
 # Release builds of the launcher (SPEC.md M13, M14): on a version tag (v*), build the Rust app and the
 # command line for Linux (AppImage), Windows (zip) and the Mac (app, zipped), check each file list for game
 # data (tools/check_release_files.sh), and attach the three files to a draft release. The release holds
-# no game data. Replaces tools/package_release_*.sh for our launcher. Runs on a tag pushed to a test branch too.
+# no game data and no player. Runs on a tag pushed to a test branch too.
 name: release
 
 on:
@@ -70,7 +70,10 @@ jobs:
           chmod +x "$D/AppRun"
           find "$D" -type f | tee files.txt
           bash tools/check_release_files.sh < files.txt
-          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          APPIMAGETOOL_TAG="1.9.1"
+          APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_TAG}/appimagetool-x86_64.AppImage"
+          echo "${APPIMAGETOOL_SHA256}  appimagetool" | sha256sum -c -
           chmod +x appimagetool
           ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool "$D" "ACNH-Universal-$VERSION-linux-x86_64.AppImage"
       - uses: actions/upload-artifact@v4
@@ -183,4 +186,4 @@ jobs:
           bash tools/check_release_files.sh < files.txt
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --draft --title "$VERSION" --notes "Launcher builds. No game data; bring your own game folder."
+        run: gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --draft --title "$VERSION" --notes "Launcher builds (acnh-app, acnh-universal CLI, and source). No game data and no player; a hub builds the game from your own game folder."
