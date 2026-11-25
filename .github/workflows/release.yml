@@ -144,7 +144,7 @@ jobs:
           if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
           printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
           # The packaged source has no .git: carry the version and the commit count for tools/build_version.sh (Mac and iOS stamps).
-          ( NX_RELEASE_VERSION="$VERSION"; . tools/build_version.sh; printf 'BASE_VER=%s\nCOMMITS=%s\n' "$BASE_VER" "$(git rev-list --count HEAD)" > "$SRC/BUILD_VERSION" )
+          ( NX_RELEASE_VERSION="$VERSION"; . tools/build_version.sh; printf 'BASE_VER=%s\nCOMMITS=%s\n' "${BASE_VER%%[-+]*}" "$(git rev-list --count HEAD)" > "$SRC/BUILD_VERSION" )
           for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
             test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
           done

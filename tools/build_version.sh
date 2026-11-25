@@ -24,6 +24,7 @@ _bv_file_commits=""
 if [ "$_bv_git" = 0 ] && [ -f "$_bv_root/BUILD_VERSION" ]; then
   _bv_file_ver=$(sed -n 's/^BASE_VER=//p' "$_bv_root/BUILD_VERSION" | head -n 1)
   _bv_file_commits=$(sed -n 's/^COMMITS=//p' "$_bv_root/BUILD_VERSION" | head -n 1)
+  _bv_file_ver=${_bv_file_ver%%[-+]*}  # a pre-release suffix does not count (as for a checkout)
   [[ $_bv_file_ver =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] || _bv_file_ver=""
   [[ $_bv_file_commits =~ ^[0-9]+$ ]] || _bv_file_commits=""
 fi

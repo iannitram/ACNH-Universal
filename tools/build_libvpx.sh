@@ -20,12 +20,25 @@ case "$target" in android|iphoneos|iphonesimulator) ;; *) sed -n 7,10p "$0"; exi
 # NX_VPX_DIR moves the clone, the builds and the results out of the checkout: Prepare keeps them beside the prepared
 # folder, as its copy of the source is made anew every time. Default: private/third_party.
 work=${NX_VPX_DIR:-$root/private/third_party}
+final=$work
 src=$work/libvpx-src-$TAG
 if [ ! -d "$src/.git" ]; then
     rm -rf "$src"
     mkdir -p "$work"
     git clone --quiet --depth 1 --branch "$TAG" https://chromium.googlesource.com/webm/libvpx "$src"
 fi
+# libvpx's configure and makefiles cannot cope with a space in a path (the Mac's ~/Library/Application Support has
+# one): build in a scratch folder without one, then copy the result to its place under $final.
+staged=0
+case "$work" in
+*[[:space:]]*)
+    staged=1
+    work=$(mktemp -d "${TMPDIR:-/tmp}/nxvpx.XXXXXX")
+    case "$work" in *[[:space:]]*) work=$(mktemp -d /tmp/nxvpx.XXXXXX) ;; esac
+    trap 'rm -rf "$work"' EXIT
+    cp -R "$src" "$work/libvpx-src-$TAG"
+    src=$work/libvpx-src-$TAG ;;
+esac
 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 common=(--disable-vp8-encoder --disable-vp9-encoder --enable-vp8-decoder --enable-vp9-decoder --disable-examples
         --disable-tools --disable-docs --disable-unit-tests --disable-install-bins --disable-install-srcs
@@ -71,4 +84,11 @@ mkdir -p "$build"
 )
 [ -f "$out/lib/libvpx.a" ] || { echo "no $out/lib/libvpx.a"; exit 1; }
 cp "$src/LICENSE" "$out/LICENSE"
+if [ "$staged" = 1 ]; then
+    dest=$final${out#"$work"}
+    rm -rf "$dest"
+    mkdir -p "$(dirname "$dest")"
+    cp -R "$out" "$dest"
+    out=$dest
+fi
 echo "libvpx $TAG for $target: $out/lib/libvpx.a ($(du -h "$out/lib/libvpx.a" | cut -f1))"
