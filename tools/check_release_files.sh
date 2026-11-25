@@ -3,7 +3,8 @@
 # (an archive listing, an AppDir's find output) and refuses game data, keys, packs, shaders and gen/.
 # usage: <list files> | tools/check_release_files.sh
 #
-# One exception: the mods an Apple package carries beside the player (tools/bundle_mods.sh), exactly
+# One exception, off unless ACNH_ALLOW_BUNDLED_MODS=1 (only package_mac.sh and package_ios.sh set it; the public
+# release check in release.yml does not, so the release can never carry them): the mods an Apple package carries beside the player (tools/bundle_mods.sh), exactly
 # ACNH-Universal.app/Contents/Resources/mods/{ptbr,speedfix60}/romfs/ in the Mac zip and Payload/ACNH.app/mods/
 # {ptbr,speedfix60}/romfs/ in the .ipa. There the romfs/ folder and the .zs, .sarc and .pack names (the mods' own
 # files) pass; every other rule still applies to the rest of the path, and nothing else under romfs/ passes.
@@ -11,7 +12,7 @@ mods_prefix='^/([^/]+\.app/contents/resources|payload/acnh\.app)/mods/(ptbr|spee
 bad=0
 while IFS= read -r f || [ -n "$f" ]; do
   lf=/$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]' | tr '\\' '/')
-  if [[ $lf =~ $mods_prefix ]]; then
+  if [ "${ACNH_ALLOW_BUNDLED_MODS:-}" = 1 ] && [[ $lf =~ $mods_prefix ]]; then
     rest=${lf#"${BASH_REMATCH[0]}"}
     rest=${rest%/}
     case "/$rest/" in

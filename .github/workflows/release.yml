@@ -163,6 +163,7 @@ jobs:
           # The release holds the launcher only: no player, and never a game (SPEC.md M14).
           test ! -e "$A/Contents/MacOS/acnh" || { echo "the release app holds a player"; exit 1; }
           test ! -e "$A/Contents/Resources/game" || { echo "the release app holds a game folder"; exit 1; }
+          test ! -e "$A/Contents/Resources/mods" || { echo "the release app holds a mods folder"; exit 1; }
           codesign --force --deep --sign - "$A"
           find "$A" -type f | tee files.txt
           bash tools/check_release_files.sh < files.txt

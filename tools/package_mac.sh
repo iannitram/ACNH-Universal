@@ -70,7 +70,7 @@ while IFS= read -r -d '' f; do
     [ "$(lipo -archs "$f" 2>/dev/null)" = arm64 ] || die "a Mach-O file in the app is not arm64 only"
   fi
 done < <(find "$app" -type f -print0)
-(cd "$app" && find . \( -type f -o -type l \)) | bash "$root/tools/check_release_files.sh" >/dev/null ||
+(cd "$app" && find . \( -type f -o -type l \)) | ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" >/dev/null ||
   die "the app's file list fails tools/check_release_files.sh"
 
 # --- stage, sign, zip ---
@@ -108,7 +108,7 @@ if [ -n "$mods" ]; then
   find "$bundle/Contents/Resources/mods" -name .DS_Store -delete
   # The release check again, over what is in the app now (everything but the game): the one path it lets pass is mods/.
   (cd "$stage" && find ACNH-Universal.app -path ACNH-Universal.app/Contents/Resources/game -prune -o \( -type f -o -type l \) -print) |
-    bash "$root/tools/check_release_files.sh" >/dev/null || die "the package's file list fails tools/check_release_files.sh"
+    ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" >/dev/null || die "the package's file list fails tools/check_release_files.sh"
 fi
 
 # Sign each binary first, then the bundle, so the signature seals the game files too.

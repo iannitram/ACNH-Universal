@@ -48,6 +48,8 @@ struct Fake {
     ran: Vec<Stage>,
     args: Vec<Vec<String>>,
     fail_at: Option<Stage>,
+    /// Fails the script `tools/bundle_mods.sh` (the network is down), whatever the stage.
+    fail_bundle: bool,
     root: Option<PathBuf>,
     /// The programs `probe` finds (and what they print); the others are not there.
     tools: Vec<(&'static str, &'static str)>,
@@ -99,6 +101,9 @@ impl ScriptRunner for Fake {
     fn run(&mut self, stage: Stage, args: &[String]) -> Result<(), Vec<String>> {
         self.ran.push(stage);
         self.args.push(args.to_vec());
+        if self.fail_bundle && args.iter().any(|a| a == "tools/bundle_mods.sh") {
+            return Err(vec!["curl: could not resolve host".to_owned()]);
+        }
         if self.fail_at == Some(stage) {
             return Err(vec!["boom at /home/me/x".to_owned()]);
         }
@@ -1678,6 +1683,37 @@ fn mac_runs_the_stages_the_packs_the_assembly_and_the_package_script() {
         ]
     );
     assert_eq!(zip, delivery.join(format!("ACNH-Universal-{version}.zip")));
+}
+
+#[test]
+fn mac_packages_without_the_mods_when_they_cannot_be_fetched() {
+    let (req, delivery) = mac_request("mac-no-mods");
+    let mut fake = Fake::with_mac_tools();
+    fake.fail_bundle = true;
+    let zip = prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    let n = fake.args.len();
+    assert!(fake.args[n - 2].iter().any(|a| a == "tools/bundle_mods.sh"));
+    assert_eq!(fake.args[n - 1][0], "tools/package_mac.sh");
+    assert!(!fake.args[n - 1].iter().any(|a| a == "--mods"));
+    assert!(zip.starts_with(&delivery));
+}
+
+#[test]
+fn ios_packages_without_the_mods_when_they_cannot_be_fetched() {
+    let (mut req, _) = ios_request("ios-no-mods");
+    let romfs = req.out.join("game-romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    std::fs::write(romfs.join("a.bin"), b"a").unwrap();
+    req.game.romfs = romfs;
+    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
+    std::fs::write(req.out.join("spirv/a.spv"), b"spv").unwrap();
+    let mut fake = Fake::with_ios_tools();
+    fake.fail_bundle = true;
+    prepare_with(&req, Hub::Mac, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    let n = fake.args.len();
+    assert!(fake.args[n - 2].iter().any(|a| a == "tools/bundle_mods.sh"));
+    assert_eq!(fake.args[n - 1][0], "tools/package_ios.sh");
+    assert!(!fake.args[n - 1].iter().any(|a| a == "--mods"));
 }
 
 #[test]

@@ -166,7 +166,7 @@ printf '%s\n' Payload/ACNH.app/mods/bundle.txt Payload/ACNH.app/mods/ptbr/romfs/
     | sort > "$work/mods.want"
 diff "$work/mods.want" "$work/mods.got" || die "the archive's mods/ is not exactly the bundle"
 grep -q '^Payload/ACNH\.app/game/analysis/main.bin$' "$work/mods.list" || die "--mods lost the game"
-awk '!/^Payload\/ACNH\.app\/game/' "$work/mods.list" | bash "$root/tools/check_release_files.sh" > /dev/null \
+awk '!/^Payload\/ACNH\.app\/game/' "$work/mods.list" | ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" > /dev/null \
     || die "the archive with mods fails the release check outside game/"
 unzip -tq "$mods_out/ACNH-Universal-mods.ipa" > /dev/null || die "--mods archive fails unzip -t"
 # beside the player: the player reads <its folder>/mods/bundle.txt, version first (acnh_files_mods_fetch)

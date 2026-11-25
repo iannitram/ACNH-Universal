@@ -80,7 +80,7 @@ zip=$out/ACNH-Universal-t1.zip
 [ -f "$zip" ] || fail "no zip"
 [ ! -e "$out/.ACNH-Universal-t1.partial" ] && [ ! -e "$zip.partial" ] || fail "partial files left behind"
 zipinfo -1 "$zip" >"$work/stub.list"
-bash "$root/tools/check_release_files.sh" <"$work/stub.list" >/dev/null || fail "stub list fails the release check"
+ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" <"$work/stub.list" >/dev/null || fail "stub list fails the release check"
 ! grep -q 'Contents/Resources/game/' "$work/stub.list" || fail "stub zip holds a game folder"
 grep -q '^ACNH-Universal.app/Contents/MacOS/acnh$' "$work/stub.list" || fail "stub zip is missing the player"
 pass "stub zip"
@@ -110,7 +110,7 @@ diff "$work/game.want" "$work/game.list" || fail "game/ does not hold exactly th
 for other in gen/ build/ exefs/ extract/ user/ config.ini; do
   ! grep -q "$other" "$work/decoy.list" || fail "a decoy outside the five names was copied: $other"
 done
-grep -v 'Contents/Resources/game/' "$work/decoy.list" | bash "$root/tools/check_release_files.sh" >/dev/null ||
+grep -v 'Contents/Resources/game/' "$work/decoy.list" | ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" >/dev/null ||
   fail "decoy zip's list outside game/ fails the release check"
 unpacked=$work/unpacked
 mkdir "$unpacked"
@@ -169,7 +169,7 @@ grep "^$res/mods/." "$work/mods.list" | grep -v '/$' | sort >"$work/mods.got"
 printf '%s\n' "$res/mods/bundle.txt" "$res/mods/ptbr/romfs/Message/Decoy.sarc.zs" \
   "$res/mods/speedfix60/romfs/Bcsv/Decoy.bcsv" "$res/mods/speedfix60/romfs/Pack/Decoy.pack" | sort >"$work/mods.want"
 diff "$work/mods.want" "$work/mods.got" || fail "the zip's mods/ is not exactly the bundle"
-grep -v "^$res/game/" "$work/mods.list" | bash "$root/tools/check_release_files.sh" >/dev/null ||
+grep -v "^$res/game/" "$work/mods.list" | ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" >/dev/null ||
   fail "the zip with mods fails the release check outside game/"
 ! grep -q "^$res/game/.*mods" "$work/mods.list" || fail "mods went into game/"
 mkdir "$work/unpacked-mods"
@@ -205,13 +205,15 @@ empty_or_missing "$work/out-badmods" || fail "a refused mods folder wrote to the
 ok_list=$work/release-ok.list
 printf '%s\n' "$res/mods/speedfix60/romfs/Pack/Decoy.pack" "$res/mods/ptbr/romfs/Message/Decoy.sarc.zs" \
   Payload/ACNH.app/mods/speedfix60/romfs/Bcsv/Decoy.bcsv >"$ok_list"
-bash "$root/tools/check_release_files.sh" <"$ok_list" >/dev/null || fail "the release check refuses the bundled mods"
+ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" <"$ok_list" >/dev/null || fail "the release check refuses the bundled mods"
 for bad in "$res/game/romfs/Decoy.bcsv" "$res/mods/other/romfs/Decoy.bcsv" "$res/mods/ptbr/romfs/Decoy.bin" \
            "$res/mods/ptbr/romfs/gen/Decoy.zs" "$res/mods/ptbr/romfs/../x/romfs/Decoy.zs" "$res/other/romfs/Decoy.zs" \
            "$res/mods/ptbr/Decoy.zs" "$res/Decoy.pack" Payload/ACNH.app/game/mods/ptbr/romfs/Decoy.bcsv \
            Payload/ACNH.app/x/mods/ptbr/romfs/Decoy.bcsv; do
-  if printf '%s\n' "$bad" | bash "$root/tools/check_release_files.sh" >/dev/null 2>&1; then fail "the release check lets through: $bad"; fi
+  if printf '%s\n' "$bad" | ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" >/dev/null 2>&1; then fail "the release check lets through: $bad"; fi
 done
+# without the opt-in (the public release check) the very same list is refused
+if bash "$root/tools/check_release_files.sh" <"$ok_list" >/dev/null 2>&1; then fail "the release check lets the bundled mods through without ACNH_ALLOW_BUNDLED_MODS"; fi
 pass "bundled mods"
 
 # ---- past 4 GB: a ZIP64 archive that lists the full size and unpacks with ditto ----

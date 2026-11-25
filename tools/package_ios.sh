@@ -192,7 +192,7 @@ elif grep -q '^Payload/ACNH\.app/game' "$list"; then
     fail "the archive has a game/ folder although --no-game was given"
 fi
 outside=$(awk -F/ '!($1 == "Payload" && $2 == "ACNH.app" && $3 == "game") { print }' "$list")
-if ! check=$(printf '%s\n' "$outside" | bash "$root/tools/check_release_files.sh" 2>&1); then
+if ! check=$(printf '%s\n' "$outside" | ACNH_ALLOW_BUNDLED_MODS=1 bash "$root/tools/check_release_files.sh" 2>&1); then
     printf '%s\n' "$check" >&2
     fail "the archive outside game/ does not pass tools/check_release_files.sh"
 fi
