@@ -14,7 +14,7 @@ use acnh_core::savecard::SaveCard;
 use acnh_core::{saves, Error};
 use relay::{
     decide, describe_card, Action, Blocked, BlockedAnswer, Connector, FileSettings, HeldAnswer,
-    Player, Prompt, Roots, SignInAnswer, SignInForm,
+    Player, Prompt, Roots, SignInAnswer, SignInForm, SyncNow, SyncReady,
 };
 use save_relay::creds::{self, CredentialStore, MemoryStore, Secret};
 use save_relay::local::{Config, LocalStore};
@@ -22,7 +22,7 @@ use save_relay::platform::AppDirs;
 use save_relay::remote::{MemoryRemote, Precondition, Remote, RemoteEntry};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -43,12 +43,17 @@ struct Gate {
     inner: Arc<MemoryRemote>,
     password_ok: bool,
     broken: Arc<AtomicBool>,
+    /// No network: every call answers `Unreachable`.
+    offline: Arc<AtomicBool>,
     /// The next puts of `playing.json` fail as a dropped connection.
     fail_mark_puts: Arc<AtomicUsize>,
 }
 
 impl Gate {
     fn check(&self) -> save_relay::Result<()> {
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(save_relay::Error::Unreachable("no network".into()));
+        }
         if !self.password_ok {
             return Err(save_relay::Error::AuthFailed);
         }
@@ -134,6 +139,7 @@ struct FakeConnector {
     remote: Arc<MemoryRemote>,
     accepted: Mutex<String>,
     broken: Arc<AtomicBool>,
+    offline: Arc<AtomicBool>,
     fail_mark_puts: Arc<AtomicUsize>,
 }
 
@@ -164,6 +170,7 @@ impl Connector for FakeConnector {
             inner: self.remote.clone(),
             password_ok: secret.expose() == *self.accepted.lock().unwrap(),
             broken: self.broken.clone(),
+            offline: self.offline.clone(),
             fail_mark_puts: self.fail_mark_puts.clone(),
         };
         Ok(Some(
@@ -319,6 +326,7 @@ struct Fx {
     creds: Creds,
     booted: AtomicBool,
     pulled: AtomicBool,
+    synced: AtomicU64,
     settings: FileSettings,
     failures: Failures,
     connector: FakeConnector,
@@ -343,6 +351,7 @@ impl Fx {
                 remote: remote.clone(),
                 accepted: Mutex::new(PASSWORD.into()),
                 broken: Arc::new(AtomicBool::new(false)),
+                offline: Arc::new(AtomicBool::new(false)),
                 fail_mark_puts: Arc::new(AtomicUsize::new(0)),
             },
             remote,
@@ -352,6 +361,7 @@ impl Fx {
             },
             booted: AtomicBool::new(false),
             pulled: AtomicBool::new(false),
+            synced: AtomicU64::new(0),
             settings: FileSettings(data_root.join("config.ini")),
             failures: Failures::default(),
             log: Mutex::new(Vec::new()),
@@ -378,6 +388,7 @@ impl Fx {
             booted: &self.booted,
             pulled: &self.pulled,
             settings: &self.settings,
+            synced: &self.synced,
             log: Box::new(|line| self.log.lock().unwrap().push(line.to_string())),
         }
     }
@@ -1148,4 +1159,173 @@ fn a_background_push_with_nothing_new_keeps_the_mark_and_one_against_a_newer_isl
     let (laptop, laptop_saves) = fx.other("laptop");
     laptop.pull_anyway(&laptop_saves, None).unwrap();
     assert_eq!(read_main(&laptop_saves), "main desktop newer");
+}
+
+// ---- the Saves page's Sync now (issue #260): the checkpoint's push, on demand ----------------
+
+/// A booted game, set up and pulled, its island "v1".
+fn playing(name: &str) -> Fx {
+    let fx = Fx::new(name);
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    assert!(fx.pulled.load(Ordering::SeqCst));
+    fx
+}
+
+#[test]
+fn sync_now_uploads_keeps_the_ipad_playing_and_says_synced_then_nothing_new() {
+    let fx = playing("ios-sync-now");
+    let prompt = fx.no_prompt();
+    let player = fx.player(&prompt);
+    let pulled_at = fx.synced.load(Ordering::SeqCst);
+    assert!(pulled_at > 0, "the start's pull is the first sync");
+    assert_eq!(player.sync_now_ready(false), SyncReady::Ready);
+    assert_eq!(player.service_label(), Some("Nextcloud"));
+    fs::write(fx.saves().join("main.dat"), "main played").unwrap();
+    assert_eq!(player.sync_now(), SyncNow::Synced);
+    assert!(fx.synced.load(Ordering::SeqCst) >= pulled_at);
+    assert_eq!(
+        ipad_mark(&fx).as_deref(),
+        Some("ipad"),
+        "still the one playing"
+    );
+    assert!(!fx.roots.dirs().data.join("push-waiting").exists());
+    assert_eq!(player.sync_now(), SyncNow::NothingNew);
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("ipad"));
+    let (desktop, desktop_saves) = fx.other("desktop");
+    assert!(matches!(
+        desktop.pull(&desktop_saves, None).unwrap(),
+        RelaySync::Held { .. }
+    ));
+    desktop.pull_anyway(&desktop_saves, None).unwrap();
+    assert_eq!(read_main(&desktop_saves), "main played");
+    assert!(!fx.log_text().contains(PASSWORD));
+}
+
+#[test]
+fn sync_now_with_no_island_saved_yet_pulls_nothing_under_the_running_game() {
+    let fx = playing("ios-sync-now-empty");
+    let prompt = fx.no_prompt();
+    let player = fx.player(&prompt);
+    fs::remove_dir_all(fx.saves()).unwrap();
+    fs::create_dir_all(fx.saves()).unwrap();
+    assert_eq!(player.sync_now(), SyncNow::NothingNew);
+    assert!(
+        !fx.saves().join("main.dat").exists(),
+        "the server's island is not pulled mid-game"
+    );
+}
+
+#[test]
+fn sync_now_against_a_newer_island_overwrites_nothing_never_pulls_and_waits_for_the_next_start() {
+    let fx = playing("ios-sync-now-newer");
+    let prompt = fx.no_prompt();
+    let player = fx.player(&prompt);
+    let (desktop, desktop_saves) = fx.other("desktop");
+    desktop.pull_anyway(&desktop_saves, None).unwrap();
+    fs::write(desktop_saves.join("main.dat"), "main desktop newer").unwrap();
+    desktop.push(&desktop_saves, None).unwrap();
+    fs::write(fx.saves().join("main.dat"), "main ipad also").unwrap();
+    assert_eq!(player.sync_now(), SyncNow::Newer);
+    assert_eq!(read_main(&fx.saves()), "main ipad also", "nothing pulled");
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    let (laptop, laptop_saves) = fx.other("laptop");
+    laptop.pull_anyway(&laptop_saves, None).unwrap();
+    assert_eq!(read_main(&laptop_saves), "main desktop newer");
+
+    // The island moved on and the iPad's did not change: no mark is claimed over it.
+    let fx = playing("ios-sync-now-moved-on");
+    let prompt = fx.no_prompt();
+    let player = fx.player(&prompt);
+    let (desktop, desktop_saves) = fx.other("desktop");
+    desktop.pull_anyway(&desktop_saves, None).unwrap();
+    fs::write(desktop_saves.join("main.dat"), "main desktop newer").unwrap();
+    desktop.push(&desktop_saves, None).unwrap();
+    assert_eq!(player.sync_now(), SyncNow::Newer);
+    assert_eq!(ipad_mark(&fx), None);
+    assert_eq!(read_main(&fx.saves()), "main v1");
+}
+
+#[test]
+fn sync_now_when_another_device_took_the_island_over_leaves_its_mark() {
+    let fx = playing("ios-sync-now-taken");
+    let prompt = fx.no_prompt();
+    let player = fx.player(&prompt);
+    let (desktop, desktop_saves) = fx.other("desktop");
+    desktop.pull_anyway(&desktop_saves, None).unwrap();
+    assert_eq!(player.sync_now(), SyncNow::TakenOver);
+    assert_eq!(ipad_mark(&fx).as_deref(), Some("desktop"));
+}
+
+#[test]
+fn sync_now_is_off_for_a_game_started_with_sync_off() {
+    let fx = Fx::new("ios-sync-now-off");
+    island(&fx.saves(), "v1");
+    assert_eq!(
+        fx.player(&fx.no_prompt()).sync_now_ready(false),
+        SyncReady::NotBooted
+    );
+    run(&fx, |game| {
+        let Shown::SignIn(_) = game.shown() else {
+            panic!("expected the sign-in form")
+        };
+        game.reply(Reply::SignIn(SignInAnswer::NotNow));
+        game.finish();
+    });
+    assert_eq!(fx.synced.load(Ordering::SeqCst), 0);
+    // Set up while the game runs: still no push from this game.
+    fx.set_up();
+    let prompt = fx.no_prompt();
+    let player = fx.player(&prompt);
+    assert_eq!(player.sync_now_ready(false), SyncReady::StartedOff);
+    assert_eq!(player.sync_now(), SyncNow::Off);
+    assert_eq!(ipad_mark(&fx), None);
+    assert_eq!(player.sync_now_ready(true), SyncReady::StartedOff);
+}
+
+#[test]
+fn sync_now_with_a_refused_or_unreadable_password_never_asks_mid_game() {
+    let fx = playing("ios-sync-now-signed-out");
+    let prompt = fx.no_prompt();
+    let player = fx.player(&prompt);
+    assert_eq!(player.sync_now_ready(true), SyncReady::Busy);
+    // The server refuses the app password: signed out, the push waits.
+    *fx.connector.accepted.lock().unwrap() = SECOND.into();
+    fs::write(fx.saves().join("main.dat"), "main played").unwrap();
+    assert_eq!(player.sync_now(), SyncNow::SignedOut);
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    // The Keychain cannot be read (locked): the button says signed out, a press is an error.
+    fx.creds.unreadable.store(true, Ordering::SeqCst);
+    assert_eq!(player.sync_now_ready(false), SyncReady::SignedOut);
+    assert_eq!(player.sync_now(), SyncNow::Error);
+    // The password is gone from the Keychain.
+    fx.creds.unreadable.store(false, Ordering::SeqCst);
+    fx.creds.delete(&account()).unwrap();
+    assert_eq!(player.sync_now_ready(false), SyncReady::SignedOut);
+    assert_eq!(player.sync_now(), SyncNow::SignedOut);
+    assert!(!fx.log_text().contains(PASSWORD));
+    assert!(!fx.log_text().contains(SECOND));
+}
+
+#[test]
+fn sync_now_offline_or_on_a_broken_server_waits_for_the_next_start() {
+    let fx = playing("ios-sync-now-offline");
+    let prompt = fx.no_prompt();
+    let player = fx.player(&prompt);
+    fs::write(fx.saves().join("main.dat"), "main played").unwrap();
+    fx.connector.offline.store(true, Ordering::SeqCst);
+    assert_eq!(player.sync_now(), SyncNow::Offline);
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    fx.connector.offline.store(false, Ordering::SeqCst);
+    fx.connector.broken.store(true, Ordering::SeqCst);
+    assert_eq!(player.sync_now(), SyncNow::Error);
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    fx.connector.broken.store(false, Ordering::SeqCst);
+    assert_eq!(player.sync_now(), SyncNow::Synced);
+    assert!(!fx.roots.dirs().data.join("push-waiting").exists());
+    // Save sync turned off meanwhile (its config gone): off.
+    fs::remove_file(fx.roots.dirs().config.join("config.json")).unwrap();
+    assert_eq!(player.sync_now_ready(false), SyncReady::Off);
+    assert_eq!(player.sync_now(), SyncNow::Off);
 }

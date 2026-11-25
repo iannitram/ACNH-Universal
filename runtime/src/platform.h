@@ -110,6 +110,30 @@ void window_size(uint32_t& w, uint32_t& h);  // client size in pixels
 void screen_size(uint32_t& w, uint32_t& h);  // the display's own size, landscape (Android; the window on PC)
 // The render scale to use when the player sets none: 1 on fast GPUs, less on slower ones (Android).
 float default_render_scale();
+// The Saves page's Sync now (issue #260): save sync inside the game (Save Relay; crates/runtime relay.rs) on Android
+// and iOS. Elsewhere the launcher syncs, and `offered` is false. The codes are relay.rs's SyncReady and SyncNow.
+enum SaveSyncReady { kSyncReady = 0, kSyncOff, kSyncStartedOff, kSyncBusy, kSyncSignedOut, kSyncNotBooted };
+enum SaveSyncOutcome {
+    kSyncRunning = -1,
+    kSyncNone = 0,
+    kSyncSynced,      // a new revision went up
+    kSyncNothingNew,  // the server already had this island
+    kSyncNewer,       // the server has a newer island from another device: nothing overwritten, left for the next start
+    kSyncTakenOver,   // it went up, but another device has opened the island since
+    kSyncWasOff,        // save sync is off (or this game started with it off)
+    kSyncWasSignedOut,  // the sign-in is gone or refused
+    kSyncOffline,
+    kSyncError,
+};
+struct SaveSync {
+    bool offered = false;   // this host syncs inside the game
+    int ready = kSyncOff;   // SaveSyncReady
+    int outcome = kSyncNone;  // SaveSyncOutcome: the last Sync now's
+    int64_t last_unix = 0;  // when the island last synced in this game (0: not yet)
+    std::string service;    // "Dropbox", "Nextcloud"; "" when unknown
+};
+SaveSync save_sync_status();  // files and the credential store only, no network: a few times a second at most
+bool save_sync_now();         // uploads on a worker thread and returns at once; false when it did not start
 #if defined(__ANDROID__)
 // The app started again from its launcher activity, and this process ended (settings that take effect at start).
 [[noreturn]] void restart_app();

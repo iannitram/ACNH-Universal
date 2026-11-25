@@ -92,6 +92,10 @@ extern "C" void acnh_relay_android_after_game(const char* data_root, const char*
 extern "C" void acnh_relay_android_background(const char* data_root, const char* files);
 extern "C" bool acnh_relay_android_ready(const char* files);
 extern "C" void acnh_relay_android_resume(const char* data_root, const char* files);
+// The Saves page's Sync now (platform.h, SaveSync): the background push on a worker, and what the page shows of it.
+extern "C" bool acnh_relay_android_sync_now(const char* data_root, const char* files);  // returns at once
+extern "C" void acnh_relay_android_sync_status(const char* data_root, const char* files, int* ready, int* outcome,
+                                               uint64_t* last, char* service, size_t cap);
 
 namespace nx::plat {
 
@@ -194,6 +198,20 @@ void exit_process(int code) {
     nx::log_flush();
     _exit(code);
 }
+
+SaveSync save_sync_status() {
+    SaveSync s;
+    s.offered = true;
+    uint64_t last = 0;
+    char service[64] = {};
+    acnh_relay_android_sync_status(g_root.c_str(), g_cache_dir.c_str(), &s.ready, &s.outcome, &last, service,
+                                   sizeof service);
+    s.last_unix = int64_t(last);
+    s.service = service;
+    return s;
+}
+
+bool save_sync_now() { return acnh_relay_android_sync_now(g_root.c_str(), g_cache_dir.c_str()); }
 
 // The home screen's pull names the game folder before android_main does (relay_android.cpp): its config.ini holds
 // relay.ask, its logs/ the relay's lines.

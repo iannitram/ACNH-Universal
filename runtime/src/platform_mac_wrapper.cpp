@@ -58,6 +58,8 @@
 #include <nx/game.h>
 #include <nx/runtime.h>
 
+#include "touch_input.h"
+#include "touch_layout.h"
 #if TARGET_OS_IPHONE
 // The small .ipa's first-start download (runtime/src/appgame_ios.mm; issue #231).
 extern "C" bool nx_appgame_first_start();      // blocks until the game is installed (true) or given up (false)
@@ -71,6 +73,7 @@ extern "C" const char* nx_appgame_game_dir();  // Library/Application Support/ga
 #include "ui/amiibo_importer.h"
 #include "ui/ui.h"
 #include "bug_report.h"
+#include "glyph_layout.h"
 #include "platform.h"
 
 #ifdef NX_RUST_RUNTIME
@@ -367,6 +370,11 @@ uint64_t window_generation() { return 1; }
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 float default_render_scale() { return 1.0f; }
+#if !TARGET_OS_IPHONE
+// No save sync inside the game on the Mac: the launcher syncs (platform.h, SaveSync). The iPad's is below.
+SaveSync save_sync_status() { return {}; }
+bool save_sync_now() { return false; }
+#endif
 
 // ---- input: first SDL gamepad + keyboard (sampled on the main thread) -----------------------------------------
 
@@ -388,10 +396,14 @@ const char* const kKeyNames[22][2] = {
 };
 // Nintendo's own pads (a Switch Pro Controller, Joy-Cons) keep A on the right face button; every other keeps confirm
 // on the bottom one (input.layout auto).
+// One test for "Nintendo's own pad", used for both the button mapping and the icon layout so they never differ: SDL's
+// type name (switchpro, joyconleft, ...) or Nintendo's USB vendor id (adapters and licensed pads typed "standard").
+static bool nintendo_type(SDL_GamepadType type, Uint16 vendor) {
+    const char* t = SDL_GetGamepadStringForType(type);
+    return nx::nintendo_pad_by(t ? t : "", vendor);
+}
 static bool nintendo_pad(SDL_Gamepad* pad) {
-    const char* t = pad ? SDL_GetGamepadStringForType(SDL_GetGamepadType(pad)) : nullptr;
-    const std::string s = t ? t : "";
-    return s.rfind("switch", 0) == 0 || s.rfind("joycon", 0) == 0 || (pad && SDL_GetGamepadVendor(pad) == 0x057e);
+    return pad && nintendo_type(SDL_GetGamepadType(pad), SDL_GetGamepadVendor(pad));
 }
 
 const InputOptions& input_options() {
@@ -419,6 +431,41 @@ const InputOptions& input_options() {
 
 SDL_Gamepad* g_gamepad = nullptr;  // player 1's controller: the settings screen's name and icons, and rumble
 
+// The kind of a pad from SDL's type for it: "xbox", "playstation", "switch" (the console's own pads, by SDL's name
+// for their type: "switchpro", "joyconleft", ...) or "generic".
+static std::string kind_of_type(SDL_GamepadType type, Uint16 vendor) {
+    if (nintendo_type(type, vendor)) return "switch";
+    switch (type) {
+        case SDL_GAMEPAD_TYPE_XBOX360:
+        case SDL_GAMEPAD_TYPE_XBOXONE: return "xbox";
+        case SDL_GAMEPAD_TYPE_PS3:
+        case SDL_GAMEPAD_TYPE_PS4:
+        case SDL_GAMEPAD_TYPE_PS5: return "playstation";
+        default: return "generic";
+    }
+}
+
+// Player 1's controller, or before one has joined the first one connected: kind and name, kept for the other
+// threads. The pad itself is the main thread's (sample_gamepads closes it on disconnect), so they read this copy.
+namespace {
+std::mutex g_pad_info_lock;
+std::string g_pad_kind, g_pad_name;
+bool g_pad_info_set = false;  // the main thread has looked (an empty kind then means no pad)
+}  // namespace
+
+static void cache_pad_info(SDL_Gamepad* pad) {
+    std::string kind, name;
+    if (pad) {
+        kind = kind_of_type(SDL_GetGamepadType(pad), SDL_GetGamepadVendor(pad));
+        const char* n = SDL_GetGamepadName(pad);
+        name = n ? n : "";
+    }
+    std::lock_guard lk(g_pad_info_lock);
+    g_pad_kind = std::move(kind);
+    g_pad_name = std::move(name);
+    g_pad_info_set = true;
+}
+
 // ---- several controllers, one per player (hle_hid.cpp reads players 2.. through read_player_pad) ---------------
 
 namespace {
@@ -428,7 +475,7 @@ bool g_player_on[kMaxPlayers] = {};
 }  // namespace
 
 // One controller's buttons and sticks, in the layout chosen in the settings.
-static void read_gamepad(SDL_Gamepad* pad, const InputOptions& opt, PadState& p) {
+static void read_gamepad(SDL_Gamepad* pad, const InputOptions& opt, PadState& p, bool guide_opens_settings = false) {
     // SDL names buttons by position (south/east/...). Console layout: the game's A is the east button, as on a
     // Switch controller. Xbox layout: A is the bottom one (confirm where Xbox and PlayStation players expect it).
     struct Map {
@@ -445,6 +492,9 @@ static void read_gamepad(SDL_Gamepad* pad, const InputOptions& opt, PadState& p)
     };
     for (const Map& m : map)
         if (SDL_GetGamepadButton(pad, m.b)) p.buttons |= m.bit;
+    // The Guide/Home button opens the settings screen, as Minus+Plus does (ui_pad). Player 1's pad only: ui_pad and
+    // ui_filter_game_buttons act on that one, so on another player's pad the chord would reach the game.
+    if (guide_opens_settings && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_GUIDE)) p.buttons |= kPlus | kMinus;
     bool east = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST), south = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH);
     const bool bottom_confirm = opt.layout_auto ? !nintendo_pad(pad) : opt.xbox_layout;
     if (bottom_confirm ? south : east) p.buttons |= kA;
@@ -492,6 +542,12 @@ static void sample_gamepads(const InputOptions& opt, PadState (&players)[kMaxPla
             if (known) continue;
             if (SDL_Gamepad* pad = SDL_OpenGamepad(ids[i])) {
                 nx::log("input: controller %s, joins on its first button", SDL_GetGamepadName(pad) ? SDL_GetGamepadName(pad) : "?");
+                // Which SDL driver reads it (GUID byte 0: 'h' HIDAPI, 'm' MFi/GameController framework).
+                char guid[40] = {};
+                SDL_GUIDToString(SDL_GetGamepadGUIDForID(ids[i]), guid, sizeof guid);
+                const char* type = SDL_GetGamepadStringForType(SDL_GetGamepadType(pad));
+                nx::log("input: backend SDL3 type=%s vendor:product=%04x:%04x guid=%s", type ? type : "?",
+                        SDL_GetGamepadVendor(pad), SDL_GetGamepadProduct(pad), guid);
                 waiting.push_back(pad);
             }
         }
@@ -514,12 +570,30 @@ static void sample_gamepads(const InputOptions& opt, PadState (&players)[kMaxPla
     }
     for (int k = 0; k < kMaxPlayers; k++) {
         if (!g_pads[k]) continue;
-        read_gamepad(g_pads[k], opt, players[k]);
+        read_gamepad(g_pads[k], opt, players[k], k == 0);
         if (joining[k] && players[k].buttons) players[k] = PadState{};
         else joining[k] = false;
     }
     g_gamepad = g_pads[0];
+    cache_pad_info(g_pads[0] ? g_pads[0] : (waiting.empty() ? nullptr : waiting.front()));
 }
+
+#if TARGET_OS_IPHONE
+// The on-screen touch controls (touch_input.cpp): the window's size and safe area, how many controllers are connected
+// (SDL counts the ones waiting to join and the ones that have), and the settings screen taking the fingers while it is open.
+static void sample_touch_state() {
+    if (!g_window) return;
+    int w = 0, h = 0;
+    SDL_Rect safe{};
+    SDL_GetWindowSize(g_window, &w, &h);
+    nx::plat::touch::Insets in;
+    if (SDL_GetWindowSafeArea(g_window, &safe) && safe.w > 0 && safe.h > 0)
+        in = {float(safe.x), float(safe.y), float(w - safe.x - safe.w), float(h - safe.y - safe.h)};
+    nx::plat::touch_input_screen(float(w), float(h), in);
+    nx::plat::touch_input_set_controllers(SDL_HasGamepad() ? 1 : 0);
+    if (nx::ui::ui_visible()) nx::plat::touch_input_clear();
+}
+#endif
 
 static void sample_input() {
     const InputOptions& opt = input_options();
@@ -595,6 +669,19 @@ static void sample_input() {
     }
     if (focused && nx::ui::ui_visible()) nx::ui::amiibo_importer_poll();
     nx::nfp_host::poll();
+#if TARGET_OS_IPHONE
+    // The drawn touch controls (none while a controller is connected): their buttons and stick join player 1's pad. The
+    // gear opens and closes the settings screen; it is not a pad button.
+    sample_touch_state();
+    nx::plat::touch_input_pad(p, monotonic_ns());
+    {
+        static bool gear_held = false;
+        const bool gear = p.buttons & kSettingsButton;
+        if (gear && !gear_held) nx::ui::ui_toggle();
+        gear_held = gear;
+        p.buttons &= ~kSettingsButton;
+    }
+#endif
     // The settings screen takes the input while it is open (and watches for its Minus + Plus combo).
     bool ui = nx::ui::ui_pad(p.buttons, p.lx, p.ly);
     p.buttons = nx::ui::ui_filter_game_buttons(p.buttons, ui);
@@ -611,7 +698,12 @@ static void sample_input() {
         SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
         SDL_GetWindowSize(g_window, &ww, &wh);
         bool focus = SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS;
-        nx::plat::set_mouse_touch(!ui && focus && (mb & SDL_BUTTON_LMASK) && ww > 0 && wh > 0, mx / float(ww), my / float(wh));
+        // With the drawn touch controls up, a finger is theirs: it does not also touch the console's screen.
+        bool controls = false;
+#if TARGET_OS_IPHONE
+        controls = nx::plat::touch_input_active();
+#endif
+        nx::plat::set_mouse_touch(!ui && !controls && focus && (mb & SDL_BUTTON_LMASK) && ww > 0 && wh > 0, mx / float(ww), my / float(wh));
     }
     std::lock_guard lk(g_pad_lock);
     g_pad = p;
@@ -641,27 +733,35 @@ void set_fullscreen(bool on) {
 
 
 std::string controller_name() {
-    SDL_Gamepad* pad = g_gamepad;
-    const char* n = pad ? SDL_GetGamepadName(pad) : nullptr;
-    return n ? n : "";
+    {
+        std::lock_guard lk(g_pad_info_lock);
+        if (g_pad_info_set && !g_pad_name.empty()) return g_pad_name;
+    }
+    // Before the main thread has sampled (the game opens its fonts while booting): the first connected pad.
+    std::string name;
+    int n = 0;
+    if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
+        if (n > 0) {
+            const char* s = SDL_GetGamepadNameForID(ids[0]);
+            name = s ? s : "";
+        }
+        SDL_free(ids);
+    }
+    return name;
 }
 
 std::string controller_kind() {
-    SDL_Gamepad* pad = g_gamepad;
-    if (!pad) return "";
-    switch (SDL_GetGamepadType(pad)) {
-        case SDL_GAMEPAD_TYPE_XBOX360:
-        case SDL_GAMEPAD_TYPE_XBOXONE: return "xbox";
-        case SDL_GAMEPAD_TYPE_PS3:
-        case SDL_GAMEPAD_TYPE_PS4:
-        case SDL_GAMEPAD_TYPE_PS5: return "playstation";
-        default: {
-            // The console's own pads, by SDL's name for their type ("switchpro", "joyconleft", ...).
-            const char* t = SDL_GetGamepadStringForType(SDL_GetGamepadType(pad));
-            std::string s = t ? t : "";
-            return s.rfind("switch", 0) == 0 || s.rfind("joycon", 0) == 0 ? "switch" : "generic";
-        }
+    {
+        std::lock_guard lk(g_pad_info_lock);
+        if (g_pad_info_set && !g_pad_kind.empty()) return g_pad_kind;
     }
+    std::string kind;
+    int n = 0;
+    if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
+        if (n > 0) kind = kind_of_type(SDL_GetGamepadTypeForID(ids[0]), SDL_GetGamepadVendorForID(ids[0]));
+        SDL_free(ids);
+    }
+    return kind;
 }
 
 void rumble(float low_freq, float high_freq, uint32_t duration_ms) {
@@ -729,6 +829,11 @@ void read_pad(PadState& p) {
     if (g_pad.ry) p.ry = g_pad.ry;
     input_script(p);
 }
+
+#if TARGET_OS_IPHONE
+// The drawn touch controls over the picture (touch_input.cpp); the Mac player draws none.
+size_t touch_overlay(OverlayShape* out, size_t max) { return touch_input_overlay(out, max); }
+#endif
 
 bool read_player_pad(int index, PadState& p) {
     if (index < 1 || index >= kMaxPlayers) return false;
@@ -926,6 +1031,31 @@ static void relay_after_game() {
     if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
 }
 
+// The Saves page's Sync now (platform.h, SaveSync): the background push on a worker (relay_ios.rs), and what the page
+// shows of it. Offered wherever the player has a data root, the relay's island.
+extern "C" bool acnh_relay_sync_now(const char* data_root);  // returns at once
+extern "C" void acnh_relay_sync_status(const char* data_root, int* ready, int* outcome, uint64_t* last, char* service,
+                                       size_t cap);
+
+namespace nx::plat {
+SaveSync save_sync_status() {
+    SaveSync s;
+    const char* root = std::getenv("NX_DATA_ROOT");
+    if (!root) return s;
+    s.offered = true;
+    uint64_t last = 0;
+    char service[64] = {};
+    acnh_relay_sync_status(root, &s.ready, &s.outcome, &last, service, sizeof service);
+    s.last_unix = int64_t(last);
+    s.service = service;
+    return s;
+}
+bool save_sync_now() {
+    const char* root = std::getenv("NX_DATA_ROOT");
+    return root && acnh_relay_sync_now(root);
+}
+}  // namespace nx::plat
+
 // The app went to the background. SDL's WILL_ENTER_BACKGROUND is UIKit's resign-active, which also fires for
 // Control Center or a notification pulled over the game, so the push waits for DID_ENTER_BACKGROUND. The watch runs
 // on the main thread, which must keep its run loop: acnh_relay_background begins the background task here
@@ -1121,6 +1251,24 @@ int main(int argc, char** argv) {
                 if (nx::config_get("video.fullscreen", "0") != now) nx::config_set("video.fullscreen", now), nx::config_save();
                 break;
             }
+#if TARGET_OS_IPHONE
+            // Fingers: the drawn touch controls take them (a finger goes to the settings screen as the mouse SDL makes of it).
+            case SDL_EVENT_FINGER_DOWN:
+                sample_touch_state();
+                if (!nx::ui::ui_visible()) touch_input_down(int64_t(e.tfinger.fingerID), e.tfinger.x, e.tfinger.y);
+                break;
+            case SDL_EVENT_FINGER_MOTION:
+                touch_input_move(int64_t(e.tfinger.fingerID), e.tfinger.x, e.tfinger.y);
+                break;
+            case SDL_EVENT_FINGER_UP:
+            case SDL_EVENT_FINGER_CANCELED:
+                touch_input_up(int64_t(e.tfinger.fingerID));
+                break;
+            case SDL_EVENT_WILL_ENTER_BACKGROUND:
+            case SDL_EVENT_DID_ENTER_BACKGROUND:
+                touch_input_clear();  // no end of a finger comes for the app that left the screen
+                break;
+#endif
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.scancode == SDL_SCANCODE_F11 && g_window)
                     SDL_SetWindowFullscreen(g_window, !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN));

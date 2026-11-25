@@ -111,6 +111,17 @@ ditto -x -k "$zip" "$unpacked"
 codesign --verify --deep --strict "$unpacked/ACNH-Universal.app" || fail "signature does not verify"
 pass "empty decoys"
 
+# ---- the version stamps: the fake app has only CFBundleVersion 1; the package gives both, from git ----
+plist=$unpacked/ACNH-Universal.app/Contents/Info.plist
+want_short=$(cd "$root" && . tools/build_version.sh && s=${BASE_VER%%-*} && echo "${s%%+*}")
+want_build=$(cd "$root" && . tools/build_version.sh && echo "$VCODE")
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$want_short" ] || fail "short version not stamped"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = "$want_build" ] || fail "bundle version not stamped"
+case "$want_build" in ''|*[!0-9]*) fail "the build number is not an integer: $want_build" ;; esac
+[ "$want_build" -gt 1 ] || fail "the build number did not replace the app's own 1"
+plutil -lint "$plist" >/dev/null || fail "stamped Info.plist is not valid"
+pass "version stamps"
+
 # ---- refusals: each names its reason and writes nothing to the out folder ----
 printf 'x' >"$prep/analysis/main.bin"
 out=$work/out-nonempty
@@ -173,4 +184,13 @@ pass "ZIP64 past 4 GB"
 # ---- the release workflow never names the script ----
 ! grep -q 'package_mac' "$root/.github/workflows/release.yml" || fail "release.yml names package_mac.sh"
 pass "release.yml does not name the script"
+# ---- the Info.plist template: Game Mode category and the local-network prompt text ----
+tpl=$root/assets/mac/Info.plist.in
+sed "s/@VERSION@/1.0/" "$tpl" > "$work/template.plist"
+plutil -lint "$work/template.plist" >/dev/null || fail "assets/mac/Info.plist.in is not a valid plist"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$work/template.plist")" = public.app-category.simulation-games ] \
+  || fail "the Mac Info.plist lacks LSApplicationCategoryType simulation-games (Game Mode)"
+[ -n "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$work/template.plist")" ] \
+  || fail "the Mac Info.plist lacks NSLocalNetworkUsageDescription"
+pass "Info.plist template keys"
 echo "all package_mac tests passed"

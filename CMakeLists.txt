@@ -109,6 +109,9 @@ if(NX_TESTS AND NOT ANDROID)
     add_executable(astc_test tests/astc_test.cpp runtime/src/nvn/nvn_astc.cpp)
     target_include_directories(astc_test PRIVATE runtime/src/nvn)
     add_test(NAME astc COMMAND astc_test --selftest)
+    add_executable(glyph_layout_test tests/glyph_layout_test.cpp)
+    target_include_directories(glyph_layout_test PRIVATE runtime/src)
+    add_test(NAME glyph_layout COMMAND glyph_layout_test)
     add_executable(game_root_test tests/game_root_test.cpp)
     target_include_directories(game_root_test PRIVATE runtime/src)
     add_test(NAME game_root COMMAND game_root_test)
@@ -139,6 +142,17 @@ if(NX_TESTS AND NOT ANDROID)
         add_executable(desktop_layout_test tests/desktop_layout_test.cpp)
         target_include_directories(desktop_layout_test PRIVATE runtime/include)
         add_test(NAME desktop_layout COMMAND desktop_layout_test)
+    endif()
+    add_executable(touch_safe_test tests/touch_safe_test.cpp)
+    target_include_directories(touch_safe_test PRIVATE runtime/src)
+    target_compile_options(touch_safe_test PRIVATE -UNDEBUG)
+    add_test(NAME touch_safe COMMAND touch_safe_test)
+    if(APPLE AND NOT IOS AND NX_RUNTIME_ARCHIVE)  # the layout is Rust now: the test links the archive
+        add_executable(touch_input_test tests/touch_input_test.cpp runtime/src/touch_input.cpp)
+        target_include_directories(touch_input_test PRIVATE runtime/include runtime/src)
+        target_compile_options(touch_input_test PRIVATE -UNDEBUG)
+        target_link_libraries(touch_input_test PRIVATE "${NX_RUNTIME_ARCHIVE}")
+        add_test(NAME touch_input COMMAND touch_input_test)
     endif()
     add_executable(ldn_net_test tests/ldn_net_test.cpp)
     target_include_directories(ldn_net_test PRIVATE runtime/src)
@@ -314,6 +328,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/time_wrapper.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
+    runtime/src/touch_input.cpp
     runtime/src/platform_wrapper.cpp
     runtime/src/frame_stats.cpp
     runtime/src/nvn/nvn_caps.cpp
