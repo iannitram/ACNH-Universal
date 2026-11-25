@@ -60,8 +60,13 @@ pub struct AcnhFilesHost {
     pub trace_enabled: Option<extern "C" fn() -> bool>,
     pub discord_presence_file: Option<extern "C" fn(*const c_char)>,
     pub glyph_override: Option<extern "C" fn(*const c_char, *mut c_char, usize) -> usize>,
-    pub read_asset:
-        Option<extern "C" fn(*const c_char, Option<AcnhFilesBytesCb>, *mut c_void) -> bool>,
+    pub read_asset: Option<
+        extern "C" fn(
+            *const c_char,
+            Option<extern "C" fn(*const u8, usize, *mut c_void)>,
+            *mut c_void,
+        ) -> bool,
+    >,
 }
 
 // SAFETY: `AcnhFilesHost` only holds plain function pointers.
@@ -208,7 +213,11 @@ fn cstr_lossy(ptr: *const c_char) -> String {
         .into_owned()
 }
 
-fn emit_string(cb: Option<AcnhFilesStringCb>, ctx: *mut c_void, value: &str) {
+fn emit_string(
+    cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
+    ctx: *mut c_void,
+    value: &str,
+) {
     let Some(cb) = cb else {
         return;
     };
@@ -803,7 +812,7 @@ pub unsafe extern "C" fn acnh_files_add_virtual_file(
 #[no_mangle]
 pub extern "C" fn acnh_files_read_game_file(
     relative_to_romfs: *const c_char,
-    cb: Option<AcnhFilesBytesCb>,
+    cb: Option<extern "C" fn(*const u8, usize, *mut c_void)>,
     ctx: *mut c_void,
 ) {
     let Some(cb) = cb else {
@@ -1564,7 +1573,7 @@ pub unsafe extern "C" fn acnh_files_read_directory(
     handle: u64,
     max_entries: i64,
     out_count: *mut i64,
-    cb: Option<AcnhFilesDirEntryCb>,
+    cb: Option<extern "C" fn(*const c_char, usize, bool, i64, *mut c_void)>,
     ctx: *mut c_void,
 ) -> u32 {
     let mut st = fs_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -1896,7 +1905,7 @@ pub fn format_load_game_error(why: &str) -> String {
 pub extern "C" fn acnh_files_game_library_path(
     folder: *const c_char,
     game_id: *const c_char,
-    cb: Option<AcnhFilesStringCb>,
+    cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     ctx: *mut c_void,
 ) {
     let f = cstr_lossy(folder);
@@ -1915,7 +1924,7 @@ pub extern "C" fn acnh_files_game_library_path(
 #[no_mangle]
 pub extern "C" fn acnh_files_format_load_error(
     why: *const c_char,
-    cb: Option<AcnhFilesStringCb>,
+    cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     ctx: *mut c_void,
 ) {
     let w = cstr_lossy(why);
