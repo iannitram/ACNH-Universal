@@ -241,6 +241,12 @@ assert {e["sha256"] for e in m["files"]} == {"e3b0c44298fc1c149afbf4c8996fb92427
 PY
 say "--small under CI lists empty decoys with the hash of nothing"
 
+# --no-folder (Prepare writes the game folder itself): only the small .ipa, and --mods still goes with it.
+nf=$work/out-small-nofolder
+env CI=1 bash "$script" nofolder "$build" --small "$decoy" --build-id "$build_id" --no-folder "$nf" > /dev/null
+[ "$(ls -A "$nf" | tr '\n' ' ')" = "ACNH-Universal-nofolder.ipa " ] || die "--no-folder left more than the .ipa in the out folder"
+say "--small --no-folder makes the .ipa only"
+
 refuse "--small without a build id" "build id" "$work/out-small-nobid" \
     env CI=1 bash "$script" nobid "$build" --small "$decoy" "$work/out-small-nobid"
 refuse "--small with a bad build id" "build id" "$work/out-small-badbid" \

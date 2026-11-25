@@ -141,6 +141,35 @@ fn package_ios_args(
     ]
 }
 
+/// The arguments of `tools/package_ios.sh --small` (issue #306): the small `.ipa`, with no game
+/// inside, in `out`; the game folder and its manifest are written by `stage_ios_delivery`
+/// (`--no-folder`). The bundled mods go beside the player as in the big one.
+fn package_ios_small_args(
+    version: &str,
+    build: &Path,
+    game: &Path,
+    build_id: &str,
+    abi: &str,
+    out: &Path,
+    mods: &Path,
+) -> Vec<String> {
+    vec![
+        "tools/package_ios.sh".to_owned(),
+        version.to_owned(),
+        build.display().to_string(),
+        "--small".to_owned(),
+        game.display().to_string(),
+        "--build-id".to_owned(),
+        build_id.to_owned(),
+        "--abi".to_owned(),
+        abi.to_owned(),
+        "--no-folder".to_owned(),
+        out.display().to_string(),
+        "--mods".to_owned(),
+        mods.display().to_string(),
+    ]
+}
+
 /// The arguments of `tools/bundle_mods.sh`: the pt-BR translation and the SpeedFix's files
 /// (the 60 fps `video.frame_rate` needs them) are put in `<dest>/mods/`, which the Apple
 /// packages carry beside the player, as the APK does.
@@ -2405,10 +2434,15 @@ fn run_stages(
     }
 }
 
+/// The folder in the `ios` delivery folder that holds the small `.ipa` and, beside it, the game
+/// folder `acnh-universal-game/ios/` (issue #306).
+pub const IOS_SMALL_FOLDER: &str = "small";
+
 /// What the `ios` target does after the shared stages (which made the Mac player there too,
 /// as upstream's script cannot stop before it; the iOS build does not use it): the two packs
 /// when they are missing, the `iphoneos` build under the prepared folder, and the `.ipa` in
-/// the delivery folder, whose path it returns.
+/// the delivery folder, whose path it returns, then the small `.ipa` and the game folder with
+/// its manifest in `<delivery>/small/` (#306).
 fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Result<PathBuf> {
     let delivery = req
         .delivery
@@ -2437,12 +2471,31 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
             ["env".to_owned(), format!("PATH={}", path.to_string_lossy())],
         );
     }
-    let version = package_version(&runner.root());
+    let root = runner.root();
+    let version = package_version(&root);
+    // The small .ipa's game folder names its build and ABI: refuse before any script runs
+    // when the prepared folder has no build id (the player refuses a game of another build).
+    let build_id = read_prepared_build_id(&req.out).to_ascii_uppercase();
+    if build_id.len() != 32 || !build_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::Build(
+            "the prepared folder has no 32 hex digit build id (version.ini) for the small .ipa"
+                .into(),
+        ));
+    }
+    let abi = nx_game_abi(&root);
+    if abi == "unknown" {
+        return Err(Error::Build(
+            "the runtime headers (runtime/include/nx) are missing, so the ABI of the small .ipa is unknown"
+                .into(),
+        ));
+    }
+    let small = delivery.join(IOS_SMALL_FOLDER);
     let (mods_dest, mods, mods_cache) = bundled_mods_folder(&req.out);
     for args in [
         build_args,
         bundle_mods_args(&mods_dest, &mods_cache),
         package_ios_args(&version, &build, &req.out, delivery, &mods),
+        package_ios_small_args(&version, &build, &req.out, &build_id, &abi, &small, &mods),
     ] {
         runner
             .run(Stage::Build, &args)
@@ -2451,6 +2504,14 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
             .finish()
             .map_err(|log| build_error(Stage::Build, &log, home))?;
     }
+    // The game's files and manifest.json for Dropbox, beside the small .ipa; copy
+    // `acnh-universal-game/` into `Apps/save-relay/` (docs/IOS.md).
+    stage_ios_delivery(
+        &req.out,
+        &small.join("acnh-universal-game").join("ios"),
+        &build_id,
+        &abi,
+    )?;
     Ok(ipa_path(delivery, &version))
 }
 
@@ -2633,6 +2694,33 @@ pub fn stage_android_delivery(
     build_id: &str,
     nx_game_abi: &str,
 ) -> Result<()> {
+    stage_game_delivery(
+        prepared_out,
+        Some(game_lib),
+        delivery,
+        build_id,
+        nx_game_abi,
+    )
+}
+
+/// Stage the prepared iOS game files (the same set, without a game library: the player carries
+/// it) and `manifest.json` atomically into `delivery` (`.../acnh-universal-game/ios`).
+pub fn stage_ios_delivery(
+    prepared_out: &Path,
+    delivery: &Path,
+    build_id: &str,
+    nx_game_abi: &str,
+) -> Result<()> {
+    stage_game_delivery(prepared_out, None, delivery, build_id, nx_game_abi)
+}
+
+fn stage_game_delivery(
+    prepared_out: &Path,
+    game_lib: Option<&Path>,
+    delivery: &Path,
+    build_id: &str,
+    nx_game_abi: &str,
+) -> Result<()> {
     let parent = delivery.parent().unwrap_or(delivery);
     std::fs::create_dir_all(parent)?;
     let name = delivery
@@ -2647,7 +2735,9 @@ pub fn stage_android_delivery(
     }
     std::fs::create_dir_all(&staging)?;
 
-    std::fs::copy(game_lib, staging.join("libacnh_game.so"))?;
+    if let Some(game_lib) = game_lib {
+        std::fs::copy(game_lib, staging.join("libacnh_game.so"))?;
+    }
     for pak in ["romfs.pak", "spirv.pak"] {
         let src = prepared_out.join(pak);
         if !src.is_file() {

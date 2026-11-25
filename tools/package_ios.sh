@@ -4,7 +4,7 @@
 #
 #   tools/package_ios.sh <version> <build dir> --game <prepared folder> <out folder>
 #   tools/package_ios.sh <version> <build dir> --no-game <out folder>
-#   tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> [--abi <12 hex>] <out folder>
+#   tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> [--abi <12 hex>] [--no-folder] <out folder>
 #   any of the three may end with: --mods <mods folder>
 #
 # --mods is the folder tools/bundle_mods.sh makes (bundle.txt, ptbr/, speedfix60/). It goes to Payload/ACNH.app/mods,
@@ -17,6 +17,7 @@
 # acnh-universal-game/ into Dropbox/Apps/save-relay/, the app folder of save-relay's Dropbox app). manifest.json lists
 # each file's path, size and SHA-256, the game's main build id (--build-id) and the runtime ABI the player was built for
 # (--abi; default: the first 12 hex digits of the SHA-1 of runtime/include/nx/{cpu,module,runtime}.h, as CMake's NX_GAME_ABI).
+# --no-folder (with --small) makes the .ipa only; Prepare writes the game folder and its manifest itself (acnh_core::prepare).
 # The big .ipa (--game) is unchanged.
 # The out folder is required and has no default. Every refusal writes nothing to it.
 # The .ipa is staged in <out>/.ACNH-Universal-<version>.partial/ and moved into <out> when complete.
@@ -28,7 +29,7 @@ root=$(cd "$(dirname "$0")/.." && pwd -P)
 usage() {
     echo "usage: tools/package_ios.sh <version> <build dir> --game <prepared folder> <out folder>" >&2
     echo "       tools/package_ios.sh <version> <build dir> --no-game <out folder>" >&2
-    echo "       tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> [--abi <12 hex>] <out folder>" >&2
+    echo "       tools/package_ios.sh <version> <build dir> --small <prepared folder> --build-id <32 hex> [--abi <12 hex>] [--no-folder] <out folder>" >&2
     echo "       (any one may end with: --mods <mods folder>)" >&2
     exit 2
 }
@@ -44,6 +45,7 @@ game=
 small=
 build_id=
 abi=
+nofolder=
 case "$1" in
     --game)
         [ "$#" -ge 2 ] || usage
@@ -59,6 +61,7 @@ case "$1" in
             case "$1" in
                 --build-id) build_id=$2 ;;
                 --abi) abi=$2 ;;
+                --no-folder) nofolder=1; shift; continue ;;
                 *) break ;;
             esac
             shift 2
@@ -216,7 +219,7 @@ if [ -n "$mods" ]; then
     ditto --norsrc --noextattr --noqtn "$mods" "$copy/mods"
     find "$copy/mods" -name .DS_Store -delete
 fi
-if [ -n "$small" ]; then
+if [ -n "$small" ] && [ -z "$nofolder" ]; then
     # The same files, for the Dropbox the small .ipa downloads from, and their manifest (written last).
     files=$stage/acnh-universal-game/ios
     mkdir -p "$files"
@@ -280,7 +283,7 @@ if ! check=$(printf '%s\n' "$outside" | bash "$root/tools/check_release_files.sh
 fi
 
 mv -f "$stage/$partial" "$ipa"
-if [ -n "$small" ]; then
+if [ -n "$small" ] && [ -z "$nofolder" ]; then
     # The game files for Dropbox, replacing an earlier set in one rename pair.
     mkdir -p "$out/acnh-universal-game"
     rm -rf "$out/acnh-universal-game/ios.old"
@@ -291,7 +294,7 @@ fi
 size=$(stat -f %z "$ipa")
 sha=$(shasum -a 256 "$ipa" | awk '{print $1}')
 printf 'IPA: %s\nSize: %s bytes\nSHA-256: %s\n' "$ipa" "$size" "$sha"
-if [ -n "$small" ]; then
+if [ -n "$small" ] && [ -z "$nofolder" ]; then
     count=$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(len(m["files"]), sum(f["size"] for f in m["files"]))' \
         "$out/acnh-universal-game/ios/manifest.json")
     printf 'Game files: %s\nGame files in the manifest: %s (count, bytes)\n' "$out/acnh-universal-game/ios" "$count"
