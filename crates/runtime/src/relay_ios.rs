@@ -10,8 +10,8 @@
 //! verified on a device: whether a controller can answer the alerts (docs/IOS.md).
 
 use super::{
-    Blocked, BlockedAnswer, Connector, HeldAnswer, Live, Player, Prompt, Roots, Settings,
-    SignInAnswer, SignInForm, StatusOut, SyncNow, SyncNowSlot, SyncReady,
+    Blocked, BlockedAnswer, Bounded, Connector, FinalPush, HeldAnswer, Live, Player, Prompt, Roots,
+    Settings, SignInAnswer, SignInForm, StatusOut, SyncNow, SyncNowSlot, SyncReady,
 };
 use acnh_core::launch::Keep;
 use acnh_core::savecard::SaveCard;
@@ -496,16 +496,59 @@ pub extern "C" fn acnh_relay_before_game(data_root: *const c_char) {
     }
 }
 
-/// When the game quits: pushes the island, inside a background task, and returns when the push
-/// has finished or been left waiting for the next start. Does nothing before the game has booted.
+/// The final push of this process: claimed once, by the game's end or by the terminate.
+static FINAL_PUSH: FinalPush = FinalPush::new();
+
+/// How long the main thread waits for the final push while iOS ends the app: well under the
+/// five seconds `applicationWillTerminate:` gets before the watchdog.
+const TERMINATE_BOUND: std::time::Duration = std::time::Duration::from_millis(3000);
+
+/// When the game quits (the game's thread, which may block): pushes the island, inside a
+/// background task, and returns when the push has finished or been left waiting for the next
+/// start. Does nothing before the game has booted. The final push runs once: when another
+/// caller has it, this returns at once.
 #[no_mangle]
 pub extern "C" fn acnh_relay_after_game(data_root: *const c_char) {
     let Some(root) = self::data_root(data_root) else {
         return;
     };
+    FINAL_PUSH.run(|| {
+        let task = BackgroundTask::begin();
+        with_player(&root, |player| player.after_game());
+        task.end();
+    });
+}
+
+/// When iOS is ending the app (`SDL_EVENT_TERMINATING`, the main thread, about five seconds
+/// before the watchdog): a background task is begun, the push runs on a worker and the main
+/// thread waits at most `TERMINATE_BOUND` for it. A push that is not done by then goes on under
+/// the background task, and the island is already marked waiting (`Player::after_game`), so a
+/// start after a kill sends it first. When another caller has the final push, returns at once.
+#[no_mangle]
+pub extern "C" fn acnh_relay_terminate(data_root: *const c_char) {
+    let Some(root) = self::data_root(data_root) else {
+        return;
+    };
+    if !BOOTED.load(Ordering::SeqCst) {
+        log("relay: no push yet: the game has not booted");
+        return;
+    }
+    if FINAL_PUSH.is_claimed() {
+        return;
+    }
     let task = BackgroundTask::begin();
-    with_player(&root, |player| player.after_game());
-    task.end();
+    let worker = task.clone();
+    let outcome = FINAL_PUSH.run_bounded(TERMINATE_BOUND, move || {
+        with_player(&root, |player| player.after_game());
+        worker.end();
+    });
+    match outcome {
+        Bounded::Done => {}
+        Bounded::Late => {
+            log("relay: the final push is still running: left waiting for the next start")
+        }
+        Bounded::Taken => task.end(),
+    }
 }
 
 /// When the app has gone to the background (`SDL_EVENT_DID_ENTER_BACKGROUND`, from SDL's event

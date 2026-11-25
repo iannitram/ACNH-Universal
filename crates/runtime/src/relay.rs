@@ -454,6 +454,88 @@ pub fn sync_running() -> bool {
     matches!(PUSH_LOCK.try_lock(), Err(TryLockError::WouldBlock))
 }
 
+/// The one final push of the process (the game's end, `SDL_EVENT_QUIT`, `SDL_EVENT_TERMINATING`
+/// can all ask for it): the first caller claims it, every other caller finds it claimed and
+/// returns at once, so no thread ever waits on a push another one runs.
+pub struct FinalPush {
+    claimed: AtomicBool,
+}
+
+/// What a final push came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bounded {
+    /// The push finished (inside the bound, when there was one).
+    Done,
+    /// It is still running: it goes on on its worker, and the island is already marked waiting
+    /// (`Player::after_game` marks it before the first byte goes), so a start after a kill
+    /// pushes it.
+    Late,
+    /// Another caller had claimed the final push (running or done): nothing was started.
+    Taken,
+}
+
+impl FinalPush {
+    pub const fn new() -> FinalPush {
+        FinalPush {
+            claimed: AtomicBool::new(false),
+        }
+    }
+
+    /// True once a caller has claimed it.
+    pub fn is_claimed(&self) -> bool {
+        self.claimed.load(Ordering::SeqCst)
+    }
+
+    /// True for the first caller only.
+    pub fn claim(&self) -> bool {
+        !self.claimed.swap(true, Ordering::SeqCst)
+    }
+
+    /// `work` to the end on the calling thread, unless the push is claimed already (then
+    /// `Taken`, at once).
+    pub fn run(&self, work: impl FnOnce()) -> Bounded {
+        if !self.claim() {
+            return Bounded::Taken;
+        }
+        work();
+        Bounded::Done
+    }
+
+    /// `work` on a worker thread, waited for at most `bound`: for a thread that must not block
+    /// (the main thread while iOS ends the app, which gives it about five seconds). `Late`
+    /// leaves the worker running; the caller keeps whatever keeps the process alive for it.
+    pub fn run_bounded(
+        &self,
+        bound: std::time::Duration,
+        work: impl FnOnce() + Send + 'static,
+    ) -> Bounded {
+        if !self.claim() {
+            return Bounded::Taken;
+        }
+        let (done, finished) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("relay final push".into())
+            .spawn(move || {
+                work();
+                let _ = done.send(());
+            });
+        if spawned.is_err() {
+            return Bounded::Late;
+        }
+        match finished.recv_timeout(bound) {
+            // A worker that panicked drops its sender: also over.
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Bounded::Done,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Bounded::Late,
+        }
+    }
+}
+
+impl Default for FinalPush {
+    fn default() -> Self {
+        FinalPush::new()
+    }
+}
+
 /// One Sync now at a time, run on a worker thread, and its last outcome for the screen to poll.
 pub struct SyncNowSlot {
     running: AtomicBool,
@@ -784,6 +866,12 @@ impl Player<'_> {
             }
         };
         let dir = saves::save_dir(&self.roots.data_root);
+        if !checkpoint {
+            // The final push: marked waiting before the first byte goes, and cleared when it
+            // went. A process that is killed mid-upload (iOS ends the app while it runs) leaves
+            // the mark, so the next start sends the island first.
+            self.set_waiting(true);
+        }
         // What a push that went comes to: a new revision, nothing new, or (a checkpoint only) an
         // island that moved on or was taken over meanwhile.
         let mut went = SyncNow::Synced;

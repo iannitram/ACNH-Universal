@@ -13,8 +13,8 @@ use acnh_core::relay::SaveRelay;
 use acnh_core::savecard::SaveCard;
 use acnh_core::{saves, Error};
 use relay::{
-    decide, describe_card, Action, Blocked, BlockedAnswer, Connector, FileSettings, HeldAnswer,
-    Player, Prompt, Roots, SignInAnswer, SignInForm, SyncNow, SyncReady,
+    decide, describe_card, Action, Blocked, BlockedAnswer, Bounded, Connector, FileSettings,
+    FinalPush, HeldAnswer, Player, Prompt, Roots, SignInAnswer, SignInForm, SyncNow, SyncReady,
 };
 use save_relay::creds::{self, CredentialStore, MemoryStore, Secret};
 use save_relay::local::{Config, LocalStore};
@@ -47,6 +47,8 @@ struct Gate {
     offline: Arc<AtomicBool>,
     /// The next puts of `playing.json` fail as a dropped connection.
     fail_mark_puts: Arc<AtomicUsize>,
+    /// Every put waits while this is set (a slow server, a big island).
+    stall: Arc<AtomicBool>,
 }
 
 impl Gate {
@@ -74,6 +76,9 @@ impl Remote for Gate {
         self.inner.get(path)
     }
     fn put(&self, path: &str, bytes: &[u8], pre: &Precondition) -> save_relay::Result<String> {
+        while self.stall.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let failing = self.fail_mark_puts.load(Ordering::SeqCst);
         if path.ends_with("playing.json")
             && failing > 0
@@ -141,6 +146,7 @@ struct FakeConnector {
     broken: Arc<AtomicBool>,
     offline: Arc<AtomicBool>,
     fail_mark_puts: Arc<AtomicUsize>,
+    stall: Arc<AtomicBool>,
 }
 
 impl Connector for FakeConnector {
@@ -172,6 +178,7 @@ impl Connector for FakeConnector {
             broken: self.broken.clone(),
             offline: self.offline.clone(),
             fail_mark_puts: self.fail_mark_puts.clone(),
+            stall: self.stall.clone(),
         };
         Ok(Some(
             SaveRelay::new(Arc::new(gate), store, config.device).with_root(config.root),
@@ -353,6 +360,7 @@ impl Fx {
                 broken: Arc::new(AtomicBool::new(false)),
                 offline: Arc::new(AtomicBool::new(false)),
                 fail_mark_puts: Arc::new(AtomicUsize::new(0)),
+                stall: Arc::new(AtomicBool::new(false)),
             },
             remote,
             creds: Creds {
@@ -1428,4 +1436,90 @@ fn sync_now_offline_or_on_a_broken_server_waits_for_the_next_start() {
     fs::remove_file(fx.roots.dirs().config.join("config.json")).unwrap();
     assert_eq!(player.sync_now_ready(false), SyncReady::Off);
     assert_eq!(player.sync_now(), SyncNow::Off);
+}
+
+// ---- the final push on terminate (issue #76) -------------------------------------------------
+
+#[test]
+fn a_second_final_push_while_one_runs_returns_at_once_and_runs_nothing() {
+    static FINAL: FinalPush = FinalPush::new();
+    let (release, held) = channel::<()>();
+    let (started_tx, started) = channel::<()>();
+    let first = std::thread::spawn(move || {
+        FINAL.run(|| {
+            started_tx.send(()).unwrap();
+            let _ = held.recv_timeout(Duration::from_secs(20));
+        })
+    });
+    started.recv_timeout(Duration::from_secs(20)).unwrap();
+    let ran = AtomicBool::new(false);
+    let begun = Instant::now();
+    // Both entry points, the blocking one and the bounded one, find it taken.
+    assert_eq!(
+        FINAL.run(|| ran.store(true, Ordering::SeqCst)),
+        Bounded::Taken
+    );
+    let bounded = FINAL.run_bounded(Duration::from_secs(10), || panic!("must not run"));
+    assert_eq!(bounded, Bounded::Taken);
+    assert!(begun.elapsed() < Duration::from_secs(1), "it waited");
+    assert!(!ran.load(Ordering::SeqCst));
+    release.send(()).unwrap();
+    assert_eq!(first.join().unwrap(), Bounded::Done);
+    // Done is taken too: a late caller does not push twice.
+    assert_eq!(FINAL.run(|| panic!("must not run")), Bounded::Taken);
+}
+
+#[test]
+fn a_final_push_over_the_bound_returns_late_leaves_the_island_waiting_and_goes_on() {
+    static FINAL: FinalPush = FinalPush::new();
+    let fx = Arc::new(Fx::new("terminate-late"));
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    fs::write(fx.saves().join("main.dat"), "main after-play").unwrap();
+    fx.connector.stall.store(true, Ordering::SeqCst);
+
+    let worker = fx.clone();
+    let begun = Instant::now();
+    let outcome = FINAL.run_bounded(Duration::from_millis(300), move || {
+        worker.player(&worker.no_prompt()).after_game();
+    });
+    assert_eq!(outcome, Bounded::Late);
+    assert!(begun.elapsed() < Duration::from_secs(5), "it blocked");
+    // Still uploading, and already marked: a kill now leaves the push for the next start.
+    assert!(fx.roots.dirs().data.join("push-waiting").exists());
+    assert_eq!(
+        FINAL.run_bounded(Duration::from_millis(10), || panic!("must not run")),
+        Bounded::Taken
+    );
+
+    // The server answers: the push finishes on its worker and clears the mark.
+    fx.connector.stall.store(false, Ordering::SeqCst);
+    let start = Instant::now();
+    while fx.roots.dirs().data.join("push-waiting").exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the push never finished"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (desktop, desktop_saves) = fx.other("desktop");
+    desktop.pull(&desktop_saves, None).unwrap();
+    assert_eq!(read_main(&desktop_saves), "main after-play");
+}
+
+#[test]
+fn a_final_push_inside_the_bound_is_done_and_clears_the_mark() {
+    static FINAL: FinalPush = FinalPush::new();
+    let fx = Arc::new(Fx::new("terminate-done"));
+    fx.set_up();
+    island(&fx.saves(), "v1");
+    run(&fx, |game| game.finish());
+    fs::write(fx.saves().join("main.dat"), "main after-play").unwrap();
+    let worker = fx.clone();
+    let outcome = FINAL.run_bounded(Duration::from_secs(20), move || {
+        worker.player(&worker.no_prompt()).after_game();
+    });
+    assert_eq!(outcome, Bounded::Done);
+    assert!(!fx.roots.dirs().data.join("push-waiting").exists());
 }
