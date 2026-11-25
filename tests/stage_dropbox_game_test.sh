@@ -58,4 +58,14 @@ fi
 grep -q 'android.old is left from an earlier run' "$work/stuck.log" || { cat "$work/stuck.log" >&2; die "no clear message"; }
 [ -f "$game/android/manifest.json" ] && [ ! -e "$game/android/android" ] || die "the delivery in place was changed"
 say "a leftover android.old that cannot be removed stops the run before the swap"
+# Run through a symlink in another folder (and a relative link to that), it still finds tools/remove_tree.sh.
+mkdir -p "$work/links/deeper"
+ln -s "$script" "$work/links/stage"
+ln -s ../stage "$work/links/deeper/stage"
+for link in "$work/links/stage" "$work/links/deeper/stage"; do
+    out=$(bash "$link" 2>&1 || true)
+    case "$out" in *remove_tree.sh*) die "run through $link, it cannot find remove_tree.sh: $out" ;; esac
+    case "$out" in *usage:*) ;; *) die "run through $link with no arguments, it did not print the usage: $out" ;; esac
+done
+say "run through a symlink, it still finds tools/remove_tree.sh"
 echo "stage_dropbox_game tests passed"

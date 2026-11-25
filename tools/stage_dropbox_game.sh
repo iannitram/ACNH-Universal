@@ -11,8 +11,14 @@
 #   <prepared folder>: Prepare's work folder (analysis/, fonts/, aoc/, romfs.pak, spirv.pak)
 #   <game library>:    libacnh_game.so from tools/build_android.sh (private/acnh/apk/libacnh_game.so)
 set -euo pipefail
+# The script's own folder, through any symlink to it, for the helper beside it.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case "$link" in /*) self=$link ;; *) self=$(dirname "$self")/$link ;; esac
+done
 # shellcheck source=tools/remove_tree.sh
-. "$(cd "$(dirname "$0")" && pwd -P)/remove_tree.sh"
+. "$(cd "$(dirname "$self")" && pwd -P)/remove_tree.sh"
 OS=android
 INSTALL=""
 while [ $# -gt 0 ]; do
