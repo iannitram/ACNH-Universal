@@ -143,6 +143,17 @@ if(NX_TESTS AND NOT ANDROID)
         target_include_directories(desktop_layout_test PRIVATE runtime/include)
         add_test(NAME desktop_layout COMMAND desktop_layout_test)
     endif()
+    add_executable(touch_safe_test tests/touch_safe_test.cpp)
+    target_include_directories(touch_safe_test PRIVATE runtime/src)
+    target_compile_options(touch_safe_test PRIVATE -UNDEBUG)
+    add_test(NAME touch_safe COMMAND touch_safe_test)
+    if(APPLE AND NOT IOS AND NX_RUNTIME_ARCHIVE)  # the layout is Rust now: the test links the archive
+        add_executable(touch_input_test tests/touch_input_test.cpp runtime/src/touch_input.cpp)
+        target_include_directories(touch_input_test PRIVATE runtime/include runtime/src)
+        target_compile_options(touch_input_test PRIVATE -UNDEBUG)
+        target_link_libraries(touch_input_test PRIVATE "${NX_RUNTIME_ARCHIVE}")
+        add_test(NAME touch_input COMMAND touch_input_test)
+    endif()
     add_executable(ldn_net_test tests/ldn_net_test.cpp)
     target_include_directories(ldn_net_test PRIVATE runtime/src)
     if(WIN32)
@@ -317,6 +328,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/time_wrapper.cpp
     runtime/src/discord_presence.cpp
     runtime/src/glyphs.cpp
+    runtime/src/touch_input.cpp
     runtime/src/platform_wrapper.cpp
     runtime/src/frame_stats.cpp
     runtime/src/nvn/nvn_caps.cpp

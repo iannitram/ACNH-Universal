@@ -58,6 +58,8 @@
 #include <nx/game.h>
 #include <nx/runtime.h>
 
+#include "touch_input.h"
+#include "touch_layout.h"
 #include "kernel.h"
 #include "config.h"
 #include "nfp_host.h"
@@ -564,6 +566,23 @@ static void sample_gamepads(const InputOptions& opt, PadState (&players)[kMaxPla
     cache_pad_info(g_pads[0] ? g_pads[0] : (waiting.empty() ? nullptr : waiting.front()));
 }
 
+#if TARGET_OS_IPHONE
+// The on-screen touch controls (touch_input.cpp): the window's size and safe area, how many controllers are connected
+// (SDL counts the ones waiting to join and the ones that have), and the settings screen taking the fingers while it is open.
+static void sample_touch_state() {
+    if (!g_window) return;
+    int w = 0, h = 0;
+    SDL_Rect safe{};
+    SDL_GetWindowSize(g_window, &w, &h);
+    nx::plat::touch::Insets in;
+    if (SDL_GetWindowSafeArea(g_window, &safe) && safe.w > 0 && safe.h > 0)
+        in = {float(safe.x), float(safe.y), float(w - safe.x - safe.w), float(h - safe.y - safe.h)};
+    nx::plat::touch_input_screen(float(w), float(h), in);
+    nx::plat::touch_input_set_controllers(SDL_HasGamepad() ? 1 : 0);
+    if (nx::ui::ui_visible()) nx::plat::touch_input_clear();
+}
+#endif
+
 static void sample_input() {
     const InputOptions& opt = input_options();
     PadState players[kMaxPlayers];
@@ -638,6 +657,19 @@ static void sample_input() {
     }
     if (focused && nx::ui::ui_visible()) nx::ui::amiibo_importer_poll();
     nx::nfp_host::poll();
+#if TARGET_OS_IPHONE
+    // The drawn touch controls (none while a controller is connected): their buttons and stick join player 1's pad. The
+    // gear opens and closes the settings screen; it is not a pad button.
+    sample_touch_state();
+    nx::plat::touch_input_pad(p, monotonic_ns());
+    {
+        static bool gear_held = false;
+        const bool gear = p.buttons & kSettingsButton;
+        if (gear && !gear_held) nx::ui::ui_toggle();
+        gear_held = gear;
+        p.buttons &= ~kSettingsButton;
+    }
+#endif
     // The settings screen takes the input while it is open (and watches for its Minus + Plus combo).
     bool ui = nx::ui::ui_pad(p.buttons, p.lx, p.ly);
     p.buttons = nx::ui::ui_filter_game_buttons(p.buttons, ui);
@@ -654,7 +686,12 @@ static void sample_input() {
         SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
         SDL_GetWindowSize(g_window, &ww, &wh);
         bool focus = SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS;
-        nx::plat::set_mouse_touch(!ui && focus && (mb & SDL_BUTTON_LMASK) && ww > 0 && wh > 0, mx / float(ww), my / float(wh));
+        // With the drawn touch controls up, a finger is theirs: it does not also touch the console's screen.
+        bool controls = false;
+#if TARGET_OS_IPHONE
+        controls = nx::plat::touch_input_active();
+#endif
+        nx::plat::set_mouse_touch(!ui && !controls && focus && (mb & SDL_BUTTON_LMASK) && ww > 0 && wh > 0, mx / float(ww), my / float(wh));
     }
     std::lock_guard lk(g_pad_lock);
     g_pad = p;
@@ -780,6 +817,11 @@ void read_pad(PadState& p) {
     if (g_pad.ry) p.ry = g_pad.ry;
     input_script(p);
 }
+
+#if TARGET_OS_IPHONE
+// The drawn touch controls over the picture (touch_input.cpp); the Mac player draws none.
+size_t touch_overlay(OverlayShape* out, size_t max) { return touch_input_overlay(out, max); }
+#endif
 
 bool read_player_pad(int index, PadState& p) {
     if (index < 1 || index >= kMaxPlayers) return false;
@@ -1184,6 +1226,24 @@ int main(int argc, char** argv) {
                 if (nx::config_get("video.fullscreen", "0") != now) nx::config_set("video.fullscreen", now), nx::config_save();
                 break;
             }
+#if TARGET_OS_IPHONE
+            // Fingers: the drawn touch controls take them (a finger goes to the settings screen as the mouse SDL makes of it).
+            case SDL_EVENT_FINGER_DOWN:
+                sample_touch_state();
+                if (!nx::ui::ui_visible()) touch_input_down(int64_t(e.tfinger.fingerID), e.tfinger.x, e.tfinger.y);
+                break;
+            case SDL_EVENT_FINGER_MOTION:
+                touch_input_move(int64_t(e.tfinger.fingerID), e.tfinger.x, e.tfinger.y);
+                break;
+            case SDL_EVENT_FINGER_UP:
+            case SDL_EVENT_FINGER_CANCELED:
+                touch_input_up(int64_t(e.tfinger.fingerID));
+                break;
+            case SDL_EVENT_WILL_ENTER_BACKGROUND:
+            case SDL_EVENT_DID_ENTER_BACKGROUND:
+                touch_input_clear();  // no end of a finger comes for the app that left the screen
+                break;
+#endif
             case SDL_EVENT_KEY_DOWN:
                 if (e.key.scancode == SDL_SCANCODE_F11 && g_window)
                     SDL_SetWindowFullscreen(g_window, !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN));
