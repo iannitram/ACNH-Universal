@@ -60,6 +60,7 @@ dependencies = [
  "spake2",
  "tempfile",
  "ttf-parser",
+ "ureq",
 ]
 
 [[package]]
