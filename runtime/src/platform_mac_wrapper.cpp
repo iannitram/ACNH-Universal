@@ -919,9 +919,9 @@ extern "C" bool nx_relay_remember_not_now() {
 
 // The final push, once: the game thread's end, SDL_EVENT_QUIT and SDL_EVENT_TERMINATING can all get here. The Rust half
 // (relay_ios.rs, FinalPush) lets the first one run it and returns at once for the others, so no thread waits on a push
-// another runs. The game thread's end waits for the whole push; the main thread (QUIT, TERMINATING) waits at most about
-// 3 s, because iOS gives applicationWillTerminate: about 5 s and kills an app that blocks longer: a push not done by then
-// goes on under a background task, and the island is already marked waiting, so the next start sends it. The push itself
+// another runs. The game thread's end and SDL_EVENT_QUIT wait for the whole push; TERMINATING waits at most about 3 s,
+// because iOS gives applicationWillTerminate: about 5 s and ends the process when it returns: a push not done by then
+// is cut off, and the island is already marked waiting (before the push queues for its turn), so the next start sends it. The push itself
 // does nothing before the game booted or when it started with sync off, and a running checkpoint is waited for (PUSH_LOCK).
 static void relay_after_game() {
     if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
@@ -1115,7 +1115,7 @@ int main(int argc, char** argv) {
                 nx::log("platform: quit requested (window closed / Cmd-Q)");
                 nx::olsc_backup_on_exit();
                 nx::game_clock_save();
-                relay_terminate();
+                relay_after_game();  // the whole push: no watchdog here (relay_terminate is for TERMINATING)
                 exit_process(0);
             case SDL_EVENT_WINDOW_MINIMIZED:
             case SDL_EVENT_WINDOW_HIDDEN:

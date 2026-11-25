@@ -16,9 +16,9 @@ use super::{
 use acnh_core::launch::Keep;
 use acnh_core::savecard::SaveCard;
 use block2::RcBlock;
-use dispatch2::run_on_main;
+use dispatch2::{run_on_main, DispatchQueue};
 use objc2::rc::Retained;
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{MainThreadMarker, NSArray, NSString};
 use objc2_ui_kit::{
     UIAlertAction, UIAlertActionStyle, UIAlertController, UIAlertControllerStyle, UIApplication,
     UISceneActivationState, UIScreen, UITextAutocapitalizationType, UITextAutocorrectionType,
@@ -396,10 +396,22 @@ impl BackgroundTask {
         task
     }
 
+    /// Off the main thread the end is queued (`exec_async`), never waited for: the main thread
+    /// may be parked waiting for this very caller (`acnh_relay_terminate`), and a synchronous
+    /// dispatch to it would stall both until the wait gave up.
     fn end(&self) {
         let id = self.0.swap(0, Ordering::SeqCst);
-        if id != 0 {
-            run_on_main(move |mtm| UIApplication::sharedApplication(mtm).endBackgroundTask(id));
+        if id == 0 {
+            return;
+        }
+        let end = move |mtm| UIApplication::sharedApplication(mtm).endBackgroundTask(id);
+        match MainThreadMarker::new() {
+            Some(mtm) => end(mtm),
+            None => DispatchQueue::main().exec_async(move || {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    end(mtm);
+                }
+            }),
         }
     }
 }
@@ -521,9 +533,12 @@ pub extern "C" fn acnh_relay_after_game(data_root: *const c_char) {
 
 /// When iOS is ending the app (`SDL_EVENT_TERMINATING`, the main thread, about five seconds
 /// before the watchdog): a background task is begun, the push runs on a worker and the main
-/// thread waits at most `TERMINATE_BOUND` for it. A push that is not done by then goes on under
-/// the background task, and the island is already marked waiting (`Player::after_game`), so a
-/// start after a kill sends it first. When another caller has the final push, returns at once.
+/// thread waits at most `TERMINATE_BOUND` for it. A push that is not done by then is not
+/// continued: UIKit ends the process once `applicationWillTerminate:` returns, background task
+/// or not. What saves the island is the waiting mark, written before the push waits for its
+/// turn or sends a byte (`Player::push_island`), so the next start sends it first. The worker
+/// must not wait on the main thread (this one is parked), hence `BackgroundTask::end` queues.
+/// When another caller has the final push, returns at once.
 #[no_mangle]
 pub extern "C" fn acnh_relay_terminate(data_root: *const c_char) {
     let Some(root) = self::data_root(data_root) else {
@@ -545,7 +560,7 @@ pub extern "C" fn acnh_relay_terminate(data_root: *const c_char) {
     match outcome {
         Bounded::Done => {}
         Bounded::Late => {
-            log("relay: the final push is still running: left waiting for the next start")
+            log("relay: the final push is not done in time: left waiting for the next start")
         }
         Bounded::Taken => task.end(),
     }

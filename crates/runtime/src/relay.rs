@@ -466,8 +466,9 @@ pub struct FinalPush {
 pub enum Bounded {
     /// The push finished (inside the bound, when there was one).
     Done,
-    /// It is still running: it goes on on its worker, and the island is already marked waiting
-    /// (`Player::after_game` marks it before the first byte goes), so a start after a kill
+    /// It was not done in time. The worker is left running, but the process may end any moment
+    /// (iOS ends it when `applicationWillTerminate:` returns), so the island stays marked
+    /// waiting (`Player::push_island` marks it before it waits for its turn) and the next start
     /// pushes it.
     Late,
     /// Another caller had claimed the final push (running or done): nothing was started.
@@ -503,7 +504,7 @@ impl FinalPush {
 
     /// `work` on a worker thread, waited for at most `bound`: for a thread that must not block
     /// (the main thread while iOS ends the app, which gives it about five seconds). `Late`
-    /// leaves the worker running; the caller keeps whatever keeps the process alive for it.
+    /// leaves the worker running; nothing promises it the time to finish.
     pub fn run_bounded(
         &self,
         bound: std::time::Duration,
@@ -845,10 +846,20 @@ impl Player<'_> {
             self.log("no push: this game started with save sync off");
             return SyncNow::Off;
         }
+        // The final push is marked waiting before it queues behind a running checkpoint or Sync
+        // now (PUSH_LOCK), so a process that ends while it waits still leaves the mark.
+        let was_waiting = self.roots.push_waiting().exists();
+        if !checkpoint {
+            self.set_waiting(true);
+        }
         let _one_at_a_time = PUSH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let relay = match self.opened() {
             Ok(Opened::Sync(relay)) => relay,
-            Ok(Opened::Off) => return SyncNow::Off,
+            Ok(Opened::Off) => {
+                // Nothing to send: the mark is as it was before this push.
+                self.set_waiting(was_waiting);
+                return SyncNow::Off;
+            }
             // Set up, but the password cannot be read (the credential store is out of reach, or
             // the item is gone): the push waits for the next start, which sends it first.
             Ok(Opened::NeedsSignIn { .. }) => {
@@ -866,12 +877,9 @@ impl Player<'_> {
             }
         };
         let dir = saves::save_dir(&self.roots.data_root);
-        if !checkpoint {
-            // The final push: marked waiting before the first byte goes, and cleared when it
-            // went. A process that is killed mid-upload (iOS ends the app while it runs) leaves
-            // the mark, so the next start sends the island first.
-            self.set_waiting(true);
-        }
+        // The final push stays marked waiting (set above) until it went: a process that is
+        // killed mid-upload (iOS ends the app while it runs) leaves the mark, so the next start
+        // sends the island first.
         // What a push that went comes to: a new revision, nothing new, or (a checkpoint only) an
         // island that moved on or was taken over meanwhile.
         let mut went = SyncNow::Synced;
