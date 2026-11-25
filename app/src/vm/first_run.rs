@@ -30,12 +30,14 @@ pub enum Step {
 #[derive(Clone, PartialEq, Eq)]
 pub enum Request {
     Folders(PathBuf),
+    SystemPickFolder(PathBuf),
     Check(PathBuf),
     Discover,
     Connect(SocketAddr),
     Pair(SocketAddr, String, String),
     Build(PathBuf),
     Pull(SocketAddr, String),
+    CloudDownloadAndSync,
     Finish {
         profile: usize,
         steam: Option<PathBuf>,
@@ -46,12 +48,14 @@ pub enum Request {
 #[derive(Clone, Debug)]
 pub enum Event {
     Folders(Vec<PathBuf>),
+    SystemPicked(Option<PathBuf>),
     Checked(Result<String, String>),
     Hubs(Result<Vec<Found>, String>),
     Connected(Result<(), String>),
     Paired(Result<(), String>),
     Stage(Stage),
     Finished(Result<(), String>),
+    CloudSyncFinished(Result<(), String>),
     FinishedSetup {
         steam: bool,
         result: Result<(), String>,
@@ -85,6 +89,8 @@ pub struct FirstRunVm {
     pub relay: RelaySetupVm,
     pub profile: usize,
     pulling: bool,
+    cloud_download_pending: bool,
+    cloud_downloading: bool,
     request: Option<Request>,
     retry: Option<Request>,
     address_return: Step,
@@ -119,6 +125,8 @@ impl FirstRunVm {
             relay: RelaySetupVm::new(true),
             profile: profile::builtin().len() - 1,
             pulling: false,
+            cloud_download_pending: false,
+            cloud_downloading: false,
             request: None,
             retry: None,
             address_return: Step::NoHubFound,
@@ -161,7 +169,10 @@ impl FirstRunVm {
     }
     pub fn title(&self) -> String {
         match &self.step {
-            Step::Welcome => "Welcome. The game is not included.".into(),
+            Step::Welcome => {
+                "Sign in to download the game and sync your island, or choose a local folder."
+                    .into()
+            }
             Step::FindGame => "Where is the game?".into(),
             Step::PickFolder => format!(
                 "Choose a game folder: {}",
@@ -179,6 +190,9 @@ impl FirstRunVm {
                 Self::with_caret(&self.port, self.port_caret, self.editing_port)
             ),
             Step::Pair => format!("Enter the six-digit code used on the hub: {}", self.code),
+            Step::GetBuild if self.cloud_downloading => {
+                "Downloading the game and syncing your island…".into()
+            }
             Step::GetBuild if self.pulling => "Getting the player build".into(),
             Step::GetBuild => {
                 let current = self.stage;
@@ -214,13 +228,27 @@ impl FirstRunVm {
             return vec![];
         }
         match self.step {
-            Step::Welcome => vec!["Continue".into()],
+            Step::Welcome if self.relay_available => vec![
+                "Sign in with Dropbox".into(),
+                "Sign in with Google Drive".into(),
+                "Sign in with Nextcloud".into(),
+                "Choose a local game folder".into(),
+                "Pull from a hub on this network".into(),
+            ],
+            Step::Welcome => vec![
+                "Choose a local game folder".into(),
+                "Pull from a hub on this network".into(),
+            ],
             Step::FindGame => vec![
                 "This device has the game folder".into(),
                 "Find a hub".into(),
             ],
             Step::PickFolder => {
-                let mut out = vec!["Use this folder".into(), "Parent folder".into()];
+                let mut out = vec![
+                    "Use this folder".into(),
+                    "Parent folder".into(),
+                    "Open system folder picker".into(),
+                ];
                 out.extend(self.folders.iter().map(|p| {
                     p.file_name()
                         .unwrap_or_default()
@@ -307,7 +335,29 @@ impl FirstRunVm {
             return;
         }
         match self.step.clone() {
-            Step::Welcome => self.go(Step::FindGame),
+            Step::Welcome if self.relay_available => match index {
+                0 => self.start_cloud_sign_in(relay_setup::Service::Dropbox),
+                1 => self.start_cloud_sign_in(relay_setup::Service::GoogleDrive),
+                2 => self.start_cloud_sign_in(relay_setup::Service::Nextcloud),
+                3 => {
+                    self.pulling = false;
+                    self.go(Step::PickFolder);
+                    self.request(Request::Folders(self.folder.clone()));
+                }
+                _ => {
+                    self.go(Step::FindHub);
+                    self.request(Request::Discover);
+                }
+            },
+            Step::Welcome if index == 0 => {
+                self.pulling = false;
+                self.go(Step::PickFolder);
+                self.request(Request::Folders(self.folder.clone()));
+            }
+            Step::Welcome => {
+                self.go(Step::FindHub);
+                self.request(Request::Discover);
+            }
             Step::FindGame if index == 0 => {
                 self.pulling = false;
                 self.go(Step::PickFolder);
@@ -318,12 +368,15 @@ impl FirstRunVm {
                 self.request(Request::Discover);
             }
             Step::PickFolder if index == 0 => self.request(Request::Check(self.folder.clone())),
+            Step::PickFolder if index == 1 => {
+                self.folder.pop();
+                self.request(Request::Folders(self.folder.clone()));
+            }
+            Step::PickFolder if index == 2 => {
+                self.request(Request::SystemPickFolder(self.folder.clone()));
+            }
             Step::PickFolder => {
-                if index == 1 {
-                    self.folder.pop();
-                } else {
-                    self.folder = self.folders[index - 2].clone();
-                }
+                self.folder = self.folders[index - 3].clone();
                 self.request(Request::Folders(self.folder.clone()));
             }
             Step::FolderRejected(_) => self.go(Step::PickFolder),
@@ -416,6 +469,12 @@ impl FirstRunVm {
         });
     }
 
+    fn start_cloud_sign_in(&mut self, service: relay_setup::Service) {
+        self.cloud_download_pending = true;
+        self.relay.choose_service(service);
+        self.go(Step::Relay);
+    }
+
     /// How the relay step was left: set up or skipped goes on to the device and Steam, Back
     /// goes to the step before it.
     pub fn relay_outcome(&mut self, outcome: relay_setup::Outcome) {
@@ -423,10 +482,28 @@ impl FirstRunVm {
             relay_setup::Outcome::Open => {}
             relay_setup::Outcome::Done(_) => {
                 self.relay_set_up = true;
+                if self.cloud_download_pending {
+                    self.cloud_download_pending = false;
+                    self.cloud_downloading = true;
+                    self.pulling = true;
+                    self.go(Step::GetBuild);
+                    self.request(Request::CloudDownloadAndSync);
+                } else {
+                    self.go(Step::DeviceAndSteam);
+                }
+            }
+            relay_setup::Outcome::Skipped => {
+                self.cloud_download_pending = false;
                 self.go(Step::DeviceAndSteam);
             }
-            relay_setup::Outcome::Skipped => self.go(Step::DeviceAndSteam),
-            relay_setup::Outcome::Back => self.go(Step::FindGame),
+            relay_setup::Outcome::Back => {
+                if self.cloud_download_pending {
+                    self.cloud_download_pending = false;
+                    self.go(Step::Welcome);
+                } else {
+                    self.go(Step::FindGame);
+                }
+            }
         }
     }
 
@@ -534,6 +611,21 @@ impl FirstRunVm {
         self.busy = false;
         match event {
             Event::Folders(folders) => self.folders = folders,
+            Event::SystemPicked(Some(path)) => {
+                self.folder = path;
+                self.request(Request::Check(self.folder.clone()));
+            }
+            Event::SystemPicked(None) => {}
+            Event::CloudSyncFinished(Ok(())) => {
+                self.cloud_downloading = false;
+                self.pulling = false;
+                self.go(Step::Done);
+            }
+            Event::CloudSyncFinished(Err(reason)) => {
+                self.cloud_downloading = false;
+                self.pulling = false;
+                self.go(Step::BuildFailed(reason));
+            }
             Event::Checked(Ok(version)) => {
                 self.version = version;
                 self.go(Step::GetBuild);
@@ -772,7 +864,6 @@ mod tests {
     #[test]
     fn client_discovers_pairs_pulls_then_requires_local_preparation() {
         let mut vm = vm();
-        vm.handle(Nav::Accept);
         vm.activate(1);
         assert!(matches!(vm.take_request(), Some(Request::Discover)));
         vm.event(Event::Hubs(Ok(vec![Found {
@@ -802,5 +893,51 @@ mod tests {
         vm.event(Event::Finished(Ok(())));
         assert_eq!(vm.step, Step::FindGame);
         assert!(vm.message.contains("Prepare the game"));
+    }
+
+    #[test]
+    fn cloud_first_welcome_lists_providers_and_downloads_after_sign_in() {
+        let mut vm = vm();
+        vm.relay_available = true;
+        let opts = vm.options();
+        assert_eq!(
+            opts,
+            vec![
+                "Sign in with Dropbox",
+                "Sign in with Google Drive",
+                "Sign in with Nextcloud",
+                "Choose a local game folder",
+                "Pull from a hub on this network",
+            ]
+        );
+        vm.activate(0);
+        assert_eq!(vm.step, Step::Relay);
+        vm.relay_outcome(relay_setup::Outcome::Done(relay_setup::Account {
+            service: relay_setup::Service::Dropbox,
+            name: "u@example.com".into(),
+            address: None,
+        }));
+        assert_eq!(vm.step, Step::GetBuild);
+        assert!(matches!(
+            vm.take_request(),
+            Some(Request::CloudDownloadAndSync)
+        ));
+        vm.event(Event::CloudSyncFinished(Ok(())));
+        assert_eq!(vm.step, Step::Done);
+    }
+
+    #[test]
+    fn cloud_download_failure_shows_error_and_allows_fallback() {
+        let mut vm = vm();
+        vm.relay_available = true;
+        vm.activate(0);
+        vm.relay_outcome(relay_setup::Outcome::Done(relay_setup::Account {
+            service: relay_setup::Service::Dropbox,
+            name: "u@example.com".into(),
+            address: None,
+        }));
+        let _ = vm.take_request();
+        vm.event(Event::CloudSyncFinished(Err("no manifest".into())));
+        assert_eq!(vm.step, Step::BuildFailed("no manifest".into()));
     }
 }

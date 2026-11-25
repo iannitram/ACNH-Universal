@@ -211,6 +211,16 @@ impl RelaySetupVm {
         *self = Self::new(self.skippable);
     }
 
+    /// Jump straight into sign-in for a chosen cloud service.
+    pub fn choose_service(&mut self, service: Service) {
+        self.reset();
+        let index = Service::ALL
+            .iter()
+            .position(|item| *item == service)
+            .unwrap_or(0);
+        let _ = self.activate(index);
+    }
+
     pub fn take_request(&mut self) -> Option<Request> {
         self.request.take()
     }
