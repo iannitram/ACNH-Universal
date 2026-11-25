@@ -362,6 +362,7 @@ float default_render_scale() { return 1.0f; }
 // No save sync inside the game on the Mac: the launcher syncs (platform.h, SaveSync). The iPad's is below.
 SaveSync save_sync_status() { return {}; }
 bool save_sync_now() { return false; }
+bool save_sync_set_up() { return false; }
 #endif
 
 // ---- input: first SDL gamepad + keyboard (sampled on the main thread) -----------------------------------------
@@ -1000,7 +1001,8 @@ void thread_cpu_watch() {
 // save-relay inside the player (crates/runtime, relay.rs; issue #172). The Rust half pulls the island before the game
 // boots (it returns only when the game may boot) and pushes it when the game quits or the app goes to the background.
 extern "C" void acnh_relay_before_game(const char* data_root);
-extern "C" void acnh_relay_after_game(const char* data_root);   // synchronous: the game has quit
+extern "C" void acnh_relay_after_game(const char* data_root);   // synchronous: the game has quit (game thread)
+extern "C" void acnh_relay_terminate(const char* data_root);    // main thread: waits at most ~3 s, never longer
 extern "C" void acnh_relay_background(const char* data_root);   // returns at once: the push runs on a worker
 extern "C" void acnh_relay_foreground(const char* data_root);   // returns at once: a waiting mark is written on a worker
 
@@ -1015,8 +1017,17 @@ extern "C" bool nx_relay_remember_not_now() {
     return nx::config_save();
 }
 
+// The final push, once: the game thread's end, SDL_EVENT_QUIT and SDL_EVENT_TERMINATING can all get here. The Rust half
+// (relay_ios.rs, FinalPush) lets the first one run it and returns at once for the others, so no thread waits on a push
+// another runs. The game thread's end and SDL_EVENT_QUIT wait for the whole push; TERMINATING waits at most about 3 s,
+// because iOS gives applicationWillTerminate: about 5 s and ends the process when it returns: a push not done by then
+// is cut off, and the island is already marked waiting (before the push queues for its turn), so the next start sends it. The push itself
+// does nothing before the game booted or when it started with sync off, and a running checkpoint is waited for (PUSH_LOCK).
 static void relay_after_game() {
     if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_after_game(root);
+}
+static void relay_terminate() {
+    if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_terminate(root);
 }
 
 // The Saves page's Sync now (platform.h, SaveSync): the background push on a worker (relay_ios.rs), and what the page
@@ -1036,11 +1047,19 @@ SaveSync save_sync_status() {
     acnh_relay_sync_status(root, &s.ready, &s.outcome, &last, service, sizeof service);
     s.last_unix = int64_t(last);
     s.service = service;
+    // The game started with sync off and Not now is what kept it off: the setup prompt can be brought back.
+    s.can_set_up = s.ready == kSyncStartedOff && nx_relay_ask_off();
     return s;
 }
 bool save_sync_now() {
     const char* root = std::getenv("NX_DATA_ROOT");
     return root && acnh_relay_sync_now(root);
+}
+// Not now (relay.ask = 0) forgotten: the next start asks again. The player's own settings are the only writer of
+// config.ini (see nx_relay_remember_not_now), so this goes through them too.
+bool save_sync_set_up() {
+    nx::config_set("relay.ask", "");
+    return nx::config_save();
 }
 }  // namespace nx::plat
 
@@ -1055,10 +1074,15 @@ static bool background_watch(void*, SDL_Event* e) {
     // Back to the front: a "playing here" mark the background push could not write back is written now (on a worker).
     if (e->type == SDL_EVENT_WILL_ENTER_FOREGROUND)
         if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_foreground(root);
+    // iOS is ending the process (applicationWillTerminate: the app was swiped away while in the foreground or
+    // suspended and killed in memory pressure after a wake): a quit that never reaches SDL_EVENT_QUIT. The push runs
+    // on a worker under a background task and this thread waits a bounded time (relay_terminate), never the whole push.
+    if (e->type == SDL_EVENT_TERMINATING) relay_terminate();
     return true;
 }
 #else
 static void relay_after_game() {}
+static void relay_terminate() {}
 #endif
 
 // ---- crash handler and entry ----------------------------------------------------------------------------------
@@ -1191,7 +1215,7 @@ int main(int argc, char** argv) {
                 nx::log("platform: quit requested (window closed / Cmd-Q)");
                 nx::olsc_backup_on_exit();
                 nx::game_clock_save();
-                relay_after_game();
+                relay_after_game();  // the whole push: no watchdog here (relay_terminate is for TERMINATING)
                 exit_process(0);
             case SDL_EVENT_WINDOW_MINIMIZED:
             case SDL_EVENT_WINDOW_HIDDEN:
