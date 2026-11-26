@@ -372,6 +372,13 @@ pub trait ScriptRunner {
         rust_shaders(req, &self.root())
     }
 
+    /// Whether the tools the Tools stage leaves under the source folder are all there and
+    /// current. A test runner has no tools to look for, so the default says yes; the process
+    /// runner looks (`tools_current`).
+    fn tools_current(&self) -> bool {
+        true
+    }
+
     /// The Rust fonts stage. The default runs it (`rust_fonts`).
     fn fonts(&mut self, req: &Request) -> Result<()> {
         rust_fonts(req)
@@ -652,6 +659,10 @@ impl ScriptRunner for ProcessRunner {
         rust_build(req, &self.root, self.jobs)
     }
 
+    fn tools_current(&self) -> bool {
+        tools_current(&self.root)
+    }
+
     fn before_shaders(&mut self) -> std::result::Result<(), Vec<String>> {
         self.finish()
     }
@@ -819,6 +830,126 @@ fn next_line(pipe: &mut impl BufRead) -> Option<String> {
 /// folder, so the stage leaves nothing of its own in `out`.
 fn tools_record(req: &Request) -> PathBuf {
     req.out.join(".prepare-tools.json")
+}
+
+/// Where the pins of the tools in `<root>/private` are recorded (one `name=value` per line):
+/// what each tool folder was fetched or built from, so a bumped pin or a changed harness
+/// source is noticed on a hub that already has the tool.
+fn tools_stamp_file(root: &Path) -> PathBuf {
+    root.join("private/.tools-stamp")
+}
+
+fn read_tools_stamp(root: &Path) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(tools_stamp_file(root))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
+}
+
+/// SHA-256 over the relative names and bytes of the files under `dir` (sorted; `bin` and
+/// `obj` build folders skipped), so a change to the shader harness source shows.
+fn tree_hash(dir: &Path) -> String {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if !matches!(entry.file_name().to_str(), Some("bin" | "obj")) {
+                    walk(base, &path, out);
+                }
+            } else if let Ok(relative) = path.strip_prefix(base) {
+                out.push(relative.to_path_buf());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files);
+    files.sort();
+    let mut hasher = Sha256::new();
+    for relative in files {
+        hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+        hasher.update(b"\0");
+        hasher.update(std::fs::read(dir.join(&relative)).unwrap_or_default());
+        hasher.update(b"\0");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// The pins the tools in `<root>/private` should carry now.
+fn tools_pins(root: &Path) -> std::collections::BTreeMap<String, String> {
+    [
+        ("imgui", IMGUI.to_owned()),
+        ("ryubing", RYUBING.to_owned()),
+        (
+            "harness",
+            tree_hash(&root.join("tools/maxwell/spirv_harness")),
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect()
+}
+
+fn harness_built(root: &Path) -> bool {
+    let p = root.join("private");
+    p.join("build/spirv_harness/bin/Release/net10.0/spirv_harness.dll")
+        .exists()
+        || p.join("build/spirv_harness/out/spirv_harness.dll").exists()
+}
+
+/// Lays down empty stand-ins for every tool `rust_tools` leaves in `<root>/private`, with the
+/// current pins, so a test of the stage runner sees the Tools stage as done. Not for the app.
+#[doc(hidden)]
+pub fn seed_tools_for_test(root: &Path) -> std::io::Result<()> {
+    let p = root.join("private");
+    let t = p.join("third_party");
+    let files = [
+        venv_python(root),
+        t.join(format!("Vulkan-Headers-{VK_HEADERS}/include/stand-in")),
+        t.join("imgui/imgui.cpp"),
+        t.join("ryubing/Ryujinx.sln"),
+        t.join("dotnet").join(executable(Os::current(), "dotnet")),
+        p.join("build/spirv_harness/out/spirv_harness.dll"),
+    ];
+    for file in files {
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(file, "stand-in")?;
+    }
+    let mut stamp = tools_pins(root);
+    stamp.insert("dotnet".to_owned(), DOTNET.to_owned());
+    let text: String = stamp.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    std::fs::write(tools_stamp_file(root), text)
+}
+
+/// Whether the tools `rust_tools` leaves in `<root>/private` are all there and built from the
+/// current pins. The record in `out` alone is not enough: a refreshed source copy or an app
+/// update leaves `out` standing without them.
+pub(crate) fn tools_current(root: &Path) -> bool {
+    let t = root.join("private/third_party");
+    let stamp = read_tools_stamp(root);
+    let pins = tools_pins(root);
+    let pinned = |k: &str| stamp.get(k) == pins.get(k);
+    let dotnet_ok = find_on_path("dotnet").is_some_and(|p| has_dotnet_10(&p))
+        || (t
+            .join("dotnet")
+            .join(executable(Os::current(), "dotnet"))
+            .exists()
+            && stamp.get("dotnet").map(String::as_str) == Some(DOTNET));
+    venv_python(root).exists()
+        && t.join(format!("Vulkan-Headers-{VK_HEADERS}")).is_dir()
+        && t.join("imgui/imgui.cpp").exists()
+        && t.join("ryubing/Ryujinx.sln").exists()
+        && harness_built(root)
+        && pinned("imgui")
+        && pinned("ryubing")
+        && pinned("harness")
+        && dotnet_ok
 }
 
 /// Where the recompiler input hash is recorded beside `gen/`.
@@ -1285,6 +1416,10 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
         run_logged(stage, &py, &pkgs, root, &[], &[], None)?;
     }
 
+    let old_stamp = read_tools_stamp(root);
+    let pins = tools_pins(root);
+    let stale = |k: &str| old_stamp.get(k) != pins.get(k);
+
     let vkh = t.join(format!("Vulkan-Headers-{VK_HEADERS}"));
     if !vkh.is_dir() {
         fetch_archive(
@@ -1296,6 +1431,9 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
         )?;
     }
     let imgui = t.join("imgui");
+    if stale("imgui") && imgui.exists() {
+        std::fs::remove_dir_all(&imgui)?;
+    }
     if !imgui.join("imgui.cpp").exists() {
         fetch_archive(
             stage,
@@ -1306,6 +1444,9 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
         )?;
     }
     let ryubing = t.join("ryubing");
+    if stale("ryubing") && ryubing.exists() {
+        std::fs::remove_dir_all(&ryubing)?;
+    }
     if !ryubing.join("Ryujinx.sln").exists() {
         fetch_archive(
             stage,
@@ -1321,11 +1462,16 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
     }
 
     let mut dotnet_env = vec![("DOTNET_CLI_TELEMETRY_OPTOUT".to_owned(), "1".to_owned())];
+    let mut private_dotnet = false;
     let dotnet = match find_on_path("dotnet").filter(|p| has_dotnet_10(p)) {
         Some(sys) => sys,
         None => {
             let dn = t.join("dotnet");
             let exe = dn.join(executable(req.target, "dotnet"));
+            private_dotnet = true;
+            if old_stamp.get("dotnet").map(String::as_str) != Some(DOTNET) && dn.exists() {
+                std::fs::remove_dir_all(&dn)?;
+            }
             if !exe.exists() {
                 let (rid, ext) = dotnet_rid().ok_or_else(|| {
                     stage_err(stage, "unsupported host architecture for .NET 10 SDK")
@@ -1351,6 +1497,9 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
     let harness = p.join("build/spirv_harness/bin/Release/net10.0/spirv_harness.dll");
     let alt_dir = p.join("build/spirv_harness/out");
     let alt = alt_dir.join("spirv_harness.dll");
+    if stale("harness") && p.join("build/spirv_harness").exists() {
+        std::fs::remove_dir_all(p.join("build/spirv_harness"))?;
+    }
     if !harness.exists() && !alt.exists() {
         let proj = "tools/maxwell/spirv_harness/SpirvHarness.csproj";
         let hlog = logs.join("harness.log");
@@ -1398,6 +1547,13 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             }
         }
     }
+    let mut stamp = old_stamp;
+    stamp.extend(pins);
+    if private_dotnet {
+        stamp.insert("dotnet".to_owned(), DOTNET.to_owned());
+    }
+    let text: String = stamp.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    std::fs::write(tools_stamp_file(root), text)?;
     Ok(())
 }
 
@@ -2249,6 +2405,16 @@ fn find_cargo(root: &Path) -> PathBuf {
         .unwrap_or(found)
 }
 
+/// Whether two paths name the same folder. CMake records a collapsed absolute path, while a
+/// checkout's root keeps its `..`, and Rust's path comparison does not collapse those.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 /// The Rust build stage: configures CMake with Ninja and builds the `acnh` target.
 pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
     let stage = Stage::Build;
@@ -2269,7 +2435,7 @@ pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
             .and_then(|rest| rest.split_once('='))
             .map(|(_, val)| val.trim())
         {
-            if Path::new(home) != root {
+            if !same_folder(Path::new(home), root) {
                 let _ = std::fs::remove_file(&cache);
                 let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
             }
@@ -2435,6 +2601,44 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Copy `source` over `copy` like `copy_tree`, but keep the tools in `copy/private` (the venv,
+/// headers, imgui, Ryubing, .NET and the shader harness are slow to fetch). A first copy for a
+/// new commit (an app update) takes over the `private` of the newest earlier commit's copy:
+/// `rust_tools` refetches only the pieces whose pins changed.
+fn refresh_source_copy(source: &Path, copy: &Path) -> Result<()> {
+    let keep = copy.with_file_name(format!(
+        ".private-keep-{}",
+        copy.file_name().and_then(OsStr::to_str).unwrap_or("source")
+    ));
+    let _ = std::fs::remove_dir_all(&keep);
+    let own = copy.join("private");
+    let donor = if own.is_dir() {
+        Some(own)
+    } else {
+        copy.parent()
+            .and_then(|dir| std::fs::read_dir(dir).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path().join("private"))
+            .filter(|path| path.is_dir())
+            .max_by_key(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
+    };
+    let kept = match donor {
+        Some(donor) if !source.join("private").exists() => std::fs::rename(&donor, &keep).is_ok(),
+        _ => false,
+    };
+    let result = copy_tree(source, copy);
+    if kept {
+        if result.is_ok() && !copy.join("private").exists() {
+            std::fs::rename(&keep, copy.join("private"))?;
+        } else {
+            let _ = std::fs::remove_dir_all(&keep);
+        }
+    }
+    result
+}
+
 /// The folder the script runs in: the named source, else the packaged source beside `exe`,
 /// else the checkout. A packaged source is copied to `<data>/source/<commit>/` because the
 /// package may be read-only and the script writes into `private/`. A package from another
@@ -2456,7 +2660,7 @@ fn source_root(req: &Request, exe: &Path, dirs: &AppDirs, commit: Option<&str>) 
         )));
     }
     let copy = dirs.data.join("source").join(&found);
-    copy_tree(&source, &copy)?;
+    refresh_source_copy(&source, &copy)?;
     Ok(copy)
 }
 
@@ -2607,6 +2811,7 @@ fn run_stages(
     let expected_recomp_hash = recomp_hash(&runner.root())?;
     let before = STAGES.map(|stage| {
         stage_complete(stage, req, &expected_recomp_hash)
+            && (stage != Stage::Tools || runner.tools_current())
             && !(recheck
                 && matches!(
                     stage,
@@ -3533,6 +3738,97 @@ fn redact_hex_run(run: &str, redacted: &mut String) {
         redacted.push_str("<hex>");
     } else {
         redacted.push_str(run);
+    }
+}
+
+#[cfg(test)]
+mod tools_cache_tests {
+    use super::{refresh_source_copy, same_folder, tools_current, tools_pins, tree_hash};
+    use std::path::{Path, PathBuf};
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("acnh-tools-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x").unwrap();
+    }
+
+    #[test]
+    fn a_path_with_dotdot_is_the_same_folder_as_its_collapsed_form() {
+        let root = temp("same");
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        let dotted = root.join("a/b/../b");
+        assert!(dotted != root.join("a/b"));
+        assert!(same_folder(&dotted, &root.join("a/b")));
+        assert!(!same_folder(&root.join("a"), &root.join("a/b")));
+        assert!(!same_folder(&root.join("none"), &root.join("a")));
+    }
+
+    #[test]
+    fn the_harness_hash_follows_its_source_and_ignores_build_folders() {
+        let root = temp("hash");
+        let dir = root.join("h");
+        touch(&dir.join("A.cs"));
+        let first = tree_hash(&dir);
+        touch(&dir.join("obj/x.dll"));
+        assert_eq!(tree_hash(&dir), first);
+        std::fs::write(dir.join("A.cs"), "y").unwrap();
+        assert_ne!(tree_hash(&dir), first);
+    }
+
+    #[test]
+    fn tools_are_not_current_when_missing_or_unstamped() {
+        let root = temp("current");
+        assert!(!tools_current(&root));
+        // A venv alone is not the whole set.
+        touch(&super::venv_python(&root));
+        assert!(!tools_current(&root));
+        // Without a stamp, built tools are of unknown pins and are not trusted.
+        let p = root.join("private");
+        touch(&p.join(format!(
+            "third_party/Vulkan-Headers-{}/include/x",
+            super::VK_HEADERS
+        )));
+        touch(&p.join("third_party/imgui/imgui.cpp"));
+        touch(&p.join("third_party/ryubing/Ryujinx.sln"));
+        touch(&p.join("build/spirv_harness/out/spirv_harness.dll"));
+        assert!(!tools_current(&root));
+    }
+
+    #[test]
+    fn the_harness_pin_changes_with_its_source() {
+        let root = temp("stamp");
+        touch(&root.join("tools/maxwell/spirv_harness/A.cs"));
+        let before = tools_pins(&root);
+        std::fs::write(root.join("tools/maxwell/spirv_harness/A.cs"), "changed").unwrap();
+        assert_ne!(tools_pins(&root).get("harness"), before.get("harness"));
+        assert_eq!(tools_pins(&root).get("imgui"), before.get("imgui"));
+    }
+
+    #[test]
+    fn refreshing_the_source_copy_keeps_the_tools_and_an_update_inherits_them() {
+        let data = temp("refresh");
+        let source = data.join("pkg");
+        touch(&source.join("CMakeLists.txt"));
+        let old = data.join("source/old");
+        touch(&old.join("private/venv/bin/python"));
+        touch(&old.join("stale.txt"));
+        // Same commit again: the copy is replaced, private/ stays.
+        refresh_source_copy(&source, &old).unwrap();
+        assert!(old.join("private/venv/bin/python").is_file());
+        assert!(!old.join("stale.txt").exists());
+        assert!(old.join("CMakeLists.txt").is_file());
+        // A new commit takes over the tools of the earlier one.
+        let new = data.join("source/new");
+        refresh_source_copy(&source, &new).unwrap();
+        assert!(new.join("private/venv/bin/python").is_file());
+        assert!(new.join("CMakeLists.txt").is_file());
+        assert!(!data.join("source/.private-keep-new").exists());
     }
 }
 
