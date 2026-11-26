@@ -324,21 +324,29 @@ pub unsafe extern "C" fn acnh_platform_apply_gain(
 // ---- Controller Kind & Input Helpers -----------------------------------------------------------
 
 /// Classify a controller into `"switch"`, `"xbox"`, `"playstation"`, or `"generic"`.
-pub fn pad_kind_str(vendor: i32, name: &str) -> &'static str {
+///
+/// The same rule as the launcher (`app/src/input.rs`) and `runtime/src/controller_kind.h`; all three
+/// are held to `tests/data/pad_kinds.tsv`. Maker (USB vendor id) first, then the name.
+pub fn pad_kind_str(vendor: i32, product: i32, name: &str) -> &'static str {
     let n = name.to_ascii_lowercase();
-    if vendor == 0x057e
-        || n.contains("nintendo")
-        || n.contains("pro controller")
-        || n.contains("joy-con")
-    {
+    match (vendor, product) {
+        (0x057e, _) => return "switch",
+        (0x045e, _) => return "xbox",
+        (0x054c, _) => return "playstation",
+        (0x17ef, _) if n.contains("legion") => return "xbox",
+        // 8BitDo pads in Switch mode ("Nintendo" layout) or X-input mode.
+        (0x2dc8, 0x6001 | 0x6002 | 0x6006 | 0x6007 | 0x6101 | 0x6102 | 0x9006 | 0x9012) => {
+            return "switch"
+        }
+        (0x2dc8, 0x2000) => return "xbox",
+        (0x2dc8, _) if n.contains("switch") => return "switch",
+        _ => {}
+    }
+    if n.contains("nintendo") || n.contains("pro controller") || n.contains("joy-con") {
         "switch"
-    } else if vendor == 0x045e || n.contains("xbox") {
+    } else if n.contains("xbox") {
         "xbox"
-    } else if vendor == 0x054c
-        || n.contains("dualsense")
-        || n.contains("dualshock")
-        || n.contains("playstation")
-    {
+    } else if n.contains("dualsense") || n.contains("dualshock") || n.contains("playstation") {
         "playstation"
     } else {
         "generic"
@@ -348,17 +356,19 @@ pub fn pad_kind_str(vendor: i32, name: &str) -> &'static str {
 #[no_mangle]
 pub extern "C" fn acnh_platform_pad_kind(
     vendor: i32,
+    product: i32,
     name: *const c_char,
     out: *mut c_char,
     cap: usize,
 ) -> usize {
-    copy_str_to_buf(pad_kind_str(vendor, cstr_or_empty(name)), out, cap)
+    copy_str_to_buf(pad_kind_str(vendor, product, cstr_or_empty(name)), out, cap)
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_platform_android_controller_kind(
     connected: bool,
     vendor: i32,
+    product: i32,
     name: *const c_char,
     out: *mut c_char,
     cap: usize,
@@ -366,7 +376,7 @@ pub extern "C" fn acnh_platform_android_controller_kind(
     if !connected {
         return copy_str_to_buf("", out, cap);
     }
-    copy_str_to_buf(pad_kind_str(vendor, cstr_or_empty(name)), out, cap)
+    copy_str_to_buf(pad_kind_str(vendor, product, cstr_or_empty(name)), out, cap)
 }
 
 /// Resolve `input.layout` (`"xbox"`, `"console"`, or `"auto"`).
@@ -1716,16 +1726,35 @@ mod tests {
 
     #[test]
     fn pad_kind_classification() {
-        assert_eq!(pad_kind_str(0x057e, ""), "switch");
-        assert_eq!(pad_kind_str(0, "Pro Controller"), "switch");
-        assert_eq!(pad_kind_str(0x045e, ""), "xbox");
-        assert_eq!(pad_kind_str(0, "Xbox Wireless Controller"), "xbox");
-        assert_eq!(pad_kind_str(0x054c, ""), "playstation");
+        assert_eq!(pad_kind_str(0x057e, 0, ""), "switch");
+        assert_eq!(pad_kind_str(0, 0, "Pro Controller"), "switch");
+        assert_eq!(pad_kind_str(0x045e, 0, ""), "xbox");
+        assert_eq!(pad_kind_str(0, 0, "Xbox Wireless Controller"), "xbox");
+        assert_eq!(pad_kind_str(0x054c, 0, ""), "playstation");
         assert_eq!(
-            pad_kind_str(0, "DualSense Wireless Controller"),
+            pad_kind_str(0, 0, "DualSense Wireless Controller"),
             "playstation"
         );
-        assert_eq!(pad_kind_str(0x2dc8, "8BitDo Pro 2"), "generic");
+        assert_eq!(pad_kind_str(0x2dc8, 0x6006, "8BitDo Pro 2"), "switch");
+    }
+
+    /// The shared list the launcher and the C++ runtime are held to as well.
+    #[test]
+    fn pad_kind_matches_the_shared_table() {
+        let table = include_str!("../../../tests/data/pad_kinds.tsv");
+        let mut rows = 0;
+        for line in table
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let f: Vec<&str> = line.split('\t').collect();
+            assert_eq!(f.len(), 4, "{line}");
+            let hex = |s: &str| i32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
+            let want = if f[3] == "deck" { "generic" } else { f[3] };
+            assert_eq!(pad_kind_str(hex(f[0]), hex(f[1]), f[2]), want, "{line}");
+            rows += 1;
+        }
+        assert!(rows > 20);
     }
 
     #[test]
