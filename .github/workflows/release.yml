@@ -49,6 +49,8 @@ jobs:
           cp assets/acnhrecomp.png "$D/acnh-universal.png"
           mkdir -p "$D/usr/share/acnh-universal"
           cp assets/acnhrecomp.png "$D/usr/share/acnh-universal/"
+          # LICENSE.txt, NOTICE.txt and the licence texts of the linked crates and C code (issue #329).
+          bash tools/release_licences.sh "$D/usr/share/acnh-universal" "$(rustc -vV | sed -n 's/^host: //p')"
           SRC="$D/usr/share/acnh-universal/source"
           mkdir -p "$SRC"
           git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
@@ -106,6 +108,8 @@ jobs:
           rm -rf "$N" && mkdir "$N"
           cp target/release/acnh-app.exe target/release/acnh-universal.exe "$N/"
           cp assets/acnhrecomp.ico assets/acnhrecomp.png "$N/"
+          # LICENSE.txt, NOTICE.txt and the licence texts of the linked crates and C code (issue #329).
+          bash tools/release_licences.sh "$N" "$(rustc -vV | sed -n 's/^host: //p')"
           SRC="$N/source"
           mkdir -p "$SRC"
           git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
@@ -151,6 +155,8 @@ jobs:
           cp target/release/acnh-app "$A/Contents/MacOS/acnh-app"
           cp target/release/acnh-universal "$A/Contents/MacOS/acnh-universal"
           cp assets/acnhrecomp.icns assets/acnhrecomp.png "$A/Contents/Resources/"
+          # LICENSE.txt, NOTICE.txt and the licence texts of the linked crates and C code (issue #329), before the signing.
+          bash tools/release_licences.sh "$A/Contents/Resources" "$(rustc -vV | sed -n 's/^host: //p')"
           SRC="$A/Contents/Resources/source"
           mkdir -p "$SRC"
           git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
