@@ -372,6 +372,13 @@ pub trait ScriptRunner {
         rust_shaders(req, &self.root())
     }
 
+    /// Whether the tools the Tools stage leaves under the source folder are all there and
+    /// current. A test runner has no tools to look for, so the default says yes; the process
+    /// runner looks (`tools_current`).
+    fn tools_current(&self) -> bool {
+        true
+    }
+
     /// The Rust fonts stage. The default runs it (`rust_fonts`).
     fn fonts(&mut self, req: &Request) -> Result<()> {
         rust_fonts(req)
@@ -652,6 +659,10 @@ impl ScriptRunner for ProcessRunner {
         rust_build(req, &self.root, self.jobs)
     }
 
+    fn tools_current(&self) -> bool {
+        tools_current(&self.root)
+    }
+
     fn before_shaders(&mut self) -> std::result::Result<(), Vec<String>> {
         self.finish()
     }
@@ -821,44 +832,180 @@ fn tools_record(req: &Request) -> PathBuf {
     req.out.join(".prepare-tools.json")
 }
 
+/// Where the pins of the tools in `<root>/private` are recorded (one `name=value` per line):
+/// what each tool folder was fetched or built from, so a bumped pin or a changed harness
+/// source is noticed on a hub that already has the tool.
+fn tools_stamp_file(root: &Path) -> PathBuf {
+    root.join("private/.tools-stamp")
+}
+
+fn read_tools_stamp(root: &Path) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(tools_stamp_file(root))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
+}
+
+/// SHA-256 over the relative names and bytes of the files under `dir` (sorted; `bin` and
+/// `obj` build folders skipped), so a change to the shader harness source shows.
+fn tree_hash(dir: &Path) -> String {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if !matches!(entry.file_name().to_str(), Some("bin" | "obj")) {
+                    walk(base, &path, out);
+                }
+            } else if let Ok(relative) = path.strip_prefix(base) {
+                out.push(relative.to_path_buf());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files);
+    files.sort();
+    let mut hasher = Sha256::new();
+    for relative in files {
+        hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+        hasher.update(b"\0");
+        hasher.update(std::fs::read(dir.join(&relative)).unwrap_or_default());
+        hasher.update(b"\0");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// The pins the tools in `<root>/private` should carry now.
+fn tools_pins(root: &Path) -> std::collections::BTreeMap<String, String> {
+    [
+        ("imgui", IMGUI.to_owned()),
+        ("ryubing", RYUBING.to_owned()),
+        (
+            "harness",
+            tree_hash(&root.join("tools/maxwell/spirv_harness")),
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect()
+}
+
+fn harness_built(root: &Path) -> bool {
+    let p = root.join("private");
+    p.join("build/spirv_harness/bin/Release/net10.0/spirv_harness.dll")
+        .exists()
+        || p.join("build/spirv_harness/out/spirv_harness.dll").exists()
+}
+
+/// Lays down empty stand-ins for every tool `rust_tools` leaves in `<root>/private`, with the
+/// current pins, so a test of the stage runner sees the Tools stage as done. Not for the app.
+#[doc(hidden)]
+pub fn seed_tools_for_test(root: &Path) -> std::io::Result<()> {
+    let p = root.join("private");
+    let t = p.join("third_party");
+    let files = [
+        venv_python(root),
+        t.join(format!("Vulkan-Headers-{VK_HEADERS}/include/stand-in")),
+        t.join("imgui/imgui.cpp"),
+        t.join("ryubing/Ryujinx.sln"),
+        t.join("dotnet").join(executable(Os::current(), "dotnet")),
+        p.join("build/spirv_harness/out/spirv_harness.dll"),
+    ];
+    for file in files {
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(file, "stand-in")?;
+    }
+    let mut stamp = tools_pins(root);
+    stamp.insert("dotnet".to_owned(), DOTNET.to_owned());
+    let text: String = stamp.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    std::fs::write(tools_stamp_file(root), text)
+}
+
+/// Whether the tools `rust_tools` leaves in `<root>/private` are all there and built from the
+/// current pins. The record in `out` alone is not enough: a refreshed source copy or an app
+/// update leaves `out` standing without them.
+pub(crate) fn tools_current(root: &Path) -> bool {
+    let t = root.join("private/third_party");
+    let stamp = read_tools_stamp(root);
+    let pins = tools_pins(root);
+    let pinned = |k: &str| stamp.get(k) == pins.get(k);
+    let dotnet_ok = find_on_path("dotnet").is_some_and(|p| has_dotnet_10(&p))
+        || (t
+            .join("dotnet")
+            .join(executable(Os::current(), "dotnet"))
+            .exists()
+            && stamp.get("dotnet").map(String::as_str) == Some(DOTNET));
+    venv_python(root).exists()
+        && t.join(format!("Vulkan-Headers-{VK_HEADERS}")).is_dir()
+        && t.join("imgui/imgui.cpp").exists()
+        && t.join("ryubing/Ryujinx.sln").exists()
+        && harness_built(root)
+        && pinned("imgui")
+        && pinned("ryubing")
+        && pinned("harness")
+        && dotnet_ok
+}
+
 /// Where the recompiler input hash is recorded beside `gen/`.
 fn recomp_hash_file(req: &Request) -> PathBuf {
     req.out.join("gen").join(".recomp-hash")
 }
 
-/// Deterministic SHA-256 hash of the recompiler inputs (`recomp/*.py` in sorted name order,
-/// plus the Rust emitter/version marker) so changes to the recompiler invalidate `gen/`.
-pub fn recomp_hash(source: &Path) -> Result<String> {
+/// The `NX_REGCACHE*` switches the emitter reads (`crates/recomp/src/emit/regcache.rs`): they
+/// change the code it writes, so their values are inputs of the recompile.
+const REGCACHE_SWITCHES: [&str; 4] = [
+    "NX_REGCACHE",
+    "NX_REGCACHE_REGS",
+    "NX_REGCACHE_FLAGS",
+    "NX_REGCACHE_V",
+];
+
+/// A build version that moves with the code: the engine's version (fixed at 0.0.0 in the
+/// workspace) plus a fingerprint of this crate's source. It is the version term in the
+/// `romfs.pak`, `spirv.pak` and shaders keys.
+fn build_version() -> String {
+    format!(
+        "{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("ACNH_CORE_FINGERPRINT")
+    )
+}
+
+/// Deterministic SHA-256 hash of the recompiler inputs, so a change to the recompiler
+/// invalidates `gen/`: the emitter's own source fingerprint (taken when it was built) and
+/// the values of the `NX_REGCACHE*` switches. `source` is the repo root; nothing under it
+/// is read now that the recompiler is the in-process `acnh_recomp` crate.
+pub fn recomp_hash(_source: &Path) -> Result<String> {
+    Ok(recomp_hash_with(acnh_recomp::EMITTER_FINGERPRINT, |name| {
+        std::env::var(name).ok()
+    }))
+}
+
+/// `recomp_hash` for a given emitter fingerprint and environment lookup.
+pub fn recomp_hash_with(fingerprint: &str, env: impl Fn(&str) -> Option<String>) -> String {
     let mut hasher = Sha256::new();
-    let recomp_dir = source.join("recomp");
-    if recomp_dir.is_dir() {
-        let mut entries: Vec<(String, PathBuf)> = Vec::new();
-        for entry in std::fs::read_dir(&recomp_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if name.ends_with(".py") {
-                entries.push((name, path));
-            }
-        }
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, path) in entries {
-            let bytes = std::fs::read(&path)?;
-            hasher.update(name.as_bytes());
-            hasher.update(b"\0");
-            hasher.update(&bytes);
-            hasher.update(b"\0");
-        }
-    }
     hasher.update(b"rust-emitter:");
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher.update(fingerprint.as_bytes());
     hasher.update(b"\0");
-    Ok(format!("{:x}", hasher.finalize()))
+    for name in REGCACHE_SWITCHES {
+        hasher.update(name.as_bytes());
+        hasher.update(b"=");
+        match env(name) {
+            Some(value) => {
+                hasher.update(b"1");
+                hasher.update(value.as_bytes());
+            }
+            None => hasher.update(b"0"),
+        }
+        hasher.update(b"\0");
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 /// A mod's `.sarc.zs` archives as the game reads them (`sarc::fix_archives`), for every mod
@@ -882,27 +1029,26 @@ fn fix_mod_archives(req: &Request) -> Result<()> {
 /// runtime (`pack::romfs`, `pack::spirv`). A source that is not there yet leaves its pack
 /// alone, as upstream keeps the loose folder until something packs it.
 fn pack_stage(req: &Request) -> Result<()> {
-    std::fs::create_dir_all(&req.out)?;
-    if req.game.romfs.is_dir() {
-        let pak = req.out.join("romfs.pak");
-        let inputs = format!(
-            "romfs.pak v1 {}\n{}",
-            env!("CARGO_PKG_VERSION"),
-            tree_key(&req.game.romfs)?
-        );
-        redo_unless_current(&req.out.join(".romfs.pak.key"), &inputs, &pak, || {
-            crate::pack::romfs(&req.game.romfs, &pak)
+    pack_prepared(&req.out, &req.game.romfs)
+}
+
+/// `pack_stage` on a prepared folder `out` and the game's RomFS folder. A pack whose key
+/// record is missing or stale is rebuilt, so a pack a killed run left truncated never ships;
+/// the deliver paths and `pack_folder` call this rather than only testing the file exists.
+pub(crate) fn pack_prepared(out: &Path, romfs: &Path) -> Result<()> {
+    std::fs::create_dir_all(out)?;
+    if romfs.is_dir() {
+        let pak = out.join("romfs.pak");
+        let inputs = format!("romfs.pak v1 {}\n{}", build_version(), tree_key(romfs)?);
+        redo_unless_current(&out.join(".romfs.pak.key"), &inputs, &pak, || {
+            crate::pack::romfs(romfs, &pak)
         })?;
     }
-    let spirv = req.out.join("spirv");
+    let spirv = out.join("spirv");
     if spirv.is_dir() {
-        let pak = req.out.join("spirv.pak");
-        let inputs = format!(
-            "spirv.pak v1 {}\n{}",
-            env!("CARGO_PKG_VERSION"),
-            tree_key(&spirv)?
-        );
-        redo_unless_current(&req.out.join(".spirv.pak.key"), &inputs, &pak, || {
+        let pak = out.join("spirv.pak");
+        let inputs = format!("spirv.pak v1 {}\n{}", build_version(), tree_key(&spirv)?);
+        redo_unless_current(&out.join(".spirv.pak.key"), &inputs, &pak, || {
             crate::pack::spirv(&spirv, &pak)
         })?;
     }
@@ -995,7 +1141,7 @@ fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
     let harness = root.join("private/build/spirv_harness");
     let inputs = format!(
         "shaders v1 {}\nspirv-val {}\nromfs {}\nmain {}\nharness {} {}\n",
-        env!("CARGO_PKG_VERSION"),
+        build_version(),
         find_on_path("spirv-val").is_some(),
         tree_key(&req.game.romfs).map_err(invalidate)?,
         file_key(&main),
@@ -1036,6 +1182,11 @@ pub fn rust_fonts(req: &Request) -> Result<()> {
     .into_iter()
     .map(Path::new)
     .find(|path| path.is_file());
+    if host.is_none() {
+        eprintln!(
+            "warning: no host font found (Arial Unicode, DejaVu Sans): shared.ttf and shared_5.ttf are not written; the player falls back to NX_SHARED_FONT or a host font at run time"
+        );
+    }
     crate::glyphs::stage(&req.out.join("extract/romfs"), &req.out.join("fonts"), host)
         .map_err(|error| Error::Build(format!("stage {}: {error}", Stage::Fonts.key())))
 }
@@ -1221,6 +1372,10 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
         run_logged(stage, &py, &pkgs, root, &[], &[], None)?;
     }
 
+    let old_stamp = read_tools_stamp(root);
+    let pins = tools_pins(root);
+    let stale = |k: &str| old_stamp.get(k) != pins.get(k);
+
     let vkh = t.join(format!("Vulkan-Headers-{VK_HEADERS}"));
     if !vkh.is_dir() {
         fetch_archive(
@@ -1231,6 +1386,9 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
         )?;
     }
     let imgui = t.join("imgui");
+    if stale("imgui") && imgui.exists() {
+        std::fs::remove_dir_all(&imgui)?;
+    }
     if !imgui.join("imgui.cpp").exists() {
         fetch_archive(
             stage,
@@ -1240,6 +1398,9 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
         )?;
     }
     let ryubing = t.join("ryubing");
+    if stale("ryubing") && ryubing.exists() {
+        std::fs::remove_dir_all(&ryubing)?;
+    }
     if !ryubing.join("Ryujinx.sln").exists() {
         fetch_archive(
             stage,
@@ -1254,11 +1415,16 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
     }
 
     let mut dotnet_env = vec![("DOTNET_CLI_TELEMETRY_OPTOUT".to_owned(), "1".to_owned())];
+    let mut private_dotnet = false;
     let dotnet = match find_on_path("dotnet").filter(|p| has_dotnet_10(p)) {
         Some(sys) => sys,
         None => {
             let dn = t.join("dotnet");
             let exe = dn.join(executable(req.target, "dotnet"));
+            private_dotnet = true;
+            if old_stamp.get("dotnet").map(String::as_str) != Some(DOTNET) && dn.exists() {
+                std::fs::remove_dir_all(&dn)?;
+            }
             if !exe.exists() {
                 let (rid, ext) = dotnet_rid().ok_or_else(|| {
                     stage_err(stage, "unsupported host architecture for .NET 10 SDK")
@@ -1283,6 +1449,9 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
     let harness = p.join("build/spirv_harness/bin/Release/net10.0/spirv_harness.dll");
     let alt_dir = p.join("build/spirv_harness/out");
     let alt = alt_dir.join("spirv_harness.dll");
+    if stale("harness") && p.join("build/spirv_harness").exists() {
+        std::fs::remove_dir_all(p.join("build/spirv_harness"))?;
+    }
     if !harness.exists() && !alt.exists() {
         let proj = "tools/maxwell/spirv_harness/SpirvHarness.csproj";
         let hlog = logs.join("harness.log");
@@ -1330,6 +1499,13 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             }
         }
     }
+    let mut stamp = old_stamp;
+    stamp.extend(pins);
+    if private_dotnet {
+        stamp.insert("dotnet".to_owned(), DOTNET.to_owned());
+    }
+    let text: String = stamp.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    std::fs::write(tools_stamp_file(root), text)?;
     Ok(())
 }
 
@@ -1885,10 +2061,13 @@ fn default_jobs(requested: u32) -> u32 {
         .max(1)
 }
 
+/// A `gen/<module>` already made in the game's source folder, taken in place of a recompile
+/// when the hash Rust recorded beside it (`gen/.recomp-hash`, the file `prepare` writes) is
+/// the current one and its profile is the wanted one.
 fn prepared_gen(out: &Path, module: &str, profile: &str, expected_hash: &str) -> Option<PathBuf> {
     let src = std::fs::read_to_string(out.join("game_source.txt")).ok()?;
     let pre = Path::new(src.trim()).join("gen");
-    let same = std::fs::read_to_string(pre.join("recomp_source.txt"))
+    let same = std::fs::read_to_string(pre.join(".recomp-hash"))
         .ok()
         .is_some_and(|h| h.trim() == expected_hash);
     let prof = std::fs::read_to_string(pre.join(module).join("profile.txt")).ok()?;
@@ -2141,6 +2320,16 @@ fn find_cargo(root: &Path) -> PathBuf {
         .unwrap_or(found)
 }
 
+/// Whether two paths name the same folder. CMake records a collapsed absolute path, while a
+/// checkout's root keeps its `..`, and Rust's path comparison does not collapse those.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 /// The Rust build stage: configures CMake with Ninja and builds the `acnh` target.
 pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
     let stage = Stage::Build;
@@ -2161,7 +2350,7 @@ pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
             .and_then(|rest| rest.split_once('='))
             .map(|(_, val)| val.trim())
         {
-            if Path::new(home) != root {
+            if !same_folder(Path::new(home), root) {
                 let _ = std::fs::remove_file(&cache);
                 let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
             }
@@ -2327,6 +2516,44 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Copy `source` over `copy` like `copy_tree`, but keep the tools in `copy/private` (the venv,
+/// headers, imgui, Ryubing, .NET and the shader harness are slow to fetch). A first copy for a
+/// new commit (an app update) takes over the `private` of the newest earlier commit's copy:
+/// `rust_tools` refetches only the pieces whose pins changed.
+fn refresh_source_copy(source: &Path, copy: &Path) -> Result<()> {
+    let keep = copy.with_file_name(format!(
+        ".private-keep-{}",
+        copy.file_name().and_then(OsStr::to_str).unwrap_or("source")
+    ));
+    let _ = std::fs::remove_dir_all(&keep);
+    let own = copy.join("private");
+    let donor = if own.is_dir() {
+        Some(own)
+    } else {
+        copy.parent()
+            .and_then(|dir| std::fs::read_dir(dir).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path().join("private"))
+            .filter(|path| path.is_dir())
+            .max_by_key(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
+    };
+    let kept = match donor {
+        Some(donor) if !source.join("private").exists() => std::fs::rename(&donor, &keep).is_ok(),
+        _ => false,
+    };
+    let result = copy_tree(source, copy);
+    if kept {
+        if result.is_ok() && !copy.join("private").exists() {
+            std::fs::rename(&keep, copy.join("private"))?;
+        } else {
+            let _ = std::fs::remove_dir_all(&keep);
+        }
+    }
+    result
+}
+
 /// The folder the script runs in: the named source, else the packaged source beside `exe`,
 /// else the checkout. A packaged source is copied to `<data>/source/<commit>/` because the
 /// package may be read-only and the script writes into `private/`. A package from another
@@ -2348,7 +2575,7 @@ fn source_root(req: &Request, exe: &Path, dirs: &AppDirs, commit: Option<&str>) 
         )));
     }
     let copy = dirs.data.join("source").join(&found);
-    copy_tree(&source, &copy)?;
+    refresh_source_copy(&source, &copy)?;
     Ok(copy)
 }
 
@@ -2499,6 +2726,7 @@ fn run_stages(
     let expected_recomp_hash = recomp_hash(&runner.root())?;
     let before = STAGES.map(|stage| {
         stage_complete(stage, req, &expected_recomp_hash)
+            && (stage != Stage::Tools || runner.tools_current())
             && !(recheck
                 && matches!(
                     stage,
@@ -2599,9 +2827,9 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
         .delivery
         .as_deref()
         .ok_or_else(|| Error::Env("the delivery folder is not set".into()))?;
-    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
-        pack_stage(req)?;
-    }
+    // Always: a no-op while the packs' key records match, a rebuild of a pack that has no
+    // current record (one a killed run left truncated).
+    pack_stage(req)?;
     let build = req.out.join("build-ios");
     let mut build_args = build_ios_args(&req.out.join("gen"), &build);
     // A Finder-launched app's PATH has only launchd's folders: the build script finds cargo
@@ -2681,9 +2909,9 @@ fn mac_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
         .install
         .as_deref()
         .ok_or_else(|| Error::Env("the install folder is not set".into()))?;
-    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
-        pack_stage(req)?;
-    }
+    // Always: a no-op while the packs' key records match, a rebuild of a pack that has no
+    // current record (one a killed run left truncated).
+    pack_stage(req)?;
     let app = runner
         .assemble(&req.out.join("build"), install)
         .map_err(|e| build_error(Stage::Build, &[e.to_string()], home))?;
@@ -2703,9 +2931,9 @@ fn android_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) ->
         .delivery
         .as_deref()
         .ok_or_else(|| Error::Env("the delivery folder is not set".into()))?;
-    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
-        pack_stage(req)?;
-    }
+    // Always: a no-op while the packs' key records match, a rebuild of a pack that has no
+    // current record (one a killed run left truncated).
+    pack_stage(req)?;
 
     let root = runner.root();
     let lib_path = if let Some(found) = find_android_game_lib(&req.out, &root) {
@@ -3057,6 +3285,17 @@ fn missing_cargo(dirs: &[PathBuf], os: Os) -> Option<Missing> {
     })
 }
 
+fn missing_zstd(dirs: &[PathBuf], os: Os) -> Option<Missing> {
+    find_tool(dirs, os, "zstd").is_none().then(|| {
+        missing_piece(
+            "zstd",
+            "mod archives cannot be fixed and the dialogue reflow is skipped without it.",
+            install_command(os, "zstd"),
+            true,
+        )
+    })
+}
+
 /// `toolchain` with the Homebrew prefixes to try (the seam the tests use).
 pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> Vec<Missing> {
     let dirs: Vec<PathBuf> = std::env::split_paths(path.as_ref())
@@ -3082,6 +3321,15 @@ pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> 
                 true,
             ));
         }
+        if find_tool(&dirs, os, "python").is_none() {
+            missing.push(missing_piece(
+                "python",
+                "Prepare runs the shader tools and unpacks zip archives with it.",
+                "winget install Python.Python.3.12",
+                false,
+            ));
+        }
+        missing.extend(missing_zstd(&dirs, os));
         missing.extend(missing_cargo(&dirs, os));
         return missing;
     }
@@ -3110,10 +3358,46 @@ pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> 
         }
         None => missing.push(missing_piece(
             "python3",
-            "the build script is Python.",
+            "Prepare runs the shader tools, unpacks mod zips and makes its private venv with it.",
             install_command(os, "python3"),
             false,
         )),
+    }
+
+    if find_tool(&dirs, os, "tar").is_none() {
+        missing.push(missing_piece(
+            "tar",
+            "Prepare unpacks its downloads with it.",
+            install_command(os, "tar"),
+            false,
+        ));
+    }
+    missing.extend(missing_zstd(&dirs, os));
+    if let Some(python) = find_tool(&dirs, os, "python3") {
+        // Only a python that runs and says no is reported: one that cannot be started is
+        // left to the checks above.
+        let pillow = Command::new(python)
+            .args(["-c", "import PIL"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if pillow.is_ok_and(|status| !status.success()) {
+            missing.push(missing_piece(
+                "Pillow",
+                "without it the translation's long dialogue lines are not reflowed.",
+                install_command(os, "pillow"),
+                true,
+            ));
+        }
+    }
+    if os == Os::Linux && find_tool(&dirs, os, "patchelf").is_none() {
+        missing.push(missing_piece(
+            "patchelf",
+            "without it the packaged player cannot be given its library path.",
+            install_command(os, "patchelf"),
+            true,
+        ));
     }
 
     if os == Os::Mac {
@@ -3353,6 +3637,9 @@ fn install_command(os: Os, piece: &str) -> &'static str {
             "vulkan-loader" => "brew install vulkan-loader",
             "libvpx" => "brew install libvpx",
             "libvorbis" => "brew install libvorbis",
+            "zstd" => "brew install zstd",
+            "tar" => "xcode-select --install",
+            "pillow" => "python3 -m pip install pillow",
             "brew" => {
                 "/bin/bash -c \"$(curl -fsSL \
                  https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
@@ -3368,6 +3655,10 @@ fn install_command(os: Os, piece: &str) -> &'static str {
             "sdl3" => "sudo apt install libsdl3-dev",
             "libvpx" => "sudo apt install libvpx-dev",
             "libvorbis" => "sudo apt install libvorbis-dev",
+            "zstd" => "sudo apt install zstd  # SteamOS: sudo pacman -S zstd",
+            "tar" => "sudo apt install tar  # SteamOS: sudo pacman -S tar",
+            "pillow" => "sudo apt install python3-pil  # SteamOS: sudo pacman -S python-pillow",
+            "patchelf" => "sudo apt install patchelf  # SteamOS: sudo pacman -S patchelf",
             _ => "install it with your package manager",
         }
     }
@@ -3425,6 +3716,97 @@ fn redact_hex_run(run: &str, redacted: &mut String) {
         redacted.push_str("<hex>");
     } else {
         redacted.push_str(run);
+    }
+}
+
+#[cfg(test)]
+mod tools_cache_tests {
+    use super::{refresh_source_copy, same_folder, tools_current, tools_pins, tree_hash};
+    use std::path::{Path, PathBuf};
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("acnh-tools-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x").unwrap();
+    }
+
+    #[test]
+    fn a_path_with_dotdot_is_the_same_folder_as_its_collapsed_form() {
+        let root = temp("same");
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        let dotted = root.join("a/b/../b");
+        assert!(dotted != root.join("a/b"));
+        assert!(same_folder(&dotted, &root.join("a/b")));
+        assert!(!same_folder(&root.join("a"), &root.join("a/b")));
+        assert!(!same_folder(&root.join("none"), &root.join("a")));
+    }
+
+    #[test]
+    fn the_harness_hash_follows_its_source_and_ignores_build_folders() {
+        let root = temp("hash");
+        let dir = root.join("h");
+        touch(&dir.join("A.cs"));
+        let first = tree_hash(&dir);
+        touch(&dir.join("obj/x.dll"));
+        assert_eq!(tree_hash(&dir), first);
+        std::fs::write(dir.join("A.cs"), "y").unwrap();
+        assert_ne!(tree_hash(&dir), first);
+    }
+
+    #[test]
+    fn tools_are_not_current_when_missing_or_unstamped() {
+        let root = temp("current");
+        assert!(!tools_current(&root));
+        // A venv alone is not the whole set.
+        touch(&super::venv_python(&root));
+        assert!(!tools_current(&root));
+        // Without a stamp, built tools are of unknown pins and are not trusted.
+        let p = root.join("private");
+        touch(&p.join(format!(
+            "third_party/Vulkan-Headers-{}/include/x",
+            super::VK_HEADERS
+        )));
+        touch(&p.join("third_party/imgui/imgui.cpp"));
+        touch(&p.join("third_party/ryubing/Ryujinx.sln"));
+        touch(&p.join("build/spirv_harness/out/spirv_harness.dll"));
+        assert!(!tools_current(&root));
+    }
+
+    #[test]
+    fn the_harness_pin_changes_with_its_source() {
+        let root = temp("stamp");
+        touch(&root.join("tools/maxwell/spirv_harness/A.cs"));
+        let before = tools_pins(&root);
+        std::fs::write(root.join("tools/maxwell/spirv_harness/A.cs"), "changed").unwrap();
+        assert_ne!(tools_pins(&root).get("harness"), before.get("harness"));
+        assert_eq!(tools_pins(&root).get("imgui"), before.get("imgui"));
+    }
+
+    #[test]
+    fn refreshing_the_source_copy_keeps_the_tools_and_an_update_inherits_them() {
+        let data = temp("refresh");
+        let source = data.join("pkg");
+        touch(&source.join("CMakeLists.txt"));
+        let old = data.join("source/old");
+        touch(&old.join("private/venv/bin/python"));
+        touch(&old.join("stale.txt"));
+        // Same commit again: the copy is replaced, private/ stays.
+        refresh_source_copy(&source, &old).unwrap();
+        assert!(old.join("private/venv/bin/python").is_file());
+        assert!(!old.join("stale.txt").exists());
+        assert!(old.join("CMakeLists.txt").is_file());
+        // A new commit takes over the tools of the earlier one.
+        let new = data.join("source/new");
+        refresh_source_copy(&source, &new).unwrap();
+        assert!(new.join("private/venv/bin/python").is_file());
+        assert!(new.join("CMakeLists.txt").is_file());
+        assert!(!data.join("source/.private-keep-new").exists());
     }
 }
 
@@ -3634,5 +4016,83 @@ mod redo_unless_current_tests {
         .unwrap();
         assert_eq!(runs.get(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod recomp_staleness_tests {
+    use super::{build_version, prepared_gen, recomp_hash, recomp_hash_with};
+    use std::path::Path;
+
+    fn none(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn the_hash_changes_with_the_emitter_fingerprint() {
+        assert_ne!(
+            recomp_hash_with("emitter-a", none),
+            recomp_hash_with("emitter-b", none)
+        );
+        assert_eq!(
+            recomp_hash_with("emitter-a", none),
+            recomp_hash_with("emitter-a", none)
+        );
+    }
+
+    #[test]
+    fn the_hash_changes_with_each_regcache_switch() {
+        let base = recomp_hash_with("e", none);
+        for switch in [
+            "NX_REGCACHE",
+            "NX_REGCACHE_REGS",
+            "NX_REGCACHE_FLAGS",
+            "NX_REGCACHE_V",
+        ] {
+            let set =
+                |value: &'static str| move |name: &str| (name == switch).then(|| value.to_owned());
+            let zero = recomp_hash_with("e", set("0"));
+            assert_ne!(base, zero, "{switch} set is not seen");
+            assert_ne!(
+                zero,
+                recomp_hash_with("e", set("1")),
+                "{switch} value is not seen"
+            );
+        }
+    }
+
+    #[test]
+    fn the_real_hash_carries_the_built_fingerprint_and_ignores_the_source_folder() {
+        let a = recomp_hash(Path::new("/nonexistent-a")).unwrap();
+        let b = recomp_hash(Path::new("/nonexistent-b")).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(acnh_recomp::EMITTER_FINGERPRINT.len(), 64);
+    }
+
+    #[test]
+    fn the_build_version_is_not_the_bare_workspace_version() {
+        assert_ne!(build_version(), env!("CARGO_PKG_VERSION"));
+        assert!(build_version().starts_with(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn a_prepared_gen_is_taken_only_for_the_recorded_current_hash() {
+        let root = std::env::temp_dir().join(format!("acnh-prepared-gen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (out, game) = (root.join("out"), root.join("game"));
+        let module = game.join("gen/main");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("game_source.txt"), format!("{}\n", game.display())).unwrap();
+        std::fs::write(module.join("profile.txt"), "none\n").unwrap();
+        std::fs::write(module.join("table.cpp"), "").unwrap();
+        std::fs::write(game.join("gen/.recomp-hash"), "abc\n").unwrap();
+        assert_eq!(
+            prepared_gen(&out, "main", "none", "abc"),
+            Some(module.clone())
+        );
+        assert_eq!(prepared_gen(&out, "main", "none", "other"), None);
+        assert_eq!(prepared_gen(&out, "main", "--hooks x", "abc"), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

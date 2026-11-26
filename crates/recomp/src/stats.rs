@@ -1,4 +1,4 @@
-//! Module overview and instruction histogram (port of `recomp/stats.py`).
+//! Module overview and instruction histogram.
 
 use crate::driver::DriverError;
 use crate::load::{load_file, plt_imports};

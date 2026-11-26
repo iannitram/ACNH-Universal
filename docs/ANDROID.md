@@ -129,7 +129,7 @@ Saves are written to `user/device_save` on the phone; copy it back the same way 
 
 ### Save sync
 
-Or let save-relay carry the island through your Dropbox, as the iPad and the computers do (issue #81). *Set up save
+Or let save-relay carry the island through your Dropbox, as the iPad and the computers do (issues #81, #361): the iPad offers Dropbox beside Nextcloud at its first start, with the same save-relay Dropbox app, so one Dropbox account carries one island between the iPad and this phone. *Set up save
 sync (Dropbox)* on the home screen signs in with save-relay's Dropbox app in the browser. It is one sign-in for both:
 signing in to download the game turns save sync on too, so you never sign in twice. The first game start also
 offers it once, and *Not now* is remembered as `relay.ask = 0` in the game folder's `config.ini`. From then on the app pulls the island before the game starts, and the game starts only
