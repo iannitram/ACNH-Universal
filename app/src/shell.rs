@@ -65,7 +65,7 @@ fn session(config: &ShellConfig) -> acnh_core::Result<Session> {
                 .duration_since(UNIX_EPOCH)
                 .map(|since| since.as_secs())
                 .unwrap_or(0);
-            backup::backup_saves(save_dir, &backups, &backup::stamp(now))?;
+            backup::backup_saves_pruned(save_dir, &backups, &backup::stamp(now))?;
             Ok(())
         }),
     };
