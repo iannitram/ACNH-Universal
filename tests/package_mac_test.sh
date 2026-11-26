@@ -27,6 +27,11 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok: $*"; }
 # shellcheck source=tests/race_rm.sh
 . "$root/tests/race_rm.sh"
+# shellcheck source=tools/package_common.sh
+. "$root/tools/package_common.sh"
+# The package is staged outside the out folder (#362); the tests give it a root of their own.
+export ACNH_STAGE_ROOT=$work/stage-root
+mkdir -p "$ACNH_STAGE_ROOT"
 # Run the script under CI, as the macOS job does.
 ci() { CI=1 "$script" "$@"; }
 # `refused <reason text> <script args>`: the script exits non-zero and its message has the reason.
@@ -107,14 +112,57 @@ for a in "$@"; do case "$a" in */.ACNH-Universal-*.partial) echo "rm: $a: Direct
 exec /bin/rm "$@"
 SHIM
 chmod +x "$stuck_bin/rm"
-mkdir -p "$out/.ACNH-Universal-stuck.partial"
+stuck_stage=$(pkg_stage_path "$(pkg_realpath "$out")" stuck)
+case "$stuck_stage" in "$(pkg_realpath "$out")/"*) fail "the stage is inside the out folder" ;; esac
+mkdir -p "$stuck_stage"
 if PATH="$stuck_bin:$PATH" REMOVE_TREE_WAIT=0 ci stuck "$app" --no-game "$out" >"$work/stuck.log" 2>&1; then
   fail "a leftover staging folder that cannot be removed did not stop the run"
 fi
 grep -q 'left from an earlier run' "$work/stuck.log" || { cat "$work/stuck.log" >&2; fail "no clear message for a stuck staging folder"; }
 [ ! -e "$out/ACNH-Universal-stuck.zip" ] || fail "a zip was written although the staging folder was stuck"
-chmod -R u+w "$out/.ACNH-Universal-stuck.partial"; rm -rf "$out/.ACNH-Universal-stuck.partial"
+chmod -R u+w "$stuck_stage"; rm -rf "$stuck_stage"; rmdir "$(dirname "$stuck_stage")"
 pass "a write into the staging folder during clean-up does not fail the zip"
+
+# ---- the stage lies outside the out folder; a leftover from a killed run is cleared; the stage is gone after ----
+zip_bin=$work/zip-where-bin
+mkdir -p "$zip_bin"
+cat >"$zip_bin/zip" <<'SHIM'
+#!/bin/bash
+pwd -P >>"$ZIP_WHERE"
+exec /usr/bin/zip "$@"
+SHIM
+chmod +x "$zip_bin/zip"
+out=$work/out-stage
+mkdir -p "$out"
+left=$(pkg_stage_path "$(pkg_realpath "$out")" where)
+mkdir -p "$left/ACNH-Universal.app/Contents"
+: >"$left/ACNH-Universal.app/Contents/leftover"
+chmod -R a-w "$left"
+ZIP_WHERE=$work/zip-where PATH="$zip_bin:$PATH" ci where "$app" --no-game "$out" >"$work/where.log" 2>&1 \
+  || { cat "$work/where.log" >&2; fail "a leftover staging folder from a killed run stopped the package"; }
+case "$(cat "$work/zip-where")" in "$(pkg_realpath "$ACNH_STAGE_ROOT")/"*) ;; *) fail "the zip was not made under the stage root" ;; esac
+[ "$(ls -A "$out")" = "ACNH-Universal-where.zip" ] || fail "the out folder holds more than the zip: $(ls -A "$out")"
+[ -z "$(ls -A "$ACNH_STAGE_ROOT")" ] || fail "the stage root is not empty afterwards: $(ls -A "$ACNH_STAGE_ROOT")"
+# Without ACNH_STAGE_ROOT the stage is never inside the out folder (it is under TMPDIR or ~/Library/Caches).
+default_stage=$(env -u ACNH_STAGE_ROOT bash -c '. "$1/tools/package_common.sh"; pkg_stage_path "$2" x' _ "$root" "$(pkg_realpath "$out")")
+case "$default_stage" in "$(pkg_realpath "$out")/"*) fail "the default stage is inside the out folder: $default_stage" ;; esac
+# A stage root that is inside the out folder is refused.
+ACNH_STAGE_ROOT=$out refused "ACNH_STAGE_ROOT" where2 "$app" --no-game "$out"
+pass "the package is staged outside the out folder and a killed run's leftover is cleared"
+
+# ---- any git error, not only "not a git repository", refuses the out folder ----
+git_bin=$work/git-bin
+mkdir -p "$git_bin"
+cat >"$git_bin/git" <<'SHIM'
+#!/bin/bash
+echo "fatal: detected dubious ownership in repository" >&2
+exit 128
+SHIM
+chmod +x "$git_bin/git"
+out=$work/out-git-error
+PATH="$git_bin:$PATH" refused "cannot tell whether the out folder is inside a Git work tree" gerr "$app" --no-game "$out"
+[ ! -e "$out" ] || fail "wrote to the out folder after a git error"
+pass "a git error refuses the out folder"
 
 # ---- a .DS_Store Finder writes into the signed bundle before it is zipped stays out, and the app still verifies ----
 finder_bin=$work/finder-bin

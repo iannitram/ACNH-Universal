@@ -13,6 +13,10 @@ pub mod emit;
 pub mod load;
 pub mod stats;
 
+/// SHA-256 of this crate's `src/` tree, taken when it was built (`build.rs`): it changes with
+/// any change to the emitter, so a `gen/` made by an older one can be told from a current one.
+pub const EMITTER_FINGERPRINT: &str = env!("ACNH_RECOMP_FINGERPRINT");
+
 pub use driver::{recompile, RecompileOptions, Report, INSNS_PER_FILE, REF_BASE};
 pub use load::{
     load, load_bytes, load_file, plt_imports, Error, Module, Reloc, Symbol, DT_FINI, DT_FINI_ARRAY,

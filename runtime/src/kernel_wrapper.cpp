@@ -408,6 +408,11 @@ uint32_t host_service_dispatch(AcnhIpcDispatch* d) {
     uint32_t rc = svc->handle(ctx);
 
     size_t out_n = std::min(ctx.out.size(), d->out_cap);
+    if (ctx.out.size() > d->out_cap) {
+        char msg[96];
+        std::snprintf(msg, sizeof(msg), "ipc: service reply of %zu bytes truncated to %zu", ctx.out.size(), d->out_cap);
+        host_log(msg);
+    }
     if (out_n) std::memcpy(d->out_buf, ctx.out.data(), out_n);
     *d->out_len = out_n;
 

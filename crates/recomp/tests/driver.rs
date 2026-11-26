@@ -249,3 +249,67 @@ fn jobs_follow_cores_and_memory() {
     assert_eq!(jobs_for(16, 2048), 3);
     assert_eq!(jobs_for(16, 100), 1);
 }
+
+#[test]
+fn stale_chunks_past_the_current_count_are_removed() {
+    let dir = std::env::temp_dir().join(format!("acnh-stale-chunks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in [
+        "code_000.cpp",
+        "code_001.cpp",
+        "code_002.cpp",
+        "code_1000.cpp",
+        "code_variant.cpp",
+        "table.cpp",
+        "funcs.h",
+        "code_.cpp",
+    ] {
+        std::fs::write(dir.join(name), "x").unwrap();
+    }
+    acnh_recomp::driver::remove_stale_chunks(&dir, 2).unwrap();
+    let mut left: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            "code_.cpp",
+            "code_000.cpp",
+            "code_001.cpp",
+            "code_variant.cpp",
+            "funcs.h",
+            "table.cpp"
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_recompile_over_an_older_one_leaves_no_higher_numbered_chunk() {
+    let dir = temp_dir("stale-e2e");
+    let nso = dir.join("main.nso");
+    std::fs::write(&nso, synthetic_nso()).unwrap();
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    // What a run that yielded more chunks left behind.
+    std::fs::write(out.join("code_001.cpp"), "old body\n").unwrap();
+    std::fs::write(out.join("code_007.cpp"), "old body\n").unwrap();
+    let opts = RecompileOptions {
+        nso,
+        out: out.clone(),
+        name: "fixture".to_owned(),
+        base: 0x40_1000_0000,
+        jobs: 1,
+        only: None,
+        hooks: None,
+        variant: None,
+    };
+    let report = recompile(&opts, &mut |_| {}).unwrap();
+    assert_eq!(report.files, 1);
+    assert!(out.join("code_000.cpp").is_file());
+    assert!(!out.join("code_001.cpp").exists());
+    assert!(!out.join("code_007.cpp").exists());
+}

@@ -6,18 +6,23 @@
 //! acnh-universal build  --game <folder> [--target <os>] [--out <folder>]
 //! acnh-universal play   [--profile <id>] [--keep relay|here] [--anyway]
 //! acnh-universal sync   setup --server <url> --user <name> | sign-in gdrive|dropbox | status | off
+//!                       | push [--keep relay|here]
 //! acnh-universal steam-add
-//! acnh-universal hub    serve|pair|pull
+//! acnh-universal hub    serve|pair|pull|report
 //! acnh-universal fleet
+//! acnh-universal cloud-upload --os <os> --install <folder> --prepared <folder>
+//! acnh-universal help | --help
 //! ```
 //!
 //! Every command prints a plain message. A runtime error exits 1; with `--json` it prints
-//! `{"code":"<Error::code>"}` instead. An unknown command exits 2 with the usage.
+//! `{"code":"<Error::code>"}` instead. An unknown command exits 2 with the usage; `--help` exits 0.
 //!
 //! `play` never answers a save conflict on its own: a conflict exits 3 (unless `--keep relay`
 //! or `--keep here` was given), a held island exits 4 (unless `--anyway`), and save sync that
-//! is set up but cannot be reached exits 5. None of the three starts the game. A push that conflicts after the game ran exits 6 (settle
-//! it with `sync push --keep relay|here`). A game that quits with a non-zero code makes `play`
+//! is set up but cannot be reached exits 5. None of the three starts the game. A push that
+//! conflicts after the game ran exits 6, whatever `--keep` says (settle it with
+//! `sync push --keep relay|here`); a push that finds the relay unreachable after the game ran
+//! exits 5 (the island stays here). `sync status` exits 5 when the relay cannot be reached. A game that quits with a non-zero code makes `play`
 //! exit 1 and print that code, so its own code never looks like one of these.
 
 #![forbid(unsafe_code)]
@@ -30,7 +35,7 @@ use acnh_core::bundle;
 use acnh_core::config::Config;
 use acnh_core::fleet;
 use acnh_core::gamefolder;
-use acnh_core::hub::{self, TcpTransport};
+use acnh_core::hub;
 use acnh_core::launch::{self, Game, Keep, Relay, Sync};
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{self, Request};
@@ -54,7 +59,8 @@ sync setup --server <url> --user <name> [--device <name>] (app password on stand
 sync sign-in gdrive|dropbox | sync status | sync off | sync push [--keep relay|here]\n\
 cloud-upload --os linux --install <folder> --prepared <folder>\n\
 exit codes: play 3 conflict, 4 held, 5 relay unreachable, 6 push conflict after the game ran; the game's own failure is 1\n\
-hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>]\n\
+hub publish --out <builds> --version <game version> [--target <os>] [--install <folder>] [--commit <id>]\n\
+hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>] (--pair shows a generated six-digit code)\n\
 hub pair --address <ip:port> --name <device> --peer <hub> [--target <os>]\n\
 hub pull --address <ip:port> --name <device> --peer <hub> [--target <os>] [--prepared <private-data-root>]\n\
 hub report --address <ip:port> --name <device> --peer <hub> --target <os> --version <version> --build-id <id> --last-sync <seconds> --free <bytes>";
@@ -77,6 +83,7 @@ struct Options {
     prepared: Option<PathBuf>,
     pair: bool,
     version: Option<String>,
+    commit: Option<String>,
     build_id: Option<String>,
     last_sync: Option<String>,
     free: Option<String>,
@@ -156,8 +163,8 @@ fn parse(args: &[String]) -> std::result::Result<Options, String> {
                 index += 1;
             }
             "--game" | "--target" | "--out" | "--profile" | "--address" | "--name" | "--peer"
-            | "--hub" | "--prepared" | "--version" | "--build-id" | "--last-sync" | "--free"
-            | "--keep" | "--server" | "--user" | "--device" | "--os" | "--install" => {
+            | "--hub" | "--prepared" | "--version" | "--commit" | "--build-id" | "--last-sync"
+            | "--free" | "--keep" | "--server" | "--user" | "--device" | "--os" | "--install" => {
                 let value = match inline {
                     Some(value) => {
                         index += 1;
@@ -181,9 +188,6 @@ fn parse(args: &[String]) -> std::result::Result<Options, String> {
     if options.command.is_empty() && !options.help {
         return Err(USAGE.to_owned());
     }
-    if matches!(options.command.as_str(), "check" | "build") && options.game.is_none() {
-        return Err(format!("--game <folder> is needed\n{USAGE}"));
-    }
     Ok(options)
 }
 
@@ -199,6 +203,7 @@ fn set_value(options: &mut Options, flag: &str, value: String) -> std::result::R
         "--hub" => options.hub = Some(value),
         "--prepared" => options.prepared = Some(PathBuf::from(value)),
         "--version" => options.version = Some(value),
+        "--commit" => options.commit = Some(value),
         "--build-id" => options.build_id = Some(value),
         "--last-sync" => options.last_sync = Some(value),
         "--free" => options.free = Some(value),
@@ -276,6 +281,11 @@ pub fn run(args: Vec<String>, cx: &mut Context<'_>) -> i32 {
         println!("{USAGE}");
         return 0;
     }
+    // Checked after `--help`, so `build --help` and `check --help` print the usage and exit 0.
+    if matches!(options.command.as_str(), "check" | "build") && options.game.is_none() {
+        println!("--game <folder> is needed\n{USAGE}");
+        return 2;
+    }
 
     let result = match options.command.as_str() {
         "check" => check(&options),
@@ -347,15 +357,12 @@ fn build(options: &Options) -> Result<i32> {
         None => Os::current(),
     };
     let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
-    // The Mac and iPhone builds hold the recompiled game: by default they are made in the
-    // data root's `prepared/` folder, never in a git work tree.
-    let out = options.out.clone().unwrap_or_else(|| {
-        if matches!(target, Os::Mac | Os::Ios) {
-            AppDirs::new(&vars).data_root().join("prepared")
-        } else {
-            repo_root().join("private").join("acnh")
-        }
-    });
+    // Every build holds the recompiled game: by default it is made in the data root's
+    // `prepared/` folder, never in a git work tree (nor at a path baked in at compile time).
+    let out = options
+        .out
+        .clone()
+        .unwrap_or_else(|| default_build_out(&vars));
     let config_path = AppDirs::new(&vars).data_root().join("config.ini");
     let config = match std::fs::read_to_string(&config_path) {
         Ok(text) => acnh_core::config::Config::parse(&text)?,
@@ -409,6 +416,11 @@ fn build(options: &Options) -> Result<i32> {
     let player = prepare::assemble(target, &out.join("build"), &install)?;
     println!("assembled {}", player.display());
     Ok(0)
+}
+
+/// Where `build` makes its output without `--out`: the data root's `prepared/` folder.
+fn default_build_out(vars: &Vars) -> PathBuf {
+    AppDirs::new(vars).data_root().join("prepared")
 }
 
 fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
@@ -472,6 +484,7 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let guard = Guard {
         inner: relay,
         keep: options.keep,
+        answer_push: false,
         anyway: options.anyway,
         backups: &backups,
         stopped: RefCell::new(None),
@@ -488,7 +501,14 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
             report_sync(cx.out, "push", &played.pushed)?;
             writeln!(cx.out, "game exited with {}", played.exit_code)?;
             // The game's own code never shares a number with the codes above.
-            Ok(if played.exit_code == 0 { 0 } else { 1 })
+            if played.exit_code != 0 {
+                Ok(1)
+            } else if played.pushed == Sync::Offline {
+                // The island stays here; the same state `sync push` answers with 5.
+                Ok(fail(options, cx, &Error::RelayUnreachable, 5))
+            } else {
+                Ok(0)
+            }
         }
         Err(error) => match guard.stopped.take() {
             Some(Stop::Conflict {
@@ -614,6 +634,9 @@ pub(crate) enum Stop {
 pub(crate) struct Guard<'a> {
     pub(crate) inner: &'a dyn Relay,
     pub(crate) keep: Option<Keep>,
+    /// Whether `keep` also answers a push conflict. `play` leaves it off: a conflict after the
+    /// game ran is never answered on its own (exit 6, settled with `sync push --keep`).
+    pub(crate) answer_push: bool,
     pub(crate) anyway: bool,
     pub(crate) backups: &'a Path,
     pub(crate) stopped: RefCell<Option<Stop>>,
@@ -623,8 +646,12 @@ type Retry<'a> = &'a dyn Fn(Keep) -> Result<Sync>;
 
 impl Guard<'_> {
     fn settle(&self, save_dir: &Path, step: Step, first: Sync, retry: Retry<'_>) -> Result<Sync> {
+        let keep = match step {
+            Step::Push if !self.answer_push => None,
+            _ => self.keep,
+        };
         match first {
-            Sync::Conflict { server, local, .. } => match self.keep {
+            Sync::Conflict { server, local, .. } => match keep {
                 Some(keep) => {
                     if keep == Keep::Server {
                         // The island here is about to be replaced: keep a copy of it first.
@@ -632,7 +659,7 @@ impl Guard<'_> {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|since| since.as_secs())
                             .unwrap_or(0);
-                        acnh_core::backup::backup_saves(
+                        acnh_core::backup::backup_saves_pruned(
                             save_dir,
                             self.backups,
                             &acnh_core::backup::stamp(now),
@@ -841,7 +868,34 @@ fn code(stdin: &mut dyn BufRead) -> Result<String> {
     Ok(code)
 }
 
+fn hub_publish(options: &Options) -> Result<i32> {
+    let builds = options
+        .out
+        .as_deref()
+        .ok_or_else(|| Error::Hub("--out is required".into()))?;
+    let install = match &options.install {
+        Some(install) => install.clone(),
+        None => app_dirs()?.install(),
+    };
+    let published = hub::publish_build(
+        builds,
+        &install,
+        target(options)?,
+        required(&options.version, "--version")?,
+        options.commit.as_deref().unwrap_or("local"),
+    )?;
+    println!(
+        "Published build {} ({} files)",
+        published.build_id,
+        published.files.len()
+    );
+    Ok(0)
+}
+
 fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
+    if options.hub_action.as_deref() == Some("publish") {
+        return hub_publish(options);
+    }
     let dirs = app_dirs()?;
     let name = required(&options.name, "--name")?;
     let addr = address(options)?;
@@ -858,34 +912,35 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
                 .as_deref()
                 .ok_or_else(|| Error::Hub("--out is required".into()))?;
             let listener = TcpListener::bind(addr)?;
-            let hostname = format!("{name}.local.");
-            let _announcement = hub::announce(name, &hostname, role, &[addr.ip()], addr.port())?;
-            let mut pairing = if options.pair {
-                Some(hub::PairingSession::new(&code(cx.stdin)?)?)
-            } else {
-                None
-            };
+            let host = hub::HubHost::start(
+                dirs,
+                listener,
+                hub::HostConfig {
+                    name: name.to_owned(),
+                    role,
+                    builds: builds.to_owned(),
+                    prepared: options.prepared.clone(),
+                    pair: options.pair,
+                    announce: true,
+                },
+            )?;
             println!(
                 "Hub listening; pairing {}",
-                if pairing.is_some() { "armed" } else { "off" }
+                if options.pair { "armed" } else { "off" }
             );
-            for incoming in listener.incoming() {
-                let stream = incoming?;
-                let mut transport = match TcpTransport::from_stream(stream) {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-                if let Err(error) = hub::serve_request(
-                    &mut transport,
-                    &dirs,
-                    builds,
-                    options.prepared.as_deref(),
-                    pairing.as_mut(),
-                ) {
-                    eprintln!("Hub request failed: {}", error.code());
+            // The hub makes the six-digit code itself; a new device types it. A code that is
+            // used up or has expired is replaced, and the new one is shown here.
+            let mut shown = None;
+            loop {
+                let code = host.status().code;
+                if code != shown {
+                    if let Some(code) = &code {
+                        println!("Pairing code: {code}");
+                    }
+                    shown = code;
                 }
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            Ok(0)
         }
         Some("pair") => {
             let peer = required(&options.peer, "--peer")?;
@@ -903,12 +958,11 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
                 if options.out.is_some() {
                     return Err(Error::Hub("--out is not used for pulls".into()));
                 }
-                std::fs::create_dir_all(&dirs.data)?;
-                let staged = tempfile::Builder::new()
-                    .prefix(".hub-pull-")
-                    .tempdir_in(&dirs.data)?;
-                let bundle = hub::pull_hub(addr, &dirs, name, peer, target, staged.path())?;
-                bundle::install(&bundle, staged.path(), &dirs.install())?;
+                // The same staging folder every time: a pull that was cut continues from the
+                // chunks it already has. A successful install moves the folder away.
+                let staged = hub::resume_dir(&dirs)?;
+                let bundle = hub::pull_hub(addr, &dirs, name, peer, target, &staged)?;
+                bundle::install(&bundle, &staged, &dirs.install())?;
                 hub::report_hub_build(addr, &dirs, name, peer, &bundle)
                     .map_err(|_| Error::Hub("build installed, but fleet report failed".into()))?;
                 println!("Build installed");
@@ -996,10 +1050,6 @@ fn cloud_upload(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     Ok(0)
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
-}
-
 struct RelayOff;
 
 impl Relay for RelayOff {
@@ -1025,5 +1075,24 @@ impl Game for Player {
                 Error::Io(format!("cannot start {}: {error}", self.program.display()))
             })?;
         Ok(status.code().unwrap_or(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_build_folder_is_under_the_data_root() {
+        let vars = Vars::from_lookup(Os::current(), |name| match name {
+            "HOME" | "USERPROFILE" => Some("/home/player".to_owned()),
+            "LOCALAPPDATA" | "APPDATA" => Some("/home/player/AppData".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let out = default_build_out(&vars);
+        assert!(out.starts_with(AppDirs::new(&vars).data_root()), "{out:?}");
+        assert!(out.ends_with("prepared"));
+        assert!(!out.starts_with(env!("CARGO_MANIFEST_DIR")));
     }
 }
