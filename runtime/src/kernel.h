@@ -26,7 +26,7 @@ struct KThread : KObject {
     int64_t host_tid = 0;
     uint64_t last_yield = 0;  // svcSleepThread(0) back-off
     uint32_t yields = 0;
-    uint64_t yb_run = 0;  // yield back-off (yield_backoff.h): start of the current run of yields, 0 = none
+    uint64_t yb_run = 0;  // yield back-off (crates/runtime/src/kernel.rs): start of the current run of yields, 0 = none
     uint64_t yb_regs[10] = {};  // x19..x28 at the run's last progress
     uint64_t last_tick_call = 0;  // nn::os::GetSystemTick back-off
     uint32_t tick_spins = 0;

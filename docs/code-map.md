@@ -200,7 +200,7 @@ Also in `crates/runtime`:
 
 `unsafe` blocks: `kernel.rs` (63), `services.rs` (79) and `memory.rs` (9) carry no `// SAFETY:` line; `audio.rs`, `files.rs`, `input.rs` and `saves.rs` carry them on some. ADR 0002 says every block has one (#356).
 
-Kernel env (`kernel.rs`): `NX_YIELD_BACKOFF=start_us,cap_us` (default `2000,250`; empty or `0` = off) makes a guest thread that yields in a loop without changing x19..x28 sleep per yield; `NX_SPIN_NAPS=1` takes precedence with the older flat 0.5 ms nap. `runtime/src/yield_backoff.h`, the credited copy from nxrt, is included by nothing (#327).
+Kernel env (`kernel.rs`): `NX_YIELD_BACKOFF=start_us,cap_us` (default `2000,250`; empty or `0` = off) makes a guest thread that yields in a loop without changing x19..x28 sleep per yield; `NX_SPIN_NAPS=1` takes precedence with the older flat 0.5 ms nap. The credited nxrt copy of the back-off was a C++ header (`yield_backoff.h`) that nothing included; it was removed in #327.
 
 ### C++ that stays (SPEC M13)
 
@@ -280,10 +280,8 @@ Upstream's own preparation, ported from ACNHRecomp-Importer v1.0.7 (MIT). It is 
 | `tools/boot_smoke.sh` | live | the fake-game boot and frame gate (4.01), Linux CI |
 | `tools/gen_shaders.py`, `tools/gen_spirv_inc.py`, `tools/gen_vk.py`, `tools/shaders/`, `tools/fonts/make_ui_cjk_font.py`, `tools/make_icons.sh` | live, by hand | upstream's generators of committed sources and assets |
 | `tools/translate_shader_misses.sh`, `tools/bc/`, `tools/play/`, `tools/cpu_profile.py`, `tools/symbolize.py`, `tools/find_*.py`, `tools/frames.py`, `tools/burst_anomalies.py`, `tools/detect_explode.py`, `tools/capture.ps1`, `tools/record_run.ps1`, `tools/msl_check.swift` | developer only | upstream's analysis and play-test tools (M13 lets them stay) |
-| `tools/push_android.sh`, `tools/android_install.sh`, `tools/setup_60fps.sh` | broken (#327) | upstream's adb route and 60 fps setup: they call `tools/pack_romfs.py`, `tools/pack_spirv.py`, `tools/setup_acnh.py` or `python -m recomp`, all deleted. `docs/ANDROID.md` and `README.md` (upstream's) still describe them |
-| `tools/probe.py`, `tools/gen_mods.py`, `tools/intel/`, `tools/regress.ps1`, `tools/capture_burst.ps1` | dead (#327) | import the deleted `recomp` package, write a `games/hades/` that does not exist, or are referenced by nothing |
-| `tools/acnh_mac.sh`, `tools/acnh_linux.sh`, `Jogar ACNH.command`, `tools/install_mac_shortcut.sh` | upstream's | run presets that assume `private/acnh/build`; `Jogar ACNH.command` imports the deleted `setup_acnh` |
-| `tools/discord_guard.py`, `.github/workflows/discord-guard.yml`, `.github/FUNDING.yml` | upstream's, inert here | the workflow is guarded to upstream's repo and is skipped every 5 minutes (#327) |
+| `tools/push_android.sh`, `tools/android_install.sh`, `tools/setup_60fps.sh`, `tools/probe.py`, `tools/gen_mods.py`, `tools/intel/`, `tools/regress.ps1`, `tools/capture_burst.ps1`, `.github/workflows/discord-guard.yml`, `tools/discord_guard.py`, `.github/FUNDING.yml` | removed (#327) | broken or dead: they called the deleted `tools/pack_romfs.py`, `tools/pack_spirv.py`, `tools/setup_acnh.py` or `python -m recomp`, or were referenced by nothing. `docs/ANDROID.md`, `docs/NATIVE60.md`, `docs/ACNH.md` and `README.md` (upstream's) still describe some of them: left for upstream, not edited for pipeline reasons |
+| `tools/acnh_mac.sh`, `tools/acnh_linux.sh`, `Jogar ACNH.command`, `tools/install_mac_shortcut.sh` | upstream's | run presets that assume `private/acnh/build`; `Jogar ACNH.command` imports the deleted `setup_acnh` (upstream's file, left as is) |
 
 ## Tests
 

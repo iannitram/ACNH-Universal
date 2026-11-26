@@ -44,5 +44,5 @@ peer: gilrs (crate) | MIT or Apache-2.0 | gamepad input on desktop
 
 | Here | From (repo and commit) | License | Credit |
 |---|---|---|---|
-| `runtime/src/yield_backoff.h` | fedebuonco/nxrt c41d913 `runtime/yield_backoff.{c,h}` | Unlicense | header comment |
+| `crates/runtime/src/kernel.rs` (yield back-off) | fedebuonco/nxrt c41d913 `runtime/yield_backoff.{c,h}` | Unlicense | header comment in kernel.rs (the C++ copy was removed in #327) |
 | crates/core atomic write | iannitram/craft-libs f3327e14ca55e6ff65ab82e629917b38a6590e3a crates/atomic | MIT OR Apache-2.0 | header comment in crates/core/src/platform.rs |
