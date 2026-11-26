@@ -171,6 +171,13 @@ impl BuildActions {
                 let app_dir = prepare::app_out_dir_for(target, launcher, local_data, home);
                 prepare::pack_folder(&launcher_exe, &self.dirs.install(), &out, &app_dir)?;
             }
+            // The hub keeps the build for the devices that pull: a failure to publish is
+            // told, not hidden, but the build itself is made.
+            if let Err(error) = self.publish(target, game) {
+                report(format!(
+                    "Built, but not published for other devices: {error}"
+                ));
+            }
             Ok(())
         })
     }
@@ -280,13 +287,27 @@ impl BuildActions {
         .all(|rel| game_dir.join(rel).is_file())
     }
     fn install_pulled(&self, pull: impl FnOnce(&Path) -> Result<bundle::Bundle>) -> Result<()> {
-        std::fs::create_dir_all(&self.dirs.data)?;
-        let _lock = acnh_core::hub::lock_install_and_sweep(&self.dirs.data)?;
-        let staged = tempfile::Builder::new()
-            .prefix(".continue-")
-            .tempdir_in(&self.dirs.data)?;
-        let manifest = pull(staged.path())?;
-        self.install_bundle(&manifest, staged.path())
+        // The same staging folder every time: a pull that was cut continues from the chunks
+        // it already has. A successful install moves the folder away.
+        let staged = hub::resume_dir(&self.dirs)?;
+        let manifest = pull(&staged)?;
+        self.install_bundle(&manifest, &staged)
+    }
+
+    /// Publishes the build just made in the install folder so a hub serves it to the
+    /// devices that pull. Only the targets whose player is the install folder have one.
+    fn publish(&self, target: Os, game: &gamefolder::GameFolder) -> Result<()> {
+        if !matches!(target, Os::Linux | Os::Windows) {
+            return Ok(());
+        }
+        hub::publish_build(
+            &crate::hub_host::HubController::builds_dir(&self.dirs),
+            &self.dirs.install(),
+            target,
+            game.version.name(),
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        Ok(())
     }
 
     pub(crate) fn install_bundle(&self, manifest: &bundle::Bundle, staged: &Path) -> Result<()> {
