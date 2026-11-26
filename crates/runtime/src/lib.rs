@@ -6,6 +6,9 @@
 //! (`runtime/src/nvn`, `vk_*`, `mtl`), `games/acnh` and the `ui/` overlay stay C++.
 //! Planned: only the service list is in the skeleton.
 
+// ADR 0002: every `unsafe` block says why it is sound.
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 /// The runtime's groups, in the order they move to Rust, with the C++ they replace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Service {

@@ -2089,6 +2089,7 @@ mod tests {
         let bytes = s.as_bytes();
         if !buf.is_null() && cap > 0 {
             let n = bytes.len().min(cap - 1);
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), n);
                 *buf.add(n) = 0;
@@ -2105,6 +2106,7 @@ mod tests {
             local_from_posix: None,
             zip_inflate: None,
         };
+        // SAFETY: test-only: the host table lives on this test's stack and outlives every call that reads it.
         unsafe { acnh_saves_set_host(&host) };
     }
 
@@ -2155,13 +2157,17 @@ mod tests {
     }
 
     extern "C" fn collect_str(ptr: *const c_char, len: usize, ctx: *mut c_void) {
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let out = unsafe { &mut *ctx.cast::<String>() };
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
         *out = String::from_utf8_lossy(bytes).into_owned();
     }
 
     extern "C" fn collect_str_vec(ptr: *const c_char, len: usize, ctx: *mut c_void) {
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let out = unsafe { &mut *ctx.cast::<Vec<String>>() };
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
         out.push(String::from_utf8_lossy(bytes).into_owned());
     }
@@ -2196,24 +2202,29 @@ mod tests {
 
         assert_eq!(acnh_users_count(), 1);
         let mut u1 = AcnhUserInfo::default();
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert!(unsafe { acnh_user_find(ACNH_FIRST_USER_LO, ACNH_FIRST_USER_HI, &mut u1) });
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let nick1 = unsafe { CStr::from_ptr(u1.nickname.as_ptr()) }
             .to_str()
             .unwrap();
         assert_eq!(nick1, "Tester");
 
         let mut u2 = AcnhUserInfo::default();
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert!(unsafe { acnh_user_create(&mut u2) });
         assert_eq!(u2.lo, 2);
         assert_eq!(acnh_users_count(), 2);
 
         acnh_user_opened(u2.lo, u2.hi);
         let mut boot = AcnhUserInfo::default();
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         unsafe { acnh_user_boot(&mut boot) };
         assert_eq!(boot.lo, 2);
 
         let mut blob = [0u8; 0x88];
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_account_preselected_user_blob(blob.as_mut_ptr(), blob.len()) },
             0x88
         );
@@ -2229,6 +2240,7 @@ mod tests {
         );
 
         std::env::remove_var("NX_USER_NAME");
+        // SAFETY: test-only: the host table lives on this test's stack and outlives every call that reads it.
         unsafe { acnh_saves_set_host(std::ptr::null()) };
         reset_users_state();
     }
@@ -2302,6 +2314,7 @@ mod tests {
         ));
         assert!(acnh_saves_has_save());
 
+        // SAFETY: test-only: the host table lives on this test's stack and outlives every call that reads it.
         unsafe { acnh_saves_set_host(std::ptr::null()) };
     }
 

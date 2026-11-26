@@ -1805,6 +1805,7 @@ mod tests {
         assert_ne!(addr, 0);
         let mut desc = [0 as c_char; 128];
         let n = acnh_loader_describe(addr, desc.as_mut_ptr(), desc.len());
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let s = unsafe { CStr::from_ptr(desc.as_ptr()) }.to_str().unwrap();
         assert_eq!(n, s.len());
         assert_eq!(s, "hle:test_hle_sym_61");

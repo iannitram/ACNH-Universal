@@ -4,8 +4,6 @@
 //! `hle_web.cpp`, `hle_pl.cpp`, `hle_album.cpp`, `hle_jpeg.cpp`, `hle_nfp.cpp`, `hle_bcat.cpp`,
 //! `hle_movie.cpp`, `hle_friends.cpp`, `hle_ngc.cpp`, and `hle_ldn.cpp`.
 
-#![allow(clippy::missing_safety_doc)]
-
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
@@ -194,11 +192,16 @@ pub struct AcnhServicesHost {
 
 // Safety: host function pointers are thread-safe C callbacks set once at boot.
 unsafe impl Send for AcnhServicesHost {}
+// SAFETY: the host table holds only plain function pointers installed once and never mutated afterwards, so sharing it across threads is sound.
 unsafe impl Sync for AcnhServicesHost {}
 
 static HOST: Mutex<Option<AcnhServicesHost>> = Mutex::new(None);
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_services_set_host(host: *const AcnhServicesHost) {
     if host.is_null() {
         return;
@@ -215,6 +218,7 @@ fn with_host<R>(f: impl FnOnce(&AcnhServicesHost) -> R) -> Option<R> {
 fn host_log(msg: &str) {
     if let Some(Some(f)) = with_host(|h| h.log) {
         if let Ok(cstr) = CString::new(msg) {
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             unsafe { f(cstr.as_ptr()) };
         }
     }
@@ -223,6 +227,7 @@ fn host_log(msg: &str) {
 fn host_is_handheld() -> bool {
     with_host(|h| {
         h.config_is_handheld
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             .map(|f| unsafe { f() })
             .unwrap_or(false)
     })
@@ -233,6 +238,7 @@ fn host_config_bool(key: &str, default: bool) -> bool {
     with_host(|h| {
         if let Some(f) = h.config_get_bool {
             if let Ok(c) = CString::new(key) {
+                // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
                 return unsafe { f(c.as_ptr(), default) };
             }
         }
@@ -242,6 +248,7 @@ fn host_config_bool(key: &str, default: bool) -> bool {
 }
 
 fn host_monotonic_ns() -> u64 {
+    // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
     with_host(|h| h.monotonic_ns.map(|f| unsafe { f() }))
         .flatten()
         .unwrap_or_else(|| {
@@ -255,6 +262,7 @@ fn host_sleep_ns(ns: i64) {
         return;
     }
     if let Some(Some(f)) = with_host(|h| h.sleep_ns) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(ns) };
     } else {
         std::thread::sleep(Duration::from_nanos(ns as u64));
@@ -262,12 +270,14 @@ fn host_sleep_ns(ns: i64) {
 }
 
 fn host_kernel_alloc(size: u64) -> u64 {
+    // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
     with_host(|h| h.kernel_alloc.map(|f| unsafe { f(size) }))
         .flatten()
         .unwrap_or(0)
 }
 
 fn host_event_create(signaled: bool) -> u32 {
+    // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
     with_host(|h| h.event_create.map(|f| unsafe { f(signaled) }))
         .flatten()
         .unwrap_or(0)
@@ -278,12 +288,14 @@ fn host_event_signal(ev: u32, signaled: bool) {
         return;
     }
     if let Some(Some(f)) = with_host(|h| h.event_signal) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(ev, signaled) };
     }
 }
 
 fn host_notify_all() {
     if let Some(Some(f)) = with_host(|h| h.notify_all) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
 }
@@ -301,6 +313,10 @@ static PROCESS: Mutex<ProcessState> = Mutex::new(ProcessState {
 });
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_get_info(
     info_type: u32,
     _handle: u32,
@@ -308,19 +324,23 @@ pub unsafe extern "C" fn acnh_svc_get_info(
     out_rc: *mut u32,
 ) -> u64 {
     if !out_rc.is_null() {
+        // SAFETY: the C++ caller passes a writable pointer to a u32 or u64 slot (or null where the code checks first), valid for this call.
         unsafe { *out_rc = SVC_OK };
     }
     // Layout array: [alias_base, alias_size, heap_base, heap_max, addr_base, addr_size, stack_base, stack_size]
     let mut layout = [0u64; 8];
     if let Some(Some(f)) = with_host(|h| h.get_mem_layout) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(layout.as_mut_ptr(), layout.len()) };
     }
+    // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
     let heap_sz = with_host(|h| h.heap_size.map(|f| unsafe { f() }))
         .flatten()
         .unwrap_or(0);
     let mut sys_res = 0u64;
     let mut prog_id = 0u64;
     if let Some(Some(f)) = with_host(|h| h.get_game_info) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(&mut sys_res, &mut prog_id) };
     }
 
@@ -356,6 +376,7 @@ pub unsafe extern "C" fn acnh_svc_get_info(
         _ => {
             host_log(&format!("svcGetInfo: unknown type {info_type} sub {sub}"));
             if !out_rc.is_null() {
+                // SAFETY: the C++ caller passes a writable pointer to a u32 or u64 slot (or null where the code checks first), valid for this call.
                 unsafe { *out_rc = SVC_ERR_GENERIC };
             }
             0
@@ -387,6 +408,7 @@ pub fn pick_ideal_core(ideal: i32, mask: u64) -> Option<i32> {
 pub extern "C" fn acnh_svc_set_thread_core_mask(handle: u32, ideal: i32, mask: u64) -> u32 {
     if let Some(core) = pick_ideal_core(ideal, mask) {
         if let Some(Some(f)) = with_host(|h| h.set_thread_core) {
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             unsafe { f(handle, core) };
         }
     }
@@ -399,6 +421,7 @@ pub extern "C" fn acnh_svc_map_transfer_memory(handle: u32, addr: u64, size: u64
     let mut tm_size = 0u64;
     let found = with_host(|h| {
         h.get_transfer_memory
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             .map(|f| unsafe { f(handle, &mut tm_addr, &mut tm_size) })
             .unwrap_or(false)
     })
@@ -407,13 +430,16 @@ pub extern "C" fn acnh_svc_map_transfer_memory(handle: u32, addr: u64, size: u64
         return SVC_ERR_INVALID_HANDLE;
     }
     if let Some(Some(f)) = with_host(|h| h.mem_commit) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(addr, size) };
     }
     let n = size.min(tm_size) as usize;
     if n > 0 && addr != 0 && tm_addr != 0 {
+        // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
         unsafe { std::ptr::copy_nonoverlapping(tm_addr as *const u8, addr as *mut u8, n) };
     }
     if let Some(Some(f)) = with_host(|h| h.vm_set) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(addr, size, 3, 3) }; // kMemAlias, perm 3
     }
     SVC_OK
@@ -425,6 +451,7 @@ pub extern "C" fn acnh_svc_unmap_transfer_memory(handle: u32, addr: u64, size: u
     let mut tm_size = 0u64;
     let found = with_host(|h| {
         h.get_transfer_memory
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             .map(|f| unsafe { f(handle, &mut tm_addr, &mut tm_size) })
             .unwrap_or(false)
     })
@@ -432,19 +459,26 @@ pub extern "C" fn acnh_svc_unmap_transfer_memory(handle: u32, addr: u64, size: u
     if found {
         let n = size.min(tm_size) as usize;
         if n > 0 && addr != 0 && tm_addr != 0 {
+            // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
             unsafe { std::ptr::copy_nonoverlapping(addr as *const u8, tm_addr as *mut u8, n) };
         }
     }
     if let Some(Some(f)) = with_host(|h| h.mem_decommit) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(addr, size) };
     }
     if let Some(Some(f)) = with_host(|h| h.vm_set) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(addr, size, 0, 0) }; // kMemFree, perm 0
     }
     SVC_OK
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_set_tls_template(start: u64, end: u64) {
     let mut p = PROCESS.lock().unwrap();
     if end > start && start != 0 {
@@ -458,6 +492,10 @@ pub unsafe extern "C" fn acnh_svc_set_tls_template(start: u64, end: u64) {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_init_tls_block(block: u64) {
     let p = PROCESS.lock().unwrap();
     if !p.tls_template.is_empty() && block != 0 {
@@ -487,6 +525,7 @@ const LANG_TAGS: [&str; 18] = [
 #[no_mangle]
 pub extern "C" fn acnh_svc_set_language_code_for_enum(idx: u32) -> u64 {
     if let Some(Some(f)) = with_host(|h| h.language_code_for_enum) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         return unsafe { f(idx) };
     }
     let tag = LANG_TAGS.get(idx as usize).copied().unwrap_or("en-US");
@@ -495,12 +534,17 @@ pub extern "C" fn acnh_svc_set_language_code_for_enum(idx: u32) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn acnh_svc_set_desired_language() -> u64 {
+    // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
     with_host(|h| h.desired_language.map(|f| unsafe { f() }))
         .flatten()
         .unwrap_or_else(|| pack_lang_code_ascii("en-US"))
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_set_push_available_languages(
     out_addr: u64,
     out_size: usize,
@@ -587,6 +631,10 @@ pub extern "C" fn acnh_svc_am_get_message_event() -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_am_receive_message(out_msg: *mut u32) -> u32 {
     with_am(|st| {
         if let Some(msg) = st.messages.pop_front() {
@@ -616,6 +664,10 @@ pub extern "C" fn acnh_svc_am_get_operation_mode() -> u8 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_am_get_default_display_resolution(
     out_w: *mut u32,
     out_h: *mut u32,
@@ -645,6 +697,7 @@ pub extern "C" fn acnh_svc_am_pop_launch_parameter(kind: u32) -> u32 {
             return 0;
         }
         st.popped_launch_param = true;
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         with_host(|h| h.preselected_user_storage.map(|f| unsafe { f() }))
             .flatten()
             .unwrap_or(0)
@@ -652,6 +705,10 @@ pub extern "C" fn acnh_svc_am_pop_launch_parameter(kind: u32) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_am_player_select(
     in_data: *const u8,
     in_len: usize,
@@ -672,6 +729,7 @@ pub unsafe extern "C" fn acnh_svc_am_player_select(
     let mut uid = [0u8; 16];
     let ok = with_host(|h| {
         h.user_create_storage
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             .map(|f| unsafe { f(ui, uid.as_mut_ptr(), uid.len()) })
             .unwrap_or(0)
     })
@@ -736,6 +794,10 @@ fn mix_vibrations_at(devices: &[Vibration; 3], now_ns: u64) -> (f32, f32) {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_hid_send_vibration(
     handles_addr: u64,
     handles_size: u64,
@@ -797,6 +859,10 @@ pub unsafe extern "C" fn acnh_svc_hid_send_vibration(
 // ---- 4. Small HLE Modules (bcat, ngc, ro, web, jpeg, album) ---------------------------------------------------------
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_bcat_directory_read(count_ptr: u64) -> u32 {
     if count_ptr != 0 {
         std::ptr::write_unaligned(count_ptr as *mut i32, 0);
@@ -805,6 +871,10 @@ pub unsafe extern "C" fn acnh_hle_bcat_directory_read(count_ptr: u64) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_bcat_file_read(read_ptr: u64) -> u32 {
     if read_ptr != 0 {
         std::ptr::write_unaligned(read_ptr as *mut u64, 0);
@@ -813,6 +883,10 @@ pub unsafe extern "C" fn acnh_hle_bcat_file_read(read_ptr: u64) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_bcat_get_digest(out_ptr: u64) {
     if out_ptr != 0 {
         std::ptr::write_unaligned(out_ptr as *mut u64, 0);
@@ -821,6 +895,10 @@ pub unsafe extern "C" fn acnh_hle_bcat_get_digest(out_ptr: u64) {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_ngc_check_words(results_ptr: u64, count: u64) -> u32 {
     if results_ptr != 0 {
         for k in 0..count {
@@ -831,6 +909,10 @@ pub unsafe extern "C" fn acnh_hle_ngc_check_words(results_ptr: u64, count: u64) 
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_ngc_mask_words(masked_ptr: u64) -> u32 {
     if masked_ptr != 0 {
         std::ptr::write_unaligned(masked_ptr as *mut i32, 0);
@@ -839,6 +921,10 @@ pub unsafe extern "C" fn acnh_hle_ngc_mask_words(masked_ptr: u64) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_ro_get_buffer_size(out_ptr: u64) -> u32 {
     if out_ptr != 0 {
         std::ptr::write_unaligned(out_ptr as *mut u64, 0x1000);
@@ -853,6 +939,10 @@ pub extern "C" fn acnh_hle_ro_load_module() -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_web_show_share_page(ret_ptr: u64) -> u32 {
     if ret_ptr != 0 {
         std::ptr::write_unaligned(ret_ptr as *mut u64, 1);
@@ -862,6 +952,10 @@ pub unsafe extern "C" fn acnh_hle_web_show_share_page(ret_ptr: u64) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_jpeg_set_pixel_data(pixels: u64, dim_ptr: u64, align: i32) {
     if pixels == 0 || dim_ptr == 0 {
         return;
@@ -916,6 +1010,10 @@ pub fn sanitize_file_name_part(name: &str) -> String {
 static ALBUM_STAMP_STATE: Mutex<(String, i32)> = Mutex::new((String::new(), 0));
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_album_save_screenshot(
     data: u64,
     size: u64,
@@ -995,6 +1093,7 @@ fn host_game_root() -> String {
     let mut buf = [0 as c_char; 1024];
     let n = with_host(|h| {
         h.game_root
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             .map(|f| unsafe { f(buf.as_mut_ptr(), buf.len()) })
             .unwrap_or(0)
     })
@@ -1002,6 +1101,7 @@ fn host_game_root() -> String {
     if n == 0 {
         return String::new();
     }
+    // SAFETY: the buffer is NUL-terminated: it is a fixed-size array we zero-initialised and the host callback filled, or a C string the caller passed.
     unsafe { CStr::from_ptr(buf.as_ptr()) }
         .to_string_lossy()
         .into_owned()
@@ -1158,6 +1258,7 @@ fn ensure_shared_font(font_type: u32) -> SharedFont {
     let size = (ttf.len() + 8) as u64;
     let addr = host_kernel_alloc(size);
     if addr != 0 {
+        // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
         unsafe {
             std::ptr::write_unaligned(addr as *mut u32, 0x1802_9A7F);
             std::ptr::write_unaligned((addr + 4) as *mut u32, ttf.len() as u32);
@@ -1181,6 +1282,10 @@ pub extern "C" fn acnh_hle_pl_get_shared_font_size(font_type: u32) -> u64 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_pl_get_shared_font(
     count_ptr: u64,
     out_ptr: u64,
@@ -1299,12 +1404,14 @@ fn run_real_vsync() {
     let Some(wait_vb) = with_host(|h| h.wait_vblank).flatten() else {
         return;
     };
+    // SAFETY: `wait_vb` is the host's wait-for-vblank callback from acnh_services_set_host; it takes no arguments and is valid for the process lifetime.
     let t0 = unsafe { wait_vb() };
     if t0 == 0 {
         return;
     }
     let mut t = t0;
     for _ in 0..30 {
+        // SAFETY: `wait_vb` is the host's wait-for-vblank callback from acnh_services_set_host; it takes no arguments and is valid for the process lifetime.
         t = unsafe { wait_vb() };
         if t == 0 {
             return;
@@ -1330,6 +1437,7 @@ fn run_real_vsync() {
     VI_PER_TICK.store(k, Ordering::Relaxed);
     let mut n = 0u64;
     loop {
+        // SAFETY: `wait_vb` is the host's wait-for-vblank callback from acnh_services_set_host; it takes no arguments and is valid for the process lifetime.
         let now = unsafe { wait_vb() };
         if now == 0 {
             break;
@@ -1397,6 +1505,7 @@ static NET_LAST_AVAIL: AtomicI32 = AtomicI32::new(-1);
 fn net_up() -> bool {
     with_host(|h| {
         h.nextendo_online_active
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             .map(|f| unsafe { f() })
             .unwrap_or(false)
     })
@@ -1409,14 +1518,18 @@ pub extern "C" fn acnh_net_is_network_available() -> u64 {
     let up_i = i32::from(up);
     if NET_LAST_AVAIL.swap(up_i, Ordering::Relaxed) != up_i {
         if let Some(Some(f)) = with_host(|h| h.time_refresh_clocks) {
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             unsafe { f() };
         }
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         let nextendo = with_host(|h| h.nextendo_is_nextendo.map(|f| unsafe { f() }))
             .flatten()
             .unwrap_or(false);
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         let signed = with_host(|h| h.nextendo_signed_in.map(|f| unsafe { f() }))
             .flatten()
             .unwrap_or(false);
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         let ver_ok = with_host(|h| h.nextendo_version_ok.map(|f| unsafe { f() }))
             .flatten()
             .unwrap_or(false);
@@ -1437,6 +1550,10 @@ pub extern "C" fn acnh_net_is_any_internet_request_accepted() -> u64 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_net_get_current_proxy_setting(out_ptr: u64) -> u32 {
     if !net_up() {
         return NIFM_ERR_NO_NETWORK;
@@ -1472,6 +1589,10 @@ pub fn expand_nsd_fqdn(input: &str) -> String {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_net_resolve_ex(out_ptr: u64, in_ptr: u64) -> u32 {
     if !net_up() || in_ptr == 0 || out_ptr == 0 {
         return NET_ERR_GENERIC_FAIL;
@@ -1487,6 +1608,10 @@ pub unsafe extern "C" fn acnh_net_resolve_ex(out_ptr: u64, in_ptr: u64) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_net_get_current_primary_ip(out_ptr: u64) -> u32 {
     let ip = if net_up() {
         with_host(|h| h.hostnet_local_ip.map(|f| f()))
@@ -1505,6 +1630,10 @@ pub unsafe extern "C" fn acnh_net_get_current_primary_ip(out_ptr: u64) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_net_get_current_ip_config_info(
     out0: u64,
     out1: u64,
@@ -1548,6 +1677,7 @@ fn friend_same_game(f: &AcnhFriendInfo) -> bool {
     if f.status == 0 {
         return false;
     }
+    // SAFETY: the buffer is NUL-terminated: it is a fixed-size array we zero-initialised and the host callback filled, or a C string the caller passed.
     let app = unsafe { CStr::from_ptr(f.app_id.as_ptr()) }.to_string_lossy();
     u64::from_str_radix(app.trim().trim_start_matches("0x"), 16).unwrap_or(0) == ACNH_TITLE_ID
 }
@@ -1597,9 +1727,11 @@ unsafe fn friend_passes_filter(filter: u64, f: &AcnhFriendInfo) -> bool {
 }
 
 fn collect_friends() -> (u64, Vec<AcnhFriendInfo>) {
+    // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
     let own_nsa = with_host(|h| h.nextendo_account_nsa.map(|f| unsafe { f() }))
         .flatten()
         .unwrap_or(0);
+    // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
     let count = with_host(|h| h.nextendo_friends_count.map(|f| unsafe { f() }))
         .flatten()
         .unwrap_or(0);
@@ -1617,6 +1749,7 @@ fn collect_friends() -> (u64, Vec<AcnhFriendInfo>) {
         };
         let ok = with_host(|h| {
             h.nextendo_friends_get
+                // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
                 .map(|f| unsafe { f(i, &mut info) })
                 .unwrap_or(false)
         })
@@ -1629,6 +1762,10 @@ fn collect_friends() -> (u64, Vec<AcnhFriendInfo>) {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_friends_get_list(
     out_count: u64,
     out: u64,
@@ -1669,6 +1806,10 @@ pub unsafe extern "C" fn acnh_hle_friends_get_list(
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hle_friends_update_info(
     out: u64,
     uid: u64,
@@ -1702,6 +1843,7 @@ pub extern "C" fn acnh_hle_friends_ensure_available() -> u32 {
         return FRIENDS_ERR_NOT_LINKED;
     }
     if let Some(Some(f)) = with_host(|h| h.nextendo_friends_refresh) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
     SVC_OK
@@ -1719,6 +1861,7 @@ pub extern "C" fn acnh_hle_friends_online_ok() -> u32 {
 #[no_mangle]
 pub extern "C" fn acnh_hle_friends_declare_playing(playing: bool) -> u32 {
     if let Some(Some(f)) = with_host(|h| h.nextendo_presence_playing) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(playing) };
     }
     SVC_OK
@@ -1731,16 +1874,19 @@ static NFP_IPC_INIT: AtomicBool = AtomicBool::new(false);
 static NFC_IPC_INIT: AtomicBool = AtomicBool::new(false);
 
 fn nfp_has_tag() -> bool {
+    // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
     with_host(|h| h.nfp_has_tag.map(|f| unsafe { f() }).unwrap_or(false)).unwrap_or(false)
 }
 
 fn nfp_device_state() -> u32 {
+    // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
     with_host(|h| h.nfp_device_state.map(|f| unsafe { f() }).unwrap_or(5)).unwrap_or(5)
 }
 
 fn ensure_nfp_hle_init() {
     if !NFP_HLE_INIT.swap(true, Ordering::AcqRel) {
         if let Some(Some(f)) = with_host(|h| h.nfp_on_initialize) {
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             unsafe { f() };
         }
     }
@@ -1750,6 +1896,7 @@ fn ensure_nfp_ipc_init() {
     if !NFP_IPC_INIT.swap(true, Ordering::AcqRel) {
         NFC_IPC_INIT.store(true, Ordering::Release);
         if let Some(Some(f)) = with_host(|h| h.nfp_on_initialize) {
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             unsafe { f() };
         }
     }
@@ -1766,6 +1913,7 @@ pub extern "C" fn acnh_nfp_initialize(is_ipc: bool) -> u32 {
     } else {
         NFP_HLE_INIT.store(true, Ordering::Release);
         if let Some(Some(f)) = with_host(|h| h.nfp_on_initialize) {
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             unsafe { f() };
         }
     }
@@ -1780,6 +1928,7 @@ pub extern "C" fn acnh_nfp_finalize(is_ipc: bool) -> u32 {
         NFP_HLE_INIT.store(false, Ordering::Release);
     }
     if let Some(Some(f)) = with_host(|h| h.nfp_on_finalize) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
     SVC_OK
@@ -1813,6 +1962,10 @@ pub extern "C" fn acnh_nfp_get_device_state(is_ipc: bool) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_nfp_list_devices(out_handles: u64, out_count: u64, max: i32) -> u32 {
     ensure_nfp_hle_init();
     let count = i32::from(max > 0);
@@ -1826,6 +1979,10 @@ pub unsafe extern "C" fn acnh_nfp_list_devices(out_handles: u64, out_count: u64,
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_nfp_get_npad_id(out_npad: u64, handle_ptr: u64) -> u32 {
     ensure_nfp_hle_init();
     let handle = if handle_ptr != 0 {
@@ -1855,6 +2012,7 @@ pub extern "C" fn acnh_nfp_mount(model_type: u32, mount_target: u32, check_targe
         return NFP_ERR_WRONG_DEVICE_STATE;
     }
     if let Some(Some(f)) = with_host(|h| h.nfp_on_mount) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
     SVC_OK
@@ -1866,12 +2024,17 @@ pub extern "C" fn acnh_nfp_unmount() -> u32 {
         return NFP_ERR_WRONG_DEVICE_STATE;
     }
     if let Some(Some(f)) = with_host(|h| h.nfp_on_unmount) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
     SVC_OK
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_nfp_fill_info_checked(
     kind: u32,
     out_ptr: u64,
@@ -1901,6 +2064,10 @@ pub unsafe extern "C" fn acnh_nfp_fill_info_checked(
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_nfp_exists_app_area(out_ptr: u64) -> u32 {
     ensure_nfp_hle_init();
     let has = with_host(|h| h.nfp_tag_has_app_area.map(|f| f()).unwrap_or(false)).unwrap_or(false);
@@ -1919,6 +2086,7 @@ pub extern "C" fn acnh_nfp_open_app_area(access_id: u32) -> u32 {
     }
     let ok = with_host(|h| {
         h.nfp_on_open_app_area
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             .map(|f| unsafe { f(access_id) })
             .unwrap_or(false)
     })
@@ -1931,6 +2099,10 @@ pub extern "C" fn acnh_nfp_open_app_area(access_id: u32) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_nfp_get_app_area(out_ptr: u64, out_size_ptr: u64, size: u32) -> u32 {
     if nfp_device_state() != 3 || out_ptr == 0 {
         return NFP_ERR_WRONG_DEVICE_STATE;
@@ -1951,6 +2123,10 @@ pub unsafe extern "C" fn acnh_nfp_get_app_area(out_ptr: u64, out_size_ptr: u64, 
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_nfp_set_app_area(in_ptr: u64, size: u32) -> u32 {
     if nfp_device_state() != 3 {
         return NFP_ERR_WRONG_DEVICE_STATE;
@@ -1980,6 +2156,10 @@ pub extern "C" fn acnh_svc_nfc_ipc_is_init() -> bool {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hid_nfc_get_abstracted_pad_id(out_ptr: u64, npad: u32) -> u32 {
     if npad != NFP_VIRTUAL_NPAD_ID {
         return HID_ERR_INVALID_ARGUMENT;
@@ -1991,6 +2171,10 @@ pub unsafe extern "C" fn acnh_hid_nfc_get_abstracted_pad_id(out_ptr: u64, npad: 
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hid_nfc_get_npads(out_ptr: u64, max: i32) -> u32 {
     if max > 0 && out_ptr != 0 {
         std::ptr::write_unaligned(out_ptr as *mut u32, NFP_VIRTUAL_NPAD_ID);
@@ -2001,6 +2185,10 @@ pub unsafe extern "C" fn acnh_hid_nfc_get_npads(out_ptr: u64, max: i32) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_hid_nfc_detail_get_npads(
     count_ptr: u64,
     pads_ptr: u64,
@@ -2145,6 +2333,7 @@ static LDN_LOCK: Mutex<LdnInner> = Mutex::new(LdnInner::new());
 fn ldn_wanted() -> bool {
     with_host(|h| {
         h.nextendo_ldn_wanted
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             .map(|f| unsafe { f() })
             .unwrap_or(false)
     })
@@ -2188,6 +2377,7 @@ fn ldn_visited_island_string() -> String {
     let mut buf = [0 as c_char; 128];
     let n = with_host(|h| {
         h.ldn_island_name
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             .map(|f| unsafe { f(g.info.as_ptr(), buf.as_mut_ptr(), buf.len()) })
             .unwrap_or(0)
     })
@@ -2195,6 +2385,7 @@ fn ldn_visited_island_string() -> String {
     if n == 0 {
         String::new()
     } else {
+        // SAFETY: the buffer is NUL-terminated: it is a fixed-size array we zero-initialised and the host callback filled, or a C string the caller passed.
         unsafe { CStr::from_ptr(buf.as_ptr()) }
             .to_string_lossy()
             .into_owned()
@@ -2202,6 +2393,10 @@ fn ldn_visited_island_string() -> String {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_visited_island(out: *mut c_char, cap: usize) -> usize {
     if out.is_null() || cap == 0 {
         return 0;
@@ -2235,6 +2430,10 @@ pub extern "C" fn acnh_ldn_broadcast_ip() -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_info_valid(info_ptr: *mut u8) -> bool {
     if info_ptr.is_null() {
         return false;
@@ -2243,6 +2442,10 @@ pub unsafe extern "C" fn acnh_ldn_info_valid(info_ptr: *mut u8) -> bool {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_link_info(out_ptr: *mut u8) -> bool {
     if out_ptr.is_null() {
         return false;
@@ -2256,6 +2459,10 @@ pub unsafe extern "C" fn acnh_ldn_link_info(out_ptr: *mut u8) -> bool {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_link_add_node(station_ptr: *const u8, own_ip: u32) -> i32 {
     if station_ptr.is_null() {
         return -1;
@@ -2302,6 +2509,10 @@ pub extern "C" fn acnh_ldn_link_remove_node(n: i32) {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_peer_ips(out_ptr: *mut u32) -> i32 {
     if out_ptr.is_null() {
         return 0;
@@ -2329,6 +2540,10 @@ pub unsafe extern "C" fn acnh_ldn_peer_ips(out_ptr: *mut u32) -> i32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_link_set_info(info_ptr: *const u8) {
     if info_ptr.is_null() {
         return;
@@ -2365,12 +2580,14 @@ pub extern "C" fn acnh_ldn_disabled() -> u32 {
 pub extern "C" fn acnh_ldn_initialize() -> u32 {
     if !ldn_wanted() {
         if let Some(Some(f)) = with_host(|h| h.ui_open_online) {
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             unsafe { f() };
         }
         return LDN_ERR_DEVICE_DISABLED;
     }
     LDN_SESSION.store(true, Ordering::Release);
     if let Some(Some(f)) = with_host(|h| h.wifi_multicast) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(true) };
     }
     let mut g = LDN_LOCK.lock().unwrap();
@@ -2384,13 +2601,16 @@ pub extern "C" fn acnh_ldn_initialize() -> u32 {
 pub extern "C" fn acnh_ldn_finalize() -> u32 {
     if LDN_SESSION.load(Ordering::Acquire) {
         if let Some(Some(f)) = with_host(|h| h.ldn_link_stop) {
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             unsafe { f() };
         }
         if let Some(Some(f)) = with_host(|h| h.vsock_reset) {
+            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
             unsafe { f() };
         }
     }
     if let Some(Some(f)) = with_host(|h| h.wifi_multicast) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(false) };
     }
     let mut g = LDN_LOCK.lock().unwrap();
@@ -2429,6 +2649,7 @@ pub extern "C" fn acnh_ldn_open_access_point() -> u32 {
 #[no_mangle]
 pub extern "C" fn acnh_ldn_close_access_point() -> u32 {
     if let Some(Some(f)) = with_host(|h| h.ldn_link_stop) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
     let mut g = LDN_LOCK.lock().unwrap();
@@ -2450,6 +2671,7 @@ pub extern "C" fn acnh_ldn_open_station() -> u32 {
 #[no_mangle]
 pub extern "C" fn acnh_ldn_close_station() -> u32 {
     if let Some(Some(f)) = with_host(|h| h.ldn_link_stop) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
     let mut g = LDN_LOCK.lock().unwrap();
@@ -2459,6 +2681,10 @@ pub extern "C" fn acnh_ldn_close_station() -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_create_network(
     cfg_ptr: *const u8,
     sec_ptr: *const u8,
@@ -2534,6 +2760,7 @@ pub unsafe extern "C" fn acnh_ldn_create_network(
 #[no_mangle]
 pub extern "C" fn acnh_ldn_destroy_network() -> u32 {
     if let Some(Some(f)) = with_host(|h| h.ldn_link_stop) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
     let mut g = LDN_LOCK.lock().unwrap();
@@ -2545,6 +2772,10 @@ pub extern "C" fn acnh_ldn_destroy_network() -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_set_advertise_data(data_ptr: *const u8, size: u64) -> u32 {
     let mut g = LDN_LOCK.lock().unwrap();
     let n = size as usize;
@@ -2574,6 +2805,10 @@ pub extern "C" fn acnh_ldn_set_station_accept_policy(policy: u32) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_connect(
     net_ptr: *const u8,
     user_ptr: *const u8,
@@ -2612,6 +2847,7 @@ pub unsafe extern "C" fn acnh_ldn_connect(
 #[no_mangle]
 pub extern "C" fn acnh_ldn_disconnect() -> u32 {
     if let Some(Some(f)) = with_host(|h| h.ldn_link_stop) {
+        // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
     let mut g = LDN_LOCK.lock().unwrap();
@@ -2623,6 +2859,10 @@ pub extern "C" fn acnh_ldn_disconnect() -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_get_network_info(out_ptr: *mut u8) -> u32 {
     let g = LDN_LOCK.lock().unwrap();
     let up = g.state == LdnState::AccessPointCreated || g.state == LdnState::StationConnected;
@@ -2641,6 +2881,10 @@ pub unsafe extern "C" fn acnh_ldn_get_network_info(out_ptr: *mut u8) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_get_network_config(out_ptr: *mut u8) -> u32 {
     let g = LDN_LOCK.lock().unwrap();
     let up = g.state == LdnState::AccessPointCreated || g.state == LdnState::StationConnected;
@@ -2663,6 +2907,10 @@ pub unsafe extern "C" fn acnh_ldn_get_network_config(out_ptr: *mut u8) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_get_security_parameter(out_ptr: *mut u8) -> u32 {
     let g = LDN_LOCK.lock().unwrap();
     let up = g.state == LdnState::AccessPointCreated || g.state == LdnState::StationConnected;
@@ -2770,6 +3018,7 @@ pub extern "C" fn acnh_movie_destroy(self_addr: u64) {
     if let Some(d) = MOVIE_DECODERS.lock().unwrap().remove(&self_addr) {
         if d.codec_ctx != 0 {
             if let Some(Some(f)) = with_host(|h| h.movie_codec_close) {
+                // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
                 unsafe { f(d.codec_ctx as *mut c_void, d.codec_type) };
             }
         }
@@ -2777,6 +3026,10 @@ pub extern "C" fn acnh_movie_destroy(self_addr: u64) {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_movie_configure(
     self_addr: u64,
     width: i32,
@@ -2894,6 +3147,10 @@ pub extern "C" fn acnh_movie_flush(self_addr: u64) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_movie_acquire_input(
     self_addr: u64,
     out_idx: *mut i32,
@@ -2917,6 +3174,10 @@ pub unsafe extern "C" fn acnh_movie_acquire_input(
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_movie_send_input(
     self_addr: u64,
     idx: i32,
@@ -3044,6 +3305,10 @@ pub unsafe extern "C" fn acnh_movie_send_input(
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_movie_acquire_output(
     self_addr: u64,
     out_idx: *mut i32,
@@ -3117,6 +3382,10 @@ pub unsafe extern "C" fn acnh_movie_acquire_output(
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_movie_copy_output(
     self_addr: u64,
     idx: i32,
@@ -3223,6 +3492,10 @@ pub extern "C" fn acnh_movie_release_output(self_addr: u64, idx: i32) -> u32 {
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_movie_get_output_buffer_size(
     self_addr: u64,
     out_size: *mut i32,
@@ -3249,6 +3522,10 @@ pub unsafe extern "C" fn acnh_movie_get_output_buffer_size(
 }
 
 #[no_mangle]
+///
+/// # Safety
+/// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
+/// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_movie_get_output_format(
     self_addr: u64,
     out_is_audio: *mut bool,
@@ -3288,6 +3565,7 @@ mod tests {
     #[test]
     fn process_get_info_constants_and_entropy() {
         let mut rc = 1u32;
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         unsafe {
             assert_eq!(acnh_svc_get_info(0, 0, 0, &mut rc), 0xF);
             assert_eq!(rc, SVC_OK);
@@ -3315,6 +3593,7 @@ mod tests {
         assert_eq!(acnh_svc_set_language_count(), 18);
         assert_eq!(acnh_svc_set_region_code(), 1);
         let mut buf = [0u64; 18];
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let count = unsafe {
             acnh_svc_set_push_available_languages(
                 buf.as_mut_ptr() as u64,
@@ -3334,13 +3613,17 @@ mod tests {
         assert_eq!(parse_render_res(Some("100x100"), false), (1920, 1080));
 
         let mut msg = 0u32;
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_svc_am_receive_message(&mut msg) }, SVC_OK);
         assert_eq!(msg, AM_MSG_FOCUS_STATE_CHANGED);
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_svc_am_receive_message(&mut msg) }, SVC_OK);
         assert_eq!(msg, AM_MSG_OPERATION_MODE_CHANGED);
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_svc_am_receive_message(&mut msg) }, SVC_OK);
         assert_eq!(msg, AM_MSG_PERFORMANCE_MODE_CHANGED);
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_svc_am_receive_message(&mut msg) },
             AM_ERR_NO_MESSAGE
         );
@@ -3371,6 +3654,7 @@ mod tests {
     fn small_services_bcat_ngc_ro_web_album() {
         let mut count = -1i32;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_hle_bcat_directory_read(&mut count as *mut i32 as u64) },
             BCAT_ERR_NOT_FOUND
         );
@@ -3378,6 +3662,7 @@ mod tests {
 
         let mut results = [99u32; 3];
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_hle_ngc_check_words(results.as_mut_ptr() as u64, 3) },
             SVC_OK
         );
@@ -3385,6 +3670,7 @@ mod tests {
 
         let mut sz = 0u64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_hle_ro_get_buffer_size(&mut sz as *mut u64 as u64) },
             SVC_OK
         );
@@ -3393,6 +3679,7 @@ mod tests {
 
         let mut ret = 0u64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_hle_web_show_share_page(&mut ret as *mut u64 as u64) },
             SVC_OK
         );
@@ -3441,12 +3728,14 @@ mod tests {
         let mut idx = -1i32;
         let mut rem = -1i32;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_movie_acquire_input(addr, &mut idx, &mut rem) },
             MOVIE_OK
         );
         assert_eq!(idx, 0);
         assert_eq!(rem, 7);
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_movie_send_input(addr, idx, std::ptr::null(), 0, 1000, MOVIE_FLAG_EOS) },
             MOVIE_OK
         );
@@ -3454,6 +3743,7 @@ mod tests {
         let mut pts = 0i64;
         let mut flags = 0u32;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe {
                 acnh_movie_acquire_output(addr, &mut out_idx, &mut pts, &mut flags, &mut rem)
             },

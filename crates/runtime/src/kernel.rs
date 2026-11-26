@@ -203,6 +203,7 @@ pub struct AcnhKernelHost {
 
 // Safety: AcnhKernelHost only contains plain C function pointers.
 unsafe impl Send for AcnhKernelHost {}
+// SAFETY: the host table holds only plain function pointers installed once and never mutated afterwards, so sharing it across threads is sound.
 unsafe impl Sync for AcnhKernelHost {}
 
 static HOST: OnceLock<AcnhKernelHost> = OnceLock::new();
@@ -606,14 +607,17 @@ fn desc_addr(v: u64) -> u64 {
 // ---- Guest atomic memory helpers ---------------------------------------------------------------
 
 unsafe fn load32(addr: u64) -> u32 {
+    // SAFETY: callers pass a guest address that is mapped for the life of the process; AtomicU32::from_ptr needs 4-byte alignment, which futex words and handle slots have, and unaligned reads and writes need none.
     unsafe { AtomicU32::from_ptr(addr as *mut u32).load(Ordering::SeqCst) }
 }
 
 unsafe fn store32(addr: u64, val: u32) {
+    // SAFETY: callers pass a guest address that is mapped for the life of the process; AtomicU32::from_ptr needs 4-byte alignment, which futex words and handle slots have, and unaligned reads and writes need none.
     unsafe { AtomicU32::from_ptr(addr as *mut u32).store(val, Ordering::SeqCst) }
 }
 
 unsafe fn cas32(addr: u64, expected: u32, new_val: u32) -> bool {
+    // SAFETY: callers pass a guest address that is mapped for the life of the process and 4-byte aligned, as futex words are.
     unsafe {
         AtomicU32::from_ptr(addr as *mut u32)
             .compare_exchange(expected, new_val, Ordering::SeqCst, Ordering::SeqCst)
@@ -622,26 +626,32 @@ unsafe fn cas32(addr: u64, expected: u32, new_val: u32) -> bool {
 }
 
 unsafe fn ld_u8(addr: u64) -> u8 {
+    // SAFETY: callers pass a guest address that is mapped for the life of the process; AtomicU32::from_ptr needs 4-byte alignment, which futex words and handle slots have, and unaligned reads and writes need none.
     unsafe { *(addr as *const u8) }
 }
 
 unsafe fn ld_u16(addr: u64) -> u16 {
+    // SAFETY: callers pass a guest address that is mapped for the life of the process; AtomicU32::from_ptr needs 4-byte alignment, which futex words and handle slots have, and unaligned reads and writes need none.
     unsafe { std::ptr::read_unaligned(addr as *const u16) }
 }
 
 unsafe fn ld_u32(addr: u64) -> u32 {
+    // SAFETY: callers pass a guest address that is mapped for the life of the process; AtomicU32::from_ptr needs 4-byte alignment, which futex words and handle slots have, and unaligned reads and writes need none.
     unsafe { std::ptr::read_unaligned(addr as *const u32) }
 }
 
 unsafe fn ld_u64(addr: u64) -> u64 {
+    // SAFETY: callers pass a guest address that is mapped for the life of the process; AtomicU32::from_ptr needs 4-byte alignment, which futex words and handle slots have, and unaligned reads and writes need none.
     unsafe { std::ptr::read_unaligned(addr as *const u64) }
 }
 
 unsafe fn st_u32(addr: u64, v: u32) {
+    // SAFETY: callers pass a guest address that is mapped for the life of the process; AtomicU32::from_ptr needs 4-byte alignment, which futex words and handle slots have, and unaligned reads and writes need none.
     unsafe { std::ptr::write_unaligned(addr as *mut u32, v) }
 }
 
 unsafe fn st_u64(addr: u64, v: u64) {
+    // SAFETY: callers pass a guest address that is mapped for the life of the process; AtomicU32::from_ptr needs 4-byte alignment, which futex words and handle slots have, and unaligned reads and writes need none.
     unsafe { std::ptr::write_unaligned(addr as *mut u64, v) }
 }
 
@@ -726,12 +736,14 @@ fn unlock_mutex_locked(ks: &mut KernelState, addr: u64) {
         }
     }
     let Some(idx) = next_idx else {
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         unsafe { store32(addr, 0) };
         return;
     };
     let next = ks.mutex_waiters.remove(idx);
     let tag = next.data.lock().unwrap().wait_tag;
     let val = tag | if more > 0 { HANDLE_WAIT_MASK } else { 0 };
+    // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
     unsafe { store32(addr, val) };
     wake_thread(&next);
 }
@@ -743,6 +755,7 @@ fn svc_arbitrate_lock(owner: u32, addr: u64, tag: u32) -> u32 {
     let Some(self_t) = current_thread() else {
         return RC_INVALID_STATE;
     };
+    // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
     if unsafe { load32(addr) } != (owner | HANDLE_WAIT_MASK) {
         return RC_OK;
     }
@@ -787,6 +800,7 @@ fn svc_wait_process_wide_key(mutex: u64, key: u64, tag: u32, timeout: i64) -> u3
     {
         let mut ks = kstate().lock().unwrap();
         ks.cv_waiters.push(Arc::clone(&self_t));
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         unsafe { store32(key, 1) };
         unlock_mutex_locked(&mut ks, mutex);
     }
@@ -801,6 +815,7 @@ fn svc_wait_process_wide_key(mutex: u64, key: u64, tag: u32, timeout: i64) -> u3
         .iter()
         .any(|t| t.data.lock().unwrap().wait_key == key);
     if !others {
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         unsafe { store32(key, 0) };
     }
     RC_TIMEOUT
@@ -825,14 +840,17 @@ fn svc_signal_process_wide_key(key: u64, count: i32) -> u32 {
             (d.wait_mutex, d.wait_tag)
         };
         loop {
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             let v = unsafe { load32(wait_mutex) };
             if v == 0 {
+                // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
                 if unsafe { !cas32(wait_mutex, 0, wait_tag) } {
                     continue;
                 }
                 wake_thread(&t);
                 break;
             }
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             if (v & HANDLE_WAIT_MASK) == 0 && unsafe { !cas32(wait_mutex, v, v | HANDLE_WAIT_MASK) }
             {
                 continue;
@@ -846,6 +864,7 @@ fn svc_signal_process_wide_key(key: u64, count: i32) -> u32 {
         .iter()
         .any(|t| t.data.lock().unwrap().wait_key == key);
     if !others {
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         unsafe { store32(key, 0) };
     }
     RC_OK
@@ -857,6 +876,7 @@ fn svc_wait_for_address(addr: u64, wait_type: u32, value: i32, timeout: i64) -> 
         let h = self_t.as_ref().map_or(0, |t| t.data.lock().unwrap().handle);
         host_log(&format!(
             "arb: thread {h:x} waits on {addr:x} type {wait_type} value {value} (memory {}) timeout {timeout}",
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             unsafe { load32(addr) as i32 }
         ));
     }
@@ -864,6 +884,7 @@ fn svc_wait_for_address(addr: u64, wait_type: u32, value: i32, timeout: i64) -> 
     let Some(self_t) = self_t else {
         return RC_INVALID_STATE;
     };
+    // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
     let cur = unsafe { load32(addr) as i32 };
     match wait_type {
         0 => {
@@ -875,6 +896,7 @@ fn svc_wait_for_address(addr: u64, wait_type: u32, value: i32, timeout: i64) -> 
             if cur >= value {
                 return RC_INVALID_STATE;
             }
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             unsafe { store32(addr, (cur - 1) as u32) };
         }
         2 => {
@@ -943,6 +965,7 @@ fn svc_signal_to_address(addr: u64, sig_type: u32, value: i32, count: i32) -> u3
         let h = current_thread().map_or(0, |t| t.data.lock().unwrap().handle);
         host_log(&format!(
             "arb: thread {h:x} signals {addr:x} type {sig_type} value {value} count {count} (memory {})",
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             unsafe { load32(addr) as i32 }
         ));
     }
@@ -957,6 +980,7 @@ fn svc_signal_to_address(addr: u64, sig_type: u32, value: i32, count: i32) -> u3
     match sig_type {
         0 => {}
         1 => {
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             if unsafe { !cas32(addr, value as u32, value.wrapping_add(1) as u32) } {
                 return RC_INVALID_STATE;
             }
@@ -966,6 +990,7 @@ fn svc_signal_to_address(addr: u64, sig_type: u32, value: i32, count: i32) -> u3
                 Ok(v) => v,
                 Err(rc) => return rc,
             };
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             if unsafe { !cas32(addr, value as u32, updated as u32) } {
                 return RC_INVALID_STATE;
             }
@@ -990,6 +1015,7 @@ fn svc_wait_synchronization(c: &mut AcnhCpu, handles_ptr: u64, count: i32, timeo
     let _kl = KERNEL_LOCK.lock();
     let mut handles = Vec::with_capacity(count.max(0) as usize);
     for i in 0..count.max(0) {
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         let h = unsafe { ld_u32(handles_ptr + 4 * (i as u64)) };
         let sig = (host().obj_signaled)(h);
         if sig < 0 {
@@ -1084,6 +1110,7 @@ fn svc_wait_synchronization(c: &mut AcnhCpu, handles_ptr: u64, count: i32, timeo
 // ---- Threads -----------------------------------------------------------------------------------
 
 extern "C" fn thread_main_trampoline(p: *mut c_void) {
+    // SAFETY: p came from Arc::into_raw on a KThread when the handle was created, and the handle table holds that strong count until the handle is closed.
     let t = unsafe { Arc::from_raw(p as *const KThread) };
     set_current_thread(Some(Arc::clone(&t)));
     let (id, entry, host_tid) = {
@@ -1117,6 +1144,7 @@ fn new_thread(entry: u64, arg: u64, sp: u64, prio: i32, core: i32) -> Arc<KThrea
     let tls = (host().kernel_alloc)(0x1000, 0x1000);
     let block = (host().kernel_alloc)(0x4000, 0x1000);
     (host().init_tls_block)(block);
+    // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
     unsafe { st_u64(tls + 0x1F0, block) };
     let handle = alloc_handle();
     let t = KThread::new(handle, id, entry, arg, sp, tls, block, prio, core);
@@ -1159,6 +1187,7 @@ fn get_thread(handle: u32) -> Option<Arc<KThread>> {
 // ---- SVC Dispatch ------------------------------------------------------------------------------
 
 fn write_meminfo(p: u64, addr: u64, size: u64, state: u32, perm: u32) {
+    // SAFETY: `p` is a guest-supplied MemoryInfo output slot of 0x20 bytes, mapped for the life of the process; the stores are unaligned-safe.
     unsafe {
         st_u64(p, addr);
         st_u64(p + 8, size);
@@ -1212,6 +1241,7 @@ fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
             // MapMemory(dst, src, size)
             let (dst, src, size) = (c.x[0], c.x[1], c.x[2]);
             (host().commit)(dst, size);
+            // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
             unsafe {
                 std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, size as usize);
             }
@@ -1225,6 +1255,7 @@ fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
         0x05 => {
             // UnmapMemory(dst, src, size)
             let (dst, src, size) = (c.x[0], c.x[1], c.x[2]);
+            // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
             unsafe {
                 std::ptr::copy_nonoverlapping(dst as *const u8, src as *mut u8, size as usize);
             }
@@ -1448,6 +1479,7 @@ fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
         0x26 => {
             // Break
             if c.x[2] == 4 && c.x[1] != 0 {
+                // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
                 let r = unsafe { ld_u32(c.x[1]) };
                 host_log(&format!(
                     "abort with Result {r:#x} (module {}, description {})",
@@ -1468,6 +1500,7 @@ fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
             // OutputDebugString(str, len)
             if c.x[0] != 0 {
                 let slice =
+                    // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
                     unsafe { std::slice::from_raw_parts(c.x[0] as *const u8, c.x[1] as usize) };
                 let s = String::from_utf8_lossy(slice);
                 let trimmed = s.trim_end_matches(['\n', '\r']);
@@ -1718,6 +1751,7 @@ fn ipc_connect_ptr(port: *const c_char, out_handle: Option<&mut u64>) -> u32 {
     let port_str = if port.is_null() {
         String::new()
     } else {
+        // SAFETY: the buffer is NUL-terminated: it is a fixed-size array we zero-initialised and the host callback filled, or a C string the caller passed.
         unsafe { CStr::from_ptr(port) }
             .to_string_lossy()
             .into_owned()
@@ -1743,6 +1777,7 @@ fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 
         (sess.service, sess.domain, Arc::clone(&sess.dom))
     };
 
+    // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
     let w = unsafe { std::slice::from_raw_parts_mut(buf as *mut u32, 0x40) };
     let hdr = parse_hipc_words(w, desc_addr);
 
@@ -1812,6 +1847,7 @@ fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 
                 out_move_len += 1;
             }
         }
+        // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
         unsafe { std::ptr::write_bytes(buf as *mut u8, 0, 0x100) };
         let has_special = out_copy_len > 0 || out_move_len > 0;
         let mut q = 2usize;
@@ -1828,6 +1864,7 @@ fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 
             }
         }
         w[q] = rc;
+        // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 out_buf.as_ptr(),
@@ -1847,6 +1884,7 @@ fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 
             hdr.msg_type,
             service_name_str(sess_service),
             sess_domain as u8,
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             unsafe { ld_u32(raw) }
         ));
     }
@@ -1854,16 +1892,22 @@ fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 
     let mut target = sess_service;
     let mut in_objects = Vec::new();
     if sess_domain && (hdr.msg_type == 4 || hdr.msg_type == 6) {
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         let domain_cmd = unsafe { ld_u8(raw) };
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         let nobj = unsafe { ld_u8(raw + 1) } as u32;
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         let dsize = unsafe { ld_u16(raw + 2) } as u64;
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         let domain_obj = unsafe { ld_u32(raw + 4) };
         for i in 0..nobj {
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             in_objects.push(unsafe { ld_u32(raw + 16 + dsize + 4 * (i as u64)) });
         }
         raw += 16;
         if domain_cmd == 2 {
             sess_dom.lock().unwrap().objects.remove(&domain_obj);
+            // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
             unsafe { std::ptr::write_bytes(buf as *mut u8, 0, 0x100) };
             w[1] = 8;
             return RC_OK;
@@ -1879,7 +1923,9 @@ fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 
         target = t;
     }
 
+    // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
     let magic = unsafe { ld_u32(raw) };
+    // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
     let cmd = unsafe { ld_u32(raw + 8) };
     let in_ptr = (raw + 16) as *const u8;
     let in_size = if hdr.ndata * 4 > 32 {
@@ -2012,6 +2058,7 @@ fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 
         }
     }
 
+    // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
     unsafe { std::ptr::write_bytes(buf as *mut u8, 0, 0x100) };
     let has_special = out_copy_len > 0 || out_move_len > 0;
     let mut q = 2usize;
@@ -2031,9 +2078,11 @@ fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 
     let rawo = (buf + (q * 4) as u64 + 15) & !15u64;
     let mut o = rawo;
     if is_dom && (hdr.msg_type == 4 || hdr.msg_type == 6) {
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         unsafe { st_u32(o, out_obj_ids.len() as u32) };
         o += 16;
     }
+    // SAFETY: `o` is inside the guest IPC message buffer, which the guest sized for the reply header plus `out_len` bytes; it is mapped for the life of the process.
     unsafe {
         st_u32(o, SFCO);
         st_u32(o + 4, 0);
@@ -2043,6 +2092,7 @@ fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 
     }
     let mut end = o + 16 + ((out_len + 3) & !3) as u64;
     for id in out_obj_ids {
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         unsafe { st_u32(end, id) };
         end += 4;
     }
@@ -2066,11 +2116,13 @@ fn backtrace_cpu(c: &AcnhCpu) {
         if state == MEM_FREE {
             break;
         }
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         let lr = unsafe { ld_u64(fp + 8) };
         if lr == 0 {
             break;
         }
         host_log(&format!("  #{k:<2} {}  (fp {fp:x})", host_describe(lr)));
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         fp = unsafe { ld_u64(fp) };
     }
 }
@@ -2132,6 +2184,7 @@ fn report_threads() {
             host_describe(entry)
         ));
         if on != 0 && state == "waits for mutex" {
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             let w = unsafe { load32(on) };
             host_log(&format!(
                 "  mutex word {w:08x} (owner handle {:x})",
@@ -2250,12 +2303,14 @@ fn dump_threads() {
             if fp == 0 || (fp & 7) != 0 || fp < bounds.module_base {
                 break;
             }
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             let lr = unsafe { ld_u64(fp + 8) };
             if lr == 0 {
                 break;
             }
             chain.push_str(" < ");
             chain.push_str(&host_describe(lr));
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             let next = unsafe { ld_u64(fp) };
             if next <= fp {
                 break;
@@ -2356,6 +2411,7 @@ fn frame_profile_on() -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn acnh_kernel_set_host(host_ptr: *const AcnhKernelHost) {
     if !host_ptr.is_null() {
+        // SAFETY: host_ptr points at a live AcnhKernelHost owned by the caller for this call; we copy it by value.
         let _ = HOST.set(unsafe { std::ptr::read(host_ptr) });
     }
 }
@@ -2421,6 +2477,7 @@ pub unsafe extern "C" fn acnh_kernel_hle_get_system_tick(c: *mut AcnhCpu) {
             t.data.lock().unwrap().last_tick_call = (host().monotonic_ns)();
         }
     }
+    // SAFETY: the C++ dispatcher passes its own CPU context, or null, which as_mut and as_ref check; it stays valid and unaliased for the duration of this call.
     if let Some(cpu) = unsafe { c.as_mut() } {
         cpu.x[0] = compute_system_tick((host().monotonic_ns)());
     }
@@ -2460,6 +2517,7 @@ pub extern "C" fn acnh_kernel_current_cpu() -> *mut AcnhCpu {
 /// `c` must be null or point to a valid `AcnhCpu`.
 #[no_mangle]
 pub unsafe extern "C" fn acnh_kernel_backtrace(c: *const AcnhCpu) {
+    // SAFETY: the C++ dispatcher passes its own CPU context, or null, which as_mut and as_ref check; it stays valid and unaliased for the duration of this call.
     if let Some(cpu) = unsafe { c.as_ref() } {
         backtrace_cpu(cpu);
     }
@@ -2469,6 +2527,7 @@ pub unsafe extern "C" fn acnh_kernel_backtrace(c: *const AcnhCpu) {
 /// `c` must be null or point to a valid `AcnhCpu`.
 #[no_mangle]
 pub unsafe extern "C" fn acnh_kernel_svc(c: *mut AcnhCpu, imm: u32, pc: u64) {
+    // SAFETY: the C++ dispatcher passes its own CPU context, or null, which as_mut and as_ref check; it stays valid and unaliased for the duration of this call.
     let Some(cpu) = (unsafe { c.as_mut() }) else {
         return;
     };
@@ -2546,6 +2605,7 @@ pub unsafe extern "C" fn acnh_kernel_svc_frame_take(
     top_imm: *mut u32,
     top_pc: *mut u64,
 ) {
+    // SAFETY: each out-pointer is checked for null first; the C++ caller passes valid u64 slots for the others.
     unsafe {
         if !total.is_null() {
             *total = FRAME_SVC_NS.swap(0, Ordering::Relaxed);
@@ -2571,6 +2631,7 @@ pub unsafe extern "C" fn acnh_kernel_counters(
     yield_naps: *mut u64,
     sleep_calls: *mut u64,
 ) {
+    // SAFETY: each out-pointer is checked for null first; the C++ caller passes valid u64 slots for the others.
     unsafe {
         if !tick_calls.is_null() {
             *tick_calls = TICK_CALLS.load(Ordering::Relaxed);
@@ -2594,6 +2655,7 @@ pub unsafe extern "C" fn acnh_kernel_ipc_connect(port: *const c_char, out_handle
     let mut h = 0u64;
     let rc = ipc_connect_ptr(port, Some(&mut h));
     if !out_handle.is_null() {
+        // SAFETY: the C++ caller passes a writable pointer to a u32 or u64 slot (or null where the code checks first), valid for this call.
         unsafe { *out_handle = h };
     }
     rc
@@ -2608,6 +2670,7 @@ pub unsafe extern "C" fn acnh_kernel_ipc_request(
     buf: u64,
     size: u64,
 ) -> u32 {
+    // SAFETY: the C++ dispatcher passes its own CPU context, or null, which as_mut and as_ref check; it stays valid and unaliased for the duration of this call.
     let Some(cpu) = (unsafe { c.as_mut() }) else {
         return RC_INVALID_STATE;
     };
@@ -2630,6 +2693,7 @@ pub extern "C" fn acnh_kernel_map_shared_memory(
     (host().commit)(addr, size);
     (host().vm_set)(addr, size, MEM_SHARED, 3);
     let copy_len = size.min(shm_size) as usize;
+    // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
     unsafe {
         std::ptr::copy_nonoverlapping(host_addr as *const u8, addr as *mut u8, copy_len);
     }

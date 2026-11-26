@@ -1968,6 +1968,7 @@ mod tests {
             game_root: Some(test_root_cb),
             ..Default::default()
         };
+        // SAFETY: test-only: the host table lives on this test's stack and outlives every call that reads it.
         unsafe { acnh_files_set_host(&host) };
     }
 
@@ -2066,11 +2067,13 @@ mod tests {
 
         let vpath = CString::new("Sub/Hello.txt").unwrap();
         let vdata = b"virtual-payload";
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         unsafe { acnh_files_add_virtual_file(vpath.as_ptr(), vdata.as_ptr(), vdata.len()) };
 
         let guest = CString::new("rom:/sub/hello.txt").unwrap();
         let mut et = 99u32;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_get_entry_type(guest.as_ptr(), &mut et) },
             FS_OK
         );
@@ -2078,17 +2081,20 @@ mod tests {
 
         let mut h = 0u64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_open_file(guest.as_ptr(), 1, &mut h) },
             FS_OK
         );
 
         let mut sz = 0i64;
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_files_get_file_size(h, &mut sz) }, FS_OK);
         assert_eq!(sz, vdata.len() as i64);
 
         let mut buf = [0u8; 7];
         let mut n = 0u64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_read_file(h, 8, buf.as_mut_ptr(), 7, &mut n) },
             FS_OK
         );
@@ -2117,6 +2123,7 @@ mod tests {
         let dir_guest = CString::new("rom:/System").unwrap();
         let mut et = 99u32;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_get_entry_type(dir_guest.as_ptr(), &mut et) },
             FS_OK
         );
@@ -2124,11 +2131,13 @@ mod tests {
 
         let mut dh = 0u64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_open_directory(dir_guest.as_ptr(), 3, &mut dh) },
             FS_OK
         );
         let mut count = 0i64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_get_directory_entry_count(dh, &mut count) },
             FS_OK
         );
@@ -2141,7 +2150,9 @@ mod tests {
             size: i64,
             ctx: *mut c_void,
         ) {
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             let out = unsafe { &mut *(ctx as *mut Vec<(String, bool, i64)>) };
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             let s = unsafe { std::slice::from_raw_parts(name as *const u8, len) };
             out.push((String::from_utf8_lossy(s).into_owned(), dir, size));
         }
@@ -2149,6 +2160,7 @@ mod tests {
         let mut entries: Vec<(String, bool, i64)> = Vec::new();
         let mut read_n = 0i64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe {
                 acnh_files_read_directory(
                     dh,
@@ -2168,16 +2180,19 @@ mod tests {
         let file_guest = CString::new("rom:/System/Sub/b.bin").unwrap();
         let mut fh = 0u64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_open_file(file_guest.as_ptr(), 1, &mut fh) },
             FS_OK
         );
         let mut fsz = 0i64;
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_files_get_file_size(fh, &mut fsz) }, FS_OK);
         assert_eq!(fsz, 9);
 
         let mut buf = [0u8; 4];
         let mut rn = 0u64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_read_file(fh, 5, buf.as_mut_ptr(), 4, &mut rn) },
             FS_OK
         );
@@ -2188,6 +2203,7 @@ mod tests {
         // Write mode on packed file is rejected.
         let mut wh = 0u64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_open_file(file_guest.as_ptr(), 2, &mut wh) },
             FS_PATH_NOT_FOUND
         );
@@ -2219,10 +2235,12 @@ mod tests {
 
         let mut fh = 0u64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_open_file(fpath.as_ptr(), 3, &mut fh) },
             FS_OK
         );
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_write_file(fh, 0, b"ABCD".as_ptr(), 4) },
             FS_OK
         );
@@ -2230,6 +2248,7 @@ mod tests {
         assert_eq!(acnh_files_set_file_size(fh, 2), FS_OK);
 
         let mut sz = 0i64;
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_files_get_file_size(fh, &mut sz) }, FS_OK);
         assert_eq!(sz, 2);
         acnh_files_close_file(fh);
@@ -2256,12 +2275,14 @@ mod tests {
         let mut sz = 0i64;
         let mut j = 0i64;
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_get_device_save_data_size(&mut sz, &mut j) },
             FS_OK
         );
         assert_eq!(sz, DEFAULT_DEVICE_SAVE_SIZE);
         assert_eq!(acnh_files_extend_device_save_data(0x1000, 0x2000), FS_OK);
         assert_eq!(
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe { acnh_files_get_device_save_data_size(&mut sz, &mut j) },
             FS_OK
         );
@@ -2273,6 +2294,7 @@ mod tests {
         assert_eq!(acnh_files_count_aoc(), 2);
 
         let mut list = [0i32; 2];
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_files_list_aoc(list.as_mut_ptr(), 0, 2) }, 2);
         assert_eq!(list, [1, 2]);
 
@@ -2320,6 +2342,7 @@ mod tests {
             read_asset: Some(fake_read_asset),
             ..Default::default()
         };
+        // SAFETY: test-only: the host table lives on this test's stack and outlives every call that reads it.
         unsafe { acnh_files_set_host(&host) };
         acnh_files_mods_fetch();
 

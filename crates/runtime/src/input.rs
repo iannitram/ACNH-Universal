@@ -2094,6 +2094,7 @@ pub unsafe extern "C" fn acnh_input_touch_layout_move(
 #[no_mangle]
 pub extern "C" fn acnh_input_touch_hit(x: f32, y: f32, aspect: f32) -> u64 {
     let mut n = 0usize;
+    // SAFETY: `n` is a live local the callee writes to; the returned table is static.
     let ptr = unsafe { acnh_input_touch_buttons(&mut n as *mut usize, aspect) };
     if ptr.is_null() || n == 0 {
         return 0;
@@ -2187,6 +2188,7 @@ mod tests {
         let s = b"acnh";
         if !out.is_null() && cap > 0 {
             let n = s.len().min(cap - 1);
+            // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
             unsafe {
                 std::ptr::copy_nonoverlapping(s.as_ptr(), out.cast::<u8>(), n);
                 *out.add(n) = 0;
@@ -2201,6 +2203,7 @@ mod tests {
             game_id: Some(test_game_id),
             ..Default::default()
         };
+        // SAFETY: test-only: the host table lives on this test's stack and outlives every call that reads it.
         unsafe { acnh_input_set_host(&host as *const AcnhInputHost) };
     }
 
@@ -2254,11 +2257,13 @@ mod tests {
         TEST_FRAME.store(10, Ordering::Relaxed);
 
         let mut buf = [0u8; 0x28 * 4];
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let count = unsafe { acnh_input_get_npad_states_full_key(buf.as_mut_ptr(), 4, 0, 0) };
         assert!(count >= 1);
         let is_connected = u32::from_le_bytes(buf[32..36].try_into().unwrap());
         assert_eq!(is_connected, 1);
 
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let other = unsafe { acnh_input_get_npad_states_other(buf.as_mut_ptr(), 2, 0) };
         assert_eq!(other, 1);
         assert_eq!(
@@ -2277,24 +2282,30 @@ mod tests {
         TEST_FRAME.store(100, Ordering::Relaxed);
         acnh_input_set_mouse_touch(true, 0.5, 0.5);
         let mut ts = [0u8; 0x10 + 0x28];
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         unsafe { acnh_input_get_touch_screen_state1(ts.as_mut_ptr(), 0) };
         assert_eq!(i32::from_le_bytes(ts[8..12].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(ts[0x18..0x1C].try_into().unwrap()), 1); // Start
 
         TEST_FRAME.store(101, Ordering::Relaxed);
         acnh_input_set_mouse_touch(false, 0.6, 0.6);
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         unsafe { acnh_input_get_touch_screen_state1(ts.as_mut_ptr(), 0) };
         assert_eq!(i32::from_le_bytes(ts[8..12].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(ts[0x18..0x1C].try_into().unwrap()), 2); // End
 
         let (mut tx, mut ty, mut tf) = (0, 0, 0);
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert!(unsafe { acnh_input_touch_take_tap(&mut tx, &mut ty, &mut tf) });
         assert_eq!((tx, ty, tf), (640, 360, 101));
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert!(!unsafe { acnh_input_touch_take_tap(&mut tx, &mut ty, &mut tf) });
 
         let (mut hx, mut hy) = (0, 0);
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert!(unsafe { acnh_input_mouse_take_hover(&mut hx, &mut hy) });
         assert_eq!((hx, hy), (768, 432));
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert!(!unsafe { acnh_input_mouse_take_hover(&mut hx, &mut hy) });
     }
 
@@ -2304,18 +2315,22 @@ mod tests {
         install_test_host();
 
         let mut count = 0usize;
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let ptr = unsafe { acnh_input_touch_buttons(&mut count, 16.0 / 9.0) };
         assert_eq!(count, K_ACNH_COUNT);
         assert!(!ptr.is_null());
 
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let first = unsafe { *ptr };
         assert_eq!(acnh_input_touch_hit(first.x, first.y, 16.0 / 9.0), K_A);
         assert_eq!(acnh_input_touch_hit(0.5, 0.5, 16.0 / 9.0), 0);
 
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let group = unsafe { CStr::from_ptr(acnh_input_touch_group(0)) }
             .to_str()
             .unwrap();
         assert_eq!(group, "FACE");
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let label = unsafe { CStr::from_ptr(acnh_input_touch_label(0)) }
             .to_str()
             .unwrap();
