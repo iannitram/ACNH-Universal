@@ -141,8 +141,9 @@ codesign --verify --deep --strict "$bundle" || die "the signature does not verif
 
 # `ditto -c -k` unpacks a 4 GB file correctly but writes its size modulo 4 GiB into the zip's
 # central directory (tests/package_mac_test.sh), which other readers trust; `zip` writes ZIP64
-# sizes, keeps modes (the read-only game) and, with -y, links.
-(cd "$stage" && zip -qry "$partial" ACNH-Universal.app)
+# sizes, keeps modes (the read-only game) and, with -y, links. A .DS_Store Finder writes into the
+# bundle after signing stays out: the signature omits that name, so the unpacked app still verifies.
+(cd "$stage" && zip -qry "$partial" ACNH-Universal.app -x '.DS_Store' '*/.DS_Store')
 mv -f "$partial" "$zip"
 
 size=$(stat -f %z "$zip")
