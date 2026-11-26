@@ -36,6 +36,8 @@ component SettingsRow inherits Rectangle {
 export component MainWindow inherits Window {
     in property <ContinueView> view;
     in property <int> input-device;
+    // True while this window has the keyboard focus: the pad is ignored otherwise.
+    out property <bool> window-focused: keys.has-focus;
     callback pointer-used();
     in property <image> card-picture;
     in property <bool> first-run-open;
