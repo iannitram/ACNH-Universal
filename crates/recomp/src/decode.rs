@@ -1,6 +1,6 @@
 //! A small AArch64 decoder: only what the Analyse pass reads (branches, address
 //! materialisation, jump-table shapes, and which general register an instruction
-//! writes). It stands in for Capstone's lite disassembly in `recomp/analysis.py`.
+//! writes). It stands in for a full disassembly in the analysis.
 //! Words in reserved encoding space decode to `None`, like Capstone's skipdata.
 
 /// A decoded instruction. Register number 31 (sp/zr) never matches a search.
@@ -21,7 +21,7 @@ pub enum Insn {
         rd: u32,
         target: u64,
     },
-    /// `add rd, rn, #imm` (the immediate is the unshifted field, as Capstone prints it).
+    /// `add rd, rn, #imm`; the immediate already includes a `lsl #12`.
     AddImm {
         rd: u32,
         rn: u32,
@@ -63,6 +63,13 @@ pub enum Insn {
         mnemonic: &'static str,
         ldr_name: bool,
     },
+    /// A load or store that updates its base register (pre- or post-index): the registers it
+    /// writes are the loaded ones (`rt`, `rt2`) and the base `rn`.
+    Wb {
+        rt: Option<u32>,
+        rt2: Option<u32>,
+        rn: Option<u32>,
+    },
     /// Anything else, with the (up to two) general registers it writes.
     Other(Option<u32>, Option<u32>),
 }
@@ -86,8 +93,18 @@ impl Insn {
             | Insn::MovImm { rd, .. }
             | Insn::Copy { rd, .. } => (r(rd), None),
             Insn::Ldr { rt, .. } => (r(rt), None),
+            Insn::Wb { rt, rt2, .. } => (rt, rt2),
             Insn::Other(a, b) => (a, b),
         }
+    }
+
+    /// True when the instruction writes general register `reg`. Besides the first destination this
+    /// counts the second one of a pair and the base register of a write-back access.
+    pub fn writes(&self, reg: u32) -> bool {
+        let (d1, d2) = self.dests();
+        d1 == Some(reg)
+            || (matches!(self, Insn::Other(..) | Insn::Wb { .. }) && d2 == Some(reg))
+            || matches!(self, Insn::Wb { rn, .. } if *rn == Some(reg))
     }
 }
 
@@ -185,27 +202,62 @@ fn decode_loadstore(w: u32) -> Option<Insn> {
             }
         }
         0b101 => {
-            // pair
-            if v == 1 || (w >> 22) & 1 == 0 {
-                Some(Insn::Other(None, None))
+            // pair; bits 24:23 are 01 post-index, 11 pre-index
+            let load = v == 0 && (w >> 22) & 1 == 1;
+            let (d1, d2) = if load {
+                (reg(rt), reg((w >> 10) & 31))
             } else {
-                Some(Insn::Other(reg(rt), reg((w >> 10) & 31)))
+                (None, None)
+            };
+            if matches!((w >> 23) & 3, 1 | 3) {
+                Some(Insn::Wb {
+                    rt: d1,
+                    rt2: d2,
+                    rn: reg(rn),
+                })
+            } else {
+                Some(Insn::Other(d1, d2))
             }
         }
         0b111 => {
-            if v == 1 {
-                return Some(Insn::Other(None, None));
-            }
             let size = (w >> 30) & 3;
             let opc = (w >> 22) & 3;
             let unsigned = (w >> 24) & 1 == 1;
             let b21 = (w >> 21) & 1;
             let b1110 = (w >> 10) & 3;
+            // Pre- and post-index forms write the base register back.
+            let writeback = !unsigned && b21 == 0 && matches!(b1110, 1 | 3);
+            if v == 1 {
+                return Some(if writeback {
+                    Insn::Wb {
+                        rt: None,
+                        rt2: None,
+                        rn: reg(rn),
+                    }
+                } else {
+                    Insn::Other(None, None)
+                });
+            }
             if !unsigned && b21 == 1 && b1110 == 0 {
                 return other(rt); // atomics
             }
             if opc == 0 || (size == 3 && opc == 2) {
-                return Some(Insn::Other(None, None));
+                return Some(if writeback && opc == 0 {
+                    Insn::Wb {
+                        rt: None,
+                        rt2: None,
+                        rn: reg(rn),
+                    }
+                } else {
+                    Insn::Other(None, None)
+                });
+            }
+            if writeback {
+                return Some(Insn::Wb {
+                    rt: reg(rt),
+                    rt2: None,
+                    rn: reg(rn),
+                });
             }
             let mnemonic = ldr_name(size, opc);
             let wide = size == 3 && opc == 1;
@@ -252,7 +304,8 @@ fn decode_dp_imm(w: u32, pc: u64) -> Option<Insn> {
             let (op, s, sh) = ((w >> 30) & 1, (w >> 29) & 1, (w >> 22) & 1);
             let imm12 = u64::from((w >> 10) & 0xFFF);
             if op == 0 && s == 0 {
-                Some(Insn::AddImm { rd, rn, imm: imm12 })
+                let imm = if sh == 1 { imm12 << 12 } else { imm12 };
+                Some(Insn::AddImm { rd, rn, imm })
             } else if op == 1 && s == 1 && rd == 31 && sh == 0 {
                 Some(Insn::CmpImm { rn, imm: imm12 })
             } else {
@@ -352,6 +405,10 @@ fn decode_dp_reg(w: u32) -> Option<Insn> {
 
 fn decode_simd(w: u32) -> Option<Insn> {
     let rd = w & 31;
+    if w & 0x7F20_0000 == 0x1E00_0000 && (w >> 19) & 3 == 3 && matches!((w >> 16) & 7, 0 | 1) {
+        // fcvtzs / fcvtzu, fixed-point: the result goes to a general register.
+        return other(rd);
+    }
     if w & 0x7F20_FC00 == 0x1E20_0000 {
         let opcode = (w >> 16) & 7;
         if matches!(opcode, 0 | 1 | 4 | 5 | 6) {
@@ -432,5 +489,67 @@ mod tests {
     fn zero_and_sign_extend_copies() {
         assert_eq!(decode(0xD340_7C00, 0), Some(Insn::Copy { rd: 0, rn: 0 }));
         assert_eq!(decode(0x9340_7C00, 0), Some(Insn::Copy { rd: 0, rn: 0 }));
+    }
+
+    #[test]
+    fn write_back_accesses_write_the_base_register() {
+        // ldr x0, [x1], #8
+        let post = decode(0xF840_8420, 0).unwrap();
+        assert_eq!(
+            post,
+            Insn::Wb {
+                rt: Some(0),
+                rt2: None,
+                rn: Some(1)
+            }
+        );
+        assert!(post.writes(0) && post.writes(1) && !post.writes(2));
+        // str x0, [x1, #8]!
+        let pre = decode(0xF800_8C20, 0).unwrap();
+        assert!(pre.writes(1) && !pre.writes(0));
+        // ldp x0, x1, [x2], #16
+        let ldp = decode(0xA8C1_0440, 0).unwrap();
+        assert!(ldp.writes(0) && ldp.writes(1) && ldp.writes(2));
+        // stp x0, x1, [x2, #-16]!
+        let stp = decode(0xA9BF_0440, 0).unwrap();
+        assert!(stp.writes(2) && !stp.writes(0) && !stp.writes(1));
+        // ldr x0, [x1, #8] does not write x1.
+        let plain = decode(0xF940_0420, 0).unwrap();
+        assert!(!plain.writes(1));
+        // ldp x0, x1, [x2, #16] writes both loaded registers only.
+        let off = decode(0xA941_0440, 0).unwrap();
+        assert!(off.writes(0) && off.writes(1) && !off.writes(2));
+    }
+
+    #[test]
+    fn fixed_point_conversion_to_a_general_register() {
+        // fcvtzs w0, s1, #8
+        assert_eq!(decode(0x1E18_E020, 0), Some(Insn::Other(Some(0), None)));
+        // fcvtzu x3, d4, #1
+        assert_eq!(decode(0x9E59_FC83, 0), Some(Insn::Other(Some(3), None)));
+        // scvtf s0, w1, #8 writes a vector register.
+        assert_eq!(decode(0x1E02_E020, 0), Some(Insn::Other(None, None)));
+    }
+
+    #[test]
+    fn add_immediate_applies_lsl_12() {
+        // add x0, x1, #1
+        assert_eq!(
+            decode(0x9100_0420, 0),
+            Some(Insn::AddImm {
+                rd: 0,
+                rn: 1,
+                imm: 1
+            })
+        );
+        // add x0, x1, #1, lsl #12
+        assert_eq!(
+            decode(0x9140_0420, 0),
+            Some(Insn::AddImm {
+                rd: 0,
+                rn: 1,
+                imm: 0x1000
+            })
+        );
     }
 }

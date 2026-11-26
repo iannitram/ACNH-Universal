@@ -1,4 +1,4 @@
-//! Atomic, arithmetic and crypto extensions from recomp/emit_ext.py and emit_sdk20.py.
+//! Atomic, arithmetic and crypto extensions.
 use super::{neon::substitute, unsupported, width_mask, Emitter, Instruction, Result};
 use capstone::arch::arm64::{Arm64OperandType, Arm64Vas};
 use regex::Regex;

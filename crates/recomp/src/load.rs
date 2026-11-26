@@ -1,4 +1,4 @@
-//! Switch NSO loader: segments, MOD0, .dynamic, symbols and relocations (recomp/nso.py).
+//! Switch NSO loader: segments, MOD0, .dynamic, symbols and relocations.
 //!
 //! Addresses are module-relative (the module is linked at 0 and relocated by rtld).
 
@@ -85,10 +85,6 @@ impl Symbol {
     pub fn imported(&self) -> bool {
         self.shndx == SHN_UNDEF
     }
-
-    pub fn is_imported(&self) -> bool {
-        self.imported()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,10 +166,6 @@ impl Module {
         String::from_utf8_lossy(&self.image[a..end]).into_owned()
     }
 
-    pub fn apply_relative(&mut self) {
-        apply_relative(self);
-    }
-
     pub fn plt_imports(&self) -> BTreeMap<u64, String> {
         plt_imports(self)
     }
@@ -181,7 +173,8 @@ impl Module {
 
 /// Decompress an LZ4 raw block with known uncompressed size (as used in NSO segments).
 pub fn decompress_lz4_block(input: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, Error> {
-    let mut output = Vec::with_capacity(uncompressed_size);
+    // An LZ4 block cannot expand by more than 255x, so a larger claim is not worth reserving.
+    let mut output = Vec::with_capacity(uncompressed_size.min(input.len().saturating_mul(255)));
     let mut ip = 0;
 
     while ip < input.len() && output.len() < uncompressed_size {
@@ -286,6 +279,10 @@ fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
     }
 }
 
+/// Largest memory image the loader will build. The game's modules are far smaller; a header that
+/// asks for more is malformed, and without a cap its fields would drive a multi-gigabyte allocation.
+pub const MAX_IMAGE_SIZE: usize = 1 << 30;
+
 pub fn load_bytes(raw: &[u8], name: Option<&str>) -> Result<Module, Error> {
     if raw.len() < 0x6C {
         return Err(Error::Malformed("NSO file too short for header".into()));
@@ -311,12 +308,23 @@ pub fn load_bytes(raw: &[u8], name: Option<&str>) -> Result<Module, Error> {
             )));
         }
 
+        if mem_off > MAX_IMAGE_SIZE || size > MAX_IMAGE_SIZE {
+            return Err(Error::Malformed(format!(
+                "segment {i} is too large (memory offset {mem_off:#x}, size {size:#x})"
+            )));
+        }
+
         let compressed_blob = &raw[file_off..file_off + comp];
         let blob = if flags & (1 << i) != 0 {
             decompress_lz4_block(compressed_blob, size)?
         } else {
             compressed_blob.to_vec()
         };
+        if mem_off.saturating_add(blob.len()) > MAX_IMAGE_SIZE {
+            return Err(Error::Malformed(format!(
+                "segment {i} ends beyond the {MAX_IMAGE_SIZE:#x} byte image limit"
+            )));
+        }
         segs.push((mem_off, blob));
     }
 
@@ -427,8 +435,19 @@ pub fn parse_mod0(m: &mut Module) -> Result<(), Error> {
         if syment > 0 && strtab >= symtab {
             let nsyms = (strtab - symtab) / syment;
             for i in 0..nsyms {
-                let sym_addr = (symtab + i * syment) as usize;
-                if sym_addr.saturating_add(24) <= m.image.len() {
+                let Some(sym_addr) = i
+                    .checked_mul(syment)
+                    .and_then(|o| o.checked_add(symtab))
+                    .and_then(|a| usize::try_from(a).ok())
+                else {
+                    break;
+                };
+                // The table is read in address order, so the first entry past the image ends it
+                // (a hostile DT_STRTAB would otherwise make this loop run for billions of passes).
+                if sym_addr.saturating_add(24) > m.image.len() {
+                    break;
+                }
+                {
                     let st_name = u32::from_le_bytes([
                         m.image[sym_addr],
                         m.image[sym_addr + 1],
@@ -632,18 +651,6 @@ pub fn parse_mod0(m: &mut Module) -> Result<(), Error> {
     }
 
     Ok(())
-}
-
-pub fn apply_relative(m: &mut Module) {
-    for r in &m.relocs {
-        if r.r#type == R_AARCH64_RELATIVE {
-            let off = r.offset as usize;
-            if off.saturating_add(8) <= m.image.len() {
-                let bytes = (r.addend as u64).to_le_bytes();
-                m.image[off..off + 8].copy_from_slice(&bytes);
-            }
-        }
-    }
 }
 
 pub fn plt_imports(m: &Module) -> BTreeMap<u64, String> {
