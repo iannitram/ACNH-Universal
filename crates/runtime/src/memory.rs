@@ -897,6 +897,7 @@ mod tests {
             memguard_total_ram_bytes: Some(test_total_ram),
             ..Default::default()
         };
+        // SAFETY: test-only: the host table lives on this test's stack and outlives every call that reads it.
         unsafe { acnh_memory_set_host(&host) };
     }
 
@@ -954,6 +955,7 @@ mod tests {
         setup_test_host();
         RESERVE_CALLS.store(0, Ordering::Relaxed);
         let b = sample_bounds(false);
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         unsafe { acnh_memory_init(&b) };
         assert_eq!(RESERVE_CALLS.load(Ordering::Relaxed), 6);
 
@@ -983,6 +985,7 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap();
         setup_test_host();
         let b = sample_bounds(true);
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         unsafe { acnh_memory_init(&b) };
         let end = b.address_space_base + b.address_space_size;
 
@@ -1036,15 +1039,18 @@ mod tests {
         let mut lo = 0u64;
         let mut hi = 0u64;
         // First take returns written=true (unknown until first take).
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert!(unsafe { acnh_write_watch_take(addr, &mut lo, &mut hi) });
         assert_eq!((lo, hi), (0, u64::MAX));
 
         // Second take with no fault returns false and empty [0, 0).
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert!(!unsafe { acnh_write_watch_take(addr, &mut lo, &mut hi) });
         assert_eq!((lo, hi), (0, 0));
 
         // Simulate fault in second page.
         assert!(acnh_write_watch_fault(addr + 0x1500));
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert!(unsafe { acnh_write_watch_take(addr, &mut lo, &mut hi) });
         assert_eq!(lo, 0x1000 - 0x200);
         assert_eq!(hi, 0x2000 - 0x200);
@@ -1060,10 +1066,13 @@ mod tests {
         setup_test_host();
 
         // 32 GB RAM -> half is 16 GB (> 8 GB).
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_memguard_limit_gb(std::ptr::null()) }, 16.0);
         let c5 = CString::new("5.5").unwrap();
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_memguard_limit_gb(c5.as_ptr()) }, 5.5);
         let czero = CString::new("0").unwrap();
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         assert_eq!(unsafe { acnh_memguard_limit_gb(czero.as_ptr()) }, 16.0);
 
         MEMGUARD_READS[0].begin.store(100, Ordering::Relaxed);

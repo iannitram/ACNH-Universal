@@ -1,5 +1,5 @@
 //! Keep guest registers in locals, synchronizing around calls and function exits.
-//! This pass follows the C++ syntax produced by the emitter, as recomp/regcache.py does.
+//! This pass follows the C++ syntax produced by the emitter, and rewrites it in place.
 
 use super::{Error, Result};
 use regex::{Captures, Regex};
@@ -155,8 +155,10 @@ fn line_info(lines: &[String]) -> Result<Vec<Line>> {
         .iter()
         .enumerate()
         .filter_map(|(k, line)| {
-            LABEL
-                .captures(line.trim())
+            // Cheap guard: most lines are not labels, and the regex is the cost.
+            line.starts_with("L_")
+                .then_some(())
+                .and_then(|()| LABEL.captures(line.trim()))
                 .and_then(|m| Some((m.get(1)?.as_str(), k)))
         })
         .collect();
@@ -173,18 +175,30 @@ fn line_info(lines: &[String]) -> Result<Vec<Line>> {
             }
             let stmt = code(line);
             let mut actions = Vec::new();
+            // Each regex below is skipped on lines that cannot match it (a substring test is far
+            // cheaper than running the automaton), so the result is unchanged.
             for m in WRITE.captures_iter(stmt) {
                 let whole = m.get(0).expect("regex match");
                 if !stmt[whole.end()..].starts_with('=') {
                     actions.extend(index(&m, 1).map(|n| (whole.start(), Action::Write(n))));
                 }
             }
-            for m in FLAG_WRITE.find_iter(stmt) {
+            let flag_write = if stmt.contains("nx::") || stmt.contains("fl_") {
+                Some(FLAG_WRITE.find_iter(stmt))
+            } else {
+                None
+            };
+            for m in flag_write.into_iter().flatten() {
                 if !stmt[m.end()..].starts_with('=') {
                     actions.push((m.start(), Action::Write(FLAGS)));
                 }
             }
-            for m in VWRITE.captures_iter(stmt) {
+            let vwrite = if stmt.contains("vr") {
+                Some(VWRITE.captures_iter(stmt))
+            } else {
+                None
+            };
+            for m in vwrite.into_iter().flatten() {
                 let whole = m.get(0).expect("regex match");
                 if !stmt[whole.end()..].starts_with('=') {
                     actions.extend(
@@ -195,7 +209,12 @@ fn line_info(lines: &[String]) -> Result<Vec<Line>> {
                 }
             }
             let mut past = 0;
-            for m in CALL.captures_iter(stmt) {
+            let calls = if stmt.contains("(c") {
+                Some(CALL.captures_iter(stmt))
+            } else {
+                None
+            };
+            for m in calls.into_iter().flatten() {
                 let whole = m.get(0).expect("regex match");
                 let before = stmt[..whole.start()].chars().next_back();
                 if whole.start() < past
@@ -221,10 +240,13 @@ fn line_info(lines: &[String]) -> Result<Vec<Line>> {
             let conditional = leading.starts_with("if ")
                 || leading.starts_with("if(")
                 || leading.starts_with("switch");
-            let mut successors: Vec<_> = GOTO
-                .captures_iter(stmt)
-                .filter_map(|m| labels.get(&m[1]).copied())
-                .collect();
+            let mut successors: Vec<_> = if stmt.contains("goto") {
+                GOTO.captures_iter(stmt)
+                    .filter_map(|m| labels.get(&m[1]).copied())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             if !terminal(stmt) {
                 successors.extend(next);
             }
@@ -273,6 +295,7 @@ impl Locals {
         let use_mask = |pattern: &Regex| {
             lines
                 .iter()
+                .filter(|line| line.contains("c.x[") || line.contains("c.v["))
                 .flat_map(|line| pattern.captures_iter(line))
                 .filter_map(|cap| index(&cap, 1))
                 .fold(0u32, |mask, n| mask | (1 << n))
@@ -294,14 +317,18 @@ impl Locals {
         if line.contains(RESTORE) {
             return line.to_owned();
         }
-        let line = REG.replace_all(line, |cap: &Captures<'_>| {
-            if index(cap, 1).is_some_and(|n| self.general.contains(&n)) {
-                format!("x{}", &cap[1])
-            } else {
-                cap[0].to_owned()
-            }
-        });
-        let line = if self.vectors.is_empty() {
+        let line = if line.contains("c.x[") {
+            REG.replace_all(line, |cap: &Captures<'_>| {
+                if index(cap, 1).is_some_and(|n| self.general.contains(&n)) {
+                    format!("x{}", &cap[1])
+                } else {
+                    cap[0].to_owned()
+                }
+            })
+        } else {
+            line.into()
+        };
+        let line = if self.vectors.is_empty() || !line.contains("c.v[") {
             line
         } else {
             VREG.replace_all(&line, "vr$1").into_owned().into()
@@ -309,7 +336,14 @@ impl Locals {
         if !self.flags {
             return line.into_owned();
         }
-        let line = FLAG.replace_all(&line, "fl_.$1");
+        let line = if line.contains("c.") {
+            FLAG.replace_all(&line, "fl_.$1").into_owned().into()
+        } else {
+            line
+        };
+        if !line.contains("nx::") {
+            return line.into_owned();
+        }
         FLAG_HELPER
             .replace_all(&line, |cap: &Captures<'_>| {
                 let templates = cap.get(2).map_or("", |m| m.as_str());

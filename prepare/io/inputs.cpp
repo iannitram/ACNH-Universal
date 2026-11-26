@@ -161,14 +161,20 @@ bool is_container(const std::string& name) { return is_game_package(name); }
 
 // The entry of `dir` named `name` in any case ("exefs", "ExeFS"), of that kind; empty when none.
 fs::path child(const fs::path& dir, const std::string& name, bool want_dir) {
+    // The entry as it is named on disk: an exact-case match wins, else a case-insensitive one. (dir / name alone
+    // would report the name as asked on a case-insensitive filesystem, where "exefs" opens "ExeFS".)
     std::error_code ec;
-    const fs::path exact = dir / u8(name);
-    if (want_dir ? fs::is_directory(exact, ec) : fs::is_regular_file(exact, ec)) return exact;
     const std::string l = lower(name);
-    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
-        if (lower(str(it->path().filename())) == l && (want_dir ? it->is_directory(ec) : it->is_regular_file(ec)))
-            return it->path();
-    return {};
+    fs::path fold;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string f = str(it->path().filename());
+        if (!(want_dir ? it->is_directory(ec) : it->is_regular_file(ec))) continue;
+        if (f == name) return it->path();
+        if (fold.empty() && lower(f) == l) fold = it->path();
+    }
+    if (!fold.empty()) return fold;
+    const fs::path exact = dir / u8(name);
+    return (want_dir ? fs::is_directory(exact, ec) : fs::is_regular_file(exact, ec)) ? exact : fs::path();
 }
 
 bool looks_exefs(const fs::path& dir) { return !child(dir, "main", false).empty() || !child(dir, "main.npdm", false).empty(); }
