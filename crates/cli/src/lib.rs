@@ -416,6 +416,8 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let vars = Vars::from_lookup(os, cx.var)?;
     let dirs = AppDirs::for_os(os, &vars);
     let root = dirs.data_root();
+    // Puts right an install a kill interrupted (the island may still sit in `install.old`).
+    bundle::recover_install(&dirs.install())?;
 
     if let Some(id) = options.profile.as_deref() {
         let chosen = profile::by_id(id).ok_or_else(|| {
