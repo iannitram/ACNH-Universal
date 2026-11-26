@@ -419,6 +419,11 @@ impl<C: Clock> PairingSession<C> {
         })
     }
 
+    /// True while the code can still pair a device: not used up and not expired.
+    pub fn is_open(&self) -> bool {
+        !self.spent && !self.expired()
+    }
+
     fn expired(&self) -> bool {
         self.clock.now().saturating_duration_since(self.made) >= CODE_LIFETIME
     }
@@ -447,6 +452,22 @@ impl<C: Clock> PairingSession<C> {
             self.spent = true;
         }
     }
+}
+
+/// A fresh random six-digit pairing code (leading zeros kept), for a hub to show its owner.
+pub fn generate_code() -> Result<String> {
+    // 4_294_000_000 is a whole multiple of 1_000_000, so rejecting the top of the u32 range
+    // leaves every code equally likely.
+    for _ in 0..16 {
+        let nonce =
+            Nonce::try_generate().map_err(|_| hub_error("could not make a pairing code"))?;
+        let bytes: [u8; 12] = nonce.into();
+        let value = u32::from_be_bytes(bytes[..4].try_into().expect("four bytes"));
+        if value < 4_294_000_000 {
+            return Ok(format!("{:06}", value % 1_000_000));
+        }
+    }
+    Err(hub_error("could not make a pairing code"))
 }
 
 /// Pairs over `t` with the session's six-digit code shown on both screens; both sides derive the
@@ -789,9 +810,13 @@ fn handshake(t: &mut dyn Transport, key: &[u8], target: Os, server: bool) -> Res
     handshake_for(t, key, target, server, WIRE)
 }
 
+mod host;
 mod prepared;
+mod publish;
 mod service;
+pub use host::{local_home_address, HostConfig, HostStatus, HubHost};
 pub use prepared::{pull_prepared, pull_prepared_app, pull_prepared_app_with, serve_prepared};
+pub use publish::{publish_build, resume_dir};
 pub use service::{
     pair_hub, pull_hub, pull_hub_prepared, pull_hub_prepared_app, pull_hub_prepared_app_with,
     read_fleet, report_hub, report_hub_build, serve_request,
@@ -1052,6 +1077,36 @@ fn verify_streaming(b: &Bundle, staged: &Path) -> Result<()> {
     Ok(())
 }
 
+fn remove_entry(path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn prune_staging(staged: &Path, cache_root: &Path, cache: &Path) -> Result<()> {
+    for entry in fs::read_dir(staged)? {
+        let path = entry?.path();
+        if path != cache_root {
+            // A link in the staging folder is never ours: refuse it instead of deleting
+            // or following it.
+            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                return Err(hub_error("a staged file is a link"));
+            }
+            remove_entry(&path)?;
+        }
+    }
+    for entry in fs::read_dir(cache_root)? {
+        let path = entry?.path();
+        if path != cache {
+            remove_entry(&path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Pulls a paired hub's newest bundle into `staged`. Authenticated, atomically written
 /// chunks under `staged/.hub-transfer` survive errors; only missing or damaged chunks are
 /// requested after reconnecting. All paths are checked before creating anything in staged.
@@ -1073,6 +1128,10 @@ fn pull_inner(t: &mut dyn Transport, peer: &Peer, target: Os, staged: &Path) -> 
     make_dir(&cache_root)?;
     let cache = cache_root.join(format!("{:x}", digest));
     make_dir(&cache)?;
+    // A resumed pull starts from a staging folder an earlier try may have left. Only the
+    // authenticated chunk cache of this very manifest carries over; anything else (files of an
+    // older build, half-assembled output) is dropped so it can never reach the install.
+    prune_staging(staged, &cache_root, &cache)?;
     for (file_index, file) in b.files.iter().enumerate() {
         let file_index = file_index as u32;
         let destination = file_path(staged, &file.path, true)?;

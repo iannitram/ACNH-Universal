@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::first_run::{route_text, system_relay_setup, FirstRun};
+use crate::hub_host::HubController;
 use crate::input::{key_nav, poll_nav, DeviceEvent, Devices, Stick};
 use crate::play::{Player, Runner, Session};
 use crate::relay_setup::{PageView, RecheckWhenClosed, RelaySettings};
@@ -187,7 +188,13 @@ fn move_settings_focus(focus: SettingsControl, nav: Nav, relay: RelayRows) -> Se
     to_control(move_in(&settings_rows(relay), to_focus(focus), nav))
 }
 
-fn navigate(window: &Weak<MainWindow>, session: &mut Session, relay: &mut RelaySettings, nav: Nav) {
+fn navigate(
+    window: &Weak<MainWindow>,
+    session: &mut Session,
+    relay: &mut RelaySettings,
+    hub: &mut HubController,
+    nav: Nav,
+) {
     if let Some(window) = window.upgrade().filter(|_| session.vm().saves_open()) {
         // Accept presses the highlighted button: Sync now when it can run, otherwise Back.
         if nav == Nav::Accept {
@@ -209,6 +216,12 @@ fn navigate(window: &Weak<MainWindow>, session: &mut Session, relay: &mut RelayS
         return;
     }
     if let Some(window) = window.upgrade().filter(|_| session.vm().fleet_open()) {
+        // On a machine that can be a hub, Accept turns the hub on or off; Back closes the page.
+        if nav == Nav::Accept && hub.available() {
+            hub.toggle();
+            show_hub(&window, hub);
+            return;
+        }
         // The row count is reflected by the existing previous/next flags.
         let offset = window.get_fleet_offset().max(0) as usize;
         let rows = if window.get_fleet_has_next() {
@@ -315,6 +328,15 @@ fn draw_page(window: &MainWindow, page: PageView) {
     let choices: Vec<SharedString> = page.options.into_iter().map(Into::into).collect();
     window.set_first_run_choices(slint::ModelRc::new(slint::VecModel::from(choices)));
     window.set_first_run_progress(page.progress);
+}
+
+/// The Fleet page's hub row: on or off, the generated pairing code, who is paired.
+fn show_hub(window: &MainWindow, hub: &HubController) {
+    let view = hub.view();
+    window.set_hub_available(view.available);
+    window.set_hub_line(view.line.into());
+    window.set_hub_code(view.code.into());
+    window.set_hub_button(view.button.into());
 }
 
 /// Show Settings' save sync rows, and its sign-in pages while they are open.
@@ -427,6 +449,22 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             }
         }
     });
+    let hub = Rc::new(RefCell::new(HubController::new(
+        config.dirs.clone(),
+        config.os,
+    )));
+    window.on_hub_toggle({
+        let hub = Rc::clone(&hub);
+        let weak = window.as_weak();
+        move || {
+            let mut hub = hub.borrow_mut();
+            hub.toggle();
+            if let Some(window) = weak.upgrade() {
+                show_hub(&window, &hub);
+            }
+        }
+    });
+    show_hub(&window, &hub.borrow());
     let first = Rc::new(RefCell::new(FirstRun::new(config.vars.clone())));
     window.set_first_run_open(first.borrow().needed());
     render_first_run(&window.as_weak(), &mut first.borrow_mut());
@@ -542,6 +580,7 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
         let weak = window.as_weak();
         let first = Rc::clone(&first);
         let relay = Rc::clone(&relay);
+        let hub = Rc::clone(&hub);
         let session = Rc::clone(&session);
         let dirs = dirs.clone();
         move |text: SharedString| {
@@ -606,7 +645,7 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             }
             let mut session = session.borrow_mut();
             let mut relay = relay.borrow_mut();
-            navigate(&weak, &mut session, &mut relay, nav);
+            navigate(&weak, &mut session, &mut relay, &mut hub.borrow_mut(), nav);
             if let Some(window) = weak.upgrade() {
                 show_relay_settings(&window, &relay);
             }
@@ -652,7 +691,7 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
         let mut relay = relay.borrow_mut();
         if !first_open {
             for nav in &navs {
-                navigate(&weak, &mut session, &mut relay, *nav);
+                navigate(&weak, &mut session, &mut relay, &mut hub.borrow_mut(), *nav);
             }
         }
         let settings_open = session.vm().settings_open();
@@ -680,6 +719,11 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             && weak
                 .upgrade()
                 .is_some_and(|window| window.get_view().fleet_open);
+        if refresh_fleet || (!navs.is_empty() && session.vm().fleet_open()) {
+            if let Some(window) = weak.upgrade() {
+                show_hub(&window, &hub.borrow());
+            }
+        }
         if session.pump() || !navs.is_empty() || refresh_fleet {
             render(&weak, &session, &dirs);
         }

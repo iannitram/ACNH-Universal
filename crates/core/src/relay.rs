@@ -1163,12 +1163,7 @@ pub fn start_sign_in(
     let now = save_relay::stamp::now();
 
     if oauth::in_game_mode(&|name| std::env::var(name).ok()) {
-        let client = code_client(service, &clients);
-        let pending = oauth::start_code(provider, client, &*transport, now).map_err(map_err)?;
-        creds
-            .set(&service::pending_account(service), &pending.to_secret())
-            .map_err(map_err)?;
-        return Ok(code_prompt(service, &pending));
+        return start_code_sign_in(service, creds, transport);
     }
 
     let client = platform_client(service, &clients);
@@ -1193,6 +1188,30 @@ pub fn start_sign_in(
         root,
     });
     Ok(prompt)
+}
+
+/// Start save-relay's code flow for Dropbox or Google Drive whatever the environment: the person
+/// opens the page in a browser (the iPad: Safari) and types the code Dropbox shows into
+/// `finish_sign_in`. The pending sign-in is kept in `creds` until then.
+pub fn start_code_sign_in(
+    service: Service,
+    creds: &dyn CredentialStore,
+    transport: Arc<dyn Transport>,
+) -> Result<SignInPrompt> {
+    if !service.uses_oauth() {
+        return Err(Error::Saves(
+            "Nextcloud is set up with an app password, not a sign-in".into(),
+        ));
+    }
+    let provider = oauth::provider(service)
+        .ok_or_else(|| Error::Saves("this service has no sign-in".into()))?;
+    let client = code_client(service, &ClientSet::shipped());
+    let pending = oauth::start_code(provider, client, &*transport, save_relay::stamp::now())
+        .map_err(map_err)?;
+    creds
+        .set(&service::pending_account(service), &pending.to_secret())
+        .map_err(map_err)?;
+    Ok(code_prompt(service, &pending))
 }
 
 /// Finish the sign-in `start_sign_in` began. `answer` is the app's redirect URL on a desktop,

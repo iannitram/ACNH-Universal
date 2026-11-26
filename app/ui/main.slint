@@ -68,6 +68,11 @@ export component MainWindow inherits Window {
     in-out property <int> fleet-offset;
     in property <bool> fleet-has-previous;
     in property <bool> fleet-has-next;
+    in property <bool> hub-available;
+    in property <string> hub-line;
+    in property <string> hub-code;
+    in property <string> hub-button;
+    callback hub-toggle();
     in property <string> saves-island;
     in property <[string]> saves-backups;
     in property <string> saves-message;
@@ -193,6 +198,11 @@ export component MainWindow inherits Window {
             position: root.fleet-position;
             has-previous: root.fleet-has-previous;
             has-next: root.fleet-has-next;
+            hub-available: root.hub-available;
+            hub-line: root.hub-line;
+            hub-code: root.hub-code;
+            hub-button: root.hub-button;
+            hub-toggle => { root.pointer-used(); root.hub-toggle(); }
             back => { root.pointer-used(); root.clicked(PadTarget.back); }
             previous => { root.pointer-used(); root.fleet-scroll(-1); }
             next => { root.pointer-used(); root.fleet-scroll(1); }
