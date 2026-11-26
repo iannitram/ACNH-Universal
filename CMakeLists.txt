@@ -76,7 +76,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
                         -Wno-unused-but-set-variable -Wno-constant-logical-operand -Wno-unused-function)
 endif()
 if(MSVC)
-    add_compile_options(/arch:AVX2)
+    add_compile_options(/arch:AVX2 /EHsc)  # /EHsc: the player catches C++ exceptions (nx::LongJmp); clang-cl has them off
 endif()
 if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
