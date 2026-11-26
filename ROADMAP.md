@@ -36,14 +36,13 @@ This roadmap was audited against `main` on 2026-11-25 by reading the code (eight
 
 ### Open pull requests (2026-11-26)
 
-Four pull requests are open against `main`:
+Three pull requests are open against `main` (#417, the last refresh of this file and the code map, merged on 2026-11-26):
 
 | PR | Issue | State |
 |---|---|---|
 | #415 | #324 (Refs) | A version scheme from the workspace manifest, not from git tags (workspace version `0.12.0`, tags `v<version>`). Needs my ruling on the scheme and the baseline |
 | #403 | #335 (Refs) | Archives unpacked in Rust and unused pip packages dropped. Refreshed against `main` after a conflict in `prepare.rs`; CI is pending on the new head and the review verdict predates it. Its body's `Refs` plus `Still owed:` form is read as partial by the merge check |
 | #408 | #336 (Closes) | Splits `prepare.rs`, removes dead script code and the `NotBuilt` skeleton. Its last `Rust (macOS)` job was cancelled after 15 minutes with no log, the other nine checks passed; it was not rerun |
-| #417 | #330 (Refs) | This file and the code map |
 
 The other 31 merged on 2026-11-26. One test, `first_run::tests::steam_artwork_uses_the_size_for_each_library_slot`, fails in `cargo test --workspace` on the build Mac; it looks for assets next to the test binary, so it fails when the target folder is shared, and CI is the authority. It needs its own issue.
 
@@ -111,7 +110,7 @@ The "Merged" column is what merged on 2026-11-26; nothing in it has been run on 
 | #353 | 4.14 | The IPC reply clamp | merged (PR #375) |
 | #343, #344, #342 | 2.12, 2.13, 2.11 | CLI exit codes; Continue's stuck states; closing the window during play | merged (PRs #383, #395, #374) |
 | #339, #346 | 1.41, 2.15 | The cloud download's faults, after #321 | open |
-| #329, #330 | 0.11, 0.12 | Licences and `NOTICE`; the other stale docs and the issue labels | PR #416 merged (Refs); #330 open (this PR is Refs) |
+| #329, #330 | 0.11, 0.12 | Licences and `NOTICE`; the other stale docs and the issue labels | PR #416 merged (Refs); #330 open (PR #417 merged as Refs) |
 | #370 | 10.02 | Acceptance in SPEC that no issue asks for | open |
 
 ## Features, by Must
