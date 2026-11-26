@@ -73,7 +73,7 @@ if ! grep -v -e '^#' -e '^$' "$vf" | awk 'NF { if ($0 !~ /^[A-Z0-9_]+=[A-Za-z0-9
 fi
 dupk=$(grep -v -e '^#' -e '^$' "$vf" | cut -d= -f1 | sort | uniq -d)
 [ -z "$dupk" ] || bad "$vf names a key twice: $dupk"
-for k in SDL3 SDL3_IOS MOLTENVK VK_HEADERS LLVM LLVM_CI IMGUI RYUBING DOTNET FFX DLSS; do
+for k in SDL3 SDL3_IOS MOLTENVK VK_HEADERS LLVM IMGUI RYUBING DOTNET FFX DLSS; do
     grep -q "^$k=" "$vf" || bad "$vf lacks $k"
 done
 # a version spelled out elsewhere would drift from the file: none may appear in Prepare, CI or the scripts

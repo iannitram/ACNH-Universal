@@ -9,7 +9,6 @@ aba9789bdcf3fda9e90f965636e9e85e9dcc299333fbf5451bcf22ecfd608506  https://codebe
 c4b08b950bd29d83caae0ab8d884298d27046a9d30700fb42841c50992665c90  https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.18.tar.gz
 7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68  https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-3.4.16.tar.gz
 1a784cb2a5c64d56fe7a62090fe9d242d9865f235e4ea9678f1a6ba4e693e7de  https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-devel-3.4.16-VC.zip
-3197846a2b19063687dd56e93e34cd941e3548d907f23a6131571321bdf9fe7b  https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-win64.exe
 7e69dc07a4536b79ff24a651a2611990bf8eaab17ea560f1092707c4f31ba01d  https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.3/clang+llvm-23.1.3-x86_64-pc-windows-msvc.tar.zst
 3872a5f90df78fced023c1945f4466b654fd74573370b77b17742149763a7a7c  https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9.tar.gz
 4d9dcf243ef5efbf03340a02f16b51a22053243a22e8a9a0b3ce91c26982b4bf  https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.4.0/Kits/FidelityFX/api/include/ffx_api.h

@@ -494,7 +494,11 @@ pub(crate) fn finish_pending(game_romfs: &Path, out: &Path, python: &str) -> Res
         let romfs = path.join("romfs");
         if pending.is_dir() {
             let messages = romfs.join("Message");
-            stage_replacements(game_romfs, python, &messages, &pending, &mut measure)?;
+            if !stage_replacements(game_romfs, python, &messages, &pending, &mut measure)? {
+                // The tools to measure the lines are missing: leave the work pending so the
+                // next prepare retries it, and do not install anything for this mod now.
+                continue;
+            }
             fs::rename(&pending, &ready)?;
         }
         if ready.is_dir() {
@@ -510,7 +514,7 @@ fn stage_replacements(
     messages: &Path,
     pending: &Path,
     measure: &mut Option<Option<Advances>>,
-) -> Result<()> {
+) -> Result<bool> {
     // A staging failure leaves all originals unchanged. Drop old partial outputs
     // before recomputing so they cannot survive a later successful retry.
     for path in directory(pending)? {
@@ -531,10 +535,14 @@ fn stage_replacements(
                 })
     });
     if archives.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     if measure.is_none() {
         *measure = Some(open_measure(game_romfs, python)?);
+    }
+    if matches!(measure, Some(None)) {
+        // Reported by `open_measure`; the reflow is retried the next time.
+        return Ok(false);
     }
     if let Some(Some(measure)) = measure {
         archives.sort();
@@ -551,7 +559,7 @@ fn stage_replacements(
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn install_replacements(romfs: &Path, ready: &Path) -> Result<()> {
@@ -584,14 +592,17 @@ fn directory(path: &Path) -> Result<Vec<PathBuf>> {
 fn open_measure(game_romfs: &Path, python: &str) -> Result<Option<Advances>> {
     match Command::new("zstd").arg("-V").output() {
         Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            eprintln!("zstd not found: the translation's long lines are not reflowed yet; install zstd and prepare again");
+            return Ok(None);
+        }
         Err(error) => return Err(error.into()),
     }
     let mut measure = Advances::new(python)?;
     match measure.byte()? {
         b'1' => {}
         b'0' => {
-            eprintln!("Pillow not found: the translation's long lines are left as they are");
+            eprintln!("Pillow not found: the translation's long lines are not reflowed yet; install Pillow (pip install pillow) and prepare again");
             return Ok(None);
         }
         _ => {
