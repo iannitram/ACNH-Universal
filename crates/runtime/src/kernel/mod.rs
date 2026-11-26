@@ -2,7 +2,7 @@
 //! Replaces `runtime/src/kernel.cpp`, `runtime/src/ipc.cpp`, and `runtime/src/kernel_watch.cpp`.
 
 #[allow(unused_imports)]
-use crate::sync::LockExt;
+use crate::sync::{CondvarExt, LockExt};
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[allow(unused_imports)]
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -296,7 +296,7 @@ impl ReentrantMutex {
                 st.depth += 1;
                 return ReentrantGuard { mutex: self };
             }
-            st = self.cv.wait(st).unwrap();
+            st = self.cv.wait_or_recover(st);
         }
         st.owner = Some(me);
         st.depth = 1;
@@ -342,7 +342,7 @@ impl ReentrantMutex {
         let me = std::thread::current().id();
         let mut st = self.state.lock_or_recover();
         while st.owner.is_some() {
-            st = self.cv.wait(st).unwrap();
+            st = self.cv.wait_or_recover(st);
         }
         st.owner = Some(me);
         st.depth = depth;

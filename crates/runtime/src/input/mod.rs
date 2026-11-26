@@ -6,8 +6,9 @@
 //! `monotonic_ns`, `game_id`, `touch_y_bias`), registers the `NX_HLE` entries, and forwards the
 //! `nx::` / `nx::plat::` C++ entry points.
 
-#[allow(unused_imports)]
+#[cfg(test)]
 use crate::sync::LockExt;
+#[allow(unused_imports)]
 use std::collections::{HashSet, VecDeque};
 #[allow(unused_imports)]
 use std::ffi::{c_char, CStr};

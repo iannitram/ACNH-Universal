@@ -2,7 +2,7 @@
 //! HLE thunks, logging, and boot sequence, ported from `runtime/src/loader.cpp`,
 //! `runtime/src/main.cpp`, and `runtime/src/game_abi.cpp`.
 
-use crate::sync::LockExt;
+use crate::sync::{CondvarExt, LockExt};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
@@ -308,9 +308,8 @@ fn log_msg(msg: &str) {
                     {
                         let state = LOG_LOCK.lock_or_recover();
                         if state.pending.is_empty() {
-                            let _ = LOG_CV
-                                .wait_timeout(state, Duration::from_millis(250))
-                                .unwrap();
+                            let _ =
+                                LOG_CV.wait_timeout_or_recover(state, Duration::from_millis(250));
                         }
                     }
                     let _w = WRITE_LOCK.lock_or_recover();

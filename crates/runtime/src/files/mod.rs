@@ -9,8 +9,9 @@
 //! entries against the guest CPU dispatcher, and handles OS dynamic library loading /
 //! SDL error dialogs for `nx::plat::load_game*`.
 
-#[allow(unused_imports)]
+#[cfg(test)]
 use crate::sync::LockExt;
+#[allow(unused_imports)]
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 #[allow(unused_imports)]
 use std::ffi::{c_char, c_void, CStr, CString};

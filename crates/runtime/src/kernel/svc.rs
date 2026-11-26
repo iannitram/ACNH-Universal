@@ -2,7 +2,7 @@
 
 use super::*;
 #[allow(unused_imports)]
-use crate::sync::LockExt;
+use crate::sync::{CondvarExt, LockExt};
 
 // ---- SVC implementations -----------------------------------------------------------------------
 
@@ -351,7 +351,7 @@ pub(crate) fn svc_wait_synchronization(
                 continue;
             }
             let d = self_t.data.lock_or_recover();
-            let (_g, res) = self_t.cv.wait_timeout(d, dl - now).unwrap();
+            let (_g, res) = self_t.cv.wait_timeout_or_recover(d, dl - now);
             let timed_out = res.timed_out();
             drop(_g);
             KERNEL_LOCK.relock_all(depth);
@@ -360,7 +360,7 @@ pub(crate) fn svc_wait_synchronization(
             }
         } else {
             let d = self_t.data.lock_or_recover();
-            let _g = self_t.cv.wait(d).unwrap();
+            let _g = self_t.cv.wait_or_recover(d);
             drop(_g);
             KERNEL_LOCK.relock_all(depth);
         }

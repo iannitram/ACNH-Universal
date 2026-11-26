@@ -5,6 +5,7 @@
 //! `plat::monotonic_ns`, `plat::sleep_ns`, `nx::log`, kernel event signaling) and registers the
 //! `NX_HLE` entries for guest CPU/IPC dispatch.
 
+use crate::sync::CondvarExt;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CString};
 use std::fs::File;
@@ -438,7 +439,7 @@ impl BinaryLock {
     fn lock(&self) {
         let mut g = self.held.lock().unwrap_or_else(|e| e.into_inner());
         while *g {
-            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            g = self.cv.wait_or_recover(g);
         }
         *g = true;
     }

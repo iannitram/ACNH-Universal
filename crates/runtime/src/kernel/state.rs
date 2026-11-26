@@ -2,7 +2,7 @@
 
 use super::*;
 #[allow(unused_imports)]
-use crate::sync::LockExt;
+use crate::sync::{CondvarExt, LockExt};
 
 // ---- Thread & Kernel State ---------------------------------------------------------------------
 
@@ -349,7 +349,7 @@ pub(crate) fn block_thread(t: &Arc<KThread>, timeout_ns: i64) -> bool {
     let ok = if timeout_ns < 0 {
         let mut d = t.data.lock_or_recover();
         while !d.wake {
-            d = t.cv.wait(d).unwrap();
+            d = t.cv.wait_or_recover(d);
         }
         true
     } else {
@@ -361,7 +361,7 @@ pub(crate) fn block_thread(t: &Arc<KThread>, timeout_ns: i64) -> bool {
             if now >= deadline {
                 break;
             }
-            let (guard, res) = t.cv.wait_timeout(d, deadline - now).unwrap();
+            let (guard, res) = t.cv.wait_timeout_or_recover(d, deadline - now);
             d = guard;
             if res.timed_out() && !d.wake {
                 break;

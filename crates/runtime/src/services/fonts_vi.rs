@@ -2,7 +2,7 @@
 
 use super::*;
 #[allow(unused_imports)]
-use crate::sync::LockExt;
+use crate::sync::{CondvarExt, LockExt};
 
 // ---- 5. Shared System Fonts (hle_pl.cpp) ----------------------------------------------------------------------------
 
@@ -310,7 +310,7 @@ pub extern "C" fn acnh_vi_vblank_hold() {
             if now >= deadline {
                 break;
             }
-            let (guard, res) = VI_VB_SYNC.1.wait_timeout(lk, deadline - now).unwrap();
+            let (guard, res) = VI_VB_SYNC.1.wait_timeout_or_recover(lk, deadline - now);
             lk = guard;
             if res.timed_out() {
                 break;
