@@ -143,7 +143,8 @@ cargo_target=${CARGO_TARGET_DIR:-$root/target}
 case "$cargo_target" in /*) ;; *) cargo_target=$root/$cargo_target ;; esac
 runtime_lib=$cargo_target/$rust_target/release/libacnh_runtime.a
 [ -f "$runtime_lib" ] || { echo "error: $runtime_lib was not built" >&2; exit 1; }
-runtime_header=$(find "$cargo_target/$rust_target/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
+. "$root/tools/build_common.sh"
+runtime_header=$(newest_runtime_header "$cargo_target/$rust_target/release/build")
 
 # ---- libvpx (the movies: tools/build_libvpx.sh; without it the game's movies are black frames, issue #253) ----------
 # NX_VPX_DIR (Prepare sets it beside the prepared folder, which survives; the source copy it runs in is made anew each

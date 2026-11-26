@@ -173,7 +173,12 @@ fn status(cx: &mut Context<'_>) -> Result<i32> {
     };
     let vars = acnh_core::platform::Vars::from_lookup(cx.os, cx.var)?;
     let save_dir = saves::save_dir(&acnh_core::platform::AppDirs::new(&vars).data_root());
-    let line = match acnh_core::launch::Relay::status(&opened, &save_dir)? {
+    let status = acnh_core::launch::Relay::status(&opened, &save_dir)?;
+    if matches!(status, RelayStatus::Unavailable) {
+        writeln!(cx.out, "the relay cannot be reached")?;
+        return Ok(5);
+    }
+    let line = match status {
         RelayStatus::Unavailable => "the relay cannot be reached",
         RelayStatus::Conflict { .. } => "the island changed here and on the relay",
         RelayStatus::Held { .. } => "the island is open on another device",
@@ -204,6 +209,7 @@ fn push(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let guard = Guard {
         inner: relay,
         keep: options.keep,
+        answer_push: true,
         anyway: false,
         backups: &backups,
         stopped: std::cell::RefCell::new(None),
