@@ -58,7 +58,7 @@ fn commands_pair_pull_and_report_to_fake_hub() {
     let address = listener.local_addr().unwrap().to_string();
     std::thread::scope(|s| {
         let worker = s.spawn(|| {
-            let mut session = hub::PairingSession::new("123456").unwrap();
+            let session = std::sync::Mutex::new(hub::PairingSession::new("123456").unwrap());
             for _ in 0..6 {
                 let (stream, _) = listener.accept().unwrap();
                 hub::serve_request(
@@ -66,7 +66,7 @@ fn commands_pair_pull_and_report_to_fake_hub() {
                     &server,
                     &builds,
                     None,
-                    Some(&mut session),
+                    Some(&session),
                 )
                 .unwrap();
             }

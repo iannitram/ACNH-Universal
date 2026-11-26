@@ -80,6 +80,28 @@ fn romfs_range_writes_only_its_bytes() {
 }
 
 #[test]
+fn romfs_replaces_a_truncated_pack_and_leaves_no_temp_file() {
+    let dir = temp("atomic");
+    write(&dir, "root/a.txt", b"alpha");
+    let out = dir.join("romfs.pak");
+    std::fs::write(&out, b"NXRP-truncated").unwrap();
+    romfs(&dir.join("root"), &out).unwrap();
+    let size = romfs_size(&dir.join("root")).unwrap();
+    assert_eq!(std::fs::metadata(&out).unwrap().len(), size);
+    assert!(!dir.join("romfs.pak.tmp").exists());
+}
+
+#[test]
+fn a_failed_romfs_write_keeps_the_old_pack() {
+    let dir = temp("atomic-fail");
+    let out = dir.join("romfs.pak");
+    std::fs::write(&out, b"old pack").unwrap();
+    assert!(romfs(&dir.join("missing-root"), &out).is_err());
+    assert_eq!(std::fs::read(&out).unwrap(), b"old pack");
+    assert!(!dir.join("romfs.pak.tmp").exists());
+}
+
+#[test]
 fn empty_romfs_is_only_the_header() {
     let root = temp("empty");
     let out = root.join("romfs.pak");

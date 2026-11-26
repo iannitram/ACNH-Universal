@@ -1,4 +1,8 @@
-"""Check the Rust emitter against the Python driver and the Unicorn execution oracle.
+"""Smoke-check the Rust emitter, then run the Unicorn execution oracle on what it emits.
+
+The emitter's `functions` example is run over a synthetic module in four env/hook modes and three substrings are
+checked; tests.difftest then runs the Rust-emitted statements for each corpus instruction against Unicorn and fails
+when any of them differs, or when the emitter stops handling one (`--max-unhandled 0`).
 
 Usage: python -m tests.recomp_emit <recomp-emitter example> [--buffer-addr <address>]
 Needs the Python dependencies used by recomp and tests.difftest, and a host C++ compiler.
@@ -160,7 +164,7 @@ def main():
                 raise RuntimeError("traced mode should emit nx_hook")
         print("Rust C++ emission verified in all four modes", flush=True)
         subprocess.run([sys.executable, "-B", "-m", "tests.difftest", module, work / "difftest",
-                        "--rust-emitter", emitter, "--states", "16",
+                        "--rust-emitter", emitter, "--states", "16", "--max-unhandled", "0",
                         *(["--buffer-addr", args.buffer_addr] if args.buffer_addr else [])],
                        env=environment, check=True)
 
