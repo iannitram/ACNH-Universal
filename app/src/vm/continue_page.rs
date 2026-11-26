@@ -1124,14 +1124,15 @@ impl ContinuePageVm {
                 self.status_message = None;
                 self.focus = FocusTarget::Play;
                 match result {
+                    // A waiting push comes before a failed exit: Retry must send it first.
+                    Ok(played) if played.pushed == Sync::Offline => {
+                        self.fail(ContinueState::PushFailed("the relay did not answer".into()));
+                    }
                     Ok(played) if played.exit_code != 0 => {
                         self.fail(ContinueState::PlayerFailed {
                             exit: played.exit_code,
                             log_hint: "The newest file in the logs folder says why.".to_string(),
                         });
-                    }
-                    Ok(played) if played.pushed == Sync::Offline => {
-                        self.fail(ContinueState::PushFailed("the relay did not answer".into()));
                     }
                     Ok(played) => {
                         self.state = if played.pulled == Sync::Off {
@@ -1158,6 +1159,17 @@ impl ContinuePageVm {
             PlayEvent::Synced(result) => {
                 // A transfer of Retry or Sync now: the status that follows decides the page.
                 if self.status_job {
+                    return;
+                }
+                // Save sync was turned off in Settings while a conflict or a failed push was
+                // showing: there is nothing left to send or keep, so leave both states.
+                if matches!(result, Ok(Sync::Off)) {
+                    self.conflict = None;
+                    self.relay_card = None;
+                    self.saves_open = false;
+                    self.focus = FocusTarget::Play;
+                    self.state = ContinueState::SyncOff;
+                    self.play_action = Some(PlayAction::Play);
                     return;
                 }
                 let outcome = match result {
@@ -2010,6 +2022,61 @@ mod tests {
         assert_eq!(vm.view().button, "Retry");
     }
     #[test]
+    fn a_waiting_push_is_shown_before_a_failed_exit() {
+        let mut vm = ContinuePageVm::new(Some(fake_card(100, "amd-handheld", 1000, "3.0.2")), None);
+        vm.handle(Nav::Accept);
+        vm.take_request();
+        vm.on_play_event(PlayEvent::Played(Ok(Played {
+            pulled: done(),
+            exit_code: 3,
+            pushed: Sync::Offline,
+        })));
+        assert!(matches!(vm.state(), ContinueState::PushFailed(_)));
+        // Retry sends the push, not Play.
+        assert!(vm.handle(Nav::Accept));
+        assert_eq!(
+            vm.take_request(),
+            Some(Request::Sync {
+                step: SyncStep::Push,
+                keep: None
+            })
+        );
+    }
+
+    #[test]
+    fn sync_turned_off_leaves_a_failed_push() {
+        let mut vm = ContinuePageVm::new(Some(fake_card(100, "amd-handheld", 1000, "3.0.2")), None);
+        vm.handle(Nav::Accept);
+        vm.take_request();
+        vm.on_play_event(PlayEvent::Played(Ok(Played {
+            pulled: done(),
+            exit_code: 0,
+            pushed: Sync::Offline,
+        })));
+        assert!(matches!(vm.state(), ContinueState::PushFailed(_)));
+        assert!(vm.handle(Nav::Accept));
+        vm.take_request();
+        vm.on_play_event(PlayEvent::Synced(Ok(Sync::Off)));
+        assert_eq!(vm.state(), &ContinueState::SyncOff);
+        assert_eq!(vm.view().button, "Play");
+    }
+
+    #[test]
+    fn sync_turned_off_leaves_a_conflict() {
+        let mut vm =
+            ContinuePageVm::new(Some(fake_card(1000, "AMD handheld", 3600, "3.0.2")), None);
+        vm.handle(Nav::Accept);
+        vm.take_request();
+        relay_conflict(&mut vm, SyncStep::Push);
+        assert!(!vm.click(FocusTarget::Play));
+        assert!(vm.click(FocusTarget::Keep(Side::This)));
+        vm.take_request();
+        vm.on_play_event(PlayEvent::Synced(Ok(Sync::Off)));
+        assert!(vm.conflict().is_none());
+        assert_eq!(vm.state(), &ContinueState::SyncOff);
+    }
+
+    #[test]
     fn held_offers_wait_and_only_explicit_play_anyway_overrides() {
         let mut vm = ContinuePageVm::new(None, None);
         vm.on_play_event(PlayEvent::Held {
@@ -2028,7 +2095,7 @@ mod tests {
         assert_eq!(vm.take_request(), Some(Request::PlayAnyway));
     }
 
-    // 2.06a: no offline play. A waiting push goes first at open, Retry never starts a game, and
+    // 2.06a: no offline play. A waiting push goes first at open, Retry in RelayUnavailable never starts a game, and
     // the Saves page says the relay state in words with Sync now.
 
     fn with_status(status: Result<RelayStatus>) -> ContinuePageVm {
