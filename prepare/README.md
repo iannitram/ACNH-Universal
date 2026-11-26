@@ -98,7 +98,7 @@ author) unchanged, except for the include paths and the command line's name.
 - `acnh_recomp`: the command line, with `python -m recomp`'s arguments:
   `acnh_recomp <module.nso> <out dir> --name main --base 0x4000000000 [--jobs N] [--hooks f] [--variant f.pchtxt]`.
 - Capstone 5.0.7, AArch64 only (`third_party/capstone/`, BSD-3-Clause). The generated code is built from Capstone's
-  text, so the Python uses the same version (`tools/setup_acnh.py` installs `capstone==5.0.7`).
+  text, so a Capstone version bump changes the output. The Rust recompiler uses Capstone 5.0.6 (`capstone-sys`), this copy 5.0.7 (ADR 0007).
 - `acnh/speedfix-*.pchtxt`: tmouh's SpeedFix for main, CC BY-NC 4.0 (`acnh/SPEEDFIX.md`).
 
 `recomp/recomp.cmake` and `prepare.cmake` build them; the top `CMakeLists.txt` includes them on desktop, except in a

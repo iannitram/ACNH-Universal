@@ -1,4 +1,4 @@
-//! Command-line driver for `acnh_recomp` (replaces `python3 -m recomp` and `recomp.stats`).
+//! Command-line driver for `acnh-recompiler` (replaces `python3 -m recomp` and `recomp.stats`).
 
 use acnh_recomp::driver::{parse_hex, recompile, DriverError, RecompileOptions};
 use acnh_recomp::stats::stats;
@@ -10,7 +10,7 @@ fn run() -> Result<(), DriverError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("stats") {
         let nso = args.get(1).ok_or_else(|| {
-            DriverError::Message("usage: acnh_recomp stats <nso> [out.txt]".into())
+            DriverError::Message("usage: acnh-recompiler stats <nso> [out.txt]".into())
         })?;
         if let Some(out_path) = args.get(2) {
             let file = std::fs::File::create(out_path)?;
@@ -86,7 +86,7 @@ fn run() -> Result<(), DriverError> {
 
     if positional.len() != 2 {
         return Err(DriverError::Message(
-            "usage: acnh_recomp <module.nso> <out dir> [--name NAME] [--base ADDR] [--jobs N] [--hooks FILE] [--variant FILE] [--only ADDR...]".into(),
+            "usage: acnh-recompiler <module.nso> <out dir> [--name NAME] [--base ADDR] [--jobs N] [--hooks FILE] [--variant FILE] [--only ADDR...]".into(),
         ));
     }
     opts.nso = PathBuf::from(&positional[0]);

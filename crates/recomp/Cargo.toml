@@ -12,7 +12,7 @@ name = "acnh_recomp"
 path = "src/lib.rs"
 
 [[bin]]
-name = "acnh_recomp"
+name = "acnh-recompiler"
 path = "src/main.rs"
 
 [dependencies]
