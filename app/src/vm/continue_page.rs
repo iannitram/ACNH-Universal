@@ -585,7 +585,7 @@ impl ContinuePageVm {
     }
 
     /// True while a job runs: presses wait for its result.
-    fn busy(&self) -> bool {
+    pub fn busy(&self) -> bool {
         matches!(
             self.state,
             ContinueState::CheckingStatus

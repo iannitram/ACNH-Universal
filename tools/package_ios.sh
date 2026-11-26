@@ -20,7 +20,9 @@
 # --no-folder (with --small) makes the .ipa only; Prepare writes the game folder and its manifest itself (acnh_core::prepare).
 # The big .ipa (--game) is unchanged.
 # The out folder is required and has no default. Every refusal writes nothing to it.
-# The .ipa is staged in <out>/.ACNH-Universal-<version>.partial/ and moved into <out> when complete.
+# The .ipa is staged outside <out> (the owner's Dropbox delivery folder) on the same volume, in a folder under
+# $ACNH_STAGE_ROOT, $TMPDIR or ~/Library/Caches (tools/package_common.sh), and moved into <out> when complete. A stage left
+# by a killed run is cleared by the next one.
 # Under CI (CI or GITHUB_ACTIONS set) the out folder must be inside $RUNNER_TEMP, and the game items it copies may hold only
 # empty files.
 set -euo pipefail
@@ -34,7 +36,9 @@ usage() {
     exit 2
 }
 fail() { echo "error: $*" >&2; exit 1; }
-realpath_py() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+# shellcheck source=tools/package_common.sh
+. "$root/tools/package_common.sh"
+realpath_py() { pkg_realpath "$1"; }
 
 [ "$#" -ge 3 ] || usage
 version=$1
@@ -114,42 +118,21 @@ case "$out/" in "$root/"*) fail "out folder must be outside the checkout: $out" 
 
 # Refusals come before anything is created, so they leave the out folder untouched.
 [ ! -e "$out" ] || [ -d "$out" ] || fail "out folder is not a folder: $out"
-existing=$out
-while [ ! -d "$existing" ]; do existing=$(dirname "$existing"); done
-# Fail closed: any git error other than "not a git repository" refuses the folder.
-if git_location=$(git -C "$existing" rev-parse --is-inside-work-tree --is-inside-git-dir 2>"${TMPDIR:-/tmp}/.package_ios_git.$$"); then
-    git_err=
-else
-    git_err=$(cat "${TMPDIR:-/tmp}/.package_ios_git.$$")
-    case "$git_err" in
-        *"not a git repository"*) git_location= ;;
-        *) rm -f "${TMPDIR:-/tmp}/.package_ios_git.$$"; fail "cannot tell whether the out folder is inside a Git work tree: $git_err" ;;
-    esac
-fi
-rm -f "${TMPDIR:-/tmp}/.package_ios_git.$$"
-if printf '%s\n' "$git_location" | grep -qx true; then
-    fail "out folder is inside a Git work tree (or its metadata): choose a folder outside every checkout"
-fi
+# Fail closed: any git error other than "not a git repository" refuses the folder (tools/package_common.sh).
+msg=$(pkg_refuse_git "$out") || fail "$msg"
 ci=
 if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then ci=1; fi
-if [ -n "$ci" ]; then
-    [ -n "${RUNNER_TEMP:-}" ] || fail "CI is set but RUNNER_TEMP is not, so the out folder cannot be checked"
-    runner_temp=$(realpath_py "$RUNNER_TEMP")
-    case "$out/" in
-        "$runner_temp/"*) ;;
-        *) fail "under CI the out folder must be inside \$RUNNER_TEMP ($RUNNER_TEMP)" ;;
-    esac
-fi
+msg=$(pkg_refuse_ci_out "$out") || fail "$msg"
 
 name=ACNH-Universal-$version
 ipa=$out/$name.ipa
 if [ -L "$ipa" ] || [ -d "$ipa" ]; then
     fail "IPA destination must not be a symlink or directory"
 fi
-stage_dir=$out/.ACNH-Universal-$version.partial
-if [ -e "$stage_dir" ] || [ -L "$stage_dir" ]; then
-    fail "$stage_dir is left from an earlier run: run chmod -R u+w on it, then remove it"
-fi
+# The out folder is the owner's Dropbox delivery folder: stage outside the synced tree, on the same volume, and move
+# only the finished files in (tools/package_common.sh). A stage left by a killed run is cleared below, once every
+# refusal has passed.
+stage_dir=$(pkg_stage_path "$out" "$version") || fail "$stage_dir"  # on a refusal the output is the reason
 
 app=$build/ACNH.app
 [ ! -L "$app" ] && [ -d "$app" ] || fail "ACNH.app must be a directory, not a symlink"
@@ -195,17 +178,18 @@ stage=
 made_out=
 [ -d "$out" ] || made_out=1
 cleanup() {
-    if [ -n "$stage" ] && ! remove_tree "$stage"; then
-        echo "warning: could not remove $stage (something keeps writing into it): remove it before the next run" >&2
-    fi
+    if [ -n "$stage" ]; then pkg_drop_stage "$stage" "$out"; fi
     if [ -n "$made_out" ]; then rmdir "$out" 2>/dev/null || true; fi
     return 0
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 mkdir -p "$out"
+# A stage left by a killed run (SIGKILL, power loss, a clean-up that gave up) is cleared; one that cannot be removed stops here.
+pkg_clear_stage "$stage_dir" "$out" "$version" ||
+    fail "$stage_dir is left from an earlier run and cannot be removed: remove it, then run again"
 stage=$stage_dir
-mkdir "$stage"
+mkdir -p "$stage"
 mkdir "$stage/Payload"
 
 copy=$stage/Payload/ACNH.app
