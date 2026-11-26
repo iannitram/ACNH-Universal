@@ -91,11 +91,12 @@ int main() {
     // without it, it gives "" (never a folder outside the app and never the data root).
     const fs::path android_files = tmp / "android-files";
     const fs::path android_game = android_files / "game";
+    const std::string android_game_s = android_files.string() + "/game";  // the code joins with "/"
     const std::string android_data = (android_files / "root").string();
     EXPECT(choose_android_game_root(nullptr, android_files.string(), is_file), "");
     touch(android_game / "analysis" / "main.bin");
-    EXPECT(choose_android_game_root(nullptr, android_files.string(), is_file), android_game.string());
-    EXPECT(choose_android_game_root("", android_files.string() + "/", is_file), android_game.string());
+    EXPECT(choose_android_game_root(nullptr, android_files.string(), is_file), android_game_s);
+    EXPECT(choose_android_game_root("", android_files.string() + "/", is_file), android_game_s);
     EXPECT(choose_android_game_root((tmp.string() + "/env-game").c_str(), android_files.string(), is_file),
            tmp.string() + "/env-game");
     fs::remove(android_game / "analysis" / "main.bin", ec);
