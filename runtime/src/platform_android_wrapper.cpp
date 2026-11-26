@@ -62,8 +62,8 @@ void acnh_platform_window_set_refresh_hz(int32_t hz);
 void acnh_platform_pick_begin();
 void acnh_platform_pick_complete(const char* path);
 void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
-size_t acnh_platform_pad_kind(int32_t vendor, const char* name, char* out, size_t cap);
-size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, const char* name, char* out, size_t cap);
+size_t acnh_platform_pad_kind(int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
+size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
 bool acnh_platform_xbox_layout(const char* controller_kind);
 int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
 uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
@@ -1328,9 +1328,10 @@ bool gamepad_connected(android_app* app) {
     jmethodID virt_m = env->GetMethodID(dev, "isVirtual", "()Z");
     jmethodID name_m = env->GetMethodID(dev, "getName", "()Ljava/lang/String;");
     jmethodID vendor_m = env->GetMethodID(dev, "getVendorId", "()I");
+    jmethodID product_m = env->GetMethodID(dev, "getProductId", "()I");
     bool found = false;
     std::string pad_name;
-    int vendor = 0;
+    int vendor = 0, product = 0;
     if (ids_m && get_m && src_m && virt_m) {
         auto ids = static_cast<jintArray>(env->CallStaticObjectMethod(dev, ids_m));
         jsize n = ids ? env->GetArrayLength(ids) : 0;
@@ -1343,6 +1344,7 @@ bool gamepad_connected(android_app* app) {
             found = !virt && ((src & 0x401) == 0x401 || (src & 0x1000010) == 0x1000010);  // SOURCE_GAMEPAD / _JOYSTICK
             if (found) {
                 if (vendor_m) vendor = env->CallIntMethod(d, vendor_m);
+                if (product_m) product = env->CallIntMethod(d, product_m);
                 if (auto js = name_m ? static_cast<jstring>(env->CallObjectMethod(d, name_m)) : nullptr) {
                     if (const char* c = env->GetStringUTFChars(js, nullptr)) {
                         pad_name = c;
@@ -1360,9 +1362,9 @@ bool gamepad_connected(android_app* app) {
     env->DeleteLocalRef(dev);
     {
         std::lock_guard lk(nx::plat::g_pad_info_lock);
-        const std::string kind = nx::plat::android_controller_kind(found, vendor, pad_name);
+        const std::string kind = nx::plat::android_controller_kind(found, vendor, product, pad_name);
         if (pad_name != nx::plat::g_pad_name || kind != nx::plat::g_pad_kind)
-            nx::log("input: controller %s (vendor %04x): %s", found ? pad_name.c_str() : "none", vendor,
+            nx::log("input: controller %s (vendor %04x product %04x): %s", found ? pad_name.c_str() : "none", vendor, product,
                     found ? kind.c_str() : "-");
         nx::plat::g_pad_name = found ? pad_name : "";
         nx::plat::g_pad_kind = kind;

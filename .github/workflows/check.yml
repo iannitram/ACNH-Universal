@@ -146,6 +146,8 @@ jobs:
         run: ctest --test-dir build --output-on-failure -E '^prepare_e2e_zig$'
       - name: Game reads stay on the game root
         run: bash tests/game_root_check.sh
+      - name: Release source package configures with CMake
+        run: bash tests/package_source_test.sh
 
   boot-smoke:
     name: Boot smoke (Linux)

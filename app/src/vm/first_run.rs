@@ -82,6 +82,8 @@ pub struct FirstRunVm {
     pub busy: bool,
     pub message: String,
     pub steam_applicable: bool,
+    /// The system folder picker works on this device (Linux only); else it is not offered.
+    pub system_picker: bool,
     /// Save sync can be set up on this build, and is not set up yet: step 5 is shown.
     pub relay_available: bool,
     pub relay_set_up: bool,
@@ -120,6 +122,7 @@ impl FirstRunVm {
             busy: false,
             message: String::new(),
             steam_applicable: cfg!(target_os = "linux"),
+            system_picker: cfg!(target_os = "linux"),
             relay_available: false,
             relay_set_up: false,
             relay: RelaySetupVm::new(true),
@@ -244,11 +247,10 @@ impl FirstRunVm {
                 "Find a hub".into(),
             ],
             Step::PickFolder => {
-                let mut out = vec![
-                    "Use this folder".into(),
-                    "Parent folder".into(),
-                    "Open system folder picker".into(),
-                ];
+                let mut out = vec!["Use this folder".into(), "Parent folder".into()];
+                if self.system_picker {
+                    out.push("Open system folder picker".into());
+                }
                 out.extend(self.folders.iter().map(|p| {
                     p.file_name()
                         .unwrap_or_default()
@@ -374,14 +376,17 @@ impl FirstRunVm {
             }
             Step::PickFolder if index == 0 => self.request(Request::Check(self.folder.clone())),
             Step::PickFolder if index == 1 => {
-                self.folder.pop();
+                // At a drive root on Windows the parent is the list of drives (an empty path).
+                if !self.folder.pop() && cfg!(windows) {
+                    self.folder = PathBuf::new();
+                }
                 self.request(Request::Folders(self.folder.clone()));
             }
-            Step::PickFolder if index == 2 => {
+            Step::PickFolder if index == 2 && self.system_picker => {
                 self.request(Request::SystemPickFolder(self.folder.clone()));
             }
             Step::PickFolder => {
-                self.folder = self.folders[index - 3].clone();
+                self.folder = self.folders[index - 2 - usize::from(self.system_picker)].clone();
                 self.request(Request::Folders(self.folder.clone()));
             }
             Step::FolderRejected(_) => self.go(Step::PickFolder),
@@ -633,7 +638,9 @@ impl FirstRunVm {
                 self.folder = path;
                 self.request(Request::Check(self.folder.clone()));
             }
-            Event::SystemPicked(None) => {}
+            Event::SystemPicked(None) => {
+                self.message = "No folder was chosen. Pick one from the list.".into();
+            }
             Event::CloudSyncFinished(Ok(())) => {
                 self.cloud_downloading = false;
                 self.pulling = false;
@@ -964,5 +971,39 @@ mod tests {
         vm.activate(1);
         assert_eq!(vm.step, Step::PickFolder);
         assert!(matches!(vm.take_request(), Some(Request::Folders(_))));
+    }
+
+    #[test]
+    fn system_picker_is_offered_only_where_it_works() {
+        let mut vm = FirstRunVm::new(PathBuf::from("/h"));
+        vm.step = Step::PickFolder;
+        vm.folders = vec![PathBuf::from("/h/a"), PathBuf::from("/h/b")];
+        vm.system_picker = false;
+        assert_eq!(
+            vm.options(),
+            vec!["Use this folder", "Parent folder", "a", "b"]
+        );
+        vm.activate(3);
+        assert_eq!(vm.folder, PathBuf::from("/h/b"));
+        vm.step = Step::PickFolder;
+        vm.busy = false;
+        vm.system_picker = true;
+        assert_eq!(
+            vm.options(),
+            vec![
+                "Use this folder",
+                "Parent folder",
+                "Open system folder picker",
+                "a",
+                "b"
+            ]
+        );
+        vm.activate(2);
+        assert!(matches!(
+            vm.take_request(),
+            Some(Request::SystemPickFolder(_))
+        ));
+        vm.event(Event::SystemPicked(None));
+        assert!(!vm.message.is_empty());
     }
 }
