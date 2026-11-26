@@ -229,6 +229,8 @@ jobs:
           CC: clang-cl
           CXX: clang-cl
           CMAKE_LINKER: lld-link
+          # Git for Windows ships /usr/bin/link.exe (coreutils), which shadows MSVC link.exe in this bash step.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
           ACNH_GAME: acnh
           ACNH_BUILD_PLAYER: "1"
         run: |
