@@ -1,11 +1,12 @@
-//! acnh-core: the launcher's engine (docs/code-map.md). The Slint app (`app/`, planned) and
-//! the `acnh-universal` command line both drive it; neither has logic of its own.
+//! acnh-core: the launcher's engine (docs/code-map.md). The Slint app (`app/`) and
+//! the `acnh-universal` command line both drive it; neither has logic of its own. The Android
+//! and iOS players link it too (the in-app download, `appgame`).
 //!
-//! Skeleton (2026-11-02): every module has its final public signatures, in the pattern of
-//! iannitram/totk-universal (MIT), whose generic modules (platform, vdf, steam, artwork,
-//! backup, bundle, fleet, launch, update, hub) are copied here with credit by their issues.
-//! A function that is not built yet returns `Err(Error::NotBuilt(..))`, or panics with "not
-//! built yet" when its signature cannot fail; each one is filled in by its own issue. MIT.
+//! Built since the skeleton of 2026-11-02: Prepare and its stages, the game-folder checks, saves,
+//! backups, bundles, the hub and the fleet, save-relay, Steam, artwork. The generic modules came
+//! from iannitram/totk-universal (MIT), copied with credit by their issues. What is not built
+//! yet (a few stubs) returns `Err(Error::NotBuilt(..))`, or panics
+//! with "not built yet" when its signature cannot fail. MIT.
 //!
 //! Never in this crate: game data, keys, firmware, or code that copies, uploads or logs them
 //! beyond my own devices (SPEC.md M1, M14).

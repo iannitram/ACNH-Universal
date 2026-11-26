@@ -5,10 +5,10 @@ For a smoke build on a Mac, install Xcode, CMake, Ninja, Python 3 and the Vulkan
 ```sh
 tools/build_ios.sh iphoneos
 out="$(mktemp -d)"
-tools/package_ios.sh 0.1 private/ios/build-iphoneos "$out"
+tools/package_ios.sh 0.1 private/ios/build-iphoneos --no-game "$out"
 ```
 
-The packaging script takes a version, an optional build directory, and an optional output folder. It defaults to `private/ios/build-iphoneos` and `~/Dropbox/_transfers/ACNH-Universal/ios/`. It accepts arm64 device builds and requires a destination outside Git work trees.
+The packaging script takes a version, a build directory, one of `--game <prepared folder>` (the big `.ipa`), `--no-game` or `--small <prepared folder>` (see below), and an out folder, which is required and has no default (the script prints its usage and exits otherwise; the delivery folder is `~/Dropbox/_transfers/ACNH-Universal/ios/`). It accepts arm64 device builds and requires a destination outside Git work trees.
 
 The executable uses an ad-hoc signature without entitlements. The package omits the app's `_CodeSignature` resource seal. SideStore creates the seal when it re-signs the app for installation. Until then, full `codesign --verify` reports a missing or invalid resource directory.
 
