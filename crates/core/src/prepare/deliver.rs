@@ -266,8 +266,8 @@ pub(super) fn bundle_mods_optional(
     made.then(|| mods.to_path_buf())
 }
 
-/// What the `ios` target does after the shared stages (which made the Mac player there too,
-/// as upstream's script cannot stop before it; the iOS build does not use it): the two packs
+/// What the `ios` target does after the shared stages (which skip the host player's build, as
+/// the iOS build does not use it): the two packs
 /// when they are missing, the `iphoneos` build under the prepared folder, and the `.ipa` in
 /// the delivery folder, whose path it returns, then the small `.ipa` and the game folder with
 /// its manifest in `<delivery>/small/` (#306).
@@ -571,12 +571,16 @@ pub(super) fn stage_game_delivery(
     if let Some(game_lib) = game_lib {
         std::fs::copy(game_lib, staging.join("libacnh_game.so"))?;
     }
+    let mut known = std::collections::HashMap::new();
     for pak in ["romfs.pak", "spirv.pak"] {
         let src = prepared_out.join(pak);
         if !src.is_file() {
             return Err(Error::Build(format!("missing {}", src.display())));
         }
-        std::fs::copy(&src, staging.join(pak))?;
+        // One read of the pak: the copy is hashed as it is written, and the manifest walk
+        // below takes that digest instead of reading the staged file again.
+        let sha256 = crate::fsutil::copy_and_sha256(&src, &staging.join(pak))?;
+        known.insert(pak.to_owned(), sha256);
     }
     for dir in ["analysis", "fonts", "aoc"] {
         let src_dir = prepared_out.join(dir);
@@ -586,7 +590,7 @@ pub(super) fn stage_game_delivery(
     }
 
     let mut manifest_files = Vec::new();
-    collect_manifest_files(&staging, Path::new(""), &mut manifest_files)?;
+    collect_manifest_files(&staging, Path::new(""), &known, &mut manifest_files)?;
     manifest_files.sort_by(|a, b| a.path.cmp(&b.path));
 
     let manifest = crate::appgame::Manifest {
@@ -664,6 +668,7 @@ pub(super) fn copy_dir_follow_symlinks(src: &Path, dst: &Path) -> Result<()> {
 pub(super) fn collect_manifest_files(
     dir: &Path,
     prefix: &Path,
+    known: &std::collections::HashMap<String, String>,
     out: &mut Vec<crate::appgame::ManifestFile>,
 ) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
@@ -677,14 +682,18 @@ pub(super) fn collect_manifest_files(
         let rel = prefix.join(&name);
         let meta = std::fs::metadata(&path)?;
         if meta.is_dir() {
-            collect_manifest_files(&path, &rel, out)?;
+            collect_manifest_files(&path, &rel, known, out)?;
         } else if meta.is_file() {
             let rel_str = rel
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            let sha256 = crate::appgame::sha256_file(&path)?;
+            // A digest taken while the file was copied is not computed again.
+            let sha256 = match known.get(&rel_str) {
+                Some(sha256) => sha256.clone(),
+                None => crate::appgame::sha256_file(&path)?,
+            };
             out.push(crate::appgame::ManifestFile {
                 path: rel_str,
                 size: meta.len(),

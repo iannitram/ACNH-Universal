@@ -96,6 +96,27 @@ pub(crate) fn size_and_sha256(path: &Path) -> Result<(u64, String)> {
     Ok((size, format!("{:x}", hasher.finalize())))
 }
 
+/// Copy `from` to `to` and return the lowercase hex SHA-256 of what was copied, reading the
+/// source once: a 10 GB pak is copied and hashed in one pass, not copied and then read again.
+/// The permissions carry over as `std::fs::copy` does.
+pub(crate) fn copy_and_sha256(from: &Path, to: &Path) -> Result<String> {
+    let mut source = File::open(from)?;
+    let mut target = File::create(to)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = source.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        std::io::Write::write_all(&mut target, &buf[..n])?;
+    }
+    drop(target);
+    std::fs::set_permissions(to, source.metadata()?.permissions())?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// The work tree `path` is in, if any: the nearest folder above it that holds `.git`.
 pub(crate) fn git_work_tree(path: &Path) -> Option<PathBuf> {
     let path = std::path::absolute(path).ok()?;

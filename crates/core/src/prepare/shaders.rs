@@ -1,6 +1,46 @@
 //! The shaders and fonts stages, and the packs they make.
 
 use super::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+thread_local! {
+    /// The RomFS keys of the prepare running on this thread (`RunKeys`), `None` outside one.
+    static RUN_KEYS: RefCell<Option<HashMap<PathBuf, String>>> = const { RefCell::new(None) };
+}
+
+/// Holds the game RomFS's `tree_key` for the length of one prepare: the shaders stage's key and
+/// the pack's key name the same folder, and the delivery packs again, so the RomFS (tens of
+/// thousands of files) was walked up to three times. The RomFS is only read during a prepare.
+pub(super) struct RunKeys;
+
+impl RunKeys {
+    pub(super) fn begin() -> Self {
+        RUN_KEYS.with(|keys| *keys.borrow_mut() = Some(HashMap::new()));
+        RunKeys
+    }
+}
+
+impl Drop for RunKeys {
+    fn drop(&mut self) {
+        RUN_KEYS.with(|keys| *keys.borrow_mut() = None);
+    }
+}
+
+/// `tree_key` of the game's RomFS, walked once per prepare (`RunKeys`) and each time outside one.
+fn romfs_key(romfs: &Path) -> Result<String> {
+    let known = RUN_KEYS.with(|keys| keys.borrow().as_ref()?.get(romfs).cloned());
+    if let Some(key) = known {
+        return Ok(key);
+    }
+    let key = tree_key(romfs)?;
+    RUN_KEYS.with(|keys| {
+        if let Some(keys) = keys.borrow_mut().as_mut() {
+            keys.insert(romfs.to_owned(), key.clone());
+        }
+    });
+    Ok(key)
+}
 
 /// The Rust part of the shaders stage: pack the RomFS and the stage's `.spv` files for the
 /// runtime (`pack::romfs`, `pack::spirv`). A source that is not there yet leaves its pack
@@ -16,7 +56,7 @@ pub(crate) fn pack_prepared(out: &Path, romfs: &Path) -> Result<()> {
     std::fs::create_dir_all(out)?;
     if romfs.is_dir() {
         let pak = out.join("romfs.pak");
-        let inputs = format!("romfs.pak v1 {}\n{}", build_version(), tree_key(romfs)?);
+        let inputs = format!("romfs.pak v1 {}\n{}", build_version(), romfs_key(romfs)?);
         redo_unless_current(&out.join(".romfs.pak.key"), &inputs, &pak, || {
             crate::pack::romfs(romfs, &pak)
         })?;
@@ -120,7 +160,7 @@ pub(super) fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
         "shaders v1 {}\nspirv-val {}\nromfs {}\nmain {}\nharness {} {}\n",
         build_version(),
         find_on_path("spirv-val").is_some(),
-        tree_key(&req.game.romfs).map_err(invalidate)?,
+        romfs_key(&req.game.romfs).map_err(invalidate)?,
         file_key(&main),
         file_key(&harness.join("bin/Release/net10.0/spirv_harness.dll")),
         file_key(&harness.join("out/spirv_harness.dll")),
@@ -166,6 +206,38 @@ pub fn rust_fonts(req: &Request) -> Result<()> {
     }
     crate::glyphs::stage(&req.out.join("extract/romfs"), &req.out.join("fonts"), host)
         .map_err(|error| Error::Build(format!("stage {}: {error}", Stage::Fonts.key())))
+}
+
+#[cfg(test)]
+mod run_keys_tests {
+    use super::{romfs_key, RunKeys};
+
+    #[test]
+    fn a_prepare_walks_the_romfs_once_and_outside_one_every_call_walks() {
+        let dir = std::env::temp_dir().join(format!("acnh-run-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.bin"), b"a").unwrap();
+        let first = romfs_key(&dir).unwrap();
+        std::fs::write(dir.join("b.bin"), b"b").unwrap();
+        assert_ne!(romfs_key(&dir).unwrap(), first, "no prepare: walked again");
+        {
+            let _run = RunKeys::begin();
+            let kept = romfs_key(&dir).unwrap();
+            std::fs::write(dir.join("c.bin"), b"c").unwrap();
+            assert_eq!(
+                romfs_key(&dir).unwrap(),
+                kept,
+                "within a prepare: the one walk"
+            );
+        }
+        assert_ne!(
+            romfs_key(&dir).unwrap(),
+            first,
+            "the run's keys end with it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
