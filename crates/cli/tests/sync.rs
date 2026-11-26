@@ -596,3 +596,80 @@ fn anyway_on_a_held_island_that_also_changed_here_is_still_a_conflict() {
     assert_eq!(code, 0, "{out}{err}");
     assert!(machine.started());
 }
+
+#[test]
+fn keep_never_answers_a_push_conflict_after_the_game() {
+    for keep in ["relay", "here"] {
+        let machine = Machine::new(&format!("push-keep-{keep}"));
+        let remote = Arc::new(MemoryRemote::new());
+        let (here, a, a_saves) = in_step(&machine, &remote);
+        let save_dir = machine.save_dir();
+        *machine.player.during.lock().unwrap() = Some(Box::new(move || {
+            fs::write(save_dir.join("main.dat"), "main island data: played-here").unwrap();
+            fs::write(a_saves.join("main.dat"), "main island data: from-a").unwrap();
+            a.push(&a_saves, None).unwrap();
+        }));
+
+        let (code, out, err) =
+            machine.exec(&["play", "--keep", keep], "", RelaySource::Fixed(&here));
+        assert_eq!(code, 6, "--keep {keep}: {out}{err}");
+        assert!(machine.started());
+        // The island here is kept, nothing is backed up and nothing replaced the relay's.
+        assert_eq!(
+            fs::read_to_string(machine.save_dir().join("main.dat")).unwrap(),
+            "main island data: played-here"
+        );
+        assert!(!saves::backups_dir(&machine.data_root()).exists());
+    }
+}
+
+#[test]
+fn a_relay_lost_while_the_game_ran_exits_5_and_keeps_the_island() {
+    let machine = Machine::new("push-offline");
+    let remote = Arc::new(MemoryRemote::new());
+    let (here, _a, _a_saves) = in_step(&machine, &remote);
+    let save_dir = machine.save_dir();
+    let gone = remote.clone();
+    *machine.player.during.lock().unwrap() = Some(Box::new(move || {
+        fs::write(save_dir.join("main.dat"), "main island data: played-here").unwrap();
+        gone.set_reachable(false);
+    }));
+
+    let (code, out, err) = machine.exec(&["play"], "", RelaySource::Fixed(&here));
+    assert_eq!(code, 5, "{out}{err}");
+    assert!(machine.started());
+    assert!(out.contains("the relay did not answer"), "{out}");
+    assert!(out.contains("game exited with 0"), "{out}");
+    assert_eq!(
+        fs::read_to_string(machine.save_dir().join("main.dat")).unwrap(),
+        "main island data: played-here"
+    );
+}
+
+#[test]
+fn a_failing_game_keeps_exit_1_even_when_the_push_is_offline() {
+    let machine = Machine::new("push-offline-failed-game");
+    let remote = Arc::new(MemoryRemote::new());
+    let (here, _a, _a_saves) = in_step(&machine, &remote);
+    let gone = remote.clone();
+    *machine.player.during.lock().unwrap() = Some(Box::new(move || gone.set_reachable(false)));
+    machine.player.exit.store(3, Ordering::SeqCst);
+
+    let (code, out, err) = machine.exec(&["play"], "", RelaySource::Fixed(&here));
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("game exited with 3"), "{out}");
+}
+
+#[test]
+fn sync_status_exits_5_when_the_relay_cannot_be_reached() {
+    let machine = Machine::new("status-offline");
+    island(&machine.save_dir(), "here");
+    machine.setup();
+    let (code, out, err) = machine.exec(&["sync", "status"], "", RelaySource::Open);
+    assert_eq!(code, 0, "{out}{err}");
+
+    machine.dav.set_online(false);
+    let (code, out, err) = machine.exec(&["sync", "status"], "", RelaySource::Open);
+    assert_eq!(code, 5, "{out}{err}");
+    assert!(out.contains("the relay cannot be reached"), "{out}");
+}

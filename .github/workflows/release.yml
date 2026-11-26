@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
@@ -188,6 +188,8 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [linux, windows, mac]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -198,8 +200,11 @@ jobs:
           merge-multiple: true
       - name: File list has no game data
         run: |
+          # The archive names, then the contents of each zip (the AppImage's file list is checked in the linux job,
+          # before it is packed). A file that is not a readable zip fails the step.
           # shellcheck disable=SC2012
           ls dist | tee files.txt
+          for z in dist/*.zip; do unzip -Z1 "$z" >> files.txt; done
           bash tools/check_release_files.sh < files.txt
       - env:
           GH_TOKEN: ${{ github.token }}

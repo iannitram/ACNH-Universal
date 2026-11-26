@@ -5,16 +5,21 @@
 # mac`); nobody runs it by hand, and no workflow names it. CI uses it only on stand-ins:
 # `--no-game`, or a game folder of empty files.
 # usage: tools/package_mac.sh <version> <app> <game folder>|--no-game <out folder> [--mods <mods folder>]
+# The package is staged outside <out folder> (the owner's Dropbox delivery folder) on the same volume, under $ACNH_STAGE_ROOT,
+# $TMPDIR or ~/Library/Caches (tools/package_common.sh), and only the finished zip is moved in; a stage left by a killed run
+# is cleared by the next one.
 # --mods: the folder tools/bundle_mods.sh makes (bundle.txt, ptbr/, speedfix60/). It goes to Contents/Resources/mods,
 # where the player's first start copies the SpeedFix's files into its data root (video.frame_rate = 60 needs them).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 usage() { echo "usage: tools/package_mac.sh <version> <app> <game folder>|--no-game <out folder> [--mods <mods folder>]" >&2; exit 2; }
 die() { echo "error: $*" >&2; exit 1; }
+# shellcheck source=tools/package_common.sh
+. "$root/tools/package_common.sh"
 [ "$#" -eq 4 ] || { [ "$#" -eq 6 ] && [ "$5" = --mods ]; } || usage
 version=$1
 case "$version" in ''|*[!a-zA-Z0-9._-]*|.|..) usage ;; esac
-real() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+real() { pkg_realpath "$1"; }
 [ -n "$4" ] || die "the out folder is required; this script has no default"
 app=$(real "$2")
 out=$(real "$4")
@@ -25,21 +30,14 @@ mods=
 ci=${CI:-}${GITHUB_ACTIONS:-}
 
 # --- the out folder: nothing is written until every refusal has been checked ---
-existing=$out
-while [ ! -d "$existing" ]; do existing=$(dirname "$existing"); done
-git_location=$(git -C "$existing" rev-parse --is-inside-work-tree --is-inside-git-dir 2>/dev/null || true)
-if printf '%s\n' "$git_location" | grep -qx true; then
-  die "the out folder must be outside every git work tree and git folder"
-fi
+# Fail closed: any git error other than "not a git repository" refuses the folder, as package_ios.sh always did.
+msg=$(pkg_refuse_git "$out") || die "$msg"
+case "$out/" in "$root/"*) die "the out folder must be outside the checkout: $out" ;; esac
 case "$out/" in "$app/"*) die "the out folder must not be inside the app" ;; esac
 if [ -n "$game" ]; then
   case "$out/" in "$game/"*) die "the out folder must not be inside the game folder" ;; esac
 fi
-if [ -n "$ci" ]; then
-  [ -n "${RUNNER_TEMP:-}" ] || die "under CI the out folder must be inside \$RUNNER_TEMP, which is not set"
-  temp=$(real "$RUNNER_TEMP")
-  case "$out/" in "$temp/"*) ;; *) die "under CI the out folder must be inside \$RUNNER_TEMP" ;; esac
-fi
+msg=$(pkg_refuse_ci_out "$out") || die "$msg"
 zip=$out/ACNH-Universal-$version.zip
 if [ -L "$zip" ] || [ -d "$zip" ]; then die "the zip destination must not be a link or a folder"; fi
 
@@ -74,21 +72,18 @@ done < <(find "$app" -type f -print0)
   die "the app's file list fails tools/check_release_files.sh"
 
 # --- stage, sign, zip ---
-stage=$out/.ACNH-Universal-$version.partial
-partial=$zip.partial
+# The out folder is the owner's Dropbox delivery folder: stage outside the synced tree, on the same volume, and move
+# only the finished zip in (tools/package_common.sh).
+stage=$(pkg_stage_path "$out" "$version") || die "$stage"  # on a refusal the output is the reason
+partial=$stage/ACNH-Universal-$version.zip.partial
 # shellcheck source=tools/remove_tree.sh
 . "$root/tools/remove_tree.sh"
-cleanup() {
-  remove_tree "$stage" ||
-    echo "warning: could not remove $stage (something keeps writing into it): remove it before the next run" >&2
-  rm -f "$partial" || true
-}
+cleanup() { pkg_drop_stage "$stage" "$out"; }
 mkdir -p "$out"
-# A staging folder or partial zip left by an earlier run is cleared first; one that cannot be removed stops here.
-remove_tree "$stage" || die "$stage is left from an earlier run and cannot be removed: remove it, then run again"
-rm -f "$partial"
+# A staging folder left by an earlier run is cleared first; one that cannot be removed stops here.
+pkg_clear_stage "$stage" "$out" "$version" || die "$stage is left from an earlier run and cannot be removed: remove it, then run again"
 trap cleanup EXIT
-mkdir "$stage"
+mkdir -p "$stage"
 bundle=$stage/ACNH-Universal.app
 ditto "$app" "$bundle"
 rm -rf "$bundle/Contents/_CodeSignature"

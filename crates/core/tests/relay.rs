@@ -773,6 +773,33 @@ fn hold_requires_an_explicit_override_and_status_tracks_changes() {
 }
 
 #[test]
+fn a_failed_card_write_does_not_fail_a_finished_push_or_pull() {
+    let root = temp_fixture_dir("card-write-fails");
+    let remote = Arc::new(MemoryRemote::new());
+    let saves = root.join("a").join("saves");
+    populate_island(&saves, "one");
+    // A non-empty directory where the card file goes makes the card write fail.
+    let blocker = root.join("a").join("launcher-card.txt");
+    fs::create_dir_all(&blocker).unwrap();
+    fs::write(blocker.join("keep"), "x").unwrap();
+    let relay = SaveRelay::new(remote.clone(), create_store(&root.join("a")), "a");
+    assert!(matches!(relay.push(&saves, None), Ok(Sync::Done(_))));
+
+    let other = root.join("b");
+    let other_saves = other.join("saves");
+    let blocker = other.join("launcher-card.txt");
+    fs::create_dir_all(&blocker).unwrap();
+    fs::write(blocker.join("keep"), "x").unwrap();
+    let relay = SaveRelay::new(remote, create_store(&other), "b");
+    assert!(matches!(relay.pull(&other_saves, None), Ok(Sync::Done(_))));
+    assert_eq!(
+        fs::read_to_string(other_saves.join("main.dat")).unwrap(),
+        "main island data: one"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn session_card_is_written_after_push() {
     let root = temp_fixture_dir("session-card");
     let saves = root.join("saves");

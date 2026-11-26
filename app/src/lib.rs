@@ -3,6 +3,8 @@
 pub mod android_launcher;
 pub mod build_actions;
 pub mod first_run;
+pub mod fleet_report;
+pub mod hub_host;
 pub mod input;
 pub mod play;
 pub mod player_env;
