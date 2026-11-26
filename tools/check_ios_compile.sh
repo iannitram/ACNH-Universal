@@ -20,7 +20,7 @@ done
 
 # The player links the Rust runtime (NX_RUST_RUNTIME), so the wrappers compile against the header cbindgen
 # generates for it: build.rs writes it on any host build, with the same text the iOS build gets.
-cargo build -p acnh-runtime --quiet
+cargo build --locked -p acnh-runtime --quiet
 cargo_target=${CARGO_TARGET_DIR:-target}
 runtime_header=$(find "$cargo_target/debug/build" -name acnh_runtime.h -path '*acnh-runtime*' -print0 |
     xargs -0 ls -t | head -n 1)

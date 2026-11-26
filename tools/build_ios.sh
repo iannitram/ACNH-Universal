@@ -15,7 +15,7 @@
 # It builds libvpx for the SDK too (tools/build_libvpx.sh, into private/third_party/libvpx-ios/<sdk>) when it is not
 # there, so the game's movies play, and refuses a configure that dropped it.
 #
-# It also builds the Rust runtime library (save-relay in the player, issue #172): cargo build -p acnh-runtime --release
+# It also builds the Rust runtime library (save-relay in the player, issue #172): cargo build --locked -p acnh-runtime --release
 # --target aarch64-apple-ios (aarch64-apple-ios-sim for the simulator), and fails unless the SDL3 it built has the
 # GameController joystick driver (SDL_JOYSTICK_MFI), which the pads need.
 #
@@ -66,8 +66,10 @@ if [ ! -f "$vulkan/vulkan/vulkan.h" ]; then
     exit 1
 fi
 
-SDL3_TAG=release-3.4.18
-MOLTENVK_TAG=v1.3.0
+# Versions live in tools/versions.env, shared with CI and Prepare (#328).
+. "$root/tools/versions.env"
+SDL3_TAG=release-$SDL3_IOS
+MOLTENVK_TAG=v$MOLTENVK
 mkdir -p "$third/downloads" "$third/src" "$third/build" "$third/$sdk"
 
 fetch() { # <url> <file>
@@ -76,8 +78,8 @@ fetch() { # <url> <file>
         return 0
     fi
     echo "fetching $(basename "$file")"
-    curl --fail --silent --show-error --location --retry 3 --output "$file.part" "$url"
-    mv "$file.part" "$file"
+    # Checked against tools/downloads.sha256 (#328); an unlisted URL or a mismatch stops the build.
+    bash "$root/tools/fetch_pinned.sh" "$url" "$file"
 }
 
 # ---- SDL3 (static, for iOS) -------------------------------------------------------------------------------------
@@ -138,7 +140,7 @@ if command -v rustup >/dev/null 2>&1 && ! rustup target list --installed | grep 
     echo "error: the Rust target $rust_target is missing: rustup target add $rust_target" >&2
     exit 1
 fi
-IPHONEOS_DEPLOYMENT_TARGET=15.0 cargo build -p acnh-runtime --release --target "$rust_target"
+IPHONEOS_DEPLOYMENT_TARGET=15.0 cargo build --locked -p acnh-runtime --release --target "$rust_target"
 cargo_target=${CARGO_TARGET_DIR:-$root/target}
 case "$cargo_target" in /*) ;; *) cargo_target=$root/$cargo_target ;; esac
 runtime_lib=$cargo_target/$rust_target/release/libacnh_runtime.a

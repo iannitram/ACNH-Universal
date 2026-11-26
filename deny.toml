@@ -1,0 +1,55 @@
+# cargo-deny policy (#328). Run: cargo deny --locked check   (CI job "Dependencies (cargo deny)").
+# A first policy: it fails on a known security advisory, on a crate from a registry or git host not named
+# here, and on a licence not listed. Duplicate crate versions (62 today) are a warning, not a failure:
+# thinning them is its own work.
+
+[graph]
+all-features = true
+
+[advisories]
+# Yanked crates fail; a known vulnerability fails. An advisory that cannot be fixed yet is listed in
+# `ignore` with the reason and the issue that will remove it.
+yanked = "deny"
+# The first run (2026-11-26) found these four. Each is ignored until the follow-up issue removes it
+# (a `cargo update -p url` fixes the first; the others need a dependency to move); then delete the line.
+ignore = [
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained; no safe upgrade; acnh-core uses it directly for fonts, so moving to skrifa is its own change" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.32 (quadratic start-tag check); comes in through save-relay's pinned rev, so it goes with the move to a save-relay release (#121)" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.32 (NsReader allocation); same copy as RUSTSEC-2026-0194" },
+    { id = "RUSTSEC-2026-0592", reason = "url 2.5.8 (Url::origin on nested blob: URLs); fixed by url >= 2.5.9, a lockfile bump kept out of this pinning change" },
+]
+
+[licenses]
+confidence-threshold = 0.9
+# Permissive licences, MPL-2.0 (cbindgen, a build tool), and Slint's royalty-free licence: ROADMAP.md lists
+# slint-ui/slint as a dependency under it, with the notice in About. Slint also offers GPL-3.0; it is not
+# allowed, so a crate that offered only GPL-3.0 would fail here.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LicenseRef-Slint-Royalty-free-2.0",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# save-relay is pinned by rev in every manifest (tools/check_pins.sh).
+allow-git = ["https://github.com/iannitram/save-relay"]
