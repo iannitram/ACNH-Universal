@@ -88,3 +88,25 @@ fn invalid_function_ranges_return_errors() {
         Err(Error::FunctionRange { start: 1, end: 4 })
     ));
 }
+
+#[test]
+fn undecodable_words_are_reported_and_decoding_resumes_after_them() {
+    let words: [u32; 5] = [
+        0x91000400, // add x0, x0, #1
+        0xffffffff, // undecodable
+        0x91000400, // add x0, x0, #1
+        0xffffffff, // undecodable
+        0xd65f03c0, // ret
+    ];
+    let module = Module {
+        image: words.into_iter().flat_map(u32::to_le_bytes).collect(),
+        ..Module::default()
+    };
+    let analysis = Analysis::default();
+    let mut emitter = Emitter::new(&module, &analysis, "fixture").unwrap();
+    let text = emitter.function(&function(0, 20)).unwrap();
+    assert_eq!(text.matches("undecodable 0xffffffff").count(), 2, "{text}");
+    assert_eq!(text.matches(" // add x0, x0, #1").count(), 2, "{text}");
+    assert!(text.contains(" // ret"), "{text}");
+    assert_eq!(emitter.coverage.handled, 3);
+}

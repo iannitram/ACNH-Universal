@@ -6,7 +6,7 @@ use crate::ehframe::{self, Fde};
 use crate::load::{
     self, Error, Module, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// The module's text as an address -> instruction map.
 pub struct Insns<'a> {
@@ -192,6 +192,9 @@ pub fn analyse(m: &Module, log: &mut dyn FnMut(&str), patched: &[u64]) -> Result
 
     // Fixpoint: build ranges, resolve jump tables, promote out-of-range branch targets to entries.
     let mut converged = false;
+    // A table depends only on the function's bounds and the (fixed) image, so a function that
+    // keeps its bounds across passes keeps its tables instead of resolving them again.
+    let mut resolved: HashMap<(u64, u64, u64), Option<Vec<u64>>> = HashMap::new();
     for it in 0..400 {
         let sorted: Vec<u64> = entries.iter().copied().collect();
         an.functions = ranges(m, &an, &sorted, &fdes, &fde_bounds);
@@ -213,9 +216,12 @@ pub fn analyse(m: &Module, log: &mut dyn FnMut(&str), patched: &[u64]) -> Result
                         }
                     }
                     Some(Insn::Br(_)) => {
-                        if let Some(tg) = jump_table(m, &insns, f, a) {
+                        let found = resolved
+                            .entry((f.start, f.end, a))
+                            .or_insert_with(|| jump_table(m, &insns, f, a));
+                        if let Some(tg) = found.as_deref() {
                             let e = an.jump_tables.entry(a).or_default();
-                            e.extend(tg);
+                            e.extend_from_slice(tg);
                             e.sort_unstable();
                             e.dedup();
                         }
