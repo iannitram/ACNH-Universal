@@ -10,3 +10,4 @@ Ours, in English; upstream's own docs (`docs/*.md`, some in Portuguese) are kept
 | [0004](0004-build-hubs.md) | Three home build hubs |
 | [0005](0005-android-upstream-route.md) | Android keeps upstream's route |
 | [0006](0006-apple.md) | Apple: the same recompiled code on Mac and iOS |
+| [0007](0007-recompiler-names-and-capstone.md) | The Rust recompiler binary is `acnh-recompiler`; Capstone stays 5.0.6 in Rust and 5.0.7 in the C++ copy |

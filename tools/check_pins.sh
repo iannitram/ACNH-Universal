@@ -80,7 +80,7 @@ done
 while IFS== read -r k v; do
     case "$k" in "" | \#*) continue ;; esac
     # short or generic values (a bare commit prefix) are only checked in their quoted form
-    for f in crates/core/src/prepare.rs .github/workflows/check.yml tools/build_ios.sh tools/build_android.sh; do
+    for f in crates/core/src/prepare/*.rs .github/workflows/check.yml tools/build_ios.sh tools/build_android.sh; do
         if grep -nE "(^|[^0-9.])${v//./\\.}([^0-9]|\\.[^0-9]|$)" "$f" | grep -v -e '^[0-9]*: *#' -e '^[0-9]*: *//' | grep -q .; then
             grep -nE "(^|[^0-9.])${v//./\\.}([^0-9]|\\.[^0-9]|$)" "$f" | grep -v -e '^[0-9]*: *#' -e '^[0-9]*: *//' >&2
             bad "$f spells out $k=$v; read it from $vf"
