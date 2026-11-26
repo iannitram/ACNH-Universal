@@ -1235,7 +1235,7 @@ fn rust_version_reads_build_id_and_writes_version_ini() {
 /// A dropbox folder with `_transfers/ACNH-Universal/` in it, and the request that delivers to
 /// its `ios` folder.
 /// The version the Apple deliveries are named with: `tools/build_version.sh`'s short build
-/// (`<BASE_VER>-<VCODE>`, as the script prints them in this checkout), not the crate's 0.0.0.
+/// (`<BASE_VER>-<VCODE>`, as the script prints them in this checkout), not the crate's own.
 fn apple_version() -> String {
     let output = std::process::Command::new("bash")
         .arg("tools/build_version.sh")

@@ -3,8 +3,8 @@
 # CFBundleVersion) from git state and optional NX_RELEASE_VERSION.
 #
 # Sets:
-#   BASE_VER  - base semver without leading 'v' (e.g. 0.11.0, or 0.0.0 when no git tags exist)
-#   VNAME     - display version: clean <BASE_VER> for an exact release tag or clean NX_RELEASE_VERSION,
+#   BASE_VER  - base semver without leading 'v': the workspace version in Cargo.toml (0.0.0 only when that is unreadable)
+#   VNAME     - display version: clean <BASE_VER> at HEAD tagged v<BASE_VER>, or clean NX_RELEASE_VERSION,
 #               otherwise <BASE_VER>+<short-sha>[-dirty]
 #   VCODE     - monotonically rising integer >= 1100 (and <= 2100000000):
 #               BASE_CODE * 1000 + COMMIT_COUNT when BASE_CODE > 0, else 10000 + COMMIT_COUNT
@@ -29,11 +29,14 @@ if [ "$_bv_git" = 0 ] && [ -f "$_bv_root/BUILD_VERSION" ]; then
   [[ $_bv_file_commits =~ ^[0-9]+$ ]] || _bv_file_commits=""
 fi
 
-_bv_tag=$(_bv_g describe --tags --abbrev=0 2>/dev/null || true)
-# A tag that is not a version (this repo's `mods`, a stray `laptop`) is not a base version.
-[[ $_bv_tag =~ ^v?[0-9]+(\.[0-9]+){1,2}([-+].*)?$ ]] || _bv_tag=""
-BASE_VER=${_bv_tag#v}
-BASE_VER=${BASE_VER:-${_bv_file_ver:-0.0.0}}
+# The base version is ours and tracked: the workspace version in Cargo.toml ([workspace.package] version), the same in
+# every clone, shallow or tagless or not. Git tags are never read for it (upstream's v0.3.0..v0.11.0 live in another
+# remote's namespace and a clone may or may not have them). A packaged source's BUILD_VERSION file, then
+# NX_RELEASE_VERSION, take precedence.
+_bv_manifest=$(awk '/^\[/{p=($0=="[workspace.package]")} p&&/^version[ \t]*=/{gsub(/^[^"]*"|".*$/,""); print; exit}' \
+  "$_bv_root/Cargo.toml" 2>/dev/null || true)
+[[ $_bv_manifest =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] || _bv_manifest=""
+BASE_VER=${_bv_file_ver:-${_bv_manifest:-0.0.0}}
 
 _bv_is_release=0
 if [[ ${NX_RELEASE_VERSION:-} =~ ^v?[0-9]+\.[0-9]+ ]]; then
@@ -42,9 +45,10 @@ if [[ ${NX_RELEASE_VERSION:-} =~ ^v?[0-9]+\.[0-9]+ ]]; then
   if [[ $BASE_VER =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
     _bv_is_release=1
   fi
-elif [ -n "$_bv_tag" ] \
-  && _bv_g describe --tags --exact-match HEAD >/dev/null 2>&1 \
+elif [ "$BASE_VER" != 0.0.0 ] \
+  && _bv_g describe --tags --exact-match --match "v$BASE_VER" HEAD >/dev/null 2>&1 \
   && _bv_g diff-index --quiet HEAD -- 2>/dev/null; then
+  # HEAD carries our own release tag, v<manifest version>.
   _bv_is_release=1
 fi
 

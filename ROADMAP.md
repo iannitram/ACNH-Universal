@@ -46,7 +46,7 @@ Each of these stops work until I answer. The issue holds the detail.
 | Which Adreno device is the 1.0 Android device, or does M9 change? | Every Android result is from the Mali Pixel Fold | #370 |
 | Where does the one Android signing key live? | Each checkout signs with its own; an APK from another machine cannot update the app | #366 |
 | How does the SpeedFix patch (CC BY-NC 4.0) ship, and what must `NOTICE` carry? | It is tracked in this public MIT repo and built into my apps | #329 |
-| Our version and tag scheme, and who cuts 1.0 | The workspace version is `0.0.0`; builds read upstream's tags | #324, #370 |
+| Our version and tag scheme, and who cuts 1.0 | Proposed in the draft PR for #324: the base version is the workspace version in `Cargo.toml` (now `0.12.0`, above upstream's last tag `v0.11.0`); builds never read git tags for it; our releases are tags `v<workspace version>`, and 1.0 is the change that sets it to `1.0.0` followed by tag `v1.0.0`; the Android and iOS code is base*1000 + commit count | #324, #370 |
 | Do upstream's online services (`nextendo`, `hle_ssl`, `hle_hostnet`) stay on in our builds? | Online play is a Won't for 1.0; they came in with the sync | #352 |
 | One recompiler or two after 1.0 | The on-phone Prepare still uses upstream's C++ recompiler | #351 |
 

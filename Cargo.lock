@@ -20,7 +20,7 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
 name = "acnh-app"
-version = "0.0.0"
+version = "0.12.0"
 dependencies = [
  "acnh-core",
  "android-activity 0.6.1",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "acnh-cli"
-version = "0.0.0"
+version = "0.12.0"
 dependencies = [
  "acnh-core",
  "save-relay",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "acnh-core"
-version = "0.0.0"
+version = "0.12.0"
 dependencies = [
  "acnh-recomp",
  "chacha20poly1305",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "acnh-recomp"
-version = "0.0.0"
+version = "0.12.0"
 dependencies = [
  "capstone",
  "regex",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "acnh-runtime"
-version = "0.0.0"
+version = "0.12.0"
 dependencies = [
  "acnh-core",
  "block2 0.6.2",
