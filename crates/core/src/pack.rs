@@ -38,11 +38,31 @@ pub fn romfs(root: &Path, out: &Path) -> Result<()> {
 pub fn romfs_range(root: &Path, out: &Path, from: u64, to: u64) -> Result<()> {
     let files = romfs_layout(root)?;
     let index = romfs_index(&files)?;
-    let file = File::create(out)?;
+    // Through a temp file and a rename, as `spirv` does: a kill mid-write must not leave a
+    // truncated pack at `out`.
+    let temp = with_suffix(out, ".tmp");
+    let written = write_romfs(&temp, &files, &index, from, to);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    replace_file(&temp, out)
+}
+
+fn replace_file(temp: &Path, out: &Path) -> Result<()> {
+    if fs::rename(temp, out).is_err() {
+        fs::remove_file(out)?;
+        fs::rename(temp, out)?;
+    }
+    Ok(())
+}
+
+fn write_romfs(temp: &Path, files: &[RomfsFile], index: &[u8], from: u64, to: u64) -> Result<()> {
+    let file = File::create(temp)?;
     let mut range = RangeWriter::new(file, from, to);
-    range.write_all(&index)?;
+    range.write_all(index)?;
     let mut pos = index.len() as u64;
-    for entry in &files {
+    for entry in files {
         if range.done() {
             break;
         }
@@ -57,6 +77,7 @@ pub fn romfs_range(root: &Path, out: &Path, from: u64, to: u64) -> Result<()> {
         pos = entry.offset + entry.size;
     }
     range.flush()?;
+    range.inner.sync_all()?;
     Ok(())
 }
 
@@ -241,11 +262,7 @@ pub fn spirv(src: &Path, out: &Path) -> Result<()> {
         let _ = fs::remove_file(&temp);
         return Err(error);
     }
-    if fs::rename(&temp, out).is_err() {
-        fs::remove_file(out)?;
-        fs::rename(&temp, out)?;
-    }
-    Ok(())
+    replace_file(&temp, out)
 }
 
 fn write_spirv(path: &Path, index: &[u8], entries: &[(String, PathBuf, u64)]) -> Result<()> {

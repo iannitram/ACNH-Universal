@@ -882,27 +882,34 @@ fn fix_mod_archives(req: &Request) -> Result<()> {
 /// runtime (`pack::romfs`, `pack::spirv`). A source that is not there yet leaves its pack
 /// alone, as upstream keeps the loose folder until something packs it.
 fn pack_stage(req: &Request) -> Result<()> {
-    std::fs::create_dir_all(&req.out)?;
-    if req.game.romfs.is_dir() {
-        let pak = req.out.join("romfs.pak");
+    pack_prepared(&req.out, &req.game.romfs)
+}
+
+/// `pack_stage` on a prepared folder `out` and the game's RomFS folder. A pack whose key
+/// record is missing or stale is rebuilt, so a pack a killed run left truncated never ships;
+/// the deliver paths and `pack_folder` call this rather than only testing the file exists.
+pub(crate) fn pack_prepared(out: &Path, romfs: &Path) -> Result<()> {
+    std::fs::create_dir_all(out)?;
+    if romfs.is_dir() {
+        let pak = out.join("romfs.pak");
         let inputs = format!(
             "romfs.pak v1 {}\n{}",
             env!("CARGO_PKG_VERSION"),
-            tree_key(&req.game.romfs)?
+            tree_key(romfs)?
         );
-        redo_unless_current(&req.out.join(".romfs.pak.key"), &inputs, &pak, || {
-            crate::pack::romfs(&req.game.romfs, &pak)
+        redo_unless_current(&out.join(".romfs.pak.key"), &inputs, &pak, || {
+            crate::pack::romfs(romfs, &pak)
         })?;
     }
-    let spirv = req.out.join("spirv");
+    let spirv = out.join("spirv");
     if spirv.is_dir() {
-        let pak = req.out.join("spirv.pak");
+        let pak = out.join("spirv.pak");
         let inputs = format!(
             "spirv.pak v1 {}\n{}",
             env!("CARGO_PKG_VERSION"),
             tree_key(&spirv)?
         );
-        redo_unless_current(&req.out.join(".spirv.pak.key"), &inputs, &pak, || {
+        redo_unless_current(&out.join(".spirv.pak.key"), &inputs, &pak, || {
             crate::pack::spirv(&spirv, &pak)
         })?;
     }
@@ -2707,9 +2714,9 @@ fn ios_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
         .delivery
         .as_deref()
         .ok_or_else(|| Error::Env("the delivery folder is not set".into()))?;
-    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
-        pack_stage(req)?;
-    }
+    // Always: a no-op while the packs' key records match, a rebuild of a pack that has no
+    // current record (one a killed run left truncated).
+    pack_stage(req)?;
     let build = req.out.join("build-ios");
     let mut build_args = build_ios_args(&req.out.join("gen"), &build);
     // A Finder-launched app's PATH has only launchd's folders: the build script finds cargo
@@ -2789,9 +2796,9 @@ fn mac_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> Res
         .install
         .as_deref()
         .ok_or_else(|| Error::Env("the install folder is not set".into()))?;
-    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
-        pack_stage(req)?;
-    }
+    // Always: a no-op while the packs' key records match, a rebuild of a pack that has no
+    // current record (one a killed run left truncated).
+    pack_stage(req)?;
     let app = runner
         .assemble(&req.out.join("build"), install)
         .map_err(|e| build_error(Stage::Build, &[e.to_string()], home))?;
@@ -2811,9 +2818,9 @@ fn android_deliver(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) ->
         .delivery
         .as_deref()
         .ok_or_else(|| Error::Env("the delivery folder is not set".into()))?;
-    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
-        pack_stage(req)?;
-    }
+    // Always: a no-op while the packs' key records match, a rebuild of a pack that has no
+    // current record (one a killed run left truncated).
+    pack_stage(req)?;
 
     let root = runner.root();
     let lib_path = if let Some(found) = find_android_game_lib(&req.out, &root) {
