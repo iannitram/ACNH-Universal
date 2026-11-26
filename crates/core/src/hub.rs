@@ -815,7 +815,10 @@ mod prepared;
 mod publish;
 mod service;
 pub use host::{local_home_address, HostConfig, HostStatus, HubHost};
-pub use prepared::{pull_prepared, pull_prepared_app, pull_prepared_app_with, serve_prepared};
+pub use prepared::{
+    lock_install_and_sweep, pull_prepared, pull_prepared_app, pull_prepared_app_with,
+    serve_prepared,
+};
 pub use publish::{publish_build, resume_dir};
 pub use service::{
     pair_hub, pull_hub, pull_hub_prepared, pull_hub_prepared_app, pull_hub_prepared_app_with,
@@ -925,26 +928,33 @@ fn newest(builds: &Path, target: Os) -> Result<(Bundle, PathBuf, String)> {
     require_dir(builds)?;
     let mut candidates = Vec::new();
     for entry in fs::read_dir(builds)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let manifest = entry.path().join("bundle.txt");
         match fs::symlink_metadata(&manifest) {
             Ok(m) if m.is_file() => {
-                candidates.push((m.modified()?, entry.file_name(), entry.path()));
+                if let Ok(modified) = m.modified() {
+                    candidates.push((modified, entry.file_name(), entry.path()));
+                }
             }
-            Ok(_) => return Err(hub_error("bundle text is not a plain file")),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            // A symlink, non-file or unreadable bundle.txt skips that build only.
+            Ok(_) | Err(_) => {}
         }
     }
     candidates.sort();
     for (_, _, root) in candidates.into_iter().rev() {
-        let text = read_manifest(&root.join("bundle.txt"))?;
-        let b = bundle::from_text(&text).map_err(|_| hub_error("invalid or forbidden bundle"))?;
+        let Ok(text) = read_manifest(&root.join("bundle.txt")) else {
+            continue;
+        };
+        let Ok(b) = bundle::from_text(&text) else {
+            continue;
+        };
         if b.target == target {
-            return Ok((validate_bundle(&text, target)?, root, text));
+            if let Ok(valid) = validate_bundle(&text, target) {
+                return Ok((valid, root, text));
+            }
         }
     }
     Err(hub_error("no build is ready for this target"))

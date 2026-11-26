@@ -3,7 +3,7 @@
 //! hub page run it.
 use super::*;
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -32,6 +32,9 @@ pub struct HostStatus {
     /// The code of the last failed request, if any.
     pub last_error: Option<String>,
 }
+
+/// Most connections served at once; the rest are dropped.
+const MAX_CONNECTIONS: usize = 32;
 
 struct Shared {
     stop: AtomicBool,
@@ -90,50 +93,66 @@ impl HubHost {
             stop: AtomicBool::new(false),
             status: Mutex::new(HostStatus::default()),
         });
-        let mut pairing = if config.pair {
-            Some(new_session(&shared).ok_or_else(|| hub_error("could not make a pairing code"))?)
+        let pairing = if config.pair {
+            Some(Mutex::new(
+                new_session(&shared).ok_or_else(|| hub_error("could not make a pairing code"))?,
+            ))
         } else {
             None
         };
         let worker = Arc::clone(&shared);
         let thread = std::thread::spawn(move || {
             let _announcement = announcement;
-            while !worker.stop.load(Ordering::Relaxed) {
-                if config.pair && pairing.as_ref().is_none_or(|session| !session.is_open()) {
-                    pairing = new_session(&worker);
-                }
-                let stream = match listener.accept() {
-                    Ok((stream, _)) => stream,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(50));
+            // One short-lived thread per connection, so a slow peer holds only its own socket.
+            // The cap keeps a flood of silent connections from exhausting threads.
+            let active = AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                while !worker.stop.load(Ordering::Relaxed) {
+                    if let Some(pairing) = &pairing {
+                        let mut session = pairing.lock().unwrap_or_else(|e| e.into_inner());
+                        if !session.is_open() {
+                            if let Some(fresh) = new_session(&worker) {
+                                *session = fresh;
+                            }
+                        }
+                    }
+                    let stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(_) => {
+                            std::thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
+                    };
+                    // A stream accepted from a non-blocking listener may start non-blocking.
+                    if stream.set_nonblocking(false).is_err() {
                         continue;
                     }
-                    Err(_) => {
-                        std::thread::sleep(Duration::from_millis(50));
+                    if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                        active.fetch_sub(1, Ordering::SeqCst);
                         continue;
                     }
-                };
-                // A stream accepted from a non-blocking listener may start non-blocking.
-                if stream.set_nonblocking(false).is_err() {
-                    continue;
+                    let (dirs, config, worker, active, pairing) =
+                        (&dirs, &config, &worker, &active, pairing.as_ref());
+                    scope.spawn(move || {
+                        if let Ok(mut transport) = TcpTransport::from_stream(stream) {
+                            let result = serve_request(
+                                &mut transport,
+                                dirs,
+                                &config.builds,
+                                config.prepared.as_deref(),
+                                pairing,
+                            );
+                            if let Ok(mut status) = worker.status.lock() {
+                                match result {
+                                    Ok(()) => status.served += 1,
+                                    Err(error) => status.last_error = Some(error.code().to_owned()),
+                                }
+                            }
+                        }
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    });
                 }
-                let Ok(mut transport) = TcpTransport::from_stream(stream) else {
-                    continue;
-                };
-                let result = serve_request(
-                    &mut transport,
-                    &dirs,
-                    &config.builds,
-                    config.prepared.as_deref(),
-                    pairing.as_mut(),
-                );
-                if let Ok(mut status) = worker.status.lock() {
-                    match result {
-                        Ok(()) => status.served += 1,
-                        Err(error) => status.last_error = Some(error.code().to_owned()),
-                    }
-                }
-            }
+            });
         });
         Ok(HubHost {
             shared,
