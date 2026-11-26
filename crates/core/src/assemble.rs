@@ -285,20 +285,7 @@ fn skip_game(folder: &Path) -> bool {
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            if skip_game(&entry.path()) {
-                continue;
-            }
-            copy_tree(&entry.path(), &target)?;
-        } else {
-            copy(&entry.path(), &target)?;
-        }
-    }
-    Ok(())
+    crate::fsutil::copy_tree_skipping(from, to, &skip_game)
 }
 
 /// The files of `folder`, sorted by name.
@@ -451,14 +438,6 @@ fn windows(plan: &Plan) -> Result<PathBuf> {
 
 // ---- Mac -------------------------------------------------------------------------------------
 
-/// The work tree `path` is in, if any: the nearest folder above it that holds `.git`.
-fn git_work_tree(path: &Path) -> Option<PathBuf> {
-    let path = std::path::absolute(path).ok()?;
-    path.ancestors()
-        .find(|folder| folder.join(".git").exists())
-        .map(Path::to_path_buf)
-}
-
 /// The `.app` `launcher` runs from (`<name>.app/Contents/MacOS/<launcher>`), if it is in one.
 fn enclosing_app(launcher: &Path) -> Option<&Path> {
     let macos = launcher.parent()?;
@@ -471,7 +450,7 @@ fn enclosing_app(launcher: &Path) -> Option<&Path> {
 }
 
 fn mac(plan: &Plan, tools: &mut dyn Tools) -> Result<PathBuf> {
-    if let Some(tree) = git_work_tree(&plan.install) {
+    if let Some(tree) = crate::fsutil::git_work_tree(&plan.install) {
         return Err(Error::Build(format!(
             "the Mac app holds game code, so it is never written inside a git work tree: {} is inside {}",
             plan.install.display(),
