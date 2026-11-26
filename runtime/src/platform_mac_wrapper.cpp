@@ -76,25 +76,7 @@ extern "C" const char* nx_appgame_game_dir();  // Library/Application Support/ga
 #include "glyph_layout.h"
 #include "platform.h"
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#else
-extern "C" {
-void acnh_platform_window_set_minimized(bool minimized);
-void acnh_platform_window_set_size(uint32_t w, uint32_t h);
-void acnh_platform_window_set_refresh_hz(int32_t hz);
-void acnh_platform_pick_begin();
-void acnh_platform_pick_complete(const char* path);
-void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
-size_t acnh_platform_pad_kind(int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
-size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
-bool acnh_platform_xbox_layout(const char* controller_kind);
-int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
-uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
-uint32_t acnh_platform_touch_label_code(const char* label);
-bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t now_ns, bool* was_run, uint64_t* past_ns);
-}
-#endif
 
 #include "sdl_audio_frame.h"
 #include "sdl_audio_queue.h"
@@ -141,7 +123,6 @@ void run_on_main(std::function<void()> fn) {
 SDL_Window* g_window = nullptr;
 SDL_MetalView g_view = nullptr;
 void* g_layer = nullptr;  // CAMetalLayer*
-
 
 std::mutex g_pad_lock;
 PadState g_pad;
@@ -299,8 +280,6 @@ uint64_t read_at(FILE* f, int64_t off, void* buf, uint64_t size) {
     return done;
 }
 
-
-
 void log_line(const char* line) { std::fprintf(stderr, "%s\n", line); }
 
 std::string data_root() {
@@ -326,11 +305,7 @@ std::string game_root() {
 
 std::string device_locale() { return ""; }
 
-
-
 // ---- window ---------------------------------------------------------------------------------------------------
-
-
 
 void* create_window() {
     run_on_main([] {
@@ -366,7 +341,6 @@ void release_window(void*) {}
 void picture_shown() {}
 uint64_t wait_vblank() { return 0; }  // no display vblank to wait on here: hle_vi.cpp keeps its timed tick
 uint64_t window_generation() { return 1; }
-
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 float default_render_scale() { return 1.0f; }
@@ -724,14 +698,11 @@ void show_fatal(const char* text) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ACNHRecomp", text, nullptr);
 }
 
-
 void set_fullscreen(bool on) {
     run_on_main([on] {
         if (g_window) SDL_SetWindowFullscreen(g_window, on);
     });
 }
-
-
 
 std::string controller_name() {
     {
@@ -818,8 +789,6 @@ void pick_file(const std::string& title, const char* extension) {
         SDL_DestroyProperties(props);
     });
 }
-
-
 
 void read_pad(PadState& p) {
     std::lock_guard lk(g_pad_lock);

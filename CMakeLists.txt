@@ -125,7 +125,7 @@ if(NX_TESTS AND NOT ANDROID)
     endif()
     if(APPLE AND NOT IOS AND NX_RUNTIME_ARCHIVE)
         add_executable(layout_test tests/layout_test.cpp runtime/src/memory_wrapper.cpp runtime/src/compact_layout.cpp)
-        target_include_directories(layout_test PRIVATE runtime/include runtime/src)
+        target_include_directories(layout_test PRIVATE runtime/include runtime/src "${NX_RUNTIME_INCLUDE}")
         target_compile_definitions(layout_test PRIVATE NX_COMPACT_LAYOUT=1)
         target_compile_options(layout_test PRIVATE -UNDEBUG)
         target_link_libraries(layout_test PRIVATE "${NX_RUNTIME_ARCHIVE}")
@@ -157,7 +157,7 @@ if(NX_TESTS AND NOT ANDROID)
     add_test(NAME ldn_net COMMAND ldn_net_test)
     if(WIN32 AND NX_RUNTIME_ARCHIVE)
         add_executable(memguard_test tests/memguard_test.cpp runtime/src/memory_wrapper.cpp)
-        target_include_directories(memguard_test PRIVATE runtime/include runtime/src)
+        target_include_directories(memguard_test PRIVATE runtime/include runtime/src "${NX_RUNTIME_INCLUDE}")
         target_link_libraries(memguard_test PRIVATE "${NX_RUNTIME_ARCHIVE}" psapi userenv ntdll ws2_32 bcrypt synchronization advapi32 dbghelp)  # what Rust std links on windows-msvc
         add_test(NAME memguard COMMAND memguard_test)
     endif()
@@ -664,7 +664,8 @@ else()
     endif()
 endif()
 
-# Optional Cargo-built runtime. Standalone CMake remains usable without Rust.
+# The Cargo-built runtime: the wrappers in runtime/src call it through cbindgen's acnh_runtime.h, so every player
+# build passes both artifacts (a configure for the unit tests alone does not need them).
 set(NX_RUNTIME_ARCHIVE "" CACHE FILEPATH "Rust runtime static library")
 set(NX_RUNTIME_INCLUDE "" CACHE PATH "Directory containing cbindgen's acnh_runtime.h")
 if(NX_RUNTIME_ARCHIVE OR NX_RUNTIME_INCLUDE)
@@ -687,7 +688,6 @@ if(NX_RUNTIME_ARCHIVE OR NX_RUNTIME_INCLUDE)
     elseif(WIN32)
         target_link_libraries(${NX_GAME} PRIVATE userenv ntdll)
     endif()
-    target_compile_definitions(${NX_GAME} PRIVATE NX_RUST_RUNTIME)
 endif()
 
 # Compile the synthetic library with precisely the same ABI definition as this player.

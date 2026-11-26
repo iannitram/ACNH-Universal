@@ -15,11 +15,3 @@ bash tools/boot_smoke.sh
 ```
 
 It needs Python 3, Xvfb, xauth, and a Vulkan driver; Mesa lavapipe works without a physical GPU. CMake builds the fake shared library with the player's actual `NX_GAME_ABI`, in `game/linux-x64`. The fixture has authored module metadata and host callbacks for startup, initializers, SDK builder queries, and `nnMain`. It submits a red clear and presents one 16×16 texture through the real NVN/Vulkan code. The script requires the Rust boot marker, the first present, an exact red GPU readback, and exit status zero. Timeouts and crashes fail. Generated images, frames and logs stay under `target/` and contain no game assets.
-
-The original CMake path remains available without Rust or the fixture:
-
-```sh
-cmake -S . -B build -G Ninja -DNX_GAME=acnh -DNX_GAME_FROM_FOLDER=ON -DNX_TESTS=ON
-cmake --build build --target acnh gpu_pick_test tiling_test astc_test --parallel 2
-ctest --test-dir build --output-on-failure
-```

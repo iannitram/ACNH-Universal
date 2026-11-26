@@ -18,7 +18,7 @@ for header in "$vulkan/include/vulkan/vulkan.h" "$sdl3/include/SDL3/SDL.h"; do
     fi
 done
 
-# The player links the Rust runtime (NX_RUST_RUNTIME), so the wrappers compile against the header cbindgen
+# The player links the Rust runtime, so the wrappers compile against the header cbindgen
 # generates for it: build.rs writes it on any host build, with the same text the iOS build gets.
 cargo build --locked -p acnh-runtime --quiet
 cargo_target=${CARGO_TARGET_DIR:-target}
@@ -53,7 +53,7 @@ fi
 
 common=(-std=c++20 -fsyntax-only -Wno-deprecated-declarations -Wno-\#warnings
         -Iruntime/include -Iruntime/src -I"games/$game" -I"$sdl3/include" -I"$vulkan/include"
-        -DNX_RUST_RUNTIME -I"$(dirname "$runtime_header")" -DNX_NO_VPX -DNX_NO_VORBIS -DNX_VERSION_STRING='"dev"')
+        -I"$(dirname "$runtime_header")" -DNX_NO_VPX -DNX_NO_VORBIS -DNX_VERSION_STRING='"dev"')
 if [ "${#imgui[@]}" -gt 0 ]; then common+=("${imgui[@]}"); fi
 
 status=0

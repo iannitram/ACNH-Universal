@@ -9,59 +9,11 @@
 
 #include <nx/runtime.h>
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#endif
 
 #include "ipc.h"
 #include "nextendo.h"
 #include "platform.h"
-
-#ifndef NX_RUST_RUNTIME
-extern "C" {
-struct AcnhCalendarTime {
-    int16_t year;
-    int8_t month;
-    int8_t day;
-    int8_t hour;
-    int8_t minute;
-    int8_t second;
-    uint8_t _pad;
-};
-struct AcnhCalendarAdditionalInfo {
-    int32_t day_of_week;
-    int32_t day_of_year;
-    uint8_t tz_name[8];
-    int32_t is_dst;
-    int32_t utc_offset;
-};
-struct AcnhTimeHost {
-    bool (*online_services_active)();
-    uint64_t (*monotonic_ns)();
-    uint64_t (*steady_ticks)();
-    bool (*local_from_posix)(int64_t posix, AcnhCalendarTime* out_cal, AcnhCalendarAdditionalInfo* out_add);
-    bool (*posix_from_local)(const AcnhCalendarTime* cal, int64_t* out_posix);
-    int32_t (*utc_offset_west)();
-};
-void acnh_time_set_host(const AcnhTimeHost* host);
-int64_t acnh_time_real_unix_seconds();
-int64_t acnh_time_unix_seconds();
-int64_t acnh_time_network_unix_seconds();
-int64_t acnh_time_steady_seconds();
-void acnh_time_apply_config();
-void acnh_time_set_offset(int64_t offset);
-void acnh_time_save();
-void acnh_time_init_shared_memory(uint8_t* shm_ptr, size_t shm_size);
-void acnh_time_refresh_shared_clocks();
-void acnh_time_gettimeofday(int64_t* out_sec, int64_t* out_usec);
-uint64_t acnh_time_clock_us();
-void acnh_time_device_location_name(char* out, size_t cap);
-void acnh_time_to_calendar(int64_t posix_time, AcnhCalendarTime* out_cal, AcnhCalendarAdditionalInfo* out_add);
-int64_t acnh_time_to_posix(const AcnhCalendarTime* cal);
-void acnh_time_to_calendar_ipc(int64_t posix_time, AcnhCalendarTime* out_cal, AcnhCalendarAdditionalInfo* out_add);
-int64_t acnh_time_to_posix_ipc(const AcnhCalendarTime* cal);
-}
-#endif
 
 namespace nx {
 

@@ -21,66 +21,11 @@
 
 #include <nx/runtime.h>
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#endif
 
 #include "ipc.h"
 #include "nextendo.h"
 #include "platform.h"
-
-#ifndef NX_RUST_RUNTIME
-extern "C" {
-struct AcnhSavesLocalTime {
-    int32_t year;
-    int32_t month;
-    int32_t day;
-    int32_t hour;
-    int32_t minute;
-    int32_t second;
-};
-struct AcnhSavesHost {
-    size_t (*data_root)(char*, size_t);
-    void (*log)(const char*);
-    bool (*local_from_posix)(int64_t, AcnhSavesLocalTime*);
-    bool (*zip_inflate)(const uint8_t*, size_t, uint8_t*, size_t, char*, size_t);
-};
-struct AcnhUserInfo {
-    uint64_t lo;
-    uint64_t hi;
-    char nickname[32];
-};
-typedef void (*AcnhSavesStringCb)(const char*, size_t, void*);
-typedef void (*AcnhSavesFoundCb)(const char*, size_t, const char*, size_t, void*);
-typedef void (*AcnhSavesUserCb)(const AcnhUserInfo*, void*);
-
-void acnh_saves_set_host(const AcnhSavesHost* host);
-void acnh_saves_save_dir(AcnhSavesStringCb cb, void* ctx);
-bool acnh_saves_has_save();
-void acnh_saves_last_modified(AcnhSavesStringCb cb, void* ctx);
-void acnh_saves_detect_emulator_saves(AcnhSavesFoundCb cb, void* ctx);
-bool acnh_saves_looks_like_acnh_save(const char* dir, AcnhSavesStringCb why_cb, void* why_ctx);
-bool acnh_saves_import_save(const char* from, AcnhSavesStringCb err_cb, void* err_ctx);
-bool acnh_saves_export_save(const char* to, AcnhSavesStringCb written_cb, void* written_ctx, AcnhSavesStringCb err_cb,
-                            void* err_ctx);
-void acnh_saves_backup_now(bool automatic, AcnhSavesStringCb out_cb, void* out_ctx, AcnhSavesStringCb err_cb,
-                           void* err_ctx);
-void acnh_saves_backups_folder(AcnhSavesStringCb cb, void* ctx);
-void acnh_saves_list_backups(AcnhSavesStringCb cb, void* ctx);
-bool acnh_saves_restore_backup(const char* name, AcnhSavesStringCb err_cb, void* err_ctx);
-
-void acnh_users_all(AcnhSavesUserCb cb, void* ctx);
-int32_t acnh_users_count();
-bool acnh_user_find(uint64_t lo, uint64_t hi, AcnhUserInfo* out);
-bool acnh_user_create(AcnhUserInfo* out);
-void acnh_user_boot(AcnhUserInfo* out);
-void acnh_user_opened(uint64_t lo, uint64_t hi);
-void acnh_user_last_opened(AcnhUserInfo* out);
-void acnh_user_save_dir(uint64_t lo, uint64_t hi, AcnhSavesStringCb cb, void* ctx);
-
-size_t acnh_account_preselected_user_blob(uint8_t* out, size_t cap);
-}
-#endif
 
 namespace nx {
 

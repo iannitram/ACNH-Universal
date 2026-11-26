@@ -27,68 +27,7 @@
 #endif
 #endif
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#endif
-
-#ifndef NX_RUST_RUNTIME
-extern "C" {
-typedef void (*AcnhFilesStringCb)(const char*, size_t, void*);
-typedef void (*AcnhFilesDirEntryCb)(const char*, size_t, bool, int64_t, void*);
-typedef void (*AcnhFilesBytesCb)(const uint8_t*, size_t, void*);
-
-struct AcnhFilesHost {
-    size_t (*data_root)(char*, size_t);
-    size_t (*game_root)(char*, size_t);
-    void (*log)(const char*);
-    int64_t (*current_thread_id)();
-    uint64_t (*monotonic_ns)();
-    bool (*trace_enabled)();
-    void (*discord_presence_file)(const char*);
-    size_t (*glyph_override)(const char*, char*, size_t);
-    bool (*read_asset)(const char*, AcnhFilesBytesCb, void*);
-};
-
-void acnh_files_set_host(const AcnhFilesHost* host);
-void acnh_files_log_recent();
-void acnh_files_add_virtual_file(const char* path, const uint8_t* data, size_t len);
-void acnh_files_read_game_file(const char* relative_to_romfs, AcnhFilesBytesCb cb, void* ctx);
-uint32_t acnh_files_mount_rom(const char* name);
-uint32_t acnh_files_ensure_save_data(uint64_t uid_lo, uint64_t uid_hi);
-uint32_t acnh_files_mount_save_data(const char* name, uint64_t uid_lo, uint64_t uid_hi);
-uint32_t acnh_files_unmount(const char* name);
-uint32_t acnh_files_commit(const char* names);
-uint32_t acnh_files_mount_device_save_data(const char* name);
-uint32_t acnh_files_get_device_save_data_size(int64_t* out_size, int64_t* out_journal);
-uint32_t acnh_files_extend_device_save_data(int64_t size, int64_t journal);
-uint32_t acnh_files_mount_cache_storage(const char* name, int32_t index);
-uint32_t acnh_files_create_file(const char* path, int64_t size);
-uint32_t acnh_files_delete_file(const char* path);
-uint32_t acnh_files_create_directory(const char* path);
-uint32_t acnh_files_get_entry_type(const char* path, uint32_t* out_type);
-uint32_t acnh_files_open_file(const char* path, int32_t mode, uint64_t* out_handle);
-void acnh_files_close_file(uint64_t handle);
-uint32_t acnh_files_get_file_size(uint64_t handle, int64_t* out_size);
-uint32_t acnh_files_read_file(uint64_t handle, int64_t off, uint8_t* buf, uint64_t size, uint64_t* out_read);
-uint32_t acnh_files_write_file(uint64_t handle, int64_t off, const uint8_t* buf, uint64_t size);
-uint32_t acnh_files_flush_file(uint64_t handle);
-uint32_t acnh_files_set_file_size(uint64_t handle, int64_t size);
-uint32_t acnh_files_open_directory(const char* path, int32_t mode, uint64_t* out_handle);
-uint32_t acnh_files_read_directory(uint64_t handle, int64_t max_entries, int64_t* out_count, AcnhFilesDirEntryCb cb,
-                                   void* ctx);
-uint32_t acnh_files_get_directory_entry_count(uint64_t handle, int64_t* out_count);
-void acnh_files_close_directory(uint64_t handle);
-uint32_t acnh_files_clean_directory_recursively(const char* path);
-uint32_t acnh_files_rename_directory(const char* from, const char* to);
-uint32_t acnh_files_delete_directory_recursively(const char* path);
-uint64_t acnh_files_count_aoc();
-int32_t acnh_files_list_aoc(int32_t* out, int32_t offset, int32_t count);
-uint32_t acnh_files_mount_aoc(const char* name, int32_t index);
-void acnh_files_mods_fetch();
-void acnh_files_game_library_path(const char* folder, const char* game_id, AcnhFilesStringCb cb, void* ctx);
-void acnh_files_format_load_error(const char* why, AcnhFilesStringCb cb, void* ctx);
-}
-#endif
 
 namespace nx {
 

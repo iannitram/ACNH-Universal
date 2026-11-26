@@ -12,65 +12,7 @@
 
 #include <nx/runtime.h>
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#else
-extern "C" {
-struct AcnhPlatformHost {
-    void (*log)(const char* msg);
-    uint64_t (*monotonic_ns)();
-    float (*thermal_headroom)();
-    void* (*adpf_create_session)(const int32_t* tids, size_t count, int64_t target_ns);
-    void (*adpf_close_session)(void* session);
-    void (*adpf_update_target)(void* session, int64_t target_ns);
-    void (*adpf_report_actual)(void* session, int64_t actual_ns);
-    void (*adpf_set_efficiency)(void* session, bool prefer_efficiency);
-    int64_t (*adpf_preferred_rate_ns)();
-    int32_t (*kgsl_set_pwrctrl)(bool enable_normal);
-};
-void acnh_platform_set_host(const AcnhPlatformHost* h);
-bool acnh_platform_headless();
-size_t acnh_platform_setting(const char* key, char* out, size_t cap);
-size_t acnh_platform_data_root(const char* default_root, char* out, size_t cap);
-bool acnh_platform_make_dirs(const char* path);
-void acnh_platform_window_set_minimized(bool minimized);
-bool acnh_platform_window_minimized();
-void acnh_platform_window_set_size(uint32_t w, uint32_t h);
-void acnh_platform_window_size(uint32_t* out_w, uint32_t* out_h);
-void acnh_platform_window_set_refresh_hz(int32_t hz);
-int32_t acnh_platform_display_refresh_hz();
-void acnh_platform_pick_begin();
-void acnh_platform_pick_complete(const char* path);
-bool acnh_platform_pick_take(char* out, size_t cap, size_t* out_len);
-void acnh_platform_set_master_volume(float v);
-void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
-int32_t acnh_platform_thermal_mode();
-double acnh_platform_thermal_adpf_share(int32_t mode);
-float acnh_platform_thermal_headroom();
-float acnh_platform_dynamic_render_scale();
-void acnh_platform_frame_period(int64_t ns);
-int64_t acnh_platform_frame_period_ns();
-void acnh_platform_frame_replay_work(int64_t ns);
-int64_t acnh_platform_frame_replay_work_ns();
-void acnh_platform_thermal_main_work(int64_t ns);
-void acnh_platform_thermal_frame(uint64_t interval_ns);
-struct AcnhThermalGovernor;
-AcnhThermalGovernor* acnh_platform_governor_new();
-void acnh_platform_governor_free(AcnhThermalGovernor* g);
-bool acnh_platform_governor_discover_parse(AcnhThermalGovernor* g, const char* output, char* out_reads, size_t cap);
-void acnh_platform_governor_sample_parse(AcnhThermalGovernor* g, const char* output);
-void acnh_platform_governor_decide(AcnhThermalGovernor* g, int32_t mode_idx, float headroom);
-void acnh_platform_governor_build_apply(AcnhThermalGovernor* g, int32_t mode_idx, char* out_restore, size_t restore_cap,
-                                        char* out_write, size_t write_cap);
-void acnh_platform_governor_mark_restored(AcnhThermalGovernor* g);
-void acnh_platform_governor_reset_on_resume(AcnhThermalGovernor* g);
-void acnh_platform_perf_hint_thread(int32_t tid);
-uint64_t acnh_platform_perf_hint_last_frame_ns();
-void acnh_platform_perf_hint_frame(int64_t ns);
-void acnh_platform_gpu_turbo();
-size_t acnh_platform_parse_keeper_cpus(const char* spec, int32_t* out, size_t max);
-}
-#endif
 
 #if defined(__ANDROID__)
 #include <dirent.h>
