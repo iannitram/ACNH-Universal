@@ -277,6 +277,34 @@ impl FirstRun {
         false
     }
 }
+/// The machine's own name as a short, plain label ("deck", "macbook"), or "device".
+fn friendly_host() -> String {
+    let raw = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            let out = std::process::Command::new("hostname").output().ok()?;
+            String::from_utf8(out.stdout).ok()
+        })
+        .unwrap_or_default();
+    let label: String = raw
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(24)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if label.is_empty() {
+        "device".into()
+    } else {
+        label
+    }
+}
+
 pub(crate) fn device(dirs: &AppDirs) -> acnh_core::Result<String> {
     let path = dirs.config.join("hub-device");
     if let Ok(name) = std::fs::read_to_string(&path) {
@@ -287,7 +315,12 @@ pub(crate) fn device(dirs: &AppDirs) -> acnh_core::Result<String> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let name = format!("device-{stamp:x}-{:x}", std::process::id());
+    // The hub lists paired devices by this name: the machine's own name leads it.
+    let name = format!(
+        "{}-{:x}",
+        friendly_host(),
+        (stamp ^ u128::from(std::process::id())) & 0xffff_ffff
+    );
     acnh_core::platform::atomic_write(&path, name.as_bytes())?;
     Ok(name)
 }
@@ -397,10 +430,10 @@ fn run(
                     }
                     return Ok(());
                 }
-                let staged = tempfile::Builder::new()
-                    .prefix(".first-run-")
-                    .tempdir_in(&dirs.data)?;
-                let bundle = hub::pull_hub(addr, dirs, &id, &name, Os::current(), staged.path())?;
+                // The same staging folder every time: a pull that was cut continues from
+                // the chunks it already has.
+                let staged = hub::resume_dir(dirs)?;
+                let bundle = hub::pull_hub(addr, dirs, &id, &name, Os::current(), &staged)?;
                 if cancelled
                     .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
                     .is_err()
@@ -411,7 +444,7 @@ fn run(
                     dirs: dirs.clone(),
                     os: Os::current(),
                 }
-                .install_bundle(&bundle, staged.path())?;
+                .install_bundle(&bundle, &staged)?;
                 hub::report_hub_build(addr, dirs, &id, &name, &bundle)?;
                 Ok(())
             })()
