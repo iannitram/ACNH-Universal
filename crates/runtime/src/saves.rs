@@ -253,8 +253,10 @@ fn local_time_from_posix(posix: i64) -> AcnhSavesLocalTime {
     posix_to_utc_local(posix)
 }
 
+/// The stamp for now in UTC, the clock the launcher's own backups (`acnh_core::backup::stamp`)
+/// use, so both kinds of backup order the same way when they share an island folder.
 fn stamp_now() -> String {
-    let lt = local_time_from_posix(unix_now_seconds());
+    let lt = posix_to_utc_local(unix_now_seconds());
     format!(
         "{:04}{:02}{:02}-{:02}{:02}{:02}",
         lt.year, lt.month, lt.day, lt.hour, lt.minute, lt.second

@@ -734,7 +734,7 @@ mod tests {
 
         std::thread::scope(|s| {
             let worker = s.spawn(|| {
-                let mut pairing = hub::PairingSession::new("654321").unwrap();
+                let pairing = std::sync::Mutex::new(hub::PairingSession::new("654321").unwrap());
                 for _ in 0..2 {
                     let (stream, _) = listener.accept().unwrap();
                     let mut transport = hub::TcpTransport::from_stream(stream).unwrap();
@@ -743,7 +743,7 @@ mod tests {
                         &hub_dirs,
                         &builds,
                         Some(&source),
-                        Some(&mut pairing),
+                        Some(&pairing),
                     )
                     .unwrap();
                 }

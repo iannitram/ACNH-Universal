@@ -101,6 +101,35 @@ WORDS = (
     0x2E204820,  # clz v0.8b, v1.8b
     0x4E604820,  # cls v0.8h, v1.8h
     0x6E205820,  # mvn v0.16b, v1.16b
+    # 64-bit lanes: saturating and rounding forms that need 128-bit intermediates (#349).
+    0x4EE20C20,  # sqadd v0.2d, v1.2d, v2.2d
+    0x5EE20C20,  # sqadd d0, d1, d2
+    0x4EE22C20,  # sqsub v0.2d, v1.2d, v2.2d
+    0x5EE22C20,  # sqsub d0, d1, d2
+    0x6EE20C20,  # uqadd v0.2d, v1.2d, v2.2d
+    0x7EE20C20,  # uqadd d0, d1, d2
+    0x4EE07820,  # sqabs v0.2d, v1.2d
+    0x5EE07820,  # sqabs d0, d1
+    0x6EE07820,  # sqneg v0.2d, v1.2d
+    0x7EE07820,  # sqneg d0, d1
+    0x6EE0B820,  # neg v0.2d, v1.2d
+    0x7EE0B820,  # neg d0, d1
+    0x6EA0B820,  # neg v0.4s, v1.4s
+    0x4EE0B820,  # abs v0.2d, v1.2d
+    0x5EE0B820,  # abs d0, d1
+    0x4EA0B820,  # abs v0.4s, v1.4s
+    0x4F402420,  # srshr v0.2d, v1.2d, #64
+    0x5F402420,  # srshr d0, d1, #64
+    0x4F7F2420,  # srshr v0.2d, v1.2d, #1
+    0x6F402420,  # urshr v0.2d, v1.2d, #64
+    0x7F402420,  # urshr d0, d1, #64
+    0x6F792420,  # urshr v0.2d, v1.2d, #7
+    0x4F403420,  # srsra v0.2d, v1.2d, #64
+    0x5F7D3420,  # srsra d0, d1, #3
+    0x6F403420,  # ursra v0.2d, v1.2d, #64
+    0x7F7B3420,  # ursra d0, d1, #5
+    0x4F7E1420,  # ssra v0.2d, v1.2d, #2
+    0x5F401420,  # ssra d0, d1, #64
     0xD65F03C0,  # ret
 )
 
@@ -164,7 +193,8 @@ def main():
                 raise RuntimeError("traced mode should emit nx_hook")
         print("Rust C++ emission verified in all four modes", flush=True)
         subprocess.run([sys.executable, "-B", "-m", "tests.difftest", module, work / "difftest",
-                        "--rust-emitter", emitter, "--states", "16", "--max-unhandled", "0",
+                        "--rust-emitter", emitter, "--states", "24", "--per-shape", "6",
+                        "--max-unhandled", "0",
                         *(["--buffer-addr", args.buffer_addr] if args.buffer_addr else [])],
                        env=environment, check=True)
 

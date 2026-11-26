@@ -202,11 +202,15 @@ impl Emitter<'_> {
                 return self.v_bin(i, expr, kind, bytes).map(Some);
             }
         }
+        // neg/abs compute in the unsigned type so INT_MIN does not overflow (signed overflow is UB in C++).
+        let ubits = self.vinfo(d_op).map_or(0, |v| v.0);
+        let neg_expr = format!("uint{ubits}_t(0) - uint{ubits}_t(a)");
+        let abs_expr = format!("a < 0 ? uint{ubits}_t(0) - uint{ubits}_t(a) : uint{ubits}_t(a)");
         let un = match i.mnemonic {
-            "neg" => Some(("-a", "s", false)),
+            "neg" => Some((neg_expr.as_str(), "s", false)),
             "cnt" => Some(("std::popcount(a)", "u", false)),
             "not" | "mvn" => Some(("~a", "u", true)),
-            "abs" => Some(("a < 0 ? -a : a", "s", false)),
+            "abs" => Some((abs_expr.as_str(), "s", false)),
             "fneg" => Some(("-a", "f", false)),
             "fabs" => Some(("std::fabs(a)", "f", false)),
             "fsqrt" => Some(("std::sqrt(a)", "f", false)),
@@ -289,7 +293,13 @@ impl Emitter<'_> {
             };
             return self.v_un(i, &expression, "u", "u", false).map(Some);
         }
+        // 64-bit lanes have no wider native type: saturate through 128-bit intermediates (and detect the unsigned
+        // carry by wrap-around), because int64_t arithmetic would overflow (UB) and nx::sat<int64_t> is a no-op.
+        let wide = bits == 64;
         let dynamic = match i.mnemonic {
+            "sqadd" if wide => Some(("nx::sat128<int64_t>(__int128(a) + __int128(b))".to_owned(), "s")),
+            "sqsub" if wide => Some(("nx::sat128<int64_t>(__int128(a) - __int128(b))".to_owned(), "s")),
+            "uqadd" if wide => Some(("a + b < a ? ~0ull : a + b".to_owned(), "u")),
             "sqadd" => Some((format!("nx::sat<int{bits}_t>(int64_t(a) + int64_t(b))"), "s")),
             "sqsub" => Some((format!("nx::sat<int{bits}_t>(int64_t(a) - int64_t(b))"), "s")),
             "uqadd" => Some((format!("(uint64_t(a) + uint64_t(b)) > uint{bits}_t(~0ull) ? uint{bits}_t(~0ull) : a + b"), "u")),
@@ -302,7 +312,9 @@ impl Emitter<'_> {
         if let Some((expr, kind)) = dynamic {
             return self.v_bin(i, &expr, kind, false).map(Some);
         }
-        let shift = match i.mnemonic {
+        // Rounding shifts of 64-bit lanes add the rounding constant in 128 bits so the carry out of bit 63 is kept
+        // and a shift by #64 is legal; accumulation wraps in the unsigned type (signed overflow is UB).
+        let mut shift = match i.mnemonic {
             "shl" => Some(("{a} << {n}", false, false)),
             "ushr" => Some(("({n} >= {bits}) ? 0 : ({a} >> {n})", false, false)),
             "sshr" => Some(("{a} >> ({n} >= {bits} ? {bits} - 1 : {n})", true, false)),
@@ -326,6 +338,32 @@ impl Emitter<'_> {
             )),
             _ => None,
         };
+        if bits == 64 {
+            shift = match i.mnemonic {
+                "srshr" => Some(("({a} + (__int128(1) << ({n} - 1))) >> {n}", true, false)),
+                "urshr" => Some((
+                    "({a} + ((unsigned __int128)(1) << ({n} - 1))) >> {n}",
+                    false,
+                    false,
+                )),
+                "srsra" => Some((
+                    "uint64_t({o}) + uint64_t(({a} + (__int128(1) << ({n} - 1))) >> {n})",
+                    true,
+                    true,
+                )),
+                "ursra" => Some((
+                    "{o} + uint64_t(({a} + ((unsigned __int128)(1) << ({n} - 1))) >> {n})",
+                    false,
+                    true,
+                )),
+                "ssra" => Some((
+                    "uint64_t({o}) + uint64_t({a} >> ({n} >= {bits} ? {bits} - 1 : {n}))",
+                    true,
+                    true,
+                )),
+                _ => shift,
+            };
+        }
         if let Some((expr, signed, acc)) = shift {
             return self.v_shift_imm(i, expr, signed, acc).map(Some);
         }

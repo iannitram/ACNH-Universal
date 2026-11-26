@@ -88,3 +88,60 @@ fn invalid_function_ranges_return_errors() {
         Err(Error::FunctionRange { start: 1, end: 4 })
     ));
 }
+
+/// 64-bit lanes (`.2d` and scalar `d`) have no wider native type, so saturating and rounding forms must go through
+/// 128-bit intermediates; the Unicorn corpus in `tests/recomp_emit.py` checks the values, this pins the emitted shape.
+#[test]
+fn sixty_four_bit_lane_saturation_and_rounding_use_wide_arithmetic() {
+    let module = Module::default();
+    let analysis = Analysis::default();
+    let emitter = Emitter::new(&module, &analysis, "fixture").unwrap();
+    let emit = |word: u32| {
+        emitter
+            .instruction(&function(0, 4), 0, word)
+            .unwrap_or_else(|e| panic!("{word:#010x}: {e:?}"))
+    };
+    for (word, fragment) in [
+        // sqadd / sqsub, vector and scalar
+        (0x4EE20C20, "nx::sat128<int64_t>(__int128(S0.s64[k]) + __int128(S1.s64[k]))"),
+        (0x5EE20C20, "nx::sat128<int64_t>(__int128(S0.s64[k]) + __int128(S1.s64[k]))"),
+        (0x4EE22C20, "nx::sat128<int64_t>(__int128(S0.s64[k]) - __int128(S1.s64[k]))"),
+        (0x5EE22C20, "nx::sat128<int64_t>(__int128(S0.s64[k]) - __int128(S1.s64[k]))"),
+        // uqadd saturates on unsigned wrap
+        (0x6EE20C20, "S0.u64[k] + S1.u64[k] < S0.u64[k] ? ~0ull"),
+        (0x7EE20C20, "S0.u64[k] + S1.u64[k] < S0.u64[k] ? ~0ull"),
+        // sqabs / sqneg
+        (0x4EE07820, "nx::sat128<int64_t>(S.s64[k] < 0 ? -__int128(S.s64[k]) : __int128(S.s64[k]))"),
+        (0x6EE07820, "nx::sat128<int64_t>(-__int128(S.s64[k]))"),
+        (0x7EE07820, "nx::sat128<int64_t>(-__int128(S.s64[k]))"),
+        // neg / abs wrap in the unsigned type
+        (0x6EE0B820, "uint64_t(0) - uint64_t(S.s64[k])"),
+        (0x6EA0B820, "uint32_t(0) - uint32_t(S.s32[k])"),
+        (0x4EE0B820, "S.s64[k] < 0 ? uint64_t(0) - uint64_t(S.s64[k]) : uint64_t(S.s64[k])"),
+        // rounding shifts, including the legal #64
+        (0x4F402420, "(int64_t(S.s64[k]) + (__int128(1) << (64 - 1))) >> 64"),
+        (0x6F402420, "(uint64_t(S.u64[k]) + ((unsigned __int128)(1) << (64 - 1))) >> 64"),
+        (0x7F402420, "(uint64_t(S.u64[k]) + ((unsigned __int128)(1) << (64 - 1))) >> 64"),
+        // accumulating forms wrap in the unsigned type
+        (0x4F403420, "uint64_t(r.s64[k]) + uint64_t((int64_t(S.s64[k]) + (__int128(1) << (64 - 1))) >> 64)"),
+        (0x6F403420, "r.u64[k] + uint64_t((uint64_t(S.u64[k]) + ((unsigned __int128)(1) << (64 - 1))) >> 64)"),
+        (0x4F7E1420, "uint64_t(r.s64[k]) + uint64_t(int64_t(S.s64[k]) >> (2 >= 64 ? 64 - 1 : 2))"),
+    ] {
+        let out = emit(word);
+        assert!(out.contains(fragment), "{word:#010x}: {fragment} not in {out}");
+    }
+}
+
+#[test]
+fn narrow_lane_saturation_is_unchanged() {
+    let module = Module::default();
+    let analysis = Analysis::default();
+    let emitter = Emitter::new(&module, &analysis, "fixture").unwrap();
+    // sqadd v0.4s, v1.4s, v2.4s keeps the 64-bit intermediate; it is exact for 32-bit lanes.
+    let out = emitter.instruction(&function(0, 4), 0, 0x4EA20C20).unwrap();
+    assert!(
+        out.contains("nx::sat<int32_t>(int64_t(S0.s32[k]) + int64_t(S1.s32[k]))"),
+        "{out}"
+    );
+    assert!(!out.contains("__int128"), "{out}");
+}
