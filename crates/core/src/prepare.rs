@@ -908,11 +908,7 @@ pub(crate) fn pack_prepared(out: &Path, romfs: &Path) -> Result<()> {
     std::fs::create_dir_all(out)?;
     if romfs.is_dir() {
         let pak = out.join("romfs.pak");
-        let inputs = format!(
-            "romfs.pak v1 {}\n{}",
-            build_version(),
-            tree_key(romfs)?
-        );
+        let inputs = format!("romfs.pak v1 {}\n{}", build_version(), tree_key(romfs)?);
         redo_unless_current(&out.join(".romfs.pak.key"), &inputs, &pak, || {
             crate::pack::romfs(romfs, &pak)
         })?;
