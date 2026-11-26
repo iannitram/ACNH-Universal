@@ -885,7 +885,11 @@ fn pack_stage(req: &Request) -> Result<()> {
     std::fs::create_dir_all(&req.out)?;
     if req.game.romfs.is_dir() {
         let pak = req.out.join("romfs.pak");
-        let inputs = format!("romfs.pak v1\n{}", tree_key(&req.game.romfs)?);
+        let inputs = format!(
+            "romfs.pak v1 {}\n{}",
+            env!("CARGO_PKG_VERSION"),
+            tree_key(&req.game.romfs)?
+        );
         redo_unless_current(&req.out.join(".romfs.pak.key"), &inputs, &pak, || {
             crate::pack::romfs(&req.game.romfs, &pak)
         })?;
@@ -893,7 +897,11 @@ fn pack_stage(req: &Request) -> Result<()> {
     let spirv = req.out.join("spirv");
     if spirv.is_dir() {
         let pak = req.out.join("spirv.pak");
-        let inputs = format!("spirv.pak v1\n{}", tree_key(&spirv)?);
+        let inputs = format!(
+            "spirv.pak v1 {}\n{}",
+            env!("CARGO_PKG_VERSION"),
+            tree_key(&spirv)?
+        );
         redo_unless_current(&req.out.join(".spirv.pak.key"), &inputs, &pak, || {
             crate::pack::spirv(&spirv, &pak)
         })?;
@@ -983,7 +991,9 @@ fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
     let main = req.out.join("analysis/main.bin");
     let harness = root.join("private/build/spirv_harness");
     let inputs = format!(
-        "shaders v1\nromfs {}\nmain {}\nharness {} {}\n",
+        "shaders v1 {}\nspirv-val {}\nromfs {}\nmain {}\nharness {} {}\n",
+        env!("CARGO_PKG_VERSION"),
+        find_on_path("spirv-val").is_some(),
         tree_key(&req.game.romfs).map_err(invalidate)?,
         file_key(&main),
         file_key(&harness.join("bin/Release/net10.0/spirv_harness.dll")),
@@ -1004,7 +1014,9 @@ fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
             )
         },
     )
-    .map_err(|error| Error::Build(format!("stage {}: {error}", stage.key())))?;
+    // Any failure here, writing the record included, clears the summary: a summary left
+    // beside packs that were never rewritten would mark the stage complete next run.
+    .map_err(invalidate)?;
     // A summary only marks the stage complete once its archives and packs are ready.
     pack_stage(req).map_err(invalidate)
 }
