@@ -44,6 +44,12 @@ impl BuildActions {
         }
     }
 
+    /// This device already has the game: contained with `player`, or a prepared folder of
+    /// its own target.
+    pub(crate) fn has_game_here(&self, player: &Path) -> bool {
+        self.has_contained_game(player) || self.prepare_root().join("analysis/main.bin").is_file()
+    }
+
     fn has_contained_game(&self, player: &Path) -> bool {
         match self.os {
             Os::Mac => player
@@ -91,8 +97,10 @@ impl BuildActions {
             .ok()
             .and_then(|text| bundle::from_text(&text).ok())
             .is_some_and(|manifest| {
+                // Existence and size only: this runs on the window thread. The hashes were
+                // checked when the install was made (bundle::install verifies the staged files).
                 manifest.target == self.os
-                    && bundle::verify(&manifest, &self.dirs.install()).is_ok()
+                    && bundle::check_sizes(&manifest, &self.dirs.install()).is_ok()
             })
     }
 
@@ -170,6 +178,13 @@ impl BuildActions {
                 let local_data = self.dirs.data.parent().unwrap_or(&self.dirs.data);
                 let app_dir = prepare::app_out_dir_for(target, launcher, local_data, home);
                 prepare::pack_folder(&launcher_exe, &self.dirs.install(), &out, &app_dir)?;
+            }
+            // The hub keeps the build for the devices that pull: a failure to publish is
+            // told, not hidden, but the build itself is made.
+            if let Err(error) = self.publish(target, game) {
+                report(format!(
+                    "Built, but not published for other devices: {error}"
+                ));
             }
             Ok(())
         })
@@ -280,12 +295,27 @@ impl BuildActions {
         .all(|rel| game_dir.join(rel).is_file())
     }
     fn install_pulled(&self, pull: impl FnOnce(&Path) -> Result<bundle::Bundle>) -> Result<()> {
-        std::fs::create_dir_all(&self.dirs.data)?;
-        let staged = tempfile::Builder::new()
-            .prefix(".continue-")
-            .tempdir_in(&self.dirs.data)?;
-        let manifest = pull(staged.path())?;
-        self.install_bundle(&manifest, staged.path())
+        // The same staging folder every time: a pull that was cut continues from the chunks
+        // it already has. A successful install moves the folder away.
+        let staged = hub::resume_dir(&self.dirs)?;
+        let manifest = pull(&staged)?;
+        self.install_bundle(&manifest, &staged)
+    }
+
+    /// Publishes the build just made in the install folder so a hub serves it to the
+    /// devices that pull. Only the targets whose player is the install folder have one.
+    fn publish(&self, target: Os, game: &gamefolder::GameFolder) -> Result<()> {
+        if !matches!(target, Os::Linux | Os::Windows) {
+            return Ok(());
+        }
+        hub::publish_build(
+            &crate::hub_host::HubController::builds_dir(&self.dirs),
+            &self.dirs.install(),
+            target,
+            game.version.name(),
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        Ok(())
     }
 
     pub(crate) fn install_bundle(&self, manifest: &bundle::Bundle, staged: &Path) -> Result<()> {
@@ -671,6 +701,11 @@ mod tests {
         assert!(actions.installed(&player));
         std::fs::write(&player, b"modified").unwrap();
         assert!(!actions.installed(&player));
+        // The window-thread check is size only; the hash is the worker's (bundle::install).
+        std::fs::write(&player, b"player").unwrap();
+        std::fs::write(&player, b"Player").unwrap();
+        assert!(actions.installed(&player));
+        assert!(bundle::verify(&manifest, &install).is_err());
     }
 
     #[test]
@@ -712,7 +747,7 @@ mod tests {
 
         std::thread::scope(|s| {
             let worker = s.spawn(|| {
-                let mut pairing = hub::PairingSession::new("654321").unwrap();
+                let pairing = std::sync::Mutex::new(hub::PairingSession::new("654321").unwrap());
                 for _ in 0..2 {
                     let (stream, _) = listener.accept().unwrap();
                     let mut transport = hub::TcpTransport::from_stream(stream).unwrap();
@@ -721,7 +756,7 @@ mod tests {
                         &hub_dirs,
                         &builds,
                         Some(&source),
-                        Some(&mut pairing),
+                        Some(&pairing),
                     )
                     .unwrap();
                 }

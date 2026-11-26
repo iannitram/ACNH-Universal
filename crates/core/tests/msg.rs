@@ -211,6 +211,7 @@ fn late_setup_and_a_fully_cached_retry_consume_pending_reflow() {
         format!("{}\n", acnh_core::prepare::recomp_hash(root).unwrap()),
     )
     .unwrap();
+    acnh_core::prepare::seed_tools_for_test(root).unwrap();
     let mut runner = ProcessRunner::new(root.to_path_buf(), 0);
 
     let pending = out.join("mods/mock/.msg-reflow-pending");

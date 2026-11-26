@@ -133,7 +133,7 @@ Work is in three bands. Inside a band, anything not blocked can be taken.
 | M12 a week on the island | | #69 (needs my developed island as a JKSV backup); the play log has no template (#370) |
 | M13 our code in Rust | the prep tools (1.31, #34), the recompiler (3.05, #49), the launcher (2.10, #44), upstream's packaging retired (2.09a, #174), the Rust cores of 11 runtime groups (#51–#61) | #352 (C++ left in the runtime), #335 (Python in Prepare), #351 (two recompilers, after 1.0) |
 | M14 no game files | `tools/check_no_game_data.sh` in CI, 1.16 `redact`, 1.17 `bundle::is_forbidden`, the package scripts' refusals | #326; the release file-list check has never run (#323); #321 |
-| M15 every build verified | 0.01, 0.02; CI on Linux, Windows (Rust), macOS | #322, #325; no CI builds the APK, the Mac player or Android's C++ |
+| M15 every build verified | 0.01, 0.02; CI on Linux, Windows (Rust), macOS | #322, #325; no CI builds the APK or Android's C++ |
 | M16 fan mods off by default, a switch each | 1.32 (#85); my own builds turn the SpeedFix on (decision of 2026-11-23) | each switch on and off at a Prepare on a hub (#370); #329 |
 | M17 every aspect, wide or tall | #91 / PR #299 (`nvn_aspect`), the Pixel Fold's two screens (#249 / PRs #248, #250), checked on an emulator | captures on devices and a live resize (#370, #84); the launcher has no narrow layout (#348) |
 | M18 one app with the game inside, on every platform | Mac and iPad (8.02a, 8.02b, 1.22b, 8.05a, 8.03e), Windows (7.01a), Linux (6.01a), Android (9.02a, 9.02, 9.02b), the small `.ipa` (8.03f, 8.03g) | #363, #365, #367; "move the folder and launch again" is asked by no issue (#370); #231, #74 |
@@ -231,7 +231,7 @@ All mine, in this order; 8.02 (#73) has no open blocker.
 | iannitram/Uncharted-Universal | GPL-2.0 | the strangler order and stage layout | learn only (this repo is MIT) |
 | peiikai/LASRecomp | MIT | `recomp`, `runtime` | learn |
 | BluetufieBugado/SuperMarioWonderRecomp | MIT | `runtime/src/nvn`, Android, Windows | learn |
-| fedebuonco/nxrt, nxrt-frontend | Unlicense | `crates/runtime` (the yield back-off in `kernel.rs`, PR #239; its C++ copy `yield_backoff.h` is unused, #327), `app/` | adopt with credit; learn |
+| fedebuonco/nxrt, nxrt-frontend | Unlicense | `crates/runtime` (the yield back-off in `kernel.rs`, PR #239; its unused C++ copy was removed in #327), `app/` | adopt with credit; learn |
 | cesar527/ACNHRecomp | MIT | `profile`, Android | adopt with credit: the thermal governor, power modes |
 | ZUlxian/ACNHRecomp | MIT | `gamefolder`, Windows | adopt with credit |
 | bingnnvjn/nvn-native-android, Timqt/d2r-android | MIT | Android, the pipeline cache (PR #243, idea only) | learn |

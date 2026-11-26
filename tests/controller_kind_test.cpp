@@ -1,8 +1,12 @@
-// The Android controller_kind rule (runtime/src/controller_kind.h): Microsoft -> xbox, Sony -> playstation,
-// Nintendo -> switch, any other connected pad -> generic, no pad -> "".
-//   clang++ -std=c++20 -Iruntime/src tests/controller_kind_test.cpp  (or through CMake -DNX_TESTS=ON, ctest)
+// The Android controller_kind rule (runtime/src/controller_kind.h), held to the list the launcher and the Rust
+// runtime share (tests/data/pad_kinds.tsv): one pad, one set of prompts everywhere. "" when no pad is connected.
+//   clang++ -std=c++20 -Iruntime/src tests/controller_kind_test.cpp && ./a.out tests/data/pad_kinds.tsv
+//   (or through CMake -DNX_TESTS=ON, ctest)
 #include <cstdio>
+#include <fstream>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "controller_kind.h"
 
@@ -12,38 +16,53 @@ namespace {
 
 int g_failed = 0;
 
-void expect(const std::string& got, const std::string& want, int line) {
+void expect(const std::string& got, const std::string& want, const std::string& what) {
     if (got != want) {
-        std::printf("FAIL line %d: got \"%s\", expected \"%s\"\n", line, got.c_str(), want.c_str());
+        std::printf("FAIL %s: got \"%s\", expected \"%s\"\n", what.c_str(), got.c_str(), want.c_str());
         g_failed++;
     }
 }
 
+std::vector<std::string> split_tabs(const std::string& line) {
+    std::vector<std::string> out;
+    std::stringstream ss(line);
+    std::string f;
+    while (std::getline(ss, f, '\t')) out.push_back(f);
+    return out;
+}
+
 }  // namespace
 
-#define EXPECT(got, want) expect((got), (want), __LINE__)
-
-int main() {
-    // Vendor IDs match SDL hosts: Microsoft (0x045E), Sony (0x054C), Nintendo (0x057E).
-    EXPECT(android_controller_kind(true, 0x045E), "xbox");
-    EXPECT(android_controller_kind(true, 0x054C), "playstation");
-    EXPECT(android_controller_kind(true, 0x057E), "switch");
-
-    // Any other connected pad (including vendor 0 Bluetooth pads) is generic.
-    EXPECT(android_controller_kind(true, 0x2DC8, "8BitDo Pro 2"), "generic");
-    EXPECT(android_controller_kind(true, 0x1234, "USB Gamepad"), "generic");
-    EXPECT(android_controller_kind(true, 0, "Bluetooth Gamepad"), "generic");
-
-    // Name fallback when vendor ID is absent.
-    EXPECT(android_controller_kind(true, 0, "Xbox Wireless Controller"), "xbox");
-    EXPECT(android_controller_kind(true, 0, "DualSense Wireless Controller"), "playstation");
-    EXPECT(android_controller_kind(true, 0, "Pro Controller"), "switch");
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::printf("usage: controller_kind_test pad_kinds.tsv\n");
+        return 2;
+    }
+    std::ifstream in(argv[1]);
+    std::string line;
+    int rows = 0;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        auto f = split_tabs(line);
+        if (f.size() != 4) {
+            std::printf("FAIL bad row: %s\n", line.c_str());
+            g_failed++;
+            continue;
+        }
+        const int vendor = int(std::stoul(f[0], nullptr, 16)), product = int(std::stoul(f[1], nullptr, 16));
+        expect(android_controller_kind(true, vendor, product, f[2]), f[3] == "deck" ? "generic" : f[3], line);
+        rows++;
+    }
+    if (rows < 20) {
+        std::printf("FAIL only %d rows read\n", rows);
+        g_failed++;
+    }
 
     // No connected pad -> "".
-    EXPECT(android_controller_kind(false, 0x045E), "");
-    EXPECT(android_controller_kind(false, 0x054C), "");
-    EXPECT(android_controller_kind(false, 0x057E), "");
-    EXPECT(android_controller_kind(false, 0), "");
+    expect(android_controller_kind(false, 0x045E, 0), "", "none xbox");
+    expect(android_controller_kind(false, 0x054C, 0), "", "none ps");
+    expect(android_controller_kind(false, 0x057E, 0), "", "none switch");
+    expect(android_controller_kind(false, 0, 0), "", "none");
 
     std::printf("controller_kind_test: %s\n", g_failed ? "FAILED" : "all passed");
     return g_failed ? 1 : 0;

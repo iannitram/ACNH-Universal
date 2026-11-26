@@ -43,8 +43,8 @@ void acnh_platform_window_set_refresh_hz(int32_t hz);
 void acnh_platform_pick_begin();
 void acnh_platform_pick_complete(const char* path);
 void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
-size_t acnh_platform_pad_kind(int32_t vendor, const char* name, char* out, size_t cap);
-size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, const char* name, char* out, size_t cap);
+size_t acnh_platform_pad_kind(int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
+size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
 bool acnh_platform_xbox_layout(const char* controller_kind);
 int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
 uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
@@ -656,7 +656,7 @@ void sdl_main_loop() {
                 if (g_window) {
                     int pw = 0, ph = 0;
                     if (SDL_GetWindowSizeInPixels(g_window, &pw, &ph) && pw > 0 && ph > 0)
-                        g_pixel_w = uint32_t(pw), g_pixel_h = uint32_t(ph);
+                        acnh_platform_window_set_size(uint32_t(pw), uint32_t(ph));
                 }
                 break;
             case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:

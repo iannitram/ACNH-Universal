@@ -56,19 +56,14 @@ endif()
 
 # The game this build is for: games/<NX_GAME>/ holds what only that game needs (game.cpp: nx/game.h), the shared
 # runtime is the rest. One build directory per game.
-set(NX_GAME "hades" CACHE STRING "Game to build (a folder under games/)")
+set(NX_GAME "acnh" CACHE STRING "Game to build (a folder under games/)")
 set(NX_GAME_DIR "${CMAKE_SOURCE_DIR}/games/${NX_GAME}")
 if(NOT EXISTS "${NX_GAME_DIR}/game.cpp")
     message(FATAL_ERROR "games/${NX_GAME}/game.cpp not found")
 endif()
 
 # Generated code of the game (python -m recomp <nso> <gen dir>/<module> --name <module> --base ...). Never committed.
-# Hades keeps the layout from before there were other games (private/gen); the others use private/<game>/gen.
-if(NX_GAME STREQUAL "hades")
-    set(NX_GEN_DEFAULT "${CMAKE_SOURCE_DIR}/private/gen")
-else()
-    set(NX_GEN_DEFAULT "${CMAKE_SOURCE_DIR}/private/${NX_GAME}/gen")
-endif()
+set(NX_GEN_DEFAULT "${CMAKE_SOURCE_DIR}/private/${NX_GAME}/gen")
 set(NX_GEN_DIR "${NX_GEN_DEFAULT}" CACHE PATH "Recompiled module sources")
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -76,7 +71,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
                         -Wno-unused-but-set-variable -Wno-constant-logical-operand -Wno-unused-function)
 endif()
 if(MSVC)
-    add_compile_options(/arch:AVX2)
+    add_compile_options(/arch:AVX2 /EHsc)  # /EHsc: the player catches C++ exceptions (nx::LongJmp); clang-cl has them off
 endif()
 if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -117,7 +112,7 @@ if(NX_TESTS AND NOT ANDROID)
     add_test(NAME game_root COMMAND game_root_test)
     add_executable(controller_kind_test tests/controller_kind_test.cpp)
     target_include_directories(controller_kind_test PRIVATE runtime/src)
-    add_test(NAME controller_kind COMMAND controller_kind_test)
+    add_test(NAME controller_kind COMMAND controller_kind_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/pad_kinds.tsv)
     add_executable(pipeline_cache_blob_test tests/pipeline_cache_blob_test.cpp)
     target_include_directories(pipeline_cache_blob_test PRIVATE runtime/src/nvn)
     add_test(NAME pipeline_cache_blob COMMAND pipeline_cache_blob_test)
@@ -163,7 +158,7 @@ if(NX_TESTS AND NOT ANDROID)
     if(WIN32 AND NX_RUNTIME_ARCHIVE)
         add_executable(memguard_test tests/memguard_test.cpp runtime/src/memory_wrapper.cpp)
         target_include_directories(memguard_test PRIVATE runtime/include runtime/src)
-        target_link_libraries(memguard_test PRIVATE "${NX_RUNTIME_ARCHIVE}" psapi userenv ntdll)
+        target_link_libraries(memguard_test PRIVATE "${NX_RUNTIME_ARCHIVE}" psapi userenv ntdll ws2_32 bcrypt synchronization advapi32 dbghelp)  # what Rust std links on windows-msvc
         add_test(NAME memguard COMMAND memguard_test)
     endif()
 endif()
@@ -386,7 +381,6 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nvn/nvn_framegen.cpp
     runtime/src/nvn/nvn_temporal.cpp
     runtime/src/nvn/nvn_temporal_dlss.cpp
-    runtime/src/nvn/nvn_pipeline_cache.cpp
     runtime/src/nvn/nvn_bc.cpp
     runtime/src/nvn/nvn_draw.cpp
     runtime/src/nvn/nvn_sets.cpp
@@ -612,7 +606,7 @@ else()
                    runtime/src/app_icon.cpp assets/acnhrecomp.manifest)
     nx_add_windows_rc(${NX_GAME} assets/acnhrecomp.rc)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
-    target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 ole32 psapi winmm dxgi ws2_32 bcrypt)
+    target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 ole32 psapi winmm dxgi ws2_32 bcrypt synchronization)  # synchronization: WaitOnAddress, WakeByAddress*
     if(NX_GAME_FROM_FOLDER)
         # The game's code from game/windows-x64/<game>_game.dll, which the player hands its runtime calls to
         # (game_abi.cpp: nx_game_bind).

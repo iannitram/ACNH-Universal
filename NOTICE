@@ -1,14 +1,17 @@
 # Third-party notices
 
-The hub implementation and tests are adapted from
-[iannitram/totk-universal](https://github.com/iannitram/totk-universal/tree/80148e16e60b5ca5d34ca87d3ef3360567490352),
-commit `80148e16e60b5ca5d34ca87d3ef3360567490352`:
+This file lists every project whose code, headers or libraries this repository copies, links into a shipped build,
+or builds into a player. The desktop release packages carry it as NOTICE.txt beside LICENSE.txt, with the licence
+texts in licences/ (tools/release_licences.sh); the Android APK carries the texts in assets/licenses (tools/build_android.sh).
+The About page in the launcher credits the same projects (app/src/vm/about.rs).
 
-- `crates/core/src/hub.rs`: discovery and transports, pairing, resumable bundle transfer.
-- `crates/core/tests/hub_discover.rs`, `hub_pair.rs`, `hub_transfer.rs`.
-- Private-file creation from `hub.rs` moved into `crates/core/src/platform.rs`.
+## Copied into this repository
 
-The source files carry no separate conflicting licence header. Their repository licence is:
+- `crates/core/src/hub.rs`, `crates/core/tests/hub_discover.rs`, `hub_pair.rs`, `hub_transfer.rs`: adapted from
+  [iannitram/totk-universal](https://github.com/iannitram/totk-universal/tree/80148e16e60b5ca5d34ca87d3ef3360567490352),
+  commit `80148e16e60b5ca5d34ca87d3ef3360567490352`, MIT. Private-file creation from `hub.rs` moved into
+  `crates/core/src/platform.rs`. The source files carry no separate conflicting licence header. Their repository
+  licence is:
 
 MIT License
 
@@ -31,3 +34,47 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+- `crates/core/src/platform.rs` (atomic write): adapted from
+  [iannitram/craft-libs](https://github.com/iannitram/craft-libs), commit `f3327e14ca55e6ff65ab82e629917b38a6590e3a`
+  (`crates/atomic`), MIT OR Apache-2.0. The licence texts are the ones in the craft-libs repository.
+- `runtime/src/yield_backoff.h`: from [fedebuonco/nxrt](https://github.com/fedebuonco/nxrt), commit
+  `c41d913` (`runtime/yield_backoff.{c,h}`), Unlicense (public domain dedication). The header carries the credit.
+
+## Linked into the desktop launcher and command line (acnh-app, acnh-universal)
+
+- Rust crates: each one's licence texts are in licences/rust/<crate>-<version>/, and the list with each licence is
+  licences/rust-crates.txt. Generated for the target by tools/rust_licenses.py.
+- `save-relay`: [iannitram/save-relay](https://github.com/iannitram/save-relay), MIT (licences/save-relay/).
+- `slint`: [slint-ui/slint](https://github.com/slint-ui/slint), the launcher's user interface, under the Slint
+  Royalty-Free License 2.0 with attribution (ADR 0003). Its licence texts are in licences/rust/slint-<version>/.
+  GUI powered by Slint (https://slint.dev). Copyright © SixtyFPS GmbH.
+- Capstone, the ARM64 disassembler the recompiler uses through the `capstone` crate: [aquynh/capstone](https://github.com/aquynh/capstone),
+  BSD-3-Clause; its LLVM-derived tables are under the LLVM licence (licences/capstone/).
+
+## Linked into the players and the Android app
+
+- `libvpx`: [webm/libvpx](https://github.com/webm/libvpx), BSD-3-Clause; VP8 and VP9 decoding for the opening movie
+  (built by tools/build_libvpx.sh, or taken from the system).
+- `libvorbis`: [xiph/vorbis](https://github.com/xiph/vorbis), BSD-3-Clause; Vorbis audio for the movies.
+- `mbedTLS`: [Mbed-TLS/mbedtls](https://github.com/Mbed-TLS/mbedtls), Apache-2.0 or GPL-2.0-or-later (dual-licensed;
+  the Apache-2.0 text is shipped with the Android app); the network stack of the Nextendo Online player.
+- `libadrenotools`: [bylaws/libadrenotools](https://github.com/bylaws/libadrenotools), BSD-2-Clause; loads the
+  Turnip GPU driver on Android.
+- `MoltenVK`: [KhronosGroup/MoltenVK](https://github.com/KhronosGroup/MoltenVK), Apache-2.0; Vulkan on Metal in the
+  iOS player (tools/build_ios.sh).
+- `SDL3`: [libsdl-org/SDL](https://github.com/libsdl-org/SDL), Zlib; window, input and audio of the players.
+- `SPIRV-Cross`: [KhronosGroup/SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross), Apache-2.0; shader translation
+  in the player build (CMakeLists.txt).
+- `Vulkan-Headers`: [KhronosGroup/Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers), Apache-2.0; the
+  headers the players compile against.
+- `zlib`: zlib licence; the system library the players link on desktop.
+
+## Credited, and their ideas used (no code copied)
+
+- [Nycolazs/ACNHRecomp](https://github.com/Nycolazs/ACNHRecomp), MIT: the upstream this repository was copied from.
+- [cesar527/ACNHRecomp](https://github.com/cesar527/ACNHRecomp), MIT: the thermal governor and handheld power modes.
+- [ZUlxian/ACNHRecomp](https://github.com/ZUlxian/ACNHRecomp), MIT: the plain game-folder import and the Windows port.
+- [fedebuonco/nxrt, nxrt-frontend](https://github.com/fedebuonco/nxrt), Unlicense: the shared runtime plan and the
+  launcher's Continue screen (the copied header is above).
+- [iannitram/save-relay](https://github.com/iannitram/save-relay), MIT: save synchronisation (linked, above).

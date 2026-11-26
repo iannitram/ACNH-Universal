@@ -1,4 +1,4 @@
-//! Recompile an NSO module to C++ (port of `recomp/__main__.py`).
+//! Recompile an NSO module to C++.
 
 use crate::{
     analyse::{analyse, Analysis, Function},
@@ -163,7 +163,13 @@ fn read_trace_sp_env() -> Result<BTreeSet<u64>, DriverError> {
     Ok(out)
 }
 
+/// Size of the NSO header that IPS offsets count and module offsets do not.
+const NSO_HEADER_SIZE: u64 = 0x100;
+
 /// `(module offset, 32-bit word)` pairs of the enabled sections of a `.pchtxt` (IPS text) patch.
+/// An IPS offset counts the 0x100 byte NSO header; `@flag offset_shift N` adds N to every offset, so
+/// a patch written with module offsets says `@flag offset_shift 0x100`. Without the flag the offsets
+/// are IPS offsets and lose the header here.
 pub fn read_pchtxt(path: &Path) -> Result<Vec<(u64, u32)>, DriverError> {
     let text = std::fs::read_to_string(path)?;
     parse_pchtxt(&text, path)
@@ -171,6 +177,7 @@ pub fn read_pchtxt(path: &Path) -> Result<Vec<(u64, u32)>, DriverError> {
 
 pub fn parse_pchtxt(text: &str, path: &Path) -> Result<Vec<(u64, u32)>, DriverError> {
     let mut enabled = false;
+    let mut shift = 0u64;
     let mut words = Vec::new();
     let line_re = Regex::new(r"^([0-9A-Fa-f]{8})\s+([0-9A-Fa-f]+)$").expect("valid regex");
     for line in text.lines() {
@@ -178,7 +185,15 @@ pub fn parse_pchtxt(text: &str, path: &Path) -> Result<Vec<(u64, u32)>, DriverEr
         if line.is_empty() {
             continue;
         }
-        if line == "@enabled" {
+        if let Some(rest) = line.strip_prefix("@flag") {
+            let mut parts = rest.split_whitespace();
+            if parts.next() == Some("offset_shift") {
+                let v = parts.next().unwrap_or("");
+                shift = parse_hex(v.strip_prefix("0x").unwrap_or(v)).map_err(|_| {
+                    DriverError::Message(format!("{}: bad offset_shift: {line}", path.display()))
+                })?;
+            }
+        } else if line == "@enabled" {
             enabled = true;
         } else if line == "@disabled" {
             enabled = false;
@@ -195,13 +210,22 @@ pub fn parse_pchtxt(text: &str, path: &Path) -> Result<Vec<(u64, u32)>, DriverEr
                         path.display()
                     )));
                 }
+                let base = off
+                    .checked_add(shift)
+                    .and_then(|o| o.checked_sub(NSO_HEADER_SIZE))
+                    .ok_or_else(|| {
+                        DriverError::Message(format!(
+                            "{}: {line}: offset is inside the NSO header (add `@flag offset_shift 0x100` if it is a module offset)",
+                            path.display()
+                        ))
+                    })?;
                 for k in (0..hex.len()).step_by(8) {
                     let b0 = u8::from_str_radix(&hex[k..k + 2], 16).unwrap();
                     let b1 = u8::from_str_radix(&hex[k + 2..k + 4], 16).unwrap();
                     let b2 = u8::from_str_radix(&hex[k + 4..k + 6], 16).unwrap();
                     let b3 = u8::from_str_radix(&hex[k + 6..k + 8], 16).unwrap();
                     let w = u32::from_le_bytes([b0, b1, b2, b3]);
-                    words.push((off + (k / 2) as u64, w));
+                    words.push((base + (k / 2) as u64, w));
                 }
             }
         }
@@ -298,26 +322,50 @@ fn variant_function(
     ))
 }
 
-/// One job per core, as many as free memory allows (a worker grows to about 300 MB).
+/// One job per core, as many as the memory allows (a worker grows to about 300 MB).
 pub fn default_jobs() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
-            if let Some(kb) = meminfo
-                .lines()
-                .find(|l| l.starts_with("MemAvailable:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse::<usize>().ok())
-            {
-                let avail_mb = kb / 1024;
-                return cores.min(avail_mb.saturating_sub(1000) / 300).max(1);
-            }
-        }
+    match available_memory_mb() {
+        Some(avail_mb) => jobs_for(cores, avail_mb),
+        None => cores.max(1),
     }
-    cores.max(1)
+}
+
+/// Jobs that fit: one per core, each needing about 300 MB, with 1 GB left for everything else.
+pub fn jobs_for(cores: usize, avail_mb: usize) -> usize {
+    cores.min(avail_mb.saturating_sub(1000) / 300).max(1)
+}
+
+#[cfg(target_os = "linux")]
+fn available_memory_mb() -> Option<usize> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb = meminfo
+        .lines()
+        .find(|l| l.starts_with("MemAvailable:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<usize>().ok())?;
+    Some(kb / 1024)
+}
+
+/// macOS has no MemAvailable: take half of the installed memory, as other programs use the rest.
+#[cfg(target_os = "macos")]
+fn available_memory_mb() -> Option<usize> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    let bytes = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    usize::try_from(bytes / (2 << 20)).ok()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn available_memory_mb() -> Option<usize> {
+    None
 }
 
 fn write_funcs_header(
@@ -471,6 +519,32 @@ fn write_table(
     Ok(())
 }
 
+/// Delete every `code_NNN.cpp` in `out` whose index is `keep` or more: a re-run that yields
+/// fewer chunks must not leave the old ones, which the build globs and compiles.
+pub fn remove_stale_chunks(out: &Path, keep: usize) -> std::io::Result<()> {
+    let Ok(entries) = std::fs::read_dir(out) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(digits) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("code_"))
+            .and_then(|n| n.strip_suffix(".cpp"))
+        else {
+            continue;
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if digits.parse::<usize>().map_or(true, |idx| idx >= keep) {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Recompile an NSO module to C++ into `opts.out`.
 pub fn recompile(
     opts: &RecompileOptions,
@@ -545,6 +619,7 @@ pub fn recompile(
 
     type ChunkResult = Result<(usize, BTreeMap<String, usize>, usize), DriverError>;
     let next_chunk = AtomicUsize::new(0);
+    let funcs_done = AtomicUsize::new(0);
     let chunk_results: Vec<ChunkResult> = std::thread::scope(|s| {
         let mut handles = Vec::with_capacity(jobs);
         for _ in 0..jobs {
@@ -586,6 +661,7 @@ pub fn recompile(
                     content.push('\n');
                     write_if_changed(&opts.out.join(format!("code_{file_idx:03}.cpp")), &content)?;
                     total_count += hi - lo;
+                    funcs_done.fetch_add(hi - lo, Ordering::Relaxed);
                 }
                 Ok((
                     emitter.coverage.handled,
@@ -593,6 +669,20 @@ pub fn recompile(
                     total_count,
                 ))
             }));
+        }
+        // Report progress while the workers run, not after they all have joined.
+        let mut reported = 0usize;
+        while handles.iter().any(|h| !h.is_finished()) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let done = funcs_done.load(Ordering::Relaxed);
+            if done / 8000 != reported / 8000 {
+                log(&format!(
+                    "  emitted {done}/{} functions ({:.0}s)",
+                    funcs.len(),
+                    t.elapsed().as_secs_f64()
+                ));
+            }
+            reported = done;
         }
         handles
             .into_iter()
@@ -605,23 +695,15 @@ pub fn recompile(
 
     let mut handled = 0usize;
     let mut unhandled: BTreeMap<String, usize> = BTreeMap::new();
-    let mut done = 0usize;
     for res in chunk_results {
-        let (h, u, count) = res?;
+        let (h, u, _) = res?;
         handled += h;
         for (mn, c) in u {
             *unhandled.entry(mn).or_default() += c;
         }
-        let prev = done;
-        done += count;
-        if done / 8000 != prev / 8000 {
-            log(&format!(
-                "  emitted {done}/{} functions ({:.0}s)",
-                funcs.len(),
-                t.elapsed().as_secs_f64()
-            ));
-        }
     }
+
+    remove_stale_chunks(&opts.out, chunks.len())?;
 
     let variant_path = opts.out.join("code_variant.cpp");
     if let Some(v) = variant.as_ref() {
