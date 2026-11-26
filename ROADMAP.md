@@ -1,6 +1,6 @@
 # Roadmap
 
-Updated: 2026-11-25
+Updated: 2026-11-26
 
 features:
 - housekeeping: Build verification, release hygiene and upstream sync
@@ -32,7 +32,22 @@ This roadmap was audited against `main` on 2026-11-25 by reading the code (eight
   - **CI and release (stage 0).** `cpp-windows` has never passed since it was added, so the Windows player has never been built in CI (#322). `release.yml` has never run and cannot (#323). There is no version scheme of our own (#324).
   - **Python (M13).** Prepare still runs Python in five places (#335).
   - **SPEC.** The desktop cloud download (PRs #315, #316) is not in `SPEC.md` and contradicts M18 and M11 as written (#321).
-- **Checked on a device so far:** the Pixel Fold (Mali-G710, not the 1.0 Adreno device) ran the game, made its first save, signed in to Dropbox and pulled an island, and ran the 60 fps SpeedFix build (#264; outdoors it holds 29–32 fps cold and 21–24 hot, so 30 fps with frame generation is its practical setting). The Mac booted an early build to the opening at 30 fps (#73, 2026-11-18). The iPad mini Simulator reaches frames at about 45 fps, then stops at a Metal limit only the Simulator has. Build 0.11.0 (1101021) of my prepared game is in my Dropbox as a Mac app, a big `.ipa` and a small `.ipa` with its game folder; none is installed yet.
+- **Checked on a device so far:** the Pixel Fold (Mali-G710, not the 1.0 Adreno device) ran the game, made its first save, signed in to Dropbox and pulled an island, and ran the 60 fps SpeedFix build (#264; outdoors it holds 29–32 fps cold and 21–24 hot, so 30 fps with frame generation is its practical setting). The Mac booted an early build to the opening at 30 fps (#73, 2026-11-18). The iPad mini Simulator reaches frames at about 45 fps, then stops at a Metal limit only the Simulator has. Build 0.11.0 (1101029), made on 2026-11-26 from `main` at `fbc35d4` with SpeedFix on, is in my Dropbox as a Mac app (about 10.2 GiB), a big `.ipa` (about 10.2 GiB) and a small `.ipa` (131 MB) with its game folder; the 1101021 files beside them are 0 bytes (Dropbox placeholders). I unzipped the Mac app and ran its player for 200 seconds: the log has no error, fail, fatal or abort lines and holds 30 fps in 36 of 39 samples. I did not look at the screen, so reaching the opening is not confirmed. None of the three is installed on a device yet.
+
+### Open pull requests (2026-11-26)
+
+Thirty-three pull requests are open against `main` and none merged on 2026-11-26, so everything in this file that says "Open" is still open. Each of the 31 checked except #407 and #412 has a passing review and failed the merge check on two counts: `cpp-windows` and the Windows player job are red (#322), and its body's `Tests and lint:` entry holds no test and lint output (R40). Three also lack a `Closes #N` or a `Refs #N` with a `Still owed:` entry (#392, #403, #380). The owner's ruling on the red Windows job covers Apple PRs only and does not cover the body check. One test, `first_run::tests::steam_artwork_uses_the_size_for_each_library_slot`, fails in `cargo test --workspace` in most of these runs; one run (#345) reports it also fails on unmodified `main`, and it looks for assets next to the test binary, so it fails when the target folder is shared. It needs its own issue. The PRs:
+
+| Band | PRs (issue) |
+|---|---|
+| 1 | #372 (#322, Windows CI), #414 (#323), #415 (#324, needs my approval of the version and tag scheme), #392 (#325), #404 (#326), #406 (#327), #413 (#328, asks which SDL3 and LLVM version to pin), #416 (#329, Refs; SpeedFix ruling still mine) |
+| 2, Prepare and saves | #381 (#331), #393 (#332), #373 (#333), #388 (#334, Refs), #382 (#338), #386 (#337), #394 (#340) |
+| 2, Apple | #377 (#362), #391 (#355), #376 (#361) |
+| 2, faces | #374 (#342), #383 (#343), #395 (#344), #405 (#345), #407 (#347, Refs; asks whether an Android pad reaches the launcher at all) |
+| 2, hubs | #378 (#357, Refs), #379 (#359), #387 (#360); #358 waits on my ruling |
+| 3 | #403 (#335, Refs), #408 (#336, Refs), #412 (#348, Refs), #385 (#350, Refs), #380 (#349, Refs; the form count needs game analysis, so it is mine to run), #375 (#353), #396 (#356, Refs) |
+
+PR #407 timed out in CI and #412 failed review after three rounds; both stay open.
 
 ## Decisions I owe
 
@@ -178,7 +193,9 @@ Each stage names its platforms (R04). Stages overlap: anything not blocked can b
 
 ### Build on the Mac
 
-Every row is merged and checked in CI on `macos-15` with synthetic inputs: clippy and tests with all features, the save-relay link check, the iOS Rust check and the runtime's iOS static library, the layout tests and `check_ios_compile.sh`, `build_ios.sh` for the Simulator and the device, the bundle checks, `prepare_runner`'s `ios_real` test, and `tests/package_mac_test.sh` and `tests/package_ios_test.sh`. CI does not build or link the Mac player.
+Every row is merged and checked in CI on `macos-15` with synthetic inputs: clippy and tests with all features, the save-relay link check, the iOS Rust check and the runtime's iOS static library, the layout tests and `check_ios_compile.sh`, `build_ios.sh` for the Simulator and the device, the bundle checks, `prepare_runner`'s `ios_real` test, and `tests/package_mac_test.sh` and `tests/package_ios_test.sh`. CI does not build or link the Mac player (#392 adds it).
+
+Build run of 2026-11-26 (merged `main`, `fbc35d4`; version 0.11.0-1101029): Prepare's `ios` target ran all stages in about 38 minutes and exited 0. The `mac` target first stopped at its build stage because only the launcher binary sat in the target folder and `acnh-app` was not beside it (my setup, not a code fault); after building `acnh-app` it passed in about 20 minutes. `dotnet` is not on that Mac's PATH and the shader stage still completed. No game is installed on a device from this run.
 
 | Piece | Status | Still unverified |
 |---|---|---|
