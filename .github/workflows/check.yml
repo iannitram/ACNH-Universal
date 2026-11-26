@@ -183,7 +183,8 @@ jobs:
           T=$(cygpath -u "$RUNNER_TEMP")
           mkdir -p "$T/llvm"
           curl -fsSL -o "$T/llvm.tar.zst" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM/clang+llvm-$LLVM-x86_64-pc-windows-msvc.tar.zst"
-          "$SYSTEMROOT/System32/tar.exe" -xf "$(cygpath -w "$T/llvm.tar.zst")" -C "$(cygpath -w "$T/llvm")" --strip-components=1
+          # the archive uses a 2 GiB zstd window: bsdtar refuses it, zstd --long=31 reads it
+          zstd -dc --long=31 "$T/llvm.tar.zst" | tar -x -C "$T/llvm" --strip-components=1
           cygpath -w "$T/llvm/bin" >> "$GITHUB_PATH"
       - uses: ilammy/msvc-dev-cmd@v1
         with:
