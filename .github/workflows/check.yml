@@ -169,7 +169,6 @@ jobs:
     env:
       SDL3: "3.4.16"
       VK_HEADERS: "1.4.357"
-      LLVM: "20.1.8"
     defaults:
       run:
         shell: bash
@@ -179,10 +178,15 @@ jobs:
           submodules: false
       - name: LLVM (clang-cl, lld-link)
         run: |
+          # One pin: the version crates/core/src/prepare.rs uses (MSVC STL on the runner needs Clang 22 or newer).
+          LLVM=$(sed -n 's/^const LLVM: &str = "\([0-9.]*\)";.*/\1/p' crates/core/src/prepare.rs)
+          [ -n "$LLVM" ] || { echo "LLVM pin not found in crates/core/src/prepare.rs"; exit 1; }
+          echo "LLVM $LLVM"
           T=$(cygpath -u "$RUNNER_TEMP")
-          export PATH="/c/Program Files/7-Zip:$PATH"
-          curl -fsSL -o "$T/llvm.exe" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM/LLVM-$LLVM-win64.exe"
-          7z x -bso0 -o"$T/llvm" "$T/llvm.exe"
+          mkdir -p "$T/llvm"
+          curl -fsSL -o "$T/llvm.tar.zst" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM/clang+llvm-$LLVM-x86_64-pc-windows-msvc.tar.zst"
+          # the archive uses a 2 GiB zstd window: bsdtar refuses it, zstd --long=31 reads it
+          zstd -dc --long=31 "$T/llvm.tar.zst" | tar -x -C "$T/llvm" --strip-components=1
           cygpath -w "$T/llvm/bin" >> "$GITHUB_PATH"
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -241,6 +245,7 @@ jobs:
           CC: clang-cl
           CXX: clang-cl
           CMAKE_LINKER: lld-link
+          # Git for Windows ships /usr/bin/link.exe (coreutils), which shadows MSVC link.exe in this bash step.
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
           ACNH_GAME: acnh
           ACNH_BUILD_PLAYER: "1"
