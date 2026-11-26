@@ -5,6 +5,7 @@
 //! `hle_movie.cpp`, `hle_friends.cpp`, `hle_ngc.cpp`, and `hle_ldn.cpp`.
 
 #[allow(unused_imports)]
+use crate::sync::LockExt;
 use std::collections::{BTreeMap, VecDeque};
 #[allow(unused_imports)]
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -211,12 +212,12 @@ pub unsafe extern "C" fn acnh_services_set_host(host: *const AcnhServicesHost) {
     if host.is_null() {
         return;
     }
-    let mut g = HOST.lock().unwrap();
+    let mut g = HOST.lock_or_recover();
     *g = Some(std::ptr::read(host));
 }
 
 pub(crate) fn with_host<R>(f: impl FnOnce(&AcnhServicesHost) -> R) -> Option<R> {
-    let g = HOST.lock().unwrap();
+    let g = HOST.lock_or_recover();
     g.as_ref().map(f)
 }
 

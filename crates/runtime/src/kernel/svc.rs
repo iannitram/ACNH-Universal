@@ -1,7 +1,8 @@
 //! Split from the old `kernel.rs` (issue #356).
 
-#[allow(unused_imports)]
 use super::*;
+#[allow(unused_imports)]
+use crate::sync::LockExt;
 
 // ---- SVC implementations -----------------------------------------------------------------------
 
@@ -15,7 +16,7 @@ pub(crate) fn svc_arbitrate_lock(owner: u32, addr: u64, tag: u32) -> u32 {
         return RC_OK;
     }
     {
-        let mut d = self_t.data.lock().unwrap();
+        let mut d = self_t.data.lock_or_recover();
         d.wake = false;
         d.wait_mutex = addr;
         d.wait_tag = tag;
@@ -26,14 +27,14 @@ pub(crate) fn svc_arbitrate_lock(owner: u32, addr: u64, tag: u32) -> u32 {
         .mutex_waiters
         .push(Arc::clone(&self_t));
     block_thread(&self_t, -1);
-    let res = self_t.data.lock().unwrap().wait_result;
+    let res = self_t.data.lock_or_recover().wait_result;
     res
 }
 
 pub(crate) fn svc_arbitrate_unlock(addr: u64) -> u32 {
     let _wakes = DeferredWakeScope;
     let _kl = KERNEL_LOCK.lock();
-    let mut ks = kstate().lock().unwrap();
+    let mut ks = kstate().lock_or_recover();
     unlock_mutex_locked(&mut ks, addr);
     RC_OK
 }
@@ -45,7 +46,7 @@ pub(crate) fn svc_wait_process_wide_key(mutex: u64, key: u64, tag: u32, timeout:
         return RC_INVALID_STATE;
     };
     {
-        let mut d = self_t.data.lock().unwrap();
+        let mut d = self_t.data.lock_or_recover();
         d.wake = false;
         d.wait_mutex = mutex;
         d.wait_key = key;
@@ -53,22 +54,22 @@ pub(crate) fn svc_wait_process_wide_key(mutex: u64, key: u64, tag: u32, timeout:
         d.wait_result = 0;
     }
     {
-        let mut ks = kstate().lock().unwrap();
+        let mut ks = kstate().lock_or_recover();
         ks.cv_waiters.push(Arc::clone(&self_t));
         // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         unsafe { store32(key, 1) };
         unlock_mutex_locked(&mut ks, mutex);
     }
     if block_thread(&self_t, timeout) {
-        return self_t.data.lock().unwrap().wait_result;
+        return self_t.data.lock_or_recover().wait_result;
     }
-    let mut ks = kstate().lock().unwrap();
+    let mut ks = kstate().lock_or_recover();
     remove_thread(&mut ks.cv_waiters, &self_t);
     remove_thread(&mut ks.mutex_waiters, &self_t);
     let others = ks
         .cv_waiters
         .iter()
-        .any(|t| t.data.lock().unwrap().wait_key == key);
+        .any(|t| t.data.lock_or_recover().wait_key == key);
     if !others {
         // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         unsafe { store32(key, 0) };
@@ -79,11 +80,11 @@ pub(crate) fn svc_wait_process_wide_key(mutex: u64, key: u64, tag: u32, timeout:
 pub(crate) fn svc_signal_process_wide_key(key: u64, count: i32) -> u32 {
     let _wakes = DeferredWakeScope;
     let _kl = KERNEL_LOCK.lock();
-    let mut ks = kstate().lock().unwrap();
+    let mut ks = kstate().lock_or_recover();
     let mut n = 0i32;
     let mut i = 0usize;
     while i < ks.cv_waiters.len() && (count <= 0 || n < count) {
-        let match_key = ks.cv_waiters[i].data.lock().unwrap().wait_key == key;
+        let match_key = ks.cv_waiters[i].data.lock_or_recover().wait_key == key;
         if !match_key {
             i += 1;
             continue;
@@ -91,7 +92,7 @@ pub(crate) fn svc_signal_process_wide_key(key: u64, count: i32) -> u32 {
         let t = ks.cv_waiters.remove(i);
         n += 1;
         let (wait_mutex, wait_tag) = {
-            let d = t.data.lock().unwrap();
+            let d = t.data.lock_or_recover();
             (d.wait_mutex, d.wait_tag)
         };
         loop {
@@ -117,7 +118,7 @@ pub(crate) fn svc_signal_process_wide_key(key: u64, count: i32) -> u32 {
     let others = ks
         .cv_waiters
         .iter()
-        .any(|t| t.data.lock().unwrap().wait_key == key);
+        .any(|t| t.data.lock_or_recover().wait_key == key);
     if !others {
         // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         unsafe { store32(key, 0) };
@@ -128,7 +129,9 @@ pub(crate) fn svc_signal_process_wide_key(key: u64, count: i32) -> u32 {
 pub(crate) fn svc_wait_for_address(addr: u64, wait_type: u32, value: i32, timeout: i64) -> u32 {
     let self_t = current_thread();
     if addr == trace_addr() && addr != 0 {
-        let h = self_t.as_ref().map_or(0, |t| t.data.lock().unwrap().handle);
+        let h = self_t
+            .as_ref()
+            .map_or(0, |t| t.data.lock_or_recover().handle);
         host_log(&format!(
             "arb: thread {h:x} waits on {addr:x} type {wait_type} value {value} (memory {}) timeout {timeout}",
             // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
@@ -165,7 +168,7 @@ pub(crate) fn svc_wait_for_address(addr: u64, wait_type: u32, value: i32, timeou
         return RC_TIMEOUT;
     }
     {
-        let mut d = self_t.data.lock().unwrap();
+        let mut d = self_t.data.lock_or_recover();
         d.wake = false;
         d.wait_addr = addr;
         d.wait_result = 0;
@@ -176,11 +179,11 @@ pub(crate) fn svc_wait_for_address(addr: u64, wait_type: u32, value: i32, timeou
         .addr_waiters
         .push(Arc::clone(&self_t));
     if !block_thread(&self_t, timeout) {
-        let mut ks = kstate().lock().unwrap();
+        let mut ks = kstate().lock_or_recover();
         remove_thread(&mut ks.addr_waiters, &self_t);
         return RC_TIMEOUT;
     }
-    let res = self_t.data.lock().unwrap().wait_result;
+    let res = self_t.data.lock_or_recover().wait_result;
     res
 }
 
@@ -217,7 +220,7 @@ pub fn compute_signal_to_address_update(
 
 pub(crate) fn svc_signal_to_address(addr: u64, sig_type: u32, value: i32, count: i32) -> u32 {
     if addr == trace_addr() && addr != 0 {
-        let h = current_thread().map_or(0, |t| t.data.lock().unwrap().handle);
+        let h = current_thread().map_or(0, |t| t.data.lock_or_recover().handle);
         host_log(&format!(
             "arb: thread {h:x} signals {addr:x} type {sig_type} value {value} count {count} (memory {})",
             // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
@@ -226,11 +229,11 @@ pub(crate) fn svc_signal_to_address(addr: u64, sig_type: u32, value: i32, count:
     }
     let _wakes = DeferredWakeScope;
     let _kl = KERNEL_LOCK.lock();
-    let mut ks = kstate().lock().unwrap();
+    let mut ks = kstate().lock_or_recover();
     let waiters = ks
         .addr_waiters
         .iter()
-        .filter(|t| t.data.lock().unwrap().wait_addr == addr)
+        .filter(|t| t.data.lock_or_recover().wait_addr == addr)
         .count();
     match sig_type {
         0 => {}
@@ -255,7 +258,7 @@ pub(crate) fn svc_signal_to_address(addr: u64, sig_type: u32, value: i32, count:
     let mut n = 0i32;
     let mut i = 0usize;
     while i < ks.addr_waiters.len() && (count <= 0 || n < count) {
-        if ks.addr_waiters[i].data.lock().unwrap().wait_addr != addr {
+        if ks.addr_waiters[i].data.lock_or_recover().wait_addr != addr {
             i += 1;
             continue;
         }
@@ -279,7 +282,7 @@ pub(crate) fn svc_wait_synchronization(
         let h = unsafe { ld_u32(handles_ptr + 4 * (i as u64)) };
         let sig = (host().obj_signaled)(h);
         if sig < 0 {
-            let first_time = kstate().lock().unwrap().invalid_wait_handles.insert(h);
+            let first_time = kstate().lock_or_recover().invalid_wait_handles.insert(h);
             if first_time {
                 host_log(&format!(
                     "svcWaitSynchronization: invalid handle {h:x} (lr {})",
@@ -312,7 +315,7 @@ pub(crate) fn svc_wait_synchronization(
     struct LeaveGuard(Arc<KThread>);
     impl Drop for LeaveGuard {
         fn drop(&mut self) {
-            let mut ks = kstate().lock().unwrap();
+            let mut ks = kstate().lock_or_recover();
             remove_thread(&mut ks.sync_waiters, &self.0);
         }
     }
@@ -334,7 +337,7 @@ pub(crate) fn svc_wait_synchronization(
             return RC_TIMEOUT;
         }
         {
-            let mut d = self_t.data.lock().unwrap();
+            let mut d = self_t.data.lock_or_recover();
             if d.cancel {
                 d.cancel = false;
                 return RC_CANCELLED;
@@ -350,7 +353,7 @@ pub(crate) fn svc_wait_synchronization(
                 }
                 continue;
             }
-            let d = self_t.data.lock().unwrap();
+            let d = self_t.data.lock_or_recover();
             let (_g, res) = self_t.cv.wait_timeout(d, dl - now).unwrap();
             let timed_out = res.timed_out();
             drop(_g);
@@ -359,7 +362,7 @@ pub(crate) fn svc_wait_synchronization(
                 return RC_TIMEOUT;
             }
         } else {
-            let d = self_t.data.lock().unwrap();
+            let d = self_t.data.lock_or_recover();
             let _g = self_t.cv.wait(d).unwrap();
             drop(_g);
             KERNEL_LOCK.relock_all(depth);
@@ -374,7 +377,7 @@ extern "C" fn thread_main_trampoline(p: *mut c_void) {
     let t = unsafe { Arc::from_raw(p as *const KThread) };
     set_current_thread(Some(Arc::clone(&t)));
     let (id, entry, host_tid) = {
-        let mut d = t.data.lock().unwrap();
+        let mut d = t.data.lock_or_recover();
         let tid = (host().current_thread_id)();
         d.host_tid = tid;
         (d.id, d.entry, tid)
@@ -385,13 +388,13 @@ extern "C" fn thread_main_trampoline(p: *mut c_void) {
         (host().set_thread_name)(c_name.as_ptr());
         (host().cpu_profile_register)(c_name.as_ptr());
     }
-    let mut ctx_copy = t.data.lock().unwrap().ctx;
+    let mut ctx_copy = t.data.lock_or_recover().ctx;
     (host().call_guest)(&mut ctx_copy, entry);
-    t.data.lock().unwrap().ctx = ctx_copy;
+    t.data.lock_or_recover().ctx = ctx_copy;
 
     let _kl = KERNEL_LOCK.lock();
     let handle = {
-        let mut d = t.data.lock().unwrap();
+        let mut d = t.data.lock_or_recover();
         d.exited = true;
         d.handle
     };
@@ -416,21 +419,21 @@ pub(crate) fn new_thread(entry: u64, arg: u64, sp: u64, prio: i32, core: i32) ->
             .threads
             .insert(handle, Arc::clone(&t));
     }
-    all_threads().lock().unwrap().push(Arc::clone(&t));
+    all_threads().lock_or_recover().push(Arc::clone(&t));
     (host().on_thread_created)(handle, id, entry, tls, prio, core);
     t
 }
 
 pub(crate) fn alloc_handle() -> u32 {
     let _kl = KERNEL_LOCK.lock();
-    let mut ks = kstate().lock().unwrap();
+    let mut ks = kstate().lock_or_recover();
     let h = ks.next_handle;
     ks.next_handle = ks.next_handle.wrapping_add(1);
     h
 }
 
 pub(crate) fn notify_all_locked() {
-    let waiters: Vec<Arc<KThread>> = kstate().lock().unwrap().sync_waiters.clone();
+    let waiters: Vec<Arc<KThread>> = kstate().lock_or_recover().sync_waiters.clone();
     for t in waiters {
         t.cv.notify_one();
     }
@@ -441,7 +444,7 @@ pub(crate) fn get_thread(handle: u32) -> Option<Arc<KThread>> {
         return current_thread();
     }
     let _kl = KERNEL_LOCK.lock();
-    kstate().lock().unwrap().threads.get(&handle).cloned()
+    kstate().lock_or_recover().threads.get(&handle).cloned()
 }
 
 // ---- SVC Dispatch ------------------------------------------------------------------------------
@@ -467,7 +470,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
     let mut rc = RC_OK;
     if imm != 0x0B {
         if let Some(t) = current_thread() {
-            t.data.lock().unwrap().yb_run = 0;
+            t.data.lock_or_recover().yb_run = 0;
         }
     }
     let bounds = region_bounds();
@@ -478,7 +481,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
             if size > bounds.heap_max {
                 rc = RC_OUT_OF_MEMORY;
             } else {
-                let prev = kstate().lock().unwrap().heap_size;
+                let prev = kstate().lock_or_recover().heap_size;
                 if size > prev {
                     (host().commit)(bounds.heap_base + prev, size - prev);
                 }
@@ -492,7 +495,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
                         host_describe(c.x[30])
                     ));
                 }
-                kstate().lock().unwrap().heap_size = size;
+                kstate().lock_or_recover().heap_size = size;
                 c.x[1] = bounds.heap_base;
             }
         }
@@ -536,7 +539,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
         0x08 => {
             // CreateThread(entry x1, arg x2, stack_top x3, prio w4, core w5) -> handle
             let t = new_thread(c.x[1], c.x[2], c.x[3], c.x[4] as i32, c.x[5] as i32);
-            let h = t.data.lock().unwrap().handle;
+            let h = t.data.lock_or_recover().handle;
             c.x[1] = h as u64;
             if (host().get_trace)() {
                 host_log(&format!(
@@ -548,7 +551,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
         0x09 => {
             // StartThread(handle)
             if let Some(t) = get_thread(c.x[0] as u32) {
-                t.data.lock().unwrap().started = true;
+                t.data.lock_or_recover().started = true;
                 let raw = Arc::into_raw(t) as *mut c_void;
                 (host().start_thread)(thread_main_trampoline, raw, 64usize << 20);
             } else {
@@ -560,7 +563,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
             if let Some(t) = current_thread() {
                 let _kl = KERNEL_LOCK.lock();
                 let handle = {
-                    let mut d = t.data.lock().unwrap();
+                    let mut d = t.data.lock_or_recover();
                     d.exited = true;
                     d.handle
                 };
@@ -575,7 +578,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
             if ns > 0 {
                 SLEEP_CALLS.fetch_add(1, Ordering::Relaxed);
                 if let Some(t) = current_thread() {
-                    t.data.lock().unwrap().yb_run = 0;
+                    t.data.lock_or_recover().yb_run = 0;
                 }
                 (host().sleep_ns)(ns);
                 return;
@@ -591,7 +594,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
                 let mut regs = [0u64; 10];
                 regs.copy_from_slice(&c.x[19..29]);
                 let action = {
-                    let mut d = t.data.lock().unwrap();
+                    let mut d = t.data.lock_or_recover();
                     if d.yb_run == 0 || yield_backoff_progress(&d.yb_regs, &regs) {
                         d.yb_run = now;
                         d.yb_regs = regs;
@@ -609,7 +612,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
                 return;
             }
             let do_yield = {
-                let mut d = t.data.lock().unwrap();
+                let mut d = t.data.lock_or_recover();
                 if now.saturating_sub(d.last_yield) > 2_000_000 {
                     d.yields = 0;
                 }
@@ -625,24 +628,24 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
             } else {
                 (host().sleep_ns)(500_000);
             }
-            t.data.lock().unwrap().last_yield = (host().monotonic_ns)();
+            t.data.lock_or_recover().last_yield = (host().monotonic_ns)();
             return;
         }
         0x0C => {
             // GetThreadPriority(handle) -> prio
             c.x[1] = get_thread(c.x[1] as u32)
-                .map_or(44u64, |t| t.data.lock().unwrap().prio as u32 as u64);
+                .map_or(44u64, |t| t.data.lock_or_recover().prio as u32 as u64);
         }
         0x0D => {
             // SetThreadPriority(handle, prio)
             if let Some(t) = get_thread(c.x[0] as u32) {
-                t.data.lock().unwrap().prio = c.x[1] as i32;
+                t.data.lock_or_recover().prio = c.x[1] as i32;
             }
         }
         0x0E => {
             // GetThreadCoreMask(handle) -> core, mask
             c.x[1] = get_thread(c.x[2] as u32)
-                .map_or(0u64, |t| t.data.lock().unwrap().core as u32 as u64);
+                .map_or(0u64, |t| t.data.lock_or_recover().core as u32 as u64);
             c.x[2] = 0xF;
         }
         0x0F => {
@@ -651,12 +654,12 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
             let mut core_out = 0i32;
             rc = (host().set_thread_core_mask)(h, c.x[1] as i32, c.x[2], &mut core_out);
             if let Some(t) = get_thread(h) {
-                t.data.lock().unwrap().core = core_out;
+                t.data.lock_or_recover().core = core_out;
             }
         }
         0x10 => {
             // GetCurrentProcessorNumber
-            c.x[0] = current_thread().map_or(0u64, |t| t.data.lock().unwrap().core.max(0) as u64);
+            c.x[0] = current_thread().map_or(0u64, |t| t.data.lock_or_recover().core.max(0) as u64);
             return;
         }
         0x11 => {
@@ -697,7 +700,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
             // CancelSynchronization(thread handle)
             let _kl = KERNEL_LOCK.lock();
             if let Some(t) = get_thread(c.x[0] as u32) {
-                t.data.lock().unwrap().cancel = true;
+                t.data.lock_or_recover().cancel = true;
             }
             notify_all_locked();
         }
@@ -722,7 +725,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
         }
         0x21 => {
             // SendSyncRequest(handle)
-            let tls = current_thread().map_or(0, |t| t.data.lock().unwrap().tls);
+            let tls = current_thread().map_or(0, |t| t.data.lock_or_recover().tls);
             rc = ipc_request_inner(c, c.x[0] as u32, tls, 0x100);
         }
         0x22 => {
@@ -734,7 +737,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
         }
         0x25 => {
             // GetThreadId(handle) -> id
-            c.x[1] = get_thread(c.x[1] as u32).map_or(0, |t| t.data.lock().unwrap().id);
+            c.x[1] = get_thread(c.x[1] as u32).map_or(0, |t| t.data.lock_or_recover().id);
         }
         0x26 => {
             // Break
@@ -820,7 +823,7 @@ pub(crate) fn svc_impl(c: &mut AcnhCpu, imm: u32, pc: u64) {
 pub(crate) fn close_handle(h: u32) {
     {
         let _kl = KERNEL_LOCK.lock();
-        kstate().lock().unwrap().threads.remove(&h);
+        kstate().lock_or_recover().threads.remove(&h);
     }
     ipc_close_session(h);
     (host().on_handle_close)(h);

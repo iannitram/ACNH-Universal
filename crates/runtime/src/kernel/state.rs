@@ -1,7 +1,8 @@
 //! Split from the old `kernel.rs` (issue #356).
 
-#[allow(unused_imports)]
 use super::*;
+#[allow(unused_imports)]
+use crate::sync::LockExt;
 
 // ---- Thread & Kernel State ---------------------------------------------------------------------
 
@@ -326,7 +327,7 @@ impl Drop for DeferredWakeScope {
 
 pub(crate) fn wake_thread(t: &Arc<KThread>) {
     {
-        let mut d = t.data.lock().unwrap();
+        let mut d = t.data.lock_or_recover();
         d.wake = true;
         d.wait_result = 0;
     }
@@ -346,7 +347,7 @@ pub(crate) fn block_thread(t: &Arc<KThread>, timeout_ns: i64) -> bool {
     DeferredWakeScope::flush();
     let depth = KERNEL_LOCK.unlock_all();
     let ok = if timeout_ns < 0 {
-        let mut d = t.data.lock().unwrap();
+        let mut d = t.data.lock_or_recover();
         while !d.wake {
             d = t.cv.wait(d).unwrap();
         }
@@ -354,7 +355,7 @@ pub(crate) fn block_thread(t: &Arc<KThread>, timeout_ns: i64) -> bool {
     } else {
         let dur = Duration::from_nanos(timeout_ns as u64);
         let deadline = Instant::now() + dur;
-        let mut d = t.data.lock().unwrap();
+        let mut d = t.data.lock_or_recover();
         while !d.wake {
             let now = Instant::now();
             if now >= deadline {
@@ -376,7 +377,7 @@ pub(crate) fn unlock_mutex_locked(ks: &mut KernelState, addr: u64) {
     let mut next_idx: Option<usize> = None;
     let mut more = 0usize;
     for (idx, t) in ks.mutex_waiters.iter().enumerate() {
-        if t.data.lock().unwrap().wait_mutex == addr {
+        if t.data.lock_or_recover().wait_mutex == addr {
             if next_idx.is_none() {
                 next_idx = Some(idx);
             } else {
@@ -390,7 +391,7 @@ pub(crate) fn unlock_mutex_locked(ks: &mut KernelState, addr: u64) {
         return;
     };
     let next = ks.mutex_waiters.remove(idx);
-    let tag = next.data.lock().unwrap().wait_tag;
+    let tag = next.data.lock_or_recover().wait_tag;
     let val = tag | if more > 0 { HANDLE_WAIT_MASK } else { 0 };
     // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
     unsafe { store32(addr, val) };

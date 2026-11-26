@@ -2,6 +2,7 @@
 //! HLE thunks, logging, and boot sequence, ported from `runtime/src/loader.cpp`,
 //! `runtime/src/main.cpp`, and `runtime/src/game_abi.cpp`.
 
+use crate::sync::LockExt;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
@@ -267,7 +268,7 @@ fn open_log_locked(state: &mut LogState) {
 
 fn write_pending_locked() {
     let (lines, mut file_opt) = {
-        let mut state = LOG_LOCK.lock().unwrap();
+        let mut state = LOG_LOCK.lock_or_recover();
         if state.pending.is_empty() {
             return;
         }
@@ -293,7 +294,7 @@ fn write_pending_locked() {
 
 fn log_msg(msg: &str) {
     let now = {
-        let mut state = LOG_LOCK.lock().unwrap();
+        let mut state = LOG_LOCK.lock_or_recover();
         open_log_locked(&mut state);
         if msg.starts_with("CRASH") || msg.starts_with("FATAL") || msg.contains("GPU hang") {
             state.sync = true;
@@ -307,21 +308,21 @@ fn log_msg(msg: &str) {
                 .name("nx-log-writer".into())
                 .spawn(|| loop {
                     {
-                        let state = LOG_LOCK.lock().unwrap();
+                        let state = LOG_LOCK.lock_or_recover();
                         if state.pending.is_empty() {
                             let _ = LOG_CV
                                 .wait_timeout(state, Duration::from_millis(250))
                                 .unwrap();
                         }
                     }
-                    let _w = WRITE_LOCK.lock().unwrap();
+                    let _w = WRITE_LOCK.lock_or_recover();
                     write_pending_locked();
                 });
         }
         now
     };
     if now {
-        let _w = WRITE_LOCK.lock().unwrap();
+        let _w = WRITE_LOCK.lock_or_recover();
         write_pending_locked();
     } else {
         LOG_CV.notify_one();
@@ -331,7 +332,7 @@ fn log_msg(msg: &str) {
 fn fatal_msg(msg: &str) -> ! {
     log_msg(&format!("FATAL: {msg}"));
     {
-        let _w = WRITE_LOCK.lock().unwrap();
+        let _w = WRITE_LOCK.lock_or_recover();
         write_pending_locked();
     }
     if !FATAL_SHOWN.swap(true, Ordering::SeqCst) {
@@ -514,7 +515,7 @@ fn hle_lookup_internal(name: &str) -> Option<HleFn> {
     if let Some((fn_ptr, _)) = libc_lookup(name) {
         return Some(fn_ptr);
     }
-    registry().lock().unwrap().get(name).copied()
+    registry().lock_or_recover().get(name).copied()
 }
 
 extern "C" fn missing_stub(c: *mut AcnhCpu) {
@@ -535,7 +536,7 @@ extern "C" fn missing_stub(c: *mut AcnhCpu) {
 fn hle_address_or_internal(name: &str, fallback: HleFn) -> u64 {
     let lay = layout();
     let max_thunks = (lay.thunk_size as usize) / 16;
-    let mut table = thunks().lock().unwrap();
+    let mut table = thunks().lock_or_recover();
     if let Some(&addr) = table.by_name.get(name) {
         return addr;
     }
@@ -646,7 +647,7 @@ fn fast_lookup(m: &FastModule, off: u64) -> Option<HleFn> {
 }
 
 fn module_at_internal(addr: u64) -> Option<AcnhLoadedModule> {
-    let mods = modules().lock().unwrap();
+    let mods = modules().lock_or_recover();
     mods.iter()
         .find(|m| addr.wrapping_sub(m.base) < m.size)
         .copied()
@@ -657,7 +658,7 @@ fn describe_internal(addr: u64) -> String {
     let thunk_off = addr.wrapping_sub(lay.thunk_base);
     if thunk_off < lay.thunk_size {
         let idx = (thunk_off / 16) as usize;
-        let table = thunks().lock().unwrap();
+        let table = thunks().lock_or_recover();
         let name = table
             .list
             .get(idx)
@@ -716,8 +717,8 @@ pub fn hle_vtable_override_name(name: &str) -> bool {
 }
 
 fn register_hle_call_overrides() {
-    let mods = modules().lock().unwrap().clone();
-    let mut ov = hle_call_overrides().lock().unwrap();
+    let mods = modules().lock_or_recover().clone();
+    let mut ov = hle_call_overrides().lock_or_recover();
     ov.clear();
     let mut n = 0usize;
     for lm in mods {
@@ -771,12 +772,12 @@ fn dump_regs_and_backtrace(c: *mut AcnhCpu) {
 
 #[inline(never)]
 fn call_slow(c: *mut AcnhCpu, t: u64) {
-    if let Some(fn_ptr) = hle_call_overrides().lock().unwrap().get(&t).copied() {
+    if let Some(fn_ptr) = hle_call_overrides().lock_or_recover().get(&t).copied() {
         fn_ptr(c);
         return;
     }
     {
-        let fd = FAST_DISPATCH.lock().unwrap();
+        let fd = FAST_DISPATCH.lock_or_recover();
         for k in 0..fd.count {
             if let Some(m) = &fd.modules[k] {
                 let off = t.wrapping_sub(m.base);
@@ -814,7 +815,7 @@ fn call_slow(c: *mut AcnhCpu, t: u64) {
     if off < lay.thunk_size {
         let idx = (off / 16) as usize;
         let thunk_info = {
-            let table = thunks().lock().unwrap();
+            let table = thunks().lock_or_recover();
             table.list.get(idx).map(|th| {
                 (
                     th.fn_ptr,
@@ -881,12 +882,12 @@ fn put_env(name: &str, value: &str) {
 }
 
 fn find_symbol_internal(name: &str) -> u64 {
-    exports().lock().unwrap().get(name).copied().unwrap_or(0)
+    exports().lock_or_recover().get(name).copied().unwrap_or(0)
 }
 
 fn load_modules_internal(mods: &[*const AcnhModuleInfo], data_dir: &str, dynamic: bool) {
     let mut variant_on = std::env::var("NX_SPEEDFIX").as_deref() == Ok("1");
-    let has_main_variant = variants().lock().unwrap().contains_key("main");
+    let has_main_variant = variants().lock_or_recover().contains_key("main");
     if variant_on && !has_main_variant {
         log_msg("loader: frame rate 60 asked, but this game's code has no SpeedFix: 30 fps");
         variant_on = false;
@@ -945,7 +946,7 @@ fn load_modules_internal(mods: &[*const AcnhModuleInfo], data_dir: &str, dynamic
         if f.read_exact(dst).is_err() {
             fatal_msg(&format!("{path}: expected {image:x} bytes"));
         }
-        if let Some(words) = variants().lock().unwrap().get(mod_name).cloned() {
+        if let Some(words) = variants().lock_or_recover().get(mod_name).cloned() {
             let count = words.len() / 2;
             if variant_on && words_on {
                 for &[off, word] in words.as_chunks::<2>().0 {
@@ -969,14 +970,14 @@ fn load_modules_internal(mods: &[*const AcnhModuleInfo], data_dir: &str, dynamic
             vm_set(mi.base + mi.data, size - mi.data, K_MEM_CODE_DATA, 3);
         }
 
-        modules().lock().unwrap().push(AcnhLoadedModule {
+        modules().lock_or_recover().push(AcnhLoadedModule {
             info: mi_ptr,
             base: mi.base,
             size,
         });
 
         {
-            let mut fd = FAST_DISPATCH.lock().unwrap();
+            let mut fd = FAST_DISPATCH.lock_or_recover();
             if dynamic && fd.anchor == 0 && mi.func_count > 0 && !mi.funcs.is_null() {
                 // SAFETY: `mi.funcs` has at least one entry.
                 let first = unsafe { (*mi.funcs).fn_ptr };
@@ -1019,7 +1020,7 @@ fn load_modules_internal(mods: &[*const AcnhModuleInfo], data_dir: &str, dynamic
             unsafe { std::slice::from_raw_parts(mi.symbols, mi.symbol_count) }
         };
         {
-            let mut exp = exports().lock().unwrap();
+            let mut exp = exports().lock_or_recover();
             for s in syms {
                 if s.imported != 0 || s.bind == 0 {
                     continue;
@@ -1047,7 +1048,7 @@ fn load_modules_internal(mods: &[*const AcnhModuleInfo], data_dir: &str, dynamic
     let mut hle = 0usize;
     let mut missing = 0usize;
     let mut linked = 0usize;
-    let loaded = modules().lock().unwrap().clone();
+    let loaded = modules().lock_or_recover().clone();
     for lm in loaded {
         // SAFETY: `lm.info` points to static `AcnhModuleInfo`.
         let mi = unsafe { &*lm.info };
@@ -1332,7 +1333,7 @@ pub unsafe extern "C" fn acnh_loader_set_layout(lay: *const AcnhLoaderLayout) {
     }
     // SAFETY: Caller passes a valid `AcnhLoaderLayout` pointer.
     let val = unsafe { *lay };
-    *LAYOUT.get_or_init(|| Mutex::new(val)).lock().unwrap() = val;
+    *LAYOUT.get_or_init(|| Mutex::new(val)).lock_or_recover() = val;
 }
 
 #[no_mangle]
@@ -1355,13 +1356,13 @@ pub extern "C" fn acnh_loader_log(msg: *const c_char) {
 
 #[no_mangle]
 pub extern "C" fn acnh_loader_log_flush() {
-    let _w = WRITE_LOCK.lock().unwrap();
+    let _w = WRITE_LOCK.lock_or_recover();
     write_pending_locked();
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_loader_log_file_path(out: *mut c_char, cap: usize) -> usize {
-    let state = LOG_LOCK.lock().unwrap();
+    let state = LOG_LOCK.lock_or_recover();
     copy_str_to_buf(&state.path, out, cap)
 }
 
@@ -1380,7 +1381,7 @@ pub extern "C" fn acnh_loader_register_hle(
     };
     let s = cstr_or_empty(name);
     if !s.is_empty() {
-        registry().lock().unwrap().insert(s.to_owned(), fp);
+        registry().lock_or_recover().insert(s.to_owned(), fp);
     }
 }
 
@@ -1415,14 +1416,14 @@ pub extern "C" fn acnh_loader_register_hook(
     fn_ptr: Option<extern "C" fn(*mut AcnhCpu)>,
 ) {
     if let Some(fp) = fn_ptr {
-        hooks().lock().unwrap().insert(offset, fp);
+        hooks().lock_or_recover().insert(offset, fp);
     }
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_loader_hook(c: *mut AcnhCpu, pc: u64) {
     let off = pc.wrapping_sub(layout().module_base);
-    let fn_opt = hooks().lock().unwrap().get(&off).copied();
+    let fn_opt = hooks().lock_or_recover().get(&off).copied();
     if let Some(fp) = fn_opt {
         fp(c);
     } else {

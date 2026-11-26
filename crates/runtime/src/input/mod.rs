@@ -7,6 +7,7 @@
 //! `nx::` / `nx::plat::` C++ entry points.
 
 #[allow(unused_imports)]
+use crate::sync::LockExt;
 use std::collections::{HashSet, VecDeque};
 #[allow(unused_imports)]
 use std::ffi::{c_char, CStr};
@@ -387,7 +388,7 @@ mod tests {
 
     #[test]
     fn npad_state_and_histories() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_LOCK.lock_or_recover();
         install_test_host();
         TEST_FRAME.store(10, Ordering::Relaxed);
 
@@ -410,7 +411,7 @@ mod tests {
 
     #[test]
     fn touch_tap_and_mouse_hover_lifecycle() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_LOCK.lock_or_recover();
         install_test_host();
         acnh_input_set_picture_box(0.0, 0.0, 1.0, 1.0);
 
@@ -446,7 +447,7 @@ mod tests {
 
     #[test]
     fn touch_layout_and_hit_testing() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_LOCK.lock_or_recover();
         install_test_host();
 
         let mut count = 0usize;
@@ -474,7 +475,7 @@ mod tests {
 
     #[test]
     fn keyboard_typing_state_transitions() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_LOCK.lock_or_recover();
         install_test_host();
 
         TEST_FRAME.store(50, Ordering::Relaxed);

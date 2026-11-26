@@ -10,6 +10,7 @@
 //! SDL error dialogs for `nx::plat::load_game*`.
 
 #[allow(unused_imports)]
+use crate::sync::LockExt;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 #[allow(unused_imports)]
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -847,14 +848,14 @@ mod tests {
     }
 
     fn reset_state_for_test() {
-        *host_lock().lock().unwrap() = AcnhFilesHost::default();
-        *fs_lock().lock().unwrap() = FsState::default();
-        *recent_lock().lock().unwrap() = RecentState::default();
+        *host_lock().lock_or_recover() = AcnhFilesHost::default();
+        *fs_lock().lock_or_recover() = FsState::default();
+        *recent_lock().lock_or_recover() = RecentState::default();
         if let Some(c) = PAK_CACHE.get() {
-            *c.lock().unwrap() = None;
+            *c.lock_or_recover() = None;
         }
         if let Some(c) = INDEX_CACHE.get() {
-            *c.lock().unwrap() = None;
+            *c.lock_or_recover() = None;
         }
     }
 

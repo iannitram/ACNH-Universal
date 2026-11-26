@@ -2,6 +2,7 @@
 //! Replaces `runtime/src/kernel.cpp`, `runtime/src/ipc.cpp`, and `runtime/src/kernel_watch.cpp`.
 
 #[allow(unused_imports)]
+use crate::sync::LockExt;
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[allow(unused_imports)]
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -289,7 +290,7 @@ impl ReentrantMutex {
 
     pub(crate) fn lock(&self) -> ReentrantGuard<'_> {
         let me = std::thread::current().id();
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock_or_recover();
         while let Some(owner) = st.owner {
             if owner == me {
                 st.depth += 1;
@@ -304,7 +305,7 @@ impl ReentrantMutex {
 
     pub(crate) fn try_lock(&self) -> Option<ReentrantGuard<'_>> {
         let me = std::thread::current().id();
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock_or_recover();
         match st.owner {
             None => {
                 st.owner = Some(me);
@@ -320,7 +321,7 @@ impl ReentrantMutex {
     }
 
     pub(crate) fn unlock_one(&self) {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock_or_recover();
         st.depth -= 1;
         if st.depth == 0 {
             st.owner = None;
@@ -329,7 +330,7 @@ impl ReentrantMutex {
     }
 
     pub(crate) fn unlock_all(&self) -> usize {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock_or_recover();
         let saved = st.depth;
         st.depth = 0;
         st.owner = None;
@@ -339,7 +340,7 @@ impl ReentrantMutex {
 
     pub(crate) fn relock_all(&self, depth: usize) {
         let me = std::thread::current().id();
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock_or_recover();
         while st.owner.is_some() {
             st = self.cv.wait(st).unwrap();
         }

@@ -1,7 +1,8 @@
 //! Split from the old `kernel.rs` (issue #356).
 
-#[allow(unused_imports)]
 use super::*;
+#[allow(unused_imports)]
+use crate::sync::LockExt;
 
 // ---- IPC (HIPC / CMIF / TIPC) ------------------------------------------------------------------
 
@@ -34,9 +35,15 @@ pub(crate) fn sessions() -> &'static Mutex<HashMap<u32, KSession>> {
 
 pub(crate) fn ipc_close_session(h: u32) {
     let _il = IPC_LOCK.lock();
-    if let Some(sess) = sessions().lock().unwrap().remove(&h) {
+    if let Some(sess) = sessions().lock_or_recover().remove(&h) {
         if Arc::strong_count(&sess.dom) == 1 {
-            let objs: Vec<u64> = sess.dom.lock().unwrap().objects.values().copied().collect();
+            let objs: Vec<u64> = sess
+                .dom
+                .lock_or_recover()
+                .objects
+                .values()
+                .copied()
+                .collect();
             for s in objs {
                 if s != sess.service {
                     (host().service_drop)(s);
@@ -49,7 +56,7 @@ pub(crate) fn ipc_close_session(h: u32) {
 
 pub(crate) fn new_session_handle(service: u64) -> u32 {
     let h = alloc_handle();
-    sessions().lock().unwrap().insert(
+    sessions().lock_or_recover().insert(
         h,
         KSession {
             service,
@@ -246,7 +253,7 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
         return RC_OUT_OF_RANGE;
     }
     let (sess_service, sess_domain, sess_dom) = {
-        let map = sessions().lock().unwrap();
+        let map = sessions().lock_or_recover();
         let Some(sess) = map.get(&handle) else {
             host_log(&format!("ipc: request on invalid handle {handle:x}"));
             return RC_INVALID_HANDLE;
@@ -396,13 +403,13 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
         }
         raw += 16;
         if domain_cmd == 2 {
-            sess_dom.lock().unwrap().objects.remove(&domain_obj);
+            sess_dom.lock_or_recover().objects.remove(&domain_obj);
             // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
             unsafe { std::ptr::write_bytes(buf as *mut u8, 0, cap as usize) };
             w[1] = 8;
             return RC_OK;
         }
-        let found = sess_dom.lock().unwrap().objects.get(&domain_obj).copied();
+        let found = sess_dom.lock_or_recover().objects.get(&domain_obj).copied();
         let Some(t) = found else {
             host_log(&format!(
                 "ipc: {} domain object {domain_obj} not found",
@@ -437,10 +444,10 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
         match cmd {
             0 => {
                 // ConvertCurrentObjectToDomain
-                if let Some(sess) = sessions().lock().unwrap().get_mut(&handle) {
+                if let Some(sess) = sessions().lock_or_recover().get_mut(&handle) {
                     sess.domain = true;
                 }
-                let mut dom = sess_dom.lock().unwrap();
+                let mut dom = sess_dom.lock_or_recover();
                 let id = dom.next_object;
                 dom.next_object += 1;
                 dom.objects.insert(id, sess_service);
@@ -452,7 +459,7 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
             2 | 4 => {
                 // CloneCurrentObject / CloneCurrentObjectEx
                 let clone_h = alloc_handle();
-                sessions().lock().unwrap().insert(
+                sessions().lock_or_recover().insert(
                     clone_h,
                     KSession {
                         service: sess_service,
@@ -481,12 +488,12 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
         }
         let mut in_services = Vec::new();
         if sess_domain {
-            let dom = sess_dom.lock().unwrap();
+            let dom = sess_dom.lock_or_recover();
             for id in in_objects {
                 in_services.push(dom.objects.get(&id).copied().unwrap_or(0));
             }
         } else {
-            let map = sessions().lock().unwrap();
+            let map = sessions().lock_or_recover();
             for &h in &hdr.in_move {
                 in_services.push(map.get(&h).map_or(0, |s| s.service));
             }
@@ -537,7 +544,7 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
         .is_some_and(|s| s.domain);
     for &o in &out_services[..out_services_len] {
         if is_dom {
-            let mut dom = sess_dom.lock().unwrap();
+            let mut dom = sess_dom.lock_or_recover();
             let id = dom.next_object;
             dom.next_object += 1;
             dom.objects.insert(id, o);

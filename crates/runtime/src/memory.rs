@@ -1,6 +1,7 @@
 //! Guest address space (`memory.cpp`), write watches (`write_watch.cpp`), and memory guard
 //! (`memguard_*.cpp`) in Rust.
 
+use crate::sync::LockExt;
 use std::collections::BTreeMap;
 use std::ffi::{c_char, CStr, CString};
 use std::ops::Bound;
@@ -174,7 +175,7 @@ static MEMGUARD_READS: [MemguardRead; K_READS] = [const { MemguardRead::new() };
 static MEMGUARD_READ_NEXT: AtomicU32 = AtomicU32::new(0);
 
 fn host_copy() -> AcnhMemoryHost {
-    *HOST.lock().unwrap()
+    *HOST.lock_or_recover()
 }
 
 fn host_log(msg: &str) {
@@ -383,7 +384,7 @@ pub unsafe extern "C" fn acnh_memory_set_host(host: *const AcnhMemoryHost) {
     if host.is_null() {
         return;
     }
-    *HOST.lock().unwrap() = *host;
+    *HOST.lock_or_recover() = *host;
 }
 
 /// Initializes the guest address space reservations and initial VM map.
@@ -397,7 +398,7 @@ pub unsafe extern "C" fn acnh_memory_init(bounds: *const AcnhMemoryBounds) {
     }
     let b = *bounds;
     {
-        let mut st = VM_STATE.lock().unwrap();
+        let mut st = VM_STATE.lock_or_recover();
         st.bounds = b;
         st.vm.clear();
         st.kernel_next = b.kernel_base;
@@ -423,7 +424,7 @@ pub unsafe extern "C" fn acnh_memory_init(bounds: *const AcnhMemoryBounds) {
     }
 
     let end = b.address_space_base.saturating_add(b.address_space_size);
-    let mut st = VM_STATE.lock().unwrap();
+    let mut st = VM_STATE.lock_or_recover();
     vm_set_locked(
         &mut st.vm,
         b.address_space_base,
@@ -465,7 +466,7 @@ pub extern "C" fn acnh_memory_decommit(addr: u64, size: u64) {
 
 #[no_mangle]
 pub extern "C" fn acnh_memory_kernel_alloc(size: u64, align: u64) -> u64 {
-    let mut st = VM_STATE.lock().unwrap();
+    let mut st = VM_STATE.lock_or_recover();
     let align = if align == 0 { 0x1000 } else { align };
     let a = (st.kernel_next + align - 1) & !(align - 1);
     let size = (size + 0xFFF) & !0xFFFu64;
@@ -483,13 +484,13 @@ pub extern "C" fn acnh_memory_kernel_alloc(size: u64, align: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn acnh_memory_vm_set(addr: u64, size: u64, state: u32, perm: u32) {
-    let mut st = VM_STATE.lock().unwrap();
+    let mut st = VM_STATE.lock_or_recover();
     vm_set_locked(&mut st.vm, addr, size, state, perm);
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_memory_vm_query(addr: u64) -> AcnhVmInfo {
-    let st = VM_STATE.lock().unwrap();
+    let st = VM_STATE.lock_or_recover();
     vm_query_locked(&st, addr)
 }
 
@@ -951,7 +952,7 @@ mod tests {
 
     #[test]
     fn desktop_layout_vm_query_and_kernel_alloc() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_LOCK.lock_or_recover();
         setup_test_host();
         RESERVE_CALLS.store(0, Ordering::Relaxed);
         let b = sample_bounds(false);
@@ -982,7 +983,7 @@ mod tests {
 
     #[test]
     fn compact_layout_and_interval_splitting() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_LOCK.lock_or_recover();
         setup_test_host();
         let b = sample_bounds(true);
         // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
@@ -1027,7 +1028,7 @@ mod tests {
 
     #[test]
     fn write_watch_lifecycle() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_LOCK.lock_or_recover();
         setup_test_host();
         MPROTECT_RO_CALLS.store(0, Ordering::Relaxed);
         MPROTECT_RW_CALLS.store(0, Ordering::Relaxed);
@@ -1062,7 +1063,7 @@ mod tests {
 
     #[test]
     fn memguard_limit_and_overlap() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_LOCK.lock_or_recover();
         setup_test_host();
 
         // 32 GB RAM -> half is 16 GB (> 8 GB).

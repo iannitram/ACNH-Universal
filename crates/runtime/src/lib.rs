@@ -45,4 +45,5 @@ pub mod memory;
 pub mod platform;
 pub mod saves;
 pub mod services;
+pub mod sync;
 pub mod time;

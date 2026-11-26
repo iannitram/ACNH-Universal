@@ -1,7 +1,8 @@
 //! Split from the old `kernel.rs` (issue #356).
 
-#[allow(unused_imports)]
 use super::*;
+#[allow(unused_imports)]
+use crate::sync::LockExt;
 
 // ---- Kernel watch / diagnostics ----------------------------------------------------------------
 
@@ -29,7 +30,7 @@ pub(crate) fn backtrace_cpu(c: &AcnhCpu) {
 }
 
 pub(crate) fn report_threads() {
-    let all = all_threads().lock().unwrap().clone();
+    let all = all_threads().lock_or_recover().clone();
     let mut guard = KERNEL_LOCK.try_lock();
     for _ in 0..100 {
         if guard.is_some() {
@@ -43,7 +44,7 @@ pub(crate) fn report_threads() {
         host_log("hang: kernel lock held by someone, reading without it");
     }
     let (mutex_w, cv_w, addr_w): (HashSet<usize>, HashSet<usize>, HashSet<usize>) = if owns_lock {
-        let ks = kstate().lock().unwrap();
+        let ks = kstate().lock_or_recover();
         (
             ks.mutex_waiters.iter().map(|t| t.ptr_id()).collect(),
             ks.cv_waiters.iter().map(|t| t.ptr_id()).collect(),
@@ -54,7 +55,7 @@ pub(crate) fn report_threads() {
     };
     for t in all {
         let (started, exited, id, handle, entry, wait_mutex, wait_key, wait_addr, ctx) = {
-            let d = t.data.lock().unwrap();
+            let d = t.data.lock_or_recover();
             (
                 d.started,
                 d.exited,
@@ -119,13 +120,13 @@ extern "C" fn watchdog_thread(_: *mut c_void) {
                     .and_then(|s| s.parse::<i32>().ok())
                     .filter(|&n| n > 0)
                     .unwrap_or(10);
-                let all = all_threads().lock().unwrap().clone();
+                let all = all_threads().lock_or_recover().clone();
                 let mut tids = Vec::new();
                 let mut lrs = Vec::new();
                 let mut keep = Vec::new();
                 for t in all {
                     let (host_tid, exited, id, entry, lr_ptr) = {
-                        let d = t.data.lock().unwrap();
+                        let d = t.data.lock_or_recover();
                         (
                             d.host_tid,
                             d.exited,
@@ -189,10 +190,10 @@ extern "C" fn watchdog_thread(_: *mut c_void) {
 
 pub(crate) fn dump_threads() {
     let bounds = region_bounds();
-    let all = all_threads().lock().unwrap().clone();
+    let all = all_threads().lock_or_recover().clone();
     for t in all {
         let (started, exited, id, ctx) = {
-            let d = t.data.lock().unwrap();
+            let d = t.data.lock_or_recover();
             (d.started, d.exited, d.id, d.ctx)
         };
         if !started || exited {
@@ -276,9 +277,9 @@ extern "C" fn stall_sampler_thread(_: *mut c_void) {
         if f == 0 || now.saturating_sub(since) < sample_ns {
             continue;
         }
-        let all = all_threads().lock().unwrap().clone();
+        let all = all_threads().lock_or_recover().clone();
         for t in all {
-            let d = t.data.lock().unwrap();
+            let d = t.data.lock_or_recover();
             if d.started && !d.exited {
                 *hits.entry((d.id, d.ctx.x[30])).or_insert(0) += 1;
             }
@@ -341,7 +342,7 @@ pub extern "C" fn acnh_kernel_notify_all() {
 
 #[no_mangle]
 pub extern "C" fn acnh_kernel_heap_size() -> u64 {
-    kstate().lock().unwrap().heap_size
+    kstate().lock_or_recover().heap_size
 }
 
 #[no_mangle]
@@ -358,7 +359,7 @@ pub unsafe extern "C" fn acnh_kernel_hle_get_system_tick(c: *mut AcnhCpu) {
         if let Some(t) = current_thread() {
             let now = (host().monotonic_ns)();
             let sleep = {
-                let mut d = t.data.lock().unwrap();
+                let mut d = t.data.lock_or_recover();
                 if now.saturating_sub(d.last_tick_call) < 20_000 {
                     d.tick_spins += 1;
                     if d.tick_spins >= 50 {
@@ -375,7 +376,7 @@ pub unsafe extern "C" fn acnh_kernel_hle_get_system_tick(c: *mut AcnhCpu) {
             if sleep {
                 (host().sleep_ns)(500_000);
             }
-            t.data.lock().unwrap().last_tick_call = (host().monotonic_ns)();
+            t.data.lock_or_recover().last_tick_call = (host().monotonic_ns)();
         }
     }
     // SAFETY: the C++ dispatcher passes its own CPU context, or null, which as_mut and as_ref check; it stays valid and unaliased for the duration of this call.
@@ -390,7 +391,7 @@ pub extern "C" fn acnh_kernel_create_main_thread(stack_size: u64) -> u32 {
     (host().vm_set)(stack, stack_size, MEM_STACK, 3);
     let t = new_thread(0, 0, stack + stack_size, 44, 0);
     let (handle, tid) = {
-        let mut d = t.data.lock().unwrap();
+        let mut d = t.data.lock_or_recover();
         d.started = true;
         let tid = (host().current_thread_id)();
         d.host_tid = tid;
@@ -407,7 +408,7 @@ pub extern "C" fn acnh_kernel_current_cpu() -> *mut AcnhCpu {
         static FALLBACK: std::cell::UnsafeCell<AcnhCpu> = std::cell::UnsafeCell::new(AcnhCpu::default());
     }
     if let Some(t) = current_thread() {
-        let mut d = t.data.lock().unwrap();
+        let mut d = t.data.lock_or_recover();
         &mut d.ctx as *mut AcnhCpu
     } else {
         FALLBACK.with(|f| f.get())
@@ -453,7 +454,7 @@ pub unsafe extern "C" fn acnh_kernel_svc(c: *mut AcnhCpu, imm: u32, pc: u64) {
         }
     }
     if dt >= 30_000 {
-        let mut map_guard = SVC_PROF_LOCK.lock().unwrap();
+        let mut map_guard = SVC_PROF_LOCK.lock_or_recover();
         let map = map_guard.get_or_insert_with(BTreeMap::new);
         let e = map.entry((role, imm, pc)).or_insert((0, 0));
         e.0 += dt;
@@ -471,7 +472,7 @@ pub extern "C" fn acnh_kernel_svc_profile_report(frames: u64, role: i32) {
     if !svc_profile_on() || frames == 0 {
         return;
     }
-    let mut map_guard = SVC_PROF_LOCK.lock().unwrap();
+    let mut map_guard = SVC_PROF_LOCK.lock_or_recover();
     let Some(map) = map_guard.as_mut() else {
         return;
     };

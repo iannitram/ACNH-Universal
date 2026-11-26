@@ -1,7 +1,8 @@
 //! Split from the old `services.rs` (issue #356).
 
-#[allow(unused_imports)]
 use super::*;
+#[allow(unused_imports)]
+use crate::sync::LockExt;
 
 // ---- 5. Shared System Fonts (hle_pl.cpp) ----------------------------------------------------------------------------
 
@@ -117,7 +118,7 @@ pub(crate) fn linux_font_candidates() -> Vec<String> {
 
 pub(crate) fn ensure_shared_font(font_type: u32) -> SharedFont {
     let idx = if font_type < 6 { font_type as usize } else { 0 };
-    let mut fonts = SHARED_FONTS.lock().unwrap();
+    let mut fonts = SHARED_FONTS.lock_or_recover();
     if fonts[idx].addr != 0 {
         return fonts[idx];
     }
@@ -302,7 +303,7 @@ pub extern "C" fn acnh_vi_vblank_hold() {
         due = seen + 1;
     }
     if due - 1 > seen {
-        let mut lk = VI_VB_SYNC.0.lock().unwrap();
+        let mut lk = VI_VB_SYNC.0.lock_or_recover();
         let deadline = Instant::now() + Duration::from_millis(100);
         while VI_VBLANKS.load(Ordering::Acquire) < due - 1 {
             let now = Instant::now();
@@ -373,7 +374,7 @@ pub(crate) fn run_real_vsync() {
             period = period * 0.99 + d * 0.01;
         }
         {
-            let _lk = VI_VB_SYNC.0.lock().unwrap();
+            let _lk = VI_VB_SYNC.0.lock_or_recover();
             VI_VBLANKS.fetch_add(1, Ordering::Release);
         }
         VI_VB_SYNC.1.notify_all();
