@@ -36,14 +36,13 @@ This roadmap was audited against `main` on 2026-11-25 by reading the code (eight
 
 ### Open pull requests (2026-11-26)
 
-Four pull requests are open against `main` (#417, the docs, merged since):
+Three pull requests are open against `main` (#417, the last refresh of this file and the code map, merged on 2026-11-26):
 
 | PR | Issue | State |
 |---|---|---|
 | #415 | #324 (Refs) | A version scheme from the workspace manifest, not from git tags (workspace version `0.12.0`, tags `v<version>`). Needs my ruling on the scheme and the baseline |
 | #403 | #335 (Refs) | Archives unpacked in Rust and unused pip packages dropped. Refreshed against `main` after a conflict in `prepare.rs`; CI is pending on the new head and the review verdict predates it. Its body's `Refs` plus `Still owed:` form is read as partial by the merge check |
 | #408 | #336 (Closes) | Splits `prepare.rs`, removes dead script code and the `NotBuilt` skeleton. Its last `Rust (macOS)` job was cancelled after 15 minutes with no log, the other nine checks passed; it was not rerun |
-| #418 | #337, #338 (docs) | Roadmap and code map after PR #382 and #386: the Apple acceptance rows and `machine_name` |
 
 The other 31 merged on 2026-11-26. One test, `first_run::tests::steam_artwork_uses_the_size_for_each_library_slot`, fails in `cargo test --workspace` on the build Mac; it looks for assets next to the test binary, so it fails when the target folder is shared, and CI is the authority. It needs its own issue.
 
@@ -92,9 +91,9 @@ The "Merged" column is what merged on 2026-11-26; nothing in it has been run on 
 | 7.02 (#71), the RTX 3090 Ti desktop | #322, #332, #345 | none listed |
 | 8.02 (#73), the Mac app | #362 (staging outside the synced folder, `docs/MAC.md`) | none listed |
 | 8.03 (#74) and 8.03f (#231), the iPad | #355 | the iOS build needs the `aarch64-apple-ios` Rust target on the Mac; no `.ipa` newer than 1101029 |
-| 8.05 (#76), 8.08 (#121), Mac and iPad save sync | #361 (Dropbox on the iPad), #338, #323, #328 | a release with save-relay pinned (`release.yml` has not run) |
+| 8.05 (#76), 8.08 (#121), Mac and iPad save sync | #361 (Dropbox on the iPad), #323, #328 | a release with save-relay pinned (`release.yml` has not run) |
 | 9.04 (#82), the Android device | #369 (build scripts) | #363 (the front door), #365 (Prepare's `android` target), #366 (signing, libvpx, the APK), #367 (the in-app download), #368 (the manifest on Linux), #364 (`Home` takes a folder from any app), #354 (the final push, sound) |
-| 10.01 (#83), one island on every device | #361, #338, #337, #360 | every run above; #83 names Dropbox |
+| 10.01 (#83), one island on every device | #361, #360 | every run above; #83 names Dropbox |
 | 11.01 (#84), the design pass | #342, #344, #347 (the pad rule), #348 (dead code) | #348 (the brief against the built screens, the rest of its list), #347 (does the Android launcher get pad keys) |
 
 ### Band 3: M13 and cleanup, alongside
@@ -111,7 +110,7 @@ The "Merged" column is what merged on 2026-11-26; nothing in it has been run on 
 | #353 | 4.14 | The IPC reply clamp | merged (PR #375) |
 | #343, #344, #342 | 2.12, 2.13, 2.11 | CLI exit codes; Continue's stuck states; closing the window during play | merged (PRs #383, #395, #374) |
 | #339, #346 | 1.41, 2.15 | The cloud download's faults, after #321 | open |
-| #329, #330 | 0.11, 0.12 | Licences and `NOTICE`; the other stale docs and the issue labels | PR #416 merged (Refs); #330 open (this PR is Refs) |
+| #329, #330 | 0.11, 0.12 | Licences and `NOTICE`; the other stale docs and the issue labels | PR #416 merged (Refs); #330 open (PR #417 merged as Refs) |
 | #370 | 10.02 | Acceptance in SPEC that no issue asks for | open |
 
 ## Features, by Must
