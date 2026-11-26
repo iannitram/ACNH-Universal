@@ -7,7 +7,7 @@
 Our code becomes one Cargo workspace:
 
 - `crates/core` (`acnh_core`): the engine. Game folder check, the four-version gate, the NSO header, prepare, config files, saves, save cards, backups, update, device profiles, recipes, Steam, artwork, bundles, fleet, and the hub behind feature `hub`.
-- `crates/recomp` (`acnh_recomp`): the AArch64 to C++ recompiler, replacing upstream's Python `recomp/`.
+- `crates/recomp` (`acnh_recomp`, binary `acnh-recompiler`): the AArch64 to C++ recompiler, replacing upstream's Python `recomp/`.
 - `crates/runtime` (`acnh_runtime`): the host runtime, replacing `runtime/src` outside the renderer.
 - `crates/cli` (`acnh-universal`): the launcher without its window.
 - `app/` (`acnh-app`, planned): the Slint launcher (ADR 0003).
