@@ -44,12 +44,72 @@ pub const COPIED_PROJECTS: &[ProjectCredit] = &[
     ProjectCredit {
         name: "fedebuonco/nxrt, nxrt-frontend",
         licence: "Unlicense",
-        role: "Learned from, not copied: one shared runtime; launcher prior art",
+        role: "Yield backoff header copied; one shared runtime and launcher prior art",
     },
     ProjectCredit {
         name: "slint-ui/slint",
         licence: "Royalty-Free (Attribution)",
         role: "Desktop and mobile user interface framework",
+    },
+    ProjectCredit {
+        name: "iannitram/craft-libs",
+        licence: "MIT OR Apache-2.0",
+        role: "Atomic file writes",
+    },
+    ProjectCredit {
+        name: "aquynh/capstone",
+        licence: "BSD-3-Clause (LLVM tables: LLVM licence)",
+        role: "ARM64 disassembler for the recompiler",
+    },
+    ProjectCredit {
+        name: "webm/libvpx",
+        licence: "BSD-3-Clause",
+        role: "VP8 and VP9 decoding for the movies",
+    },
+    ProjectCredit {
+        name: "xiph/vorbis",
+        licence: "BSD-3-Clause",
+        role: "Vorbis audio for the movies",
+    },
+    ProjectCredit {
+        name: "Mbed-TLS/mbedtls",
+        licence: "Apache-2.0 or GPL-2.0-or-later",
+        role: "TLS for the network",
+    },
+    ProjectCredit {
+        name: "bylaws/libadrenotools",
+        licence: "BSD-2-Clause",
+        role: "Loads the Turnip GPU driver on Android",
+    },
+    ProjectCredit {
+        name: "KhronosGroup/MoltenVK",
+        licence: "Apache-2.0",
+        role: "Vulkan on Metal in the iOS player",
+    },
+    ProjectCredit {
+        name: "libsdl-org/SDL",
+        licence: "Zlib",
+        role: "Window, input and audio of the players",
+    },
+    ProjectCredit {
+        name: "KhronosGroup/SPIRV-Cross",
+        licence: "Apache-2.0",
+        role: "Shader translation in the player build",
+    },
+    ProjectCredit {
+        name: "KhronosGroup/Vulkan-Headers",
+        licence: "Apache-2.0",
+        role: "Vulkan headers the players compile against",
+    },
+    ProjectCredit {
+        name: "zlib",
+        licence: "Zlib",
+        role: "Compression library the players link on desktop",
+    },
+    ProjectCredit {
+        name: "Rust crates",
+        licence: "see licences/rust-crates.txt",
+        role: "Libraries linked into the launcher and command line",
     },
 ];
 
@@ -218,6 +278,20 @@ mod tests {
         assert_eq!(fixes[0].link, "https://example.invalid/pr/1");
         assert!(fixes[0].is_offered());
         assert!(fixes[1].upstream_has_it());
+    }
+
+    #[test]
+    fn test_notice_names_every_credited_project() {
+        // NOTICE (the repo root) lists every project this page credits, so the two cannot drift (issue #329).
+        let notice = include_str!("../../../NOTICE");
+        assert!(notice.contains(UPSTREAM_CREDIT.name));
+        for credit in COPIED_PROJECTS {
+            assert!(
+                notice.contains(credit.name),
+                "NOTICE does not name {}",
+                credit.name
+            );
+        }
     }
 
     #[test]
