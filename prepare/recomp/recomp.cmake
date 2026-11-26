@@ -1,5 +1,5 @@
 # The recompiler of the game folder's preparation (prepare/README.md): recomp/*.py ported to C++ (nx_recomp), over
-# Capstone 5.0.7 (third_party/capstone/, the version the Python recompiler runs with), its command line (acnh_recomp,
+# Capstone 5.0.7 (third_party/capstone/; the Rust recompiler uses 5.0.6, ADR 0007), its command line (acnh_recomp,
 # with python -m recomp's arguments) and its tests. Included by the top CMakeLists.txt on desktop; nx_recomp itself is
 # plain C++20 with no desktop-only code, so it builds for Android too.
 set(NX_RECOMP_DIR "${CMAKE_CURRENT_LIST_DIR}")
