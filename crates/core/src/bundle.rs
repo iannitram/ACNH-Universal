@@ -247,6 +247,24 @@ pub fn verify(b: &Bundle, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A cheap `verify`: every file of `b` in `dir` exists with the listed size, with no file read
+/// or hashed. The first that is missing or differs is `Error::Hub("<path> does not match the
+/// bundle")`.
+pub fn check_sizes(b: &Bundle, dir: &Path) -> Result<()> {
+    for file in &b.files {
+        let matches = fs::metadata(dir.join(&file.path))
+            .ok()
+            .is_some_and(|meta| meta.is_file() && meta.len() == file.size);
+        if !matches {
+            return Err(Error::Hub(format!(
+                "{} does not match the bundle",
+                file.path
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `<install_dir>.old`: where the previous install waits while a new one is swapped in.
 fn old_dir_of(install_dir: &Path) -> PathBuf {
     let mut name = install_dir.as_os_str().to_os_string();
