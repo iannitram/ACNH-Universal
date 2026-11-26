@@ -88,7 +88,9 @@ void boot();
 
 // Save sync (issue #81; crates/runtime relay_android.rs, the JNI side in relay_android.cpp): the home screen pulls the
 // island before it starts the game; the game pushes it when it quits (synchronously, before the process ends) and
-// when the app goes to the background (on a worker). Nothing is pushed before the pull has let the game start.
+// when the app goes to the background (on a worker). The activity's destroy uses the bounded terminate export (about
+// 3 s; a late push is left waiting for the next start) so the main thread never blocks without a limit. Nothing is
+// pushed before the pull has let the game start.
 extern "C" void acnh_relay_android_after_game(const char* data_root, const char* files);
 extern "C" void acnh_relay_android_terminate(const char* data_root, const char* files);  // bounded (about 3 s): the main thread
 extern "C" void acnh_relay_android_background(const char* data_root, const char* files);
