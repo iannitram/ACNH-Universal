@@ -289,14 +289,12 @@ impl BuildActions {
     }
 
     pub(crate) fn install_bundle(&self, manifest: &bundle::Bundle, staged: &Path) -> Result<()> {
-        use std::io::Write;
         std::fs::create_dir_all(&self.dirs.config)?;
-        let mut record = tempfile::NamedTempFile::new_in(&self.dirs.config)?;
-        record.write_all(bundle::to_text(manifest).as_bytes())?;
         bundle::install(manifest, staged, &self.dirs.install())?;
-        record
-            .persist(self.dirs.config.join("installed-bundle.txt"))
-            .map_err(|error| error.error)?;
+        acnh_core::platform::atomic_write(
+            &self.dirs.config.join("installed-bundle.txt"),
+            bundle::to_text(manifest).as_bytes(),
+        )?;
         Ok(())
     }
 

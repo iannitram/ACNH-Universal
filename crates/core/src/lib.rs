@@ -17,6 +17,7 @@ pub mod bundle;
 pub mod config;
 pub mod error;
 pub mod fleet;
+pub(crate) mod fsutil;
 pub mod gamefolder;
 pub mod glyphs;
 #[cfg(feature = "hub")]

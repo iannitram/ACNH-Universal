@@ -1044,12 +1044,8 @@ fn persist_card(
                 save_relay::stamp::parse_rfc3339(&card.time).unwrap_or(0),
                 modified_ns
             );
-            use std::io::Write;
             let parent = save_dir.parent().unwrap_or_else(|| Path::new("."));
-            let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-            temp.write_all(content.as_bytes())?;
-            temp.persist(parent.join("launcher-card.txt"))
-                .map_err(|e| Error::Io(e.error.to_string()))?;
+            crate::platform::atomic_write(&parent.join("launcher-card.txt"), content.as_bytes())?;
         }
     }
     Ok(())

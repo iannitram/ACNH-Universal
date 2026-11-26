@@ -8,6 +8,7 @@
 use crate::bundle::is_forbidden;
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::fsutil::{make_read_only_recursive, remove_tree_writable};
 use crate::platform::{AppDirs, Os, Vars};
 use crate::prepare::redact;
 use crate::recipe::output;
@@ -470,74 +471,6 @@ fn set_executable(path: &Path) -> Result<()> {
     {
         let _ = path;
     }
-    Ok(())
-}
-
-fn make_read_only_recursive(dir: &Path) -> Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            make_read_only_recursive(&path)?;
-        } else {
-            set_read_only(&path)?;
-        }
-    }
-    set_read_only(dir)?;
-    Ok(())
-}
-
-fn set_read_only(path: &Path) -> Result<()> {
-    let mut perms = fs::metadata(path)?.permissions();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(perms.mode() & !0o222);
-    }
-    #[cfg(not(unix))]
-    {
-        perms.set_readonly(true);
-    }
-    fs::set_permissions(path, perms)?;
-    Ok(())
-}
-
-fn remove_tree_writable(dir: &Path) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    make_writable_recursive(dir)?;
-    fs::remove_dir_all(dir)?;
-    Ok(())
-}
-
-fn make_writable_recursive(dir: &Path) -> Result<()> {
-    set_writable(dir)?;
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            make_writable_recursive(&path)?;
-        } else {
-            set_writable(&path)?;
-        }
-    }
-    Ok(())
-}
-
-fn set_writable(path: &Path) -> Result<()> {
-    let mut perms = fs::metadata(path)?.permissions();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(perms.mode() | 0o200);
-    }
-    #[cfg(not(unix))]
-    {
-        #[allow(clippy::permissions_set_readonly_false)]
-        perms.set_readonly(false);
-    }
-    fs::set_permissions(path, perms)?;
     Ok(())
 }
 

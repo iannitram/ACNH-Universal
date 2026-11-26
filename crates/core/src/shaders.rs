@@ -29,11 +29,14 @@ pub struct Group {
 
 /// What a run left: folders and `.code.bin` blocks under the output, and the groups that
 /// failed with something other than "no shader container recognised".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
     pub groups: usize,
     pub blocks: usize,
     pub failed: usize,
+    /// What the run has to say, one line each; also written to `extract-summary.log` in the
+    /// output, where a window with no console can read it.
+    pub notes: Vec<String>,
 }
 
 /// Where the tools that read the containers live: the repo root and the Python interpreter.
@@ -185,6 +188,7 @@ pub fn extract_with(
     results.sort_by_key(|(index, _, _)| *index);
 
     let mut failed = 0;
+    let mut notes = Vec::new();
     for (_, name, result) in results {
         match result {
             Ok(true) => {}
@@ -193,12 +197,12 @@ pub fn extract_with(
                     &out.join(format!("{name}.log")),
                     "no shader container recognised",
                 ) {
-                    report(&name, out, &mut failed);
+                    report(&name, out, &mut failed, &mut notes);
                 }
             }
             Err(error) => {
                 failed += 1;
-                println!("FAIL {name}: {error}");
+                notes.push(format!("FAIL {name}: {error}"));
             }
         }
     }
@@ -215,10 +219,10 @@ pub fn extract_with(
         &exefs_log,
     ) {
         Ok(true) => {}
-        Ok(false) => report("exefs", out, &mut failed),
+        Ok(false) => report("exefs", out, &mut failed, &mut notes),
         Err(error) => {
             failed += 1;
-            println!("FAIL exefs: {error}");
+            notes.push(format!("FAIL exefs: {error}"));
         }
     }
 
@@ -238,20 +242,24 @@ pub fn extract_with(
         &model_log,
     ) {
         Ok(true) => {}
-        Ok(false) => report("model", out, &mut failed),
+        Ok(false) => report("model", out, &mut failed, &mut notes),
         Err(error) => {
             failed += 1;
-            println!("FAIL model: {error}");
+            notes.push(format!("FAIL model: {error}"));
         }
     }
 
     let groups = count_dirs(out)?;
     let blocks = count_blocks(out)?;
-    println!("groups: {groups}  blocks: {blocks}");
+    notes.push(format!("groups: {groups}  blocks: {blocks}"));
+    let mut text = notes.join("\n");
+    text.push('\n');
+    fs::write(out.join("extract-summary.log"), text)?;
     Ok(Summary {
         groups,
         blocks,
         failed,
+        notes,
     })
 }
 
@@ -490,9 +498,9 @@ fn run_script(tools: &Tools, script: &str, args: &[&OsStr], log_path: &Path) -> 
     Ok(status.success())
 }
 
-fn report(name: &str, out: &Path, failed: &mut usize) {
+fn report(name: &str, out: &Path, failed: &mut usize, notes: &mut Vec<String>) {
     *failed += 1;
-    println!("FAIL {name}");
+    notes.push(format!("FAIL {name}"));
     if *failed > 3 {
         return;
     }
@@ -503,7 +511,7 @@ fn report(name: &str, out: &Path, failed: &mut usize) {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(6);
     for line in &lines[start..] {
-        println!("    {line}");
+        notes.push(format!("    {line}"));
     }
 }
 

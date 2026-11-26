@@ -149,21 +149,7 @@ fn target_android(target: Os) -> Result<()> {
 }
 
 fn hash_file(path: &Path) -> Result<(u64, String)> {
-    let mut file = File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut size = 0u64;
-    let mut buf = [0; CHUNK_SIZE];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        size = size
-            .checked_add(n as u64)
-            .ok_or_else(|| hub_error("prepared file too large"))?;
-        hash.update(&buf[..n]);
-    }
-    Ok((size, format!("{:x}", hash.finalize())))
+    crate::fsutil::size_and_sha256(path)
 }
 
 // Walk only recognized roots, and reject symlinks rather than follow them.

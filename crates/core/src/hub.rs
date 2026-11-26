@@ -1031,21 +1031,10 @@ fn cached_chunk(path: &Path, key: &[u8], aad: &[u8], length: usize) -> Result<Op
 // Same size + SHA-256 checks as bundle::verify, using one bounded buffer. bundle::verify
 // currently reads a whole file, so calling it here would break the hub's memory bound.
 fn verify_streaming(b: &Bundle, staged: &Path) -> Result<()> {
-    let mut buffer = vec![0; CHUNK_SIZE];
     for file in &b.files {
-        let mut source = File::open(file_path(staged, &file.path, false)?)?;
-        if source.metadata()?.len() != file.size {
-            return Err(hub_error("a staged file does not match the bundle"));
-        }
-        let mut hash = Sha256::new();
-        loop {
-            let n = source.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            hash.update(&buffer[..n]);
-        }
-        if format!("{:x}", hash.finalize()) != file.sha256 {
+        let (size, sha256) =
+            crate::fsutil::size_and_sha256(&file_path(staged, &file.path, false)?)?;
+        if size != file.size || sha256 != file.sha256 {
             return Err(hub_error("a staged file does not match the bundle"));
         }
     }

@@ -162,17 +162,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     if to.exists() {
         std::fs::remove_dir_all(to)?;
     }
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_tree(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), &target)?;
-        }
-    }
-    Ok(())
+    crate::fsutil::copy_tree_skipping(from, to, &|_| false)
 }
 
 /// The folder the script runs in: the named source, else the packaged source beside `exe`,

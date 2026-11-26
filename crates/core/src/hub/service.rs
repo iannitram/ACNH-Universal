@@ -156,12 +156,8 @@ fn save_record(dirs: &AppDirs, mut record: DeviceRecord, build_only: bool) -> Re
         return Err(hub_error("fleet is full"));
     }
     fs::create_dir_all(&dirs.config)?;
-    let mut file = tempfile::NamedTempFile::new_in(&dirs.config)?;
-    file.write_all(text.as_bytes())?;
-    file.as_file().sync_all()?;
-    file.persist(dirs.config.join("fleet.txt"))
-        .map_err(|_| hub_error("could not save fleet"))?;
-    Ok(())
+    crate::platform::atomic_write(&dirs.config.join("fleet.txt"), text.as_bytes())
+        .map_err(|_| hub_error("could not save fleet"))
 }
 
 /// Handle one already accepted home-network connection. `pairing` is present only while
