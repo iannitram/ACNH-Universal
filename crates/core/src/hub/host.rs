@@ -71,9 +71,9 @@ impl HubHost {
     pub fn start(dirs: AppDirs, listener: TcpListener, config: HostConfig) -> Result<HubHost> {
         let address = listener.local_addr()?;
         check_home(address.ip())?;
-        if config.prepared.is_some() && config.role != crate::recipe::Hub::StrixHalo {
+        if config.prepared.is_some() && config.role == crate::recipe::Hub::Mac {
             return Err(hub_error(
-                "prepared Android data requires the Strix Halo hub",
+                "prepared data requires the Strix Halo or desktop hub",
             ));
         }
         listener.set_nonblocking(true)?;
@@ -140,6 +140,7 @@ impl HubHost {
                                 dirs,
                                 &config.builds,
                                 config.prepared.as_deref(),
+                                crate::recipe::serves(config.role),
                                 pairing,
                             );
                             if let Ok(mut status) = worker.status.lock() {

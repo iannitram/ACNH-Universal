@@ -350,6 +350,36 @@ fn safe_error(error: acnh_core::Error, home: &Path) -> String {
         other => prepare::redact(&other.to_string(), home),
     }
 }
+/// The pull's result as an event: `Ok(None)` the player and the game are here, `Ok(Some(why))`
+/// the player only.
+fn pull_event(result: Result<Option<String>, String>) -> Event {
+    Event::Pulled(result)
+}
+/// Pull the prepared game after the player (M11). `None`: the game is here and the device has
+/// all it needs; `Some(message)`: the hub could not give it, with what to tell the owner.
+fn pull_game(addr: std::net::SocketAddr, dirs: &AppDirs, id: &str, name: &str) -> Option<String> {
+    let os = Os::current();
+    let free = crate::fleet_report::free_bytes(dirs);
+    match hub::pull_hub_prepared_desktop(addr, dirs, id, name, os, free) {
+        Ok(_) => {
+            let player = acnh_core::assemble::player(
+                os,
+                &std::env::current_exe().unwrap_or_default(),
+                &dirs.install(),
+            );
+            let builds = crate::build_actions::BuildActions {
+                dirs: dirs.clone(),
+                os,
+            };
+            (!builds.has_game_here(&player))
+                .then(|| "The game from the hub could not be verified on this device.".into())
+        }
+        Err(error) if error.to_string().contains("free space") => {
+            Some("There is not enough free space on this device for the game.".into())
+        }
+        Err(_) => Some("This hub has no prepared game for this device.".into()),
+    }
+}
 fn run(
     request: Request,
     dirs: &AppDirs,
@@ -409,7 +439,7 @@ fn run(
                     .map_err(|_| "Could not save the paired hub address".into())
                 }),
         ),
-        Request::Pull(addr, name) => Event::Finished(
+        Request::Pull(addr, name) => pull_event(
             (|| {
                 std::fs::create_dir_all(&dirs.data)?;
                 let id = device(dirs)?;
@@ -430,7 +460,7 @@ fn run(
                             "the installed Android game could not be verified".into(),
                         ));
                     }
-                    return Ok(());
+                    return Ok(None);
                 }
                 // The same staging folder every time: a pull that was cut continues from
                 // the chunks it already has.
@@ -448,7 +478,10 @@ fn run(
                 }
                 .install_bundle(&bundle, &staged)?;
                 hub::report_hub_build(addr, dirs, &id, &name, &bundle)?;
-                Ok(())
+                // The player is in place. The prepared game comes next (M11); a hub with none
+                // for this device leaves the player alone and says so, and the wizard offers
+                // the local preparation instead.
+                Ok(pull_game(addr, dirs, &id, &name))
             })()
             .map_err(|e| safe_error(e, &vars.home)),
         ),
@@ -831,6 +864,93 @@ mod tests {
         std::fs::create_dir_all(prepared.join("analysis")).unwrap();
         std::fs::write(prepared.join("analysis/main.bin"), []).unwrap();
         assert!(!first.needed());
+    }
+
+    // A fake hub on loopback: pairs once, then serves the player build, the build report and,
+    // when `prepared` is given, the prepared game for this machine's own target.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn pulled_event(prepared: Option<&Path>) -> (Event, FirstRun, tempfile::TempDir) {
+        let root = tempfile::tempdir().unwrap();
+        let vars = |name: &str| Vars {
+            home: root.path().join(format!("{name}-home")),
+            data: root.path().join(format!("{name}-data")),
+            config: root.path().join(format!("{name}-config")),
+        };
+        let (hub_dirs, client_vars) = (AppDirs::new(&vars("hub")), vars("client"));
+        let client_dirs = AppDirs::new(&client_vars);
+        let os = Os::current();
+        let published = root.path().join("player");
+        let player = acnh_core::assemble::player(os, Path::new(""), &published);
+        std::fs::create_dir_all(player.parent().unwrap()).unwrap();
+        std::fs::write(&player, b"synthetic player").unwrap();
+        let builds = root.path().join("builds");
+        hub::publish_build(&builds, &published, os, "3.0.2", "synthetic").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let first = FirstRun::new(client_vars.clone());
+        let event = std::thread::scope(|s| {
+            let worker = s.spawn(|| {
+                let pairing = std::sync::Mutex::new(hub::PairingSession::new("123456").unwrap());
+                // Pairing, the bundle, its report and the prepared game.
+                for _ in 0..4 {
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut transport = hub::TcpTransport::from_stream(stream).unwrap();
+                    let _ = hub::serve_request(
+                        &mut transport,
+                        &hub_dirs,
+                        &builds,
+                        prepared,
+                        &[os],
+                        Some(&pairing),
+                    );
+                }
+            });
+            let id = device(&client_dirs).unwrap();
+            hub::pair_hub(addr, &client_dirs, &id, "hub", "123456", os).unwrap();
+            let (sender, _receiver) = mpsc::channel();
+            let event = run(
+                Request::Pull(addr, "hub".into()),
+                &client_dirs,
+                &client_vars,
+                &sender,
+                0,
+                &AtomicU8::new(0),
+            );
+            worker.join().unwrap();
+            event
+        });
+        (event, first, root)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn pull_brings_the_player_and_the_prepared_game_and_first_run_is_no_longer_needed() {
+        let source = tempfile::tempdir().unwrap();
+        let target = acnh_core::hub::prepared_root(source.path(), Os::current());
+        std::fs::create_dir_all(target.join("analysis")).unwrap();
+        std::fs::write(target.join("analysis/main.bin"), b"synthetic analysis").unwrap();
+        std::fs::write(target.join("romfs.pak"), b"synthetic romfs").unwrap();
+        std::fs::write(target.join("spirv.pak"), b"synthetic shaders").unwrap();
+        let (event, first, _root) = pulled_event(Some(source.path()));
+        assert!(matches!(event, Event::Pulled(Ok(None))), "{event:?}");
+        // The player and the game are both in place, so the wizard does not come back.
+        assert!(!first.needed());
+        assert!(first
+            .dirs
+            .install()
+            .join("game/analysis/main.bin")
+            .is_file());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn pull_from_a_hub_with_no_prepared_game_keeps_the_player_and_says_so() {
+        let (event, first, _root) = pulled_event(None);
+        let Event::Pulled(Ok(Some(why))) = event else {
+            panic!("{event:?}");
+        };
+        assert!(why.contains("no prepared game"), "{why}");
+        assert!(first.needed());
     }
 
     #[test]

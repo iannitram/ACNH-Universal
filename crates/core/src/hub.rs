@@ -817,12 +817,13 @@ mod service;
 pub use host::{local_home_address, HostConfig, HostStatus, HubHost};
 pub use prepared::{
     lock_install_and_sweep, pull_prepared, pull_prepared_app, pull_prepared_app_with,
-    serve_prepared,
+    pull_prepared_desktop, serve_prepared,
 };
 pub use publish::{publish_build, resume_dir};
 pub use service::{
-    pair_hub, pull_hub, pull_hub_prepared, pull_hub_prepared_app, pull_hub_prepared_app_with,
-    read_fleet, report_hub, report_hub_build, serve_request,
+    pair_hub, prepared_root, pull_hub, pull_hub_prepared, pull_hub_prepared_app,
+    pull_hub_prepared_app_with, pull_hub_prepared_desktop, read_fleet, report_hub,
+    report_hub_build, serve_request,
 };
 
 // Reject traversal, Windows aliases, duplicate names, file/directory collisions and our

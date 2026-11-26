@@ -754,6 +754,7 @@ mod tests {
                         &hub_dirs,
                         &builds,
                         Some(&source),
+                        &[Os::Android],
                         Some(&pairing),
                     )
                     .unwrap();

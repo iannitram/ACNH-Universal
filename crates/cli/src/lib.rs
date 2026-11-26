@@ -60,9 +60,9 @@ sync sign-in gdrive|dropbox | sync status | sync off | sync push [--keep relay|h
 cloud-upload --os linux --install <folder> --prepared <folder>\n\
 exit codes: play 3 conflict, 4 held, 5 relay unreachable, 6 push conflict after the game ran; the game's own failure is 1\n\
 hub publish --out <builds> --version <game version> [--target <os>] [--install <folder>] [--commit <id>]\n\
-hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>] (--pair shows a generated six-digit code)\n\
+hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>; Linux and Windows data in <data>/linux and <data>/windows] (--pair shows a generated six-digit code)\n\
 hub pair --address <ip:port> --name <device> --peer <hub> [--target <os>]\n\
-hub pull --address <ip:port> --name <device> --peer <hub> [--target <os>] [--prepared <private-data-root>]\n\
+hub pull --address <ip:port> --name <device> --peer <hub> [--target <os>] [--prepared <private-data-root> | --with-prepared (Linux, Windows: also install the prepared game)]\n\
 hub report --address <ip:port> --name <device> --peer <hub> --target <os> --version <version> --build-id <id> --last-sync <seconds> --free <bytes>";
 const NAME: &str = "Animal Crossing: New Horizons";
 
@@ -82,6 +82,7 @@ struct Options {
     hub: Option<String>,
     prepared: Option<PathBuf>,
     pair: bool,
+    with_prepared: bool,
     version: Option<String>,
     commit: Option<String>,
     build_id: Option<String>,
@@ -160,6 +161,10 @@ fn parse(args: &[String]) -> std::result::Result<Options, String> {
             }
             "--pair" if inline.is_none() => {
                 options.pair = true;
+                index += 1;
+            }
+            "--with-prepared" if inline.is_none() => {
+                options.with_prepared = true;
                 index += 1;
             }
             "--game" | "--target" | "--out" | "--profile" | "--address" | "--name" | "--peer"
@@ -904,9 +909,9 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     match options.hub_action.as_deref() {
         Some("serve") => {
             let role = acnh_core::recipe::hub_by_key(required(&options.hub, "--hub")?)?;
-            if options.prepared.is_some() && role != acnh_core::recipe::Hub::StrixHalo {
+            if options.prepared.is_some() && role == acnh_core::recipe::Hub::Mac {
                 return Err(Error::Hub(
-                    "prepared Android data requires the Strix Halo hub".into(),
+                    "prepared data requires the Strix Halo or desktop hub".into(),
                 ));
             }
             let builds = options
@@ -953,6 +958,11 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
         Some("pull") => {
             let peer = required(&options.peer, "--peer")?;
             let target = target(options)?;
+            if options.with_prepared && !matches!(target, Os::Linux | Os::Windows) {
+                return Err(Error::Hub(
+                    "--with-prepared is for Linux and Windows pulls".into(),
+                ));
+            }
             if let Some(root) = &options.prepared {
                 hub::pull_hub_prepared(addr, &dirs, name, peer, target, root)?;
                 println!("Prepared data installed");
@@ -968,6 +978,11 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
                 hub::report_hub_build(addr, &dirs, name, peer, &bundle)
                     .map_err(|_| Error::Hub("build installed, but fleet report failed".into()))?;
                 println!("Build installed");
+                if options.with_prepared {
+                    // The player is in place; the prepared game goes beside it.
+                    hub::pull_hub_prepared_desktop(addr, &dirs, name, peer, target, u64::MAX)?;
+                    println!("Prepared data installed");
+                }
             }
             Ok(0)
         }

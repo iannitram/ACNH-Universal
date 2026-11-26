@@ -160,6 +160,16 @@ fn save_record(dirs: &AppDirs, mut record: DeviceRecord, build_only: bool) -> Re
         .map_err(|_| hub_error("could not save fleet"))
 }
 
+/// The folder a hub serves prepared data for `target` from: Android's is the prepared folder
+/// itself (as it always was), Linux's and Windows's are the `linux` and `windows` folders in it,
+/// since each target is prepared on its own.
+pub fn prepared_root(root: &Path, target: Os) -> PathBuf {
+    match target {
+        Os::Android => root.to_path_buf(),
+        other => root.join(other.key()),
+    }
+}
+
 /// Handle one already accepted home-network connection. `pairing` is present only while
 /// the owner has explicitly armed pairing; its expiry and attempt limit persist across calls.
 /// It is shared between connection threads and locked only while a pairing exchange runs.
@@ -168,6 +178,7 @@ pub fn serve_request(
     dirs: &AppDirs,
     builds: &Path,
     prepared: Option<&Path>,
+    prepared_for: &[Os],
     pairing: Option<&Mutex<PairingSession>>,
 ) -> Result<()> {
     (|| {
@@ -195,7 +206,10 @@ pub fn serve_request(
             }
             Operation::Prepared => {
                 let root = prepared.ok_or_else(|| hub_error("prepared data is not available"))?;
-                serve_prepared(t, dirs, &device, target, root)?;
+                if !prepared_for.contains(&target) {
+                    return Err(hub_error("prepared data is not available for this device"));
+                }
+                serve_prepared(t, dirs, &device, target, &prepared_root(root, target))?;
             }
             Operation::Report => {
                 let peer = remembered(dirs, &device)?;
@@ -277,6 +291,26 @@ pub fn pull_hub_prepared(
     }
     let mut t = connect(addr, Operation::Prepared, this_device, target)?;
     pull_prepared(&mut t, dirs, hub_name, target, data_root)
+}
+
+/// Pull the prepared game for a Linux or Windows device from a paired hub and install it as
+/// the contained `<install>/game/` folder beside the player (the player is pulled first, by
+/// [`pull_hub`]). `free_bytes` is the space the install may use.
+pub fn pull_hub_prepared_desktop(
+    addr: SocketAddr,
+    dirs: &AppDirs,
+    this_device: &str,
+    hub_name: &str,
+    target: Os,
+    free_bytes: u64,
+) -> Result<PathBuf> {
+    if !matches!(target, Os::Linux | Os::Windows) {
+        return Err(hub_error(
+            "prepared data here is only for Linux and Windows",
+        ));
+    }
+    let mut t = connect(addr, Operation::Prepared, this_device, target)?;
+    pull_prepared_desktop(&mut t, dirs, hub_name, target, free_bytes)
 }
 
 /// Pull prepared Android game library and data from a paired hub and install it into

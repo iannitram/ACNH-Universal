@@ -66,6 +66,7 @@ fn commands_pair_pull_and_report_to_fake_hub() {
                     &server,
                     &builds,
                     None,
+                    &[],
                     Some(&session),
                 )
                 .unwrap();
