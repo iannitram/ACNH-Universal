@@ -417,6 +417,8 @@ jobs:
         run: bash tests/package_mac_test.sh
       - name: Stage the Dropbox game folder (decoys, a write during removal)
         run: bash tests/stage_dropbox_game_test.sh
+      - name: Build-script helpers (newest header, stale lock, Turnip patches)
+        run: bash tests/build_common_test.sh
       - name: Package the iOS device stub
         run: |
           out="$(mktemp -d "$RUNNER_TEMP/acnh-ios-package.XXXXXXXX")"
