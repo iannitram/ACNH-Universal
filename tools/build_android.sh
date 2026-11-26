@@ -1,7 +1,7 @@
 #!/bin/bash
 # Android (arm64-v8a): builds the app (lib<game>.so: the runtime, no game code; Home.java: the screen that asks for the
 # game folder) and, from the game set up on this computer, the game's recompiled code as lib<game>_game.so, which
-# goes into the game folder on the phone with the data (tools/push_android.sh), never into the APK. Packs the APK,
+# goes into the game folder on the phone with the data (the adb push script was removed in #327), never into the APK. Packs the APK,
 # signs it with a local debug key and, with --install, installs it on the phone connected by adb.
 # The APK also prepares the game folder on the phone (Prepare.java, prepare/prepare_jni.cpp: lib<game>_prepare.so)
 # with the tools it carries as native libraries, the only files Android lets an app run: libzig.so (zig for
@@ -160,7 +160,7 @@ if [ "${PHONE_PREPARE:-1}" = 1 ]; then
   cp "$TOOLS/zig/zig" "$OUT/lib/arm64-v8a/libzig.so"
   cp "$TOOLS/shaders/spirv_harness" "$OUT/lib/arm64-v8a/libspirv_harness.so"
 fi
-# The game's code, for the game folder (push_android.sh): beside the APK, not in it.
+# The game's code, for the game folder on the phone: beside the APK, not in it.
 [[ " $TARGETS " == *" ${GAME}_game "* ]] && "$STRIP" --strip-unneeded -o "$OUT/lib${GAME}_game.so" "$BUILD/lib${GAME}_game.so"
 # Home.java: javac, then d8 to classes.dex.
 mkdir -p "$OUT/classes"

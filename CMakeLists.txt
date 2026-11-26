@@ -56,19 +56,14 @@ endif()
 
 # The game this build is for: games/<NX_GAME>/ holds what only that game needs (game.cpp: nx/game.h), the shared
 # runtime is the rest. One build directory per game.
-set(NX_GAME "hades" CACHE STRING "Game to build (a folder under games/)")
+set(NX_GAME "acnh" CACHE STRING "Game to build (a folder under games/)")
 set(NX_GAME_DIR "${CMAKE_SOURCE_DIR}/games/${NX_GAME}")
 if(NOT EXISTS "${NX_GAME_DIR}/game.cpp")
     message(FATAL_ERROR "games/${NX_GAME}/game.cpp not found")
 endif()
 
 # Generated code of the game (python -m recomp <nso> <gen dir>/<module> --name <module> --base ...). Never committed.
-# Hades keeps the layout from before there were other games (private/gen); the others use private/<game>/gen.
-if(NX_GAME STREQUAL "hades")
-    set(NX_GEN_DEFAULT "${CMAKE_SOURCE_DIR}/private/gen")
-else()
-    set(NX_GEN_DEFAULT "${CMAKE_SOURCE_DIR}/private/${NX_GAME}/gen")
-endif()
+set(NX_GEN_DEFAULT "${CMAKE_SOURCE_DIR}/private/${NX_GAME}/gen")
 set(NX_GEN_DIR "${NX_GEN_DEFAULT}" CACHE PATH "Recompiled module sources")
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -386,7 +381,6 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nvn/nvn_framegen.cpp
     runtime/src/nvn/nvn_temporal.cpp
     runtime/src/nvn/nvn_temporal_dlss.cpp
-    runtime/src/nvn/nvn_pipeline_cache.cpp
     runtime/src/nvn/nvn_bc.cpp
     runtime/src/nvn/nvn_draw.cpp
     runtime/src/nvn/nvn_sets.cpp

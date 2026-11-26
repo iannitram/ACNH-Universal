@@ -214,7 +214,7 @@ All mine, in this order; 8.02 (#73) has no open blocker.
 | iannitram/Uncharted-Universal | GPL-2.0 | the strangler order and stage layout | learn only (this repo is MIT) |
 | peiikai/LASRecomp | MIT | `recomp`, `runtime` | learn |
 | BluetufieBugado/SuperMarioWonderRecomp | MIT | `runtime/src/nvn`, Android, Windows | learn |
-| fedebuonco/nxrt, nxrt-frontend | Unlicense | `crates/runtime` (the yield back-off in `kernel.rs`, PR #239; its C++ copy `yield_backoff.h` is unused, #327), `app/` | adopt with credit; learn |
+| fedebuonco/nxrt, nxrt-frontend | Unlicense | `crates/runtime` (the yield back-off in `kernel.rs`, PR #239; its unused C++ copy was removed in #327), `app/` | adopt with credit; learn |
 | cesar527/ACNHRecomp | MIT | `profile`, Android | adopt with credit: the thermal governor, power modes |
 | ZUlxian/ACNHRecomp | MIT | `gamefolder`, Windows | adopt with credit |
 | bingnnvjn/nvn-native-android, Timqt/d2r-android | MIT | Android, the pipeline cache (PR #243, idea only) | learn |
