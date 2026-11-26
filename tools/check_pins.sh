@@ -66,5 +66,27 @@ fi
 dups=$(awk 'NF { print $2 }' "$table" | sort | uniq -d)
 [ -z "$dups" ] || bad "$table lists a URL twice: $dups"
 
+# 6. tool versions live in tools/versions.env only
+vf=tools/versions.env
+if ! grep -v -e '^#' -e '^$' "$vf" | awk 'NF { if ($0 !~ /^[A-Z0-9_]+=[A-Za-z0-9._-]+$/) exit 1 }'; then
+    bad "$vf has a line that is not KEY=value"
+fi
+dupk=$(grep -v -e '^#' -e '^$' "$vf" | cut -d= -f1 | sort | uniq -d)
+[ -z "$dupk" ] || bad "$vf names a key twice: $dupk"
+for k in SDL3 SDL3_IOS MOLTENVK VK_HEADERS LLVM LLVM_CI IMGUI RYUBING DOTNET FFX DLSS; do
+    grep -q "^$k=" "$vf" || bad "$vf lacks $k"
+done
+# a version spelled out elsewhere would drift from the file: none may appear in Prepare, CI or the scripts
+while IFS== read -r k v; do
+    case "$k" in "" | \#*) continue ;; esac
+    # short or generic values (a bare commit prefix) are only checked in their quoted form
+    for f in crates/core/src/prepare.rs .github/workflows/check.yml tools/build_ios.sh tools/build_android.sh; do
+        if grep -nE "(^|[^0-9.])${v//./\\.}([^0-9]|\\.[^0-9]|$)" "$f" | grep -v -e '^[0-9]*: *#' -e '^[0-9]*: *//' | grep -q .; then
+            grep -nE "(^|[^0-9.])${v//./\\.}([^0-9]|\\.[^0-9]|$)" "$f" | grep -v -e '^[0-9]*: *#' -e '^[0-9]*: *//' >&2
+            bad "$f spells out $k=$v; read it from $vf"
+        fi
+    done
+done < "$vf"
+
 [ "$fail" -eq 0 ] && echo "check_pins: ok"
 exit "$fail"

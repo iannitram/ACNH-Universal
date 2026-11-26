@@ -66,8 +66,10 @@ if [ ! -f "$vulkan/vulkan/vulkan.h" ]; then
     exit 1
 fi
 
-SDL3_TAG=release-3.4.18
-MOLTENVK_TAG=v1.3.0
+# Versions live in tools/versions.env, shared with CI and Prepare (#328).
+. "$root/tools/versions.env"
+SDL3_TAG=release-$SDL3_IOS
+MOLTENVK_TAG=v$MOLTENVK
 mkdir -p "$third/downloads" "$third/src" "$third/build" "$third/$sdk"
 
 fetch() { # <url> <file>

@@ -43,6 +43,19 @@ jobs:
       - run: bash tools/check_pins.sh
       - run: bash tests/check_pins_test.sh
 
+  deny:
+    name: Dependencies (cargo deny)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: false
+      - name: cargo deny (advisories, licences, sources) with deny.toml
+        run: |
+          # Installed at a fixed version, from its lockfile, like every other tool (#328).
+          (cd "$RUNNER_TEMP" && cargo install --locked cargo-deny@0.22.1)
+          cargo deny --locked check
+
   rust:
     name: Rust (${{ matrix.name }})
     strategy:
@@ -133,9 +146,6 @@ jobs:
   boot-smoke:
     name: Boot smoke (Linux)
     runs-on: ubuntu-24.04
-    env:
-      SDL3: "3.4.16" # same version as the player release build
-      VK_HEADERS: "1.4.357" # matches the generated Vulkan bridge
     defaults:
       run:
         shell: bash
@@ -143,6 +153,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: false
+      - name: Tool versions (SDL3, VK_HEADERS from tools/versions.env)
+        run: cat tools/versions.env >> "$GITHUB_ENV"
       - name: Toolchain
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -180,10 +192,6 @@ jobs:
   cpp-windows:
     name: C++ and player (Windows)
     runs-on: windows-2025
-    env:
-      SDL3: "3.4.16"
-      VK_HEADERS: "1.4.357"
-      LLVM: "20.1.8"
     defaults:
       run:
         shell: bash
@@ -191,11 +199,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: false
+      - name: Tool versions (SDL3, VK_HEADERS, LLVM_CI from tools/versions.env)
+        run: cat tools/versions.env >> "$GITHUB_ENV"
       - name: LLVM (clang-cl, lld-link)
         run: |
           T=$(cygpath -u "$RUNNER_TEMP")
           export PATH="/c/Program Files/7-Zip:$PATH"
-          bash tools/fetch_pinned.sh "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM/LLVM-$LLVM-win64.exe" "$T/llvm.exe"
+          bash tools/fetch_pinned.sh "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_CI/LLVM-$LLVM_CI-win64.exe" "$T/llvm.exe"
           7z x -bso0 -o"$T/llvm" "$T/llvm.exe"
           cygpath -w "$T/llvm/bin" >> "$GITHUB_PATH"
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
@@ -362,7 +372,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: private/third_party/ios
-          key: ios-deps-sdl3-3.4.18-mvk-1.3.0-${{ runner.os }}-${{ hashFiles('tools/build_ios.sh') }}
+          key: ios-deps-${{ runner.os }}-${{ hashFiles('tools/build_ios.sh', 'tools/versions.env') }}
       - name: Cache libvpx for iOS
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:

@@ -312,15 +312,53 @@ impl std::fmt::Display for Missing {
     }
 }
 
+/// `KEY=value` lines: the versions CI and the scripts read too (#328).
+const TOOL_VERSIONS: &str = include_str!("../../../tools/versions.env");
+
+/// The value of `key` in `tools/versions.env`; a missing key stops the build at compile time.
+const fn tool_version(key: &str) -> &'static str {
+    let text = TOOL_VERSIONS.as_bytes();
+    let key = key.as_bytes();
+    let mut i = 0;
+    while i < text.len() {
+        let start = i;
+        while i < text.len() && text[i] != b'\n' {
+            i += 1;
+        }
+        let end = i;
+        i += 1;
+        // a line is `KEY=value`; comment lines start with `#` and never match
+        if end - start > key.len() && text[start + key.len()] == b'=' {
+            let mut k = 0;
+            let mut same = true;
+            while k < key.len() {
+                if text[start + k] != key[k] {
+                    same = false;
+                }
+                k += 1;
+            }
+            if same {
+                let (_, rest) = text.split_at(start + key.len() + 1);
+                let (value, _) = rest.split_at(end - start - key.len() - 1);
+                return match core::str::from_utf8(value) {
+                    Ok(v) => v,
+                    Err(_) => panic!("tools/versions.env is not UTF-8"),
+                };
+            }
+        }
+    }
+    panic!("tools/versions.env lacks a key Prepare needs")
+}
+
 /// Pinned third-party versions for `Stage::Tools` and `Stage::Build`.
-const VK_HEADERS: &str = "1.4.357";
-const LLVM: &str = "23.1.3";
-const SDL3: &str = "3.4.16";
-const IMGUI: &str = "1.91.9";
-const RYUBING: &str = "a82350bb77";
-const DOTNET: &str = "10.0.401";
-const FFX: &str = "v2.4.0";
-const DLSS: &str = "v310.9.16";
+const VK_HEADERS: &str = tool_version("VK_HEADERS");
+const LLVM: &str = tool_version("LLVM");
+const SDL3: &str = tool_version("SDL3");
+const IMGUI: &str = tool_version("IMGUI");
+const RYUBING: &str = tool_version("RYUBING");
+const DOTNET: &str = tool_version("DOTNET");
+const FFX: &str = tool_version("FFX");
+const DLSS: &str = tool_version("DLSS");
 /// vcpkg is fetched at this commit, never at whatever `HEAD` is on the day (#328).
 const VCPKG_COMMIT: &str = "e6d62cc9ce8f8d9687df14521118f2ec3c10ee6a";
 /// Python packages Prepare installs, each at a fixed version (#328).

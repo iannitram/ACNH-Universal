@@ -31,4 +31,9 @@ expect_fail "a vendored copy from another revision" third_party/save-relay/save_
 expect_fail "an Action pinned by tag" .github/workflows/check.yml 's/actions\/checkout@[0-9a-f]{40}/actions\/checkout\@v4/'
 expect_fail "a cargo command without --locked" .github/workflows/check.yml 's/cargo test --locked --workspace/cargo test --workspace/'
 expect_fail "a malformed checksum" tools/downloads.sha256 's/^[0-9a-f]/Z/ if $. == 1'
+expect_fail "a version spelled out in CI" .github/workflows/check.yml 's/\$VK_HEADERS\.tar\.gz/1.4.357.tar.gz/'
+expect_fail "a version spelled out in a script" tools/build_ios.sh 's/^MOLTENVK_TAG=.*/MOLTENVK_TAG=v1.3.0/'
+expect_fail "a version spelled out in Prepare" crates/core/src/prepare.rs 's/tool_version\("DOTNET"\)/"10.0.401"/'
+expect_fail "a missing key in the versions file" tools/versions.env 's/^FFX=.*//'
+expect_fail "a malformed line in the versions file" tools/versions.env 's/^DLSS=/DLSS = /'
 echo "check_pins_test: ok"

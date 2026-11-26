@@ -129,12 +129,13 @@ RUNTIME_HEADER=$(find "$CARGO_OUT/aarch64-linux-android/release/build" -name acn
 [ -n "$RUNTIME_HEADER" ] || { echo "acnh_runtime.h was not generated"; exit 1; }
 
 . tools/build_version.sh
+. tools/versions.env # VK_HEADERS: one list of tool versions for CI, Prepare and the scripts (#328)
 echo "== configure ($BUILD) [version $VNAME ($VCODE)]"
 cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_STL=c++_shared \
   -DANDROID_PLATFORM=android-29 -DNX_GAME=$GAME -DNX_GEN_DIR="$GEN" \
   -DNX_BUILD_VERSION="$VNAME" \
-  -DNX_VULKAN_SDK="$PWD/private/third_party/Vulkan-Headers-1.4.357" \
+  -DNX_VULKAN_SDK="$PWD/private/third_party/Vulkan-Headers-$VK_HEADERS" \
   -DNX_RUNTIME_ARCHIVE="$RUNTIME_LIB" -DNX_RUNTIME_INCLUDE="$(dirname "$RUNTIME_HEADER")" > "$OUT.cmake.log" 2>&1 ||
   { tail -20 "$OUT.cmake.log"; exit 1; }
 
