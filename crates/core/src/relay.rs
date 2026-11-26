@@ -557,10 +557,6 @@ mod cloud_stream;
 #[cfg(feature = "cloud-stream")]
 pub use cloud_stream::{collect_linux_cloud_files, upload_game_to_dropbox, DropboxStreamTransport};
 
-/// Open the save-relay machine setup this app shares with the `save-relay` CLI: its config
-/// through its `LocalStore`, and its app password or stored tokens through `creds`. Nothing
-/// set up (no config, or no secret yet) is `Ok(None)`, never an error. A credential store that
-/// cannot be reached is a plain error, so the launcher can play on with the local island.
 /// What `open` answers when save sync is set up on this device but its sign-in (the password or
 /// token in the credential store) is gone, as after an update of an ad-hoc signed Mac app or a
 /// cleared keychain. Play must not fall back to "save sync is off" then: the island would drift
@@ -568,6 +564,10 @@ pub use cloud_stream::{collect_linux_cloud_files, upload_game_to_dropbox, Dropbo
 pub const SIGN_IN_MISSING: &str =
     "the save sync sign-in on this device is missing: sign in again in Settings";
 
+/// Open the save-relay machine setup this app shares with the `save-relay` CLI: its config
+/// through its `LocalStore`, and its app password or stored tokens through `creds`. No config
+/// (save sync never set up, or turned off) is `Ok(None)`. A config whose secret is gone is
+/// `Error::Saves(SIGN_IN_MISSING)`. A credential store that cannot be reached is a plain error.
 pub fn open(
     dirs: &AppDirs,
     creds: &dyn CredentialStore,
