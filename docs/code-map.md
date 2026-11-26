@@ -183,12 +183,12 @@ If the default scratch address is unavailable on macOS, pass `--buffer-addr 0x60
 | `Time` | `time.rs` 875 | `time_wrapper.cpp` 415 | ported |
 | `Audio` | `audio.rs` 1,517 | `audio_wrapper.cpp` 374 | ported |
 | `Memory` | `memory.rs` 1,077 (compact layout on an iOS device, desktop layout elsewhere) | `memory_wrapper.cpp` 343, `compact_layout.cpp` 58 | ported |
-| `Input` | `input.rs` 2,338 | `input_wrapper.cpp` 443, `touch_input.cpp` 197 | ported |
+| `Input` | `input/` (4 files, largest 864) | `input_wrapper.cpp` 443, `touch_input.cpp` 197 | ported |
 | `Loader` | `loader.rs` 1,819 | `loader_wrapper.cpp` 477; `main()` is in each platform host | ported |
-| `Kernel` | `kernel.rs` 2,754 (SVCs, IPC, the yield back-off) | `kernel_wrapper.cpp` 651: a second handle table mirrored from Rust, event state, the `sm:` registry | core ported; wrapper holds state (#356) |
-| `Saves` | `saves.rs` 2,317 (save folder, users, zip, the game's own backups, the JKSV scan) | `saves_wrapper.cpp` 513 (the `acc:u0` services), `save_storage.cpp` 244, `save_profiles.cpp` 259, `save_unlink.cpp` 363, `hle_olsc.cpp` 435 | partial |
-| `Files` | `files.rs` 2,354 (romfs, packs, fonts, glyphs, shaders, aoc, mods) | `files_wrapper.cpp` 592 (also loads a from-folder game library), `mod_manager.cpp` 674 (a static library nothing links: dead) | ported |
-| `Services` | `services.rs` 3,467 (the leaf logic of am, set, misc, process) | `services_wrapper.cpp` 1,945 (the service-object graph, movie decode, about 600 registrations); **not ported:** `hle_hostnet.cpp` 673, `hle_vsock.cpp` 516, `hle_ssl.cpp` 625, `hle_npns.cpp` 379, `ldn_link.cpp` 485, `ldn_lan.cpp` 200, `nextendo.cpp` 1,112, `nextendo_http.cpp` 211, `nextendo_token.cpp` 152, `nextendo_status.cpp` 36, `nfp_host.cpp` 426, `amiibo_decode.cpp` 64, `acnh_amiibo_hook.cpp` 47 | partial |
+| `Kernel` | `kernel/` (state, svc, ipc, diag) (SVCs, IPC, the yield back-off) | `kernel_wrapper.cpp` 651: a second handle table mirrored from Rust, event state, the `sm:` registry | core ported; wrapper holds state (#356) |
+| `Saves` | `saves/` (5 files) (save folder, users, zip, the game's own backups, the JKSV scan) | `saves_wrapper.cpp` 513 (the `acc:u0` services), `save_storage.cpp` 244, `save_profiles.cpp` 259, `save_unlink.cpp` 363, `hle_olsc.cpp` 435 | partial |
+| `Files` | `files/` (3 files) (romfs, packs, fonts, glyphs, shaders, aoc, mods) | `files_wrapper.cpp` 592 (also loads a from-folder game library), `mod_manager.cpp` 674 (a static library nothing links: dead) | ported |
+| `Services` | `services/` (8 files) (the leaf logic of am, set, misc, process) | `services_wrapper.cpp` 1,945 (the service-object graph, movie decode, about 600 registrations); **not ported:** `hle_hostnet.cpp` 673, `hle_vsock.cpp` 516, `hle_ssl.cpp` 625, `hle_npns.cpp` 379, `ldn_link.cpp` 485, `ldn_lan.cpp` 200, `nextendo.cpp` 1,112, `nextendo_http.cpp` 211, `nextendo_token.cpp` 152, `nextendo_status.cpp` 36, `nfp_host.cpp` 426, `amiibo_decode.cpp` 64, `acnh_amiibo_hook.cpp` 47 | partial |
 | `Platform` | `platform.rs` 1,849 (roots, thermal and perf rules, pad kind) | `platform_wrapper.cpp` 603 (ADPF, thermal); **the hosts, still C++:** `platform_android_wrapper.cpp` 1,842, `platform_mac_wrapper.cpp` 1,313 (macOS and iOS), `platform_linux_wrapper.cpp` 911, `platform_sdl_wrapper.cpp` 690 (Windows), `platform_win_wrapper.cpp` 352, `platform_android_input_wrapper.cpp` 327, `platform_android_audio_wrapper.cpp` 241. They own the window, the event loop, the audio stream, the JNI entry points and `main` | partial |
 
 Also in `crates/runtime`:
@@ -198,7 +198,7 @@ Also in `crates/runtime`:
 - **`hub_android`** (Android only): the bridges `HubPull.java` calls (#80), with `runtime/src/hub_android.cpp` (63 lines).
 - **Tests:** `tests/ios_relay.rs` (35 tests), `tests/android_relay.rs` (44) and `tests/ios_appgame.rs` (5) include the platform-free sources by path so they run on every desktop runner; `tests/header.rs` checks two properties of the generated header.
 
-`unsafe` blocks: `kernel.rs` (63), `services.rs` (79) and `memory.rs` (9) carry no `// SAFETY:` line; `audio.rs`, `files.rs`, `input.rs` and `saves.rs` carry them on some. ADR 0002 says every block has one (#356).
+Every `unsafe` block in `crates/runtime` carries a `// SAFETY:` line, and `clippy::undocumented_unsafe_blocks` enforces it (#356, #396).
 
 Kernel env (`kernel.rs`): `NX_YIELD_BACKOFF=start_us,cap_us` (default `2000,250`; empty or `0` = off) makes a guest thread that yields in a loop without changing x19..x28 sleep per yield; `NX_SPIN_NAPS=1` takes precedence with the older flat 0.5 ms nap. The credited nxrt copy of the back-off was a C++ header (`yield_backoff.h`) that nothing included; it was removed in #327.
 
