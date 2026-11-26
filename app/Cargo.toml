@@ -21,6 +21,8 @@ acnh-core = { path = "../crates/core", features = ["hub"] }
 gilrs = "0.11"
 image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"
+# Free bytes for the fleet report (pure Rust, no unsafe of our own).
+fs4 = "1"
 slint = { version = "1.13", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-18"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
@@ -38,4 +40,4 @@ slint-build = "1.13"
 # player through its Rust API (#172), so those builds stay free of its dependencies.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 acnh-core = { path = "../crates/core", features = ["hub", "relay", "cloud-stream"] }
-save-relay = { git = "https://github.com/iannitram/save-relay" }
+save-relay = { git = "https://github.com/iannitram/save-relay", rev = "132b9e57c7a46c596aacbd3d0a56a2579d89b9bc" }

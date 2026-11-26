@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::first_run::{route_text, system_relay_setup, FirstRun};
+use crate::hub_host::HubController;
 use crate::input::{key_nav, poll_nav, DeviceEvent, Devices, Stick};
 use crate::play::{Player, Runner, Session};
 use crate::relay_setup::{PageView, RecheckWhenClosed, RelaySettings};
@@ -37,10 +38,18 @@ fn session(config: &ShellConfig) -> acnh_core::Result<Session> {
     let root = config.dirs.data_root();
     let save_dir = saves::save_dir(&root);
 
-    // `this_device` and `set_saved_by` take the fleet's records once the app keeps them
-    // (the Fleet page); with neither, no drift is reported.
-    let mut vm = ContinuePageVm::new(savecard::read_card(&save_dir, &config.picture).ok(), None);
+    // This device is the installed build; the island's maker comes from the hub's fleet or the
+    // card. With the build unknown (no bundle, no game folder), no drift is reported.
+    let card = savecard::read_card(&save_dir, &config.picture).ok();
+    let here = crate::fleet_report::this_device(&config.dirs, config.os, 0);
+    let mut vm = ContinuePageVm::new(card.clone(), here.clone());
     vm.home = config.vars.home.clone();
+    if let (Some(card), Some(here)) = (&card, &here) {
+        let records = acnh_core::hub::read_fleet(&config.dirs).unwrap_or_default();
+        if let Some(by) = crate::fleet_report::saved_by(card, &records, here) {
+            vm.set_saved_by(by);
+        }
+    }
 
     let backups = saves::backups_dir(&root);
     let builds = crate::build_actions::BuildActions {
@@ -64,12 +73,13 @@ fn session(config: &ShellConfig) -> acnh_core::Result<Session> {
                 .duration_since(UNIX_EPOCH)
                 .map(|since| since.as_secs())
                 .unwrap_or(0);
-            backup::backup_saves(save_dir, &backups, &backup::stamp(now))?;
+            backup::backup_saves_pruned(save_dir, &backups, &backup::stamp(now))?;
             Ok(())
         }),
     };
     let mut session = Session::new(vm, runner, config.picture.clone());
     session.set_build_actions(builds, config.launcher.clone());
+    session.set_fleet(config.dirs.clone(), config.os);
     Ok(session)
 }
 
@@ -187,7 +197,13 @@ fn move_settings_focus(focus: SettingsControl, nav: Nav, relay: RelayRows) -> Se
     to_control(move_in(&settings_rows(relay), to_focus(focus), nav))
 }
 
-fn navigate(window: &Weak<MainWindow>, session: &mut Session, relay: &mut RelaySettings, nav: Nav) {
+fn navigate(
+    window: &Weak<MainWindow>,
+    session: &mut Session,
+    relay: &mut RelaySettings,
+    hub: &mut HubController,
+    nav: Nav,
+) {
     if let Some(window) = window.upgrade().filter(|_| session.vm().saves_open()) {
         // Accept presses the highlighted button: Sync now when it can run, otherwise Back.
         if nav == Nav::Accept {
@@ -209,6 +225,12 @@ fn navigate(window: &Weak<MainWindow>, session: &mut Session, relay: &mut RelayS
         return;
     }
     if let Some(window) = window.upgrade().filter(|_| session.vm().fleet_open()) {
+        // On a machine that can be a hub, Accept turns the hub on or off; Back closes the page.
+        if nav == Nav::Accept && hub.available() {
+            hub.toggle();
+            show_hub(&window, hub);
+            return;
+        }
         // The row count is reflected by the existing previous/next flags.
         let offset = window.get_fleet_offset().max(0) as usize;
         let rows = if window.get_fleet_has_next() {
@@ -315,6 +337,15 @@ fn draw_page(window: &MainWindow, page: PageView) {
     let choices: Vec<SharedString> = page.options.into_iter().map(Into::into).collect();
     window.set_first_run_choices(slint::ModelRc::new(slint::VecModel::from(choices)));
     window.set_first_run_progress(page.progress);
+}
+
+/// The Fleet page's hub row: on or off, the generated pairing code, who is paired.
+fn show_hub(window: &MainWindow, hub: &HubController) {
+    let view = hub.view();
+    window.set_hub_available(view.available);
+    window.set_hub_line(view.line.into());
+    window.set_hub_code(view.code.into());
+    window.set_hub_button(view.button.into());
 }
 
 /// Show Settings' save sync rows, and its sign-in pages while they are open.
@@ -427,6 +458,22 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             }
         }
     });
+    let hub = Rc::new(RefCell::new(HubController::new(
+        config.dirs.clone(),
+        config.os,
+    )));
+    window.on_hub_toggle({
+        let hub = Rc::clone(&hub);
+        let weak = window.as_weak();
+        move || {
+            let mut hub = hub.borrow_mut();
+            hub.toggle();
+            if let Some(window) = weak.upgrade() {
+                show_hub(&window, &hub);
+            }
+        }
+    });
+    show_hub(&window, &hub.borrow());
     let first = Rc::new(RefCell::new(FirstRun::new(config.vars.clone())));
     window.set_first_run_open(first.borrow().needed());
     render_first_run(&window.as_weak(), &mut first.borrow_mut());
@@ -542,6 +589,7 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
         let weak = window.as_weak();
         let first = Rc::clone(&first);
         let relay = Rc::clone(&relay);
+        let hub = Rc::clone(&hub);
         let session = Rc::clone(&session);
         let dirs = dirs.clone();
         move |text: SharedString| {
@@ -598,6 +646,10 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             let Some(nav) = key_nav(&text) else {
                 return false;
             };
+            if nav == Nav::Quit {
+                quit_when_idle(&weak, &session.borrow());
+                return true;
+            }
             if weak.upgrade().is_some_and(|w| w.get_first_run_open()) {
                 let mut first = first.borrow_mut();
                 first.nav(nav);
@@ -606,7 +658,7 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             }
             let mut session = session.borrow_mut();
             let mut relay = relay.borrow_mut();
-            navigate(&weak, &mut session, &mut relay, nav);
+            navigate(&weak, &mut session, &mut relay, &mut hub.borrow_mut(), nav);
             if let Some(window) = weak.upgrade() {
                 show_relay_settings(&window, &relay);
             }
@@ -615,6 +667,7 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
         }
     });
 
+    let close_session = Rc::clone(&session);
     // Every frame: the gamepad's presses go in, and what the running job reported comes out.
     let mut gilrs = gilrs::Gilrs::new().ok();
     let mut stick = Stick::default();
@@ -629,7 +682,16 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             Some(gilrs) => poll_nav(gilrs, &mut stick, &mut devices.borrow_mut()),
             None => Vec::new(),
         };
+        // Presses on a pad belong to this window only while it has the focus; the events are
+        // still drained above so they do not pile up.
+        if !weak.upgrade().is_some_and(|w| w.get_window_focused()) {
+            navs.clear();
+        }
         navs.extend(extra_nav(&mut devices.borrow_mut()));
+        if navs.contains(&Nav::Quit) {
+            navs.retain(|nav| *nav != Nav::Quit);
+            quit_when_idle(&weak, &session.borrow());
+        }
         if let Some(window) = weak.upgrade() {
             window.set_input_device(devices.borrow().current() as i32);
         }
@@ -652,7 +714,7 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
         let mut relay = relay.borrow_mut();
         if !first_open {
             for nav in &navs {
-                navigate(&weak, &mut session, &mut relay, *nav);
+                navigate(&weak, &mut session, &mut relay, &mut hub.borrow_mut(), *nav);
             }
         }
         let settings_open = session.vm().settings_open();
@@ -680,18 +742,54 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             && weak
                 .upgrade()
                 .is_some_and(|window| window.get_view().fleet_open);
+        if refresh_fleet || (!navs.is_empty() && session.vm().fleet_open()) {
+            if let Some(window) = weak.upgrade() {
+                show_hub(&window, &hub.borrow());
+            }
+        }
         if session.pump() || !navs.is_empty() || refresh_fleet {
             render(&weak, &session, &dirs);
         }
     });
 
+    window
+        .window()
+        .on_close_requested(move || close_response(close_session.try_borrow().ok().as_deref()));
+
     window.run()?;
     Ok(())
+}
+
+/// What closing the window does: while a job runs (the game, its exit push, a sync) the
+/// window stays so the process lives until the job has reported; a session that cannot be
+/// looked at counts as busy.
+fn close_response(session: Option<&Session>) -> slint::CloseRequestResponse {
+    match session {
+        Some(session) if session.may_close() => slint::CloseRequestResponse::HideWindow,
+        _ => slint::CloseRequestResponse::KeepWindowShown,
+    }
+}
+
+/// A pad's Quit (Select) closes the launcher when nothing runs, the same as the close button.
+fn quit_when_idle(window: &Weak<MainWindow>, session: &Session) {
+    if close_response(Some(session)) == slint::CloseRequestResponse::HideWindow {
+        if let Some(window) = window.upgrade() {
+            window.hide().ok();
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_that_cannot_be_looked_at_keeps_the_window() {
+        assert_eq!(
+            close_response(None),
+            slint::CloseRequestResponse::KeepWindowShown
+        );
+    }
 
     #[test]
     fn settings_focus_reaches_both_switches_and_back() {

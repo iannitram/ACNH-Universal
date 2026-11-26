@@ -575,7 +575,7 @@ const nx::ModuleInfo* game_module(const char* name) {
 }
 
 bool load_game_or_explain() {
-    std::string why = load_game(data_root());
+    std::string why = load_game(game_root());
     if (why.empty()) return true;
     std::string msg;
     acnh_files_format_load_error(why.c_str(), string_cb, &msg);

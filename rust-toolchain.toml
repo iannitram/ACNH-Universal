@@ -1,0 +1,7 @@
+# The Rust toolchain every build, CI job and release uses (#328). Bump it on purpose, in its own
+# change, so a new clippy lint never breaks main on its own. CI reads the channel from here
+# (tools/check_pins.sh checks the workflows agree); targets are added per job.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

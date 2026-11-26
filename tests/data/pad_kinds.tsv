@@ -1,0 +1,33 @@
+# One list of pads and the prompt set each must get, read by the launcher (app/src/input.rs), the Rust runtime
+# (crates/runtime/src/platform.rs) and the C++ runtime (tests/controller_kind_test.cpp): the three classifiers
+# must agree on every row. Columns, tab-separated: USB vendor id, product id (hex, 0 when unknown), name, kind.
+# Kind is switch, xbox, playstation, generic, or deck (the launcher draws Steam Deck art; the game treats the Deck
+# as generic, which it shows with the Xbox icons).
+0x2dc8	0x6006	8BitDo Pro 2	switch
+0x2dc8	0x6001	8BitDo SN30 Pro	switch
+0x2dc8	0x2000	8BitDo Pro 2 (X-input)	xbox
+0x2dc8	0x1234	8BitDo Ultimate	generic
+0x2dc8	0x1234	8BitDo Switch Controller	switch
+0x045e	0x028e	Xbox 360 Controller	xbox
+0x045e	0x0b12	Xbox Series Controller	xbox
+0x045e	0x0b20	Xbox Wireless Controller	xbox
+0x045e	0x02fd	Xbox One S Controller	xbox
+0x045e	0x0b05	Xbox Elite Series 2	xbox
+0x054c	0x0ce6	DualSense Wireless Controller	playstation
+0x054c	0x09cc	DualShock 4	playstation
+0x054c	0x0ba0	DualShock 4 USB Wireless Adaptor	playstation
+0x057e	0x2009	Pro Controller	switch
+0x057e	0x200e	Joy-Con (L/R)	switch
+0x057e	0x2017	Nintendo Controller	switch
+0x057e	0x2019	Nintendo Controller	switch
+0x057e	0x2069	Nintendo Controller	switch
+0x28de	0x1205	Valve Steam Deck	deck
+0x17ef	0x6182	Legion Go Controller	xbox
+0x17ef	0x1111	Lenovo Gamepad	generic
+0x0000	0x0000	Xbox Wireless Controller	xbox
+0x0000	0x0000	DualSense Wireless Controller	playstation
+0x0000	0x0000	Pro Controller	switch
+0x0000	0x0000	Joy-Con (L)	switch
+0x1234	0x5678	Generic Gamepad	generic
+0x0000	0x0000	Bluetooth Gamepad	generic
+0x1532	0x0000	Razer Kishi	generic

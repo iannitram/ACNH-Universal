@@ -86,8 +86,8 @@ void acnh_platform_window_set_refresh_hz(int32_t hz);
 void acnh_platform_pick_begin();
 void acnh_platform_pick_complete(const char* path);
 void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
-size_t acnh_platform_pad_kind(int32_t vendor, const char* name, char* out, size_t cap);
-size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, const char* name, char* out, size_t cap);
+size_t acnh_platform_pad_kind(int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
+size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
 bool acnh_platform_xbox_layout(const char* controller_kind);
 int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
 uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
@@ -1124,7 +1124,7 @@ void game_thread() {
     try {
 #if TARGET_OS_IPHONE
         // The small .ipa holds no game: offer to download it (Dropbox, in the background, resumable) before anything
-        // else. Returns when the game is there or the person said Not now (the boot then says what is missing). Also
+        // else. Returns when the game is there or the person said Not now (the fatal below says what is missing). Also
         // when the game root is the downloaded game and it is of another build or runtime than this app's (the app was
         // updated; Library/Application Support/game outlives that): the matching one replaces it, whole or not at all.
         {
@@ -1133,8 +1133,15 @@ void game_thread() {
             const bool missing =
                 !std::filesystem::is_regular_file(std::filesystem::u8path(root + "/analysis/main.bin"), ec);
             const bool mismatched = !missing && root == nx_appgame_game_dir() && !nx_appgame_game_matches();
-            if ((missing || mismatched) && !nx_appgame_first_start() && mismatched)
-                nx::fatal("the downloaded game is for another version of this app: open the app again to download the matching one");
+            if (missing || mismatched) {
+                const bool installed = nx_appgame_first_start();
+                // Not now, or the download failed: say so in plain words here, before the save-sync prompts and the
+                // loader's developer message (it names a tool). The next launch offers the download again.
+                if (!installed)
+                    nx::fatal(mismatched
+                                  ? "the downloaded game is for another version of this app: open the app again to download the matching one"
+                                  : "the game is not downloaded yet: open the app again to download it");
+            }
         }
         // On this thread, so the main thread keeps the run loop the prompts need. Returns when the game may boot.
         if (const char* root = std::getenv("NX_DATA_ROOT")) acnh_relay_before_game(root);

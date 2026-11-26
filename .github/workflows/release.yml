@@ -9,8 +9,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Only the publish job writes (it makes the draft release); the three build jobs only read.
 permissions:
-  contents: write
+  contents: read
 
 env:
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
@@ -25,7 +26,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: false
           fetch-depth: 0
@@ -36,11 +37,13 @@ jobs:
           SUDO=$(command -v sudo || true)
           $SUDO apt-get update -q
           $SUDO apt-get install -yq --no-install-recommends libudev-dev libxkbcommon-dev libfontconfig1-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: "1.100.0"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-bin: false
-      - run: cargo build --release -p acnh-app -p acnh-cli
+      - run: cargo build --locked --release -p acnh-app -p acnh-cli
       - name: AppImage
         run: |
           D=AppDir
@@ -51,14 +54,8 @@ jobs:
           cp assets/acnhrecomp.png "$D/usr/share/acnh-universal/"
           SRC="$D/usr/share/acnh-universal/source"
           mkdir -p "$SRC"
-          git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
-          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
-          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
-          # The source has no .git: Prepare reads the package's build version from here.
-          bash tools/build_version.sh > "$SRC/BUILD_VERSION"
-          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
-            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
-          done
+          # The one script for the source package (tools/package_source.sh): the same on every OS.
+          NX_RELEASE_VERSION="$VERSION" bash tools/package_source.sh "$SRC"
           cat > "$D/acnh-universal.desktop" <<DESK
           [Desktop Entry]
           Type=Application
@@ -79,7 +76,7 @@ jobs:
           echo "${APPIMAGETOOL_SHA256}  appimagetool" | sha256sum -c -
           chmod +x appimagetool
           ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool "$D" "ACNH-Universal-$VERSION-linux-x86_64.AppImage"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux
           path: ACNH-Universal-*.AppImage
@@ -91,15 +88,17 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: false
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: "1.100.0"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-bin: false
-      - run: cargo build --release -p acnh-app -p acnh-cli
+      - run: cargo build --locked --release -p acnh-app -p acnh-cli
       - name: Zip
         run: |
           N="ACNH-Universal-$VERSION-windows-x64"
@@ -108,18 +107,12 @@ jobs:
           cp assets/acnhrecomp.ico assets/acnhrecomp.png "$N/"
           SRC="$N/source"
           mkdir -p "$SRC"
-          git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
-          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
-          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
-          # The source has no .git: Prepare reads the package's build version from here.
-          bash tools/build_version.sh > "$SRC/BUILD_VERSION"
-          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
-            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
-          done
+          # The one script for the source package (tools/package_source.sh): the same on every OS.
+          NX_RELEASE_VERSION="$VERSION" bash tools/package_source.sh "$SRC"
           find "$N" -type f | tee files.txt
           bash tools/check_release_files.sh < files.txt
           powershell -NoProfile -Command "Compress-Archive -Path '$N' -DestinationPath '$N.zip'"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows
           path: ACNH-Universal-*.zip
@@ -128,20 +121,22 @@ jobs:
     name: Mac app
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: false
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+        with:
+          toolchain: "1.100.0"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-bin: false
-      - run: cargo build --release -p acnh-app -p acnh-cli
+      - run: cargo build --locked --release -p acnh-app -p acnh-cli
       - name: Save relay is linked
         run: |
           host=$(rustc -vV | sed -n 's/^host: //p')
           for pkg in acnh-app acnh-cli; do
-            test -n "$(cargo tree -e normal --target "$host" -p "$pkg" -i save-relay)" \
+            test -n "$(cargo tree --locked -e normal --target "$host" -p "$pkg" -i save-relay)" \
               || { echo "save-relay is not linked into $pkg"; exit 1; }
           done
       - name: App bundle
@@ -153,17 +148,8 @@ jobs:
           cp assets/acnhrecomp.icns assets/acnhrecomp.png "$A/Contents/Resources/"
           SRC="$A/Contents/Resources/source"
           mkdir -p "$SRC"
-          git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
-          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
-          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
-          # The packaged source has no .git. Prepare reads the build version (BASE_VER, VCODE) from here, and
-          # tools/build_version.sh reads BASE_VER and the commit count (COMMITS) for the Mac and iOS stamps.
-          v=$(NX_RELEASE_VERSION="$VERSION" bash tools/build_version.sh)
-          base=$(sed -n 's/^BASE_VER=//p' <<<"$v")
-          { printf 'BASE_VER=%s\nCOMMITS=%s\n' "${base%%[-+]*}" "$(git rev-list --count HEAD)"; grep -E '^(VNAME|VCODE)=' <<<"$v"; } > "$SRC/BUILD_VERSION"
-          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
-            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
-          done
+          # The one script for the source package (tools/package_source.sh): the same on every OS.
+          NX_RELEASE_VERSION="$VERSION" bash tools/package_source.sh "$SRC"
           # The same Info.plist the launcher writes when it makes the bundle from a checkout
           # (crates/core/src/assemble.rs), so the two cannot drift.
           sed "s/@VERSION@/${VERSION#v}/" assets/mac/Info.plist.in > "$A/Contents/Info.plist"
@@ -178,7 +164,7 @@ jobs:
           find "$A" -type f | tee files.txt
           bash tools/check_release_files.sh < files.txt
           ditto -c -k --keepParent "$A" "ACNH-Universal-$VERSION-mac.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mac
           path: ACNH-Universal-*.zip
@@ -188,18 +174,23 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [linux, windows, mac]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
       - name: File list has no game data
         run: |
+          # The archive names, then the contents of each zip (the AppImage's file list is checked in the linux job,
+          # before it is packed). A file that is not a readable zip fails the step.
           # shellcheck disable=SC2012
           ls dist | tee files.txt
+          for z in dist/*.zip; do unzip -Z1 "$z" >> files.txt; done
           bash tools/check_release_files.sh < files.txt
       - env:
           GH_TOKEN: ${{ github.token }}
