@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cctype>
 #include <cstdio>
@@ -87,8 +88,11 @@ void boot();
 
 // Save sync (issue #81; crates/runtime relay_android.rs, the JNI side in relay_android.cpp): the home screen pulls the
 // island before it starts the game; the game pushes it when it quits (synchronously, before the process ends) and
-// when the app goes to the background (on a worker). Nothing is pushed before the pull has let the game start.
+// when the app goes to the background (on a worker). The activity's destroy uses the bounded terminate export (about
+// 3 s; a late push is left waiting for the next start) so the main thread never blocks without a limit. Nothing is
+// pushed before the pull has let the game start.
 extern "C" void acnh_relay_android_after_game(const char* data_root, const char* files);
+extern "C" void acnh_relay_android_terminate(const char* data_root, const char* files);  // bounded (about 3 s): the main thread
 extern "C" void acnh_relay_android_background(const char* data_root, const char* files);
 extern "C" bool acnh_relay_android_ready(const char* files);
 extern "C" void acnh_relay_android_resume(const char* data_root, const char* files);
@@ -184,12 +188,25 @@ void exit_thread() { pthread_exit(nullptr); }
 // exit (the game could not load) pushes nothing. The quit can come by several ways in turn (restart_app pushes, then
 // exit_process; the activity's destroy): the first one pushes, the others wait for that push to finish (the mutex
 // is held for the whole push), then find it done, so no _exit cuts it short.
-void relay_after_game() {
-    static std::mutex m;
+// `bounded`: the activity's destroy, on the main thread, which must not hang: the push waits at most about 3 s (here
+// for one already running, in Rust for its own) and a late one is left for the next start.
+void relay_after_game(bool bounded = false) {
+    static std::timed_mutex m;
     static bool done = false;
-    std::lock_guard lk(m);
+    std::unique_lock lk(m, std::defer_lock);
+    if (bounded) {
+        if (!lk.try_lock_for(std::chrono::milliseconds(3000))) {
+            nx::log("relay: the final push is still running: left for the next start");
+            return;
+        }
+    } else {
+        lk.lock();
+    }
     if (done) return;
-    acnh_relay_android_after_game(g_root.c_str(), g_cache_dir.c_str());
+    if (bounded)
+        acnh_relay_android_terminate(g_root.c_str(), g_cache_dir.c_str());
+    else
+        acnh_relay_android_after_game(g_root.c_str(), g_cache_dir.c_str());
     done = true;
 }
 
@@ -1788,7 +1805,7 @@ extern "C" void android_main(android_app* app) {
         android_poll_source* src;
         while (ALooper_pollOnce(started ? 0 : 50, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0) {
             if (src) src->process(app, src);
-            if (app->destroyRequested) audio_shutdown(), relay_after_game(), nx::log_flush(), _exit(0);  // the island first
+            if (app->destroyRequested) audio_shutdown(), relay_after_game(true), nx::log_flush(), _exit(0);  // the island first
         }
         if (!started && g_window) {
             started = true;
