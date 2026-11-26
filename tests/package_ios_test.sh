@@ -413,6 +413,46 @@ grep -q 'ios.old is left from an earlier run' "$work/stuck.log" || { cat "$work/
 [ ! -e "$work/out-race-small/acnh-universal-game/ios.old/ios" ] || die "ios was moved inside the leftover ios.old"
 say "a write into the staging folder or ios.old during clean-up does not fail the package"
 
+# 3d2. The package is staged outside the out folder (#362); a leftover stage from a killed run is cleared, not refused.
+# shellcheck source=tools/package_common.sh
+. "$root/tools/package_common.sh"
+stage_root=$work/stage-root
+mkdir -p "$stage_root"
+zip_bin=$work/zip-where-bin
+mkdir -p "$zip_bin"
+cat > "$zip_bin/zip" <<'SHIM'
+#!/bin/bash
+pwd -P >> "$ZIP_WHERE"
+exec /usr/bin/zip "$@"
+SHIM
+chmod +x "$zip_bin/zip"
+mkdir -p "$work/out-stage"
+left=$(pkg_stage_path "$(pkg_realpath "$work/out-stage")" where)
+mkdir -p "$left/Payload/ACNH.app"
+: > "$left/Payload/ACNH.app/leftover"
+chmod -R a-w "$left"
+ACNH_STAGE_ROOT=$stage_root ZIP_WHERE=$work/zip-where PATH="$zip_bin:$PATH" env CI=1 bash "$script" where "$build" --no-game \
+    "$work/out-stage" > "$work/where.log" 2>&1 || { cat "$work/where.log" >&2; die "a leftover stage from a killed run stopped the package"; }
+case "$(cat "$work/zip-where")" in "$(pkg_realpath "$stage_root")/"*) ;; *) die "the .ipa was not made under the stage root" ;; esac
+[ "$(ls -A "$work/out-stage")" = "ACNH-Universal-where.ipa" ] || die "the out folder holds more than the .ipa: $(ls -A "$work/out-stage")"
+[ -z "$(ls -A "$stage_root")" ] || die "the stage root is not empty afterwards: $(ls -A "$stage_root")"
+default_stage=$(env -u ACNH_STAGE_ROOT bash -c '. "$1/tools/package_common.sh"; pkg_stage_path "$2" x' _ "$root" "$(pkg_realpath "$work/out-stage")")
+case "$default_stage" in "$(pkg_realpath "$work/out-stage")/"*) die "the default stage is inside the out folder: $default_stage" ;; esac
+refuse "a stage root inside the out folder" "ACNH_STAGE_ROOT" "" \
+    env ACNH_STAGE_ROOT="$work/out-stage" CI=1 bash "$script" where2 "$build" --no-game "$work/out-stage"
+# A git error other than "not a git repository" refuses the out folder.
+git_bin=$work/git-bin
+mkdir -p "$git_bin"
+cat > "$git_bin/git" <<'SHIM'
+#!/bin/bash
+echo "fatal: detected dubious ownership in repository" >&2
+exit 128
+SHIM
+chmod +x "$git_bin/git"
+refuse "a git error" "cannot tell whether the out folder is inside a Git work tree" "$work/out-git-error" \
+    env PATH="$git_bin:$PATH" CI=1 bash "$script" gerr "$build" --no-game "$work/out-git-error"
+say "the package is staged outside the out folder and a killed run's leftover is cleared"
+
 # 3e. A .DS_Store Finder writes into the staging folder before the archive is made stays out of the .ipa (build 1101021
 # carried Payload/.DS_Store).
 finder_bin=$work/finder-bin
