@@ -632,7 +632,7 @@ impl Guard<'_> {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|since| since.as_secs())
                             .unwrap_or(0);
-                        acnh_core::backup::backup_saves(
+                        acnh_core::backup::backup_saves_pruned(
                             save_dir,
                             self.backups,
                             &acnh_core::backup::stamp(now),
