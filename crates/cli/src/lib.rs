@@ -1011,7 +1011,6 @@ fn fleet_command(_options: &Options) -> Result<i32> {
     Ok(0)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// `manifest`: the one writer of a game folder's `manifest.json` (the staging scripts call it).
 fn manifest_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let folder = options
@@ -1033,6 +1032,7 @@ fn manifest_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn cloud_upload(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let os = options.os.as_deref().unwrap_or("linux");
     if os != "linux" {
