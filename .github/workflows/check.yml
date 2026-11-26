@@ -205,6 +205,9 @@ jobs:
         with:
           cache-bin: false
       - name: Runtime archive (memguard_test links it)
+        env:
+          # Git Bash puts Git's own /usr/bin/link ahead of MSVC's link.exe on PATH; use LLVM's linker, as CMake does.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
         run: |
           cargo build --locked --release -p acnh-runtime --target x86_64-pc-windows-msvc
           archive="$PWD/target/x86_64-pc-windows-msvc/release/acnh_runtime.lib"
@@ -238,6 +241,7 @@ jobs:
           CC: clang-cl
           CXX: clang-cl
           CMAKE_LINKER: lld-link
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
           ACNH_GAME: acnh
           ACNH_BUILD_PLAYER: "1"
         run: |
