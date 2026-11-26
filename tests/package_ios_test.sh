@@ -413,6 +413,16 @@ grep -q 'ios.old is left from an earlier run' "$work/stuck.log" || { cat "$work/
 [ ! -e "$work/out-race-small/acnh-universal-game/ios.old/ios" ] || die "ios was moved inside the leftover ios.old"
 say "a write into the staging folder or ios.old during clean-up does not fail the package"
 
+# 3e. A .DS_Store Finder writes into the staging folder before the archive is made stays out of the .ipa (build 1101021
+# carried Payload/.DS_Store).
+finder_bin=$work/finder-bin
+make_finder_zip "$finder_bin"
+FINDER_MARK=$work/finder-ran PATH="$finder_bin:$PATH" env CI=1 bash "$script" finder "$build" --no-game "$work/out-finder" \
+    > "$work/finder.log" 2>&1 || { cat "$work/finder.log" >&2; die "the Finder-like zip failed the package"; }
+[ -e "$work/finder-ran" ] || die "the Finder-like zip never ran"
+! zipinfo -1 "$work/out-finder/ACNH-Universal-finder.ipa" | grep -q '\.DS_Store$' || die "a .DS_Store is inside the .ipa"
+say "a .DS_Store written into the staging folder stays out of the .ipa"
+
 # 4. Past 4 GB: zip -qry makes a ZIP64 archive that unzip -t passes.
 big=$work/big
 mkdir "$big"

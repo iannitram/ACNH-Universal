@@ -265,7 +265,8 @@ codesign --force -s - "$copy/$exe"
 rm -rf "$copy/_CodeSignature"
 
 partial=$name.ipa.partial
-(cd "$stage" && zip -qry "$partial" Payload)
+# Finder can write a .DS_Store into a folder it shows at any time, the staging folder in Dropbox included.
+(cd "$stage" && zip -qry "$partial" Payload -x '.DS_Store' '*/.DS_Store')
 
 # Check the archive itself before it gets its final name: game/ holds only the five names, and the rest passes the
 # release check. The file list is never printed.

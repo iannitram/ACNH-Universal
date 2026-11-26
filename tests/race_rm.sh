@@ -22,3 +22,18 @@ exec /bin/rm "$@"
 SHIM
     chmod +x "$1/rm"
 }
+
+# make_finder_zip <bin>: a zip that first writes a .DS_Store into every folder it is given and the folders under them,
+# as Finder does to a folder it shows, then runs the real zip.
+make_finder_zip() {
+    mkdir -p "$1"
+    cat > "$1/zip" <<'SHIM'
+#!/bin/bash
+for a in "$@"; do
+    if [ -d "$a" ]; then find "$a" -type d -exec touch {}/.DS_Store \; 2>/dev/null || true; fi
+done
+if [ -n "${FINDER_MARK:-}" ]; then : > "$FINDER_MARK"; fi
+exec /usr/bin/zip "$@"
+SHIM
+    chmod +x "$1/zip"
+}

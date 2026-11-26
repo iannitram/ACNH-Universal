@@ -116,6 +116,19 @@ grep -q 'left from an earlier run' "$work/stuck.log" || { cat "$work/stuck.log" 
 chmod -R u+w "$out/.ACNH-Universal-stuck.partial"; rm -rf "$out/.ACNH-Universal-stuck.partial"
 pass "a write into the staging folder during clean-up does not fail the zip"
 
+# ---- a .DS_Store Finder writes into the signed bundle before it is zipped stays out, and the app still verifies ----
+finder_bin=$work/finder-bin
+make_finder_zip "$finder_bin"
+out=$work/out-finder
+FINDER_MARK=$work/finder-ran PATH="$finder_bin:$PATH" ci finder "$app" --no-game "$out" >"$work/finder.log" 2>&1 \
+  || { cat "$work/finder.log" >&2; fail "the Finder-like zip failed the package"; }
+[ -e "$work/finder-ran" ] || fail "the Finder-like zip never ran"
+! zipinfo -1 "$out/ACNH-Universal-finder.zip" | grep -q '\.DS_Store$' || fail "a .DS_Store is inside the zip"
+mkdir "$work/unpacked-finder"
+ditto -x -k "$out/ACNH-Universal-finder.zip" "$work/unpacked-finder"
+codesign --verify --deep --strict "$work/unpacked-finder/ACNH-Universal.app" || fail "the signature does not verify without the .DS_Store"
+pass "a .DS_Store written into the bundle stays out of the zip"
+
 # ---- empty decoys: the game's names, and others that must never be copied ----
 prep=$work/prepared
 mkdir -p "$prep"
