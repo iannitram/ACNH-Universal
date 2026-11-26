@@ -136,8 +136,7 @@ pub fn image(raw: &[u8]) -> Result<Vec<u8>> {
 /// The flat image of the NSO at `input`, written at `output`.
 pub fn write(input: &Path, output: &Path) -> Result<()> {
     let raw = fs::read(input)?;
-    fs::write(output, image(&raw)?)?;
-    Ok(())
+    crate::platform::atomic_write(output, &image(&raw)?)
 }
 
 fn u32_at(raw: &[u8], at: usize) -> u32 {

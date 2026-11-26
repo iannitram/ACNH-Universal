@@ -16,6 +16,11 @@ export component FleetPage inherits Rectangle {
     in property <string> position;
     in property <bool> has-previous;
     in property <bool> has-next;
+    in property <bool> hub-available;
+    in property <string> hub-line;
+    in property <string> hub-code;
+    in property <string> hub-button;
+    callback hub-toggle();
     callback back();
     callback previous();
     callback next();
@@ -26,8 +31,29 @@ export component FleetPage inherits Rectangle {
         Text { text: "Fleet"; color: white; font-size: 28px; }
         Text { text: root.comparison; color: #b8cfc1; font-size: 14px; }
         if root.message != "": Text { text: root.message; color: white; font-size: 18px; }
+        if root.hub-available: Rectangle {
+            min-height: 56px;
+            border-radius: 6px;
+            background: #253c32;
+            HorizontalBox {
+                padding: 8px;
+                spacing: 8px;
+                VerticalBox {
+                    spacing: 2px;
+                    Text { text: root.hub-line; color: white; font-size: 14px; overflow: elide; }
+                    Text { text: root.hub-code != "" ? "Pairing code: " + root.hub-code : ""; color: #f7d681; font-size: 20px; }
+                }
+                Rectangle {
+                    width: 150px;
+                    background: #315143;
+                    border-radius: 6px;
+                    Text { text: root.hub-button; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                    TouchArea { clicked => { root.hub-toggle(); } }
+                }
+            }
+        }
         for row in root.rows: Rectangle {
-            min-height: 75px;
+            min-height: 58px;
             border-radius: 6px;
             background: #253c32;
             VerticalBox {
@@ -62,7 +88,7 @@ export component FleetPage inherits Rectangle {
         InputHints {
             device: root.input-device;
             move-label: root.has-previous || root.has-next ? "More devices" : "";
-            select-label: "";
+            select-label: root.hub-available ? "Hub on/off" : "";
         }
     }
 }
