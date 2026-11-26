@@ -1,10 +1,49 @@
-//! Prepared Android game data over a separate paired protocol.
+//! Prepared game data (Android, Linux, Windows) over a separate paired protocol.
 use super::*;
 use serde::{Deserialize, Serialize};
 
 const DATA_WIRE: &[u8; 8] = b"ACNHDAT1";
 const MAX_FILES: usize = 100_000;
-const REQUIRED: &[&str] = &["libacnh_game.so", "romfs.pak", "spirv.pak"];
+
+/// What a hub serves for one target: the manifest's target name, the files at the top of the
+/// tree (always sent) and every file the pulling device must receive for the game to start.
+struct Layout {
+    name: &'static str,
+    root_files: &'static [&'static str],
+    required: &'static [&'static str],
+}
+
+/// Android: the prepared tree is the app's `game/` folder, with the game library in it.
+const ANDROID: Layout = Layout {
+    name: "android",
+    root_files: &["libacnh_game.so", "romfs.pak", "spirv.pak"],
+    required: &["libacnh_game.so", "romfs.pak", "spirv.pak"],
+};
+
+/// Linux: the tree is the contained `game/` folder beside the player (what
+/// `NX_GAME_ROOT` points at); the player and its libraries come in the ordinary bundle.
+const LINUX: Layout = Layout {
+    name: "linux",
+    root_files: &["romfs.pak", "spirv.pak"],
+    required: &["analysis/main.bin", "romfs.pak", "spirv.pak"],
+};
+
+/// Windows: the same contained `game/` folder as Linux.
+const WINDOWS: Layout = Layout {
+    name: "windows",
+    ..LINUX
+};
+
+fn layout(target: Os) -> Result<&'static Layout> {
+    match target {
+        Os::Android => Ok(&ANDROID),
+        Os::Linux => Ok(&LINUX),
+        Os::Windows => Ok(&WINDOWS),
+        _ => Err(hub_error(
+            "prepared data is only available for Android, Linux and Windows",
+        )),
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct Manifest {
@@ -19,8 +58,8 @@ struct Entry {
     hash: String,
 }
 
-// Accept the prepared Android layout and the RomFS overlays produced by Prepare.
-fn allowed(path: &str) -> bool {
+// Accept the prepared layout of `layout` and the RomFS overlays produced by Prepare.
+fn allowed(path: &str, layout: &Layout) -> bool {
     let parts: Vec<_> = path.split('/').collect();
     if parts.iter().any(|p| {
         p.is_empty()
@@ -33,7 +72,7 @@ fn allowed(path: &str) -> bool {
         return false;
     }
     match parts.as_slice() {
-        ["libacnh_game.so" | "romfs.pak" | "spirv.pak"] => true,
+        [name] => layout.root_files.contains(name),
         ["analysis" | "aoc", rest @ ..] if !rest.is_empty() => {
             rest.iter().all(|component| overlay_component(component))
         }
@@ -96,14 +135,16 @@ fn overlay_component(component: &str) -> bool {
         })
 }
 
-fn validate(manifest: &Manifest) -> Result<()> {
-    if manifest.target != "android" || manifest.files.is_empty() || manifest.files.len() > MAX_FILES
+fn validate(manifest: &Manifest, layout: &Layout) -> Result<()> {
+    if manifest.target != layout.name
+        || manifest.files.is_empty()
+        || manifest.files.len() > MAX_FILES
     {
         return Err(hub_error("invalid prepared data manifest"));
     }
     let mut paths = BTreeSet::new();
     for file in &manifest.files {
-        if !allowed(&file.path)
+        if !allowed(&file.path, layout)
             || file.hash.len() != 64
             || !file
                 .hash
@@ -121,7 +162,7 @@ fn validate(manifest: &Manifest) -> Result<()> {
             }
         }
     }
-    for &required in REQUIRED {
+    for &required in layout.required {
         if !manifest
             .files
             .iter()
@@ -153,7 +194,7 @@ fn hash_file(path: &Path) -> Result<(u64, String)> {
 }
 
 // Walk only recognized roots, and reject symlinks rather than follow them.
-fn collect(root: &Path, relative: &str, files: &mut Vec<Entry>) -> Result<()> {
+fn collect(root: &Path, relative: &str, layout: &Layout, files: &mut Vec<Entry>) -> Result<()> {
     let dir = root.join(relative);
     match fs::symlink_metadata(&dir) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -175,8 +216,8 @@ fn collect(root: &Path, relative: &str, files: &mut Vec<Entry>) -> Result<()> {
             return Err(hub_error("prepared path is a symlink"));
         }
         if kind.is_dir() {
-            collect(root, &path, files)?;
-        } else if kind.is_file() && allowed(&path) {
+            collect(root, &path, layout, files)?;
+        } else if kind.is_file() && allowed(&path, layout) {
             let (size, hash) = hash_file(&file_path(root, &path, false)?)?;
             files.push(Entry { path, size, hash });
         }
@@ -184,10 +225,10 @@ fn collect(root: &Path, relative: &str, files: &mut Vec<Entry>) -> Result<()> {
     Ok(())
 }
 
-fn make_manifest(root: &Path) -> Result<Manifest> {
+fn make_manifest(root: &Path, layout: &Layout) -> Result<Manifest> {
     require_dir(root)?;
     let mut files = Vec::new();
-    for &name in REQUIRED {
+    for &name in layout.root_files {
         let (size, hash) = hash_file(&file_path(root, name, false)?)?;
         files.push(Entry {
             path: name.into(),
@@ -196,19 +237,20 @@ fn make_manifest(root: &Path) -> Result<Manifest> {
         });
     }
     for dir in ["analysis", "aoc", "fonts", "mods"] {
-        collect(root, dir, &mut files)?;
+        collect(root, dir, layout, &mut files)?;
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let result = Manifest {
-        target: "android".into(),
+        target: layout.name.into(),
         files,
     };
-    validate(&result)?;
+    validate(&result, layout)?;
     Ok(result)
 }
 
-/// Serve prepared Android data to a locally remembered peer over a sealed channel.
-/// `root` contains a prepared library, packs and optional assets. The caller supplies a
+/// Serve prepared data for `target` (Android, Linux or Windows) to a locally remembered peer
+/// over a sealed channel. `root` contains the target's packs, analysis and optional assets
+/// (and, for Android, the game library). The caller supplies a
 /// home-network transport. Success means the client received and verified every file.
 pub fn serve_prepared(
     t: &mut dyn Transport,
@@ -218,11 +260,11 @@ pub fn serve_prepared(
     root: &Path,
 ) -> Result<()> {
     (|| {
-        target_android(target)?;
+        let layout = layout(target)?;
         let peer = trusted(dirs, device)?;
         let key = pairing_key(&peer)?;
         let mut channel = handshake_for(t, &key, target, true, DATA_WIRE)?;
-        let manifest = make_manifest(root)?;
+        let manifest = make_manifest(root, layout)?;
         let text = serde_json::to_vec(&manifest)
             .map_err(|_| hub_error("invalid prepared data manifest"))?;
         if text.len() > MAX_MANIFEST {
@@ -348,15 +390,23 @@ fn pull_verified_to_stage(
     device: &str,
     target: Os,
     stage_dir: &Path,
+    free_bytes: u64,
 ) -> Result<()> {
-    target_android(target)?;
+    let layout = layout(target)?;
     let peer = trusted(dirs, device)?;
     let key = pairing_key(&peer)?;
     let mut channel = handshake_for(t, &key, target, false, DATA_WIRE)?;
     let text = channel.receive(t, b"prepared-manifest/v1", MAX_MANIFEST)?;
     let manifest: Manifest =
         serde_json::from_slice(&text).map_err(|_| hub_error("invalid prepared data manifest"))?;
-    validate(&manifest)?;
+    validate(&manifest, layout)?;
+    let needed = manifest
+        .files
+        .iter()
+        .fold(0u64, |sum, file| sum.saturating_add(file.size));
+    if needed > free_bytes {
+        return Err(hub_error("not enough free space for the prepared data"));
+    }
     let digest = Sha256::digest(&text);
     for (i, entry) in manifest.files.iter().enumerate() {
         let path = file_path(stage_dir, &entry.path, true)?;
@@ -410,20 +460,61 @@ pub fn pull_prepared(
         let had_old = recover_install(&dest, &backup, &stage_path)?;
         fs::create_dir(&stage_path)?;
         let stage = Staging(stage_path);
-        pull_verified_to_stage(t, dirs, device, target, &stage.0)?;
+        pull_verified_to_stage(t, dirs, device, target, &stage.0, u64::MAX)?;
+        swap_in(&stage.0, &dest, &backup, had_old)
+    })()
+    .map_err(transfer_error)
+}
+
+// Move the verified tree to `dest`, keeping the old tree in `backup` until the rename is done.
+fn swap_in(stage: &Path, dest: &Path, backup: &Path, had_old: bool) -> Result<()> {
+    if had_old {
+        fs::rename(dest, backup)?;
+    }
+    if let Err(e) = fs::rename(stage, dest) {
         if had_old {
-            fs::rename(&dest, &backup)?;
+            let _ = fs::rename(backup, dest);
         }
-        if let Err(e) = fs::rename(&stage.0, &dest) {
-            if had_old {
-                let _ = fs::rename(&backup, &dest);
-            }
-            return Err(e.into());
+        return Err(e.into());
+    }
+    if had_old {
+        let _ = fs::remove_dir_all(backup);
+    }
+    Ok(())
+}
+
+/// Receive a verified prepared tree for a Linux or Windows `target` and install it as the
+/// contained `game/` folder beside the player, `<install>/game/` (where the player and the
+/// first run look for `analysis/main.bin`). The tree is staged in `dirs.data`, so the swap is
+/// one rename on the same disk; `free_bytes` is checked against the manifest before any file is
+/// written. Saves, settings and the player are never touched. The install folder must already
+/// hold the player (pull the bundle first). Returns the installed folder.
+pub fn pull_prepared_desktop(
+    t: &mut dyn Transport,
+    dirs: &AppDirs,
+    device: &str,
+    target: Os,
+    free_bytes: u64,
+) -> Result<PathBuf> {
+    (|| {
+        if !matches!(target, Os::Linux | Os::Windows) {
+            return Err(hub_error(
+                "prepared data here is only for Linux and Windows",
+            ));
         }
-        if had_old {
-            let _ = fs::remove_dir_all(backup);
-        }
-        Ok(())
+        require_dir(&dirs.data)?;
+        let install = dirs.install();
+        require_dir(&install)?;
+        let _lock = lock_install_and_sweep(&dirs.data)?;
+        let dest = install.join("game");
+        let backup = dirs.data.join(".prepared-previous");
+        let stage_path = dirs.data.join(".prepared-staging");
+        let had_old = recover_install(&dest, &backup, &stage_path)?;
+        fs::create_dir(&stage_path)?;
+        let stage = Staging(stage_path);
+        pull_verified_to_stage(t, dirs, device, target, &stage.0, free_bytes)?;
+        swap_in(&stage.0, &dest, &backup, had_old)?;
+        Ok(dest)
     })()
     .map_err(transfer_error)
 }
@@ -459,7 +550,8 @@ pub fn pull_prepared_app_with(
     let staged = tempfile::Builder::new()
         .prefix(".prepared-pull-")
         .tempdir_in(private_dir)?;
-    pull_verified_to_stage(t, dirs, device, target, staged.path()).map_err(transfer_error)?;
+    pull_verified_to_stage(t, dirs, device, target, staged.path(), u64::MAX)
+        .map_err(transfer_error)?;
     let dest = private_dir.join(crate::appgame::GAME_DIR);
     let mut copy = |from: &Path, to: &Path| -> Result<()> {
         fs::copy(from, to)?;
@@ -487,18 +579,57 @@ mod tests {
                 entry("spirv.pak"),
             ],
         };
-        assert!(validate(&manifest).is_ok());
+        assert!(validate(&manifest, &ANDROID).is_ok());
         manifest.files.push(entry("romfs.pak"));
-        assert!(validate(&manifest).is_err());
+        assert!(validate(&manifest, &ANDROID).is_err());
         manifest.files.pop();
         manifest.target = "linux".into();
-        assert!(validate(&manifest).is_err());
+        assert!(validate(&manifest, &ANDROID).is_err());
         manifest.target = "android".into();
         manifest.files[1].size = 0;
-        assert!(validate(&manifest).is_err());
+        assert!(validate(&manifest, &ANDROID).is_err());
         manifest.files[1].size = 1;
         manifest.files[0].hash = "bad".into();
-        assert!(validate(&manifest).is_err());
+        assert!(validate(&manifest, &ANDROID).is_err());
+    }
+
+    #[test]
+    fn desktop_manifest_needs_its_own_target_and_required_files() {
+        let entry = |path: &str| Entry {
+            path: path.into(),
+            size: 1,
+            hash: "0".repeat(64),
+        };
+        let files = || {
+            vec![
+                entry("analysis/main.bin"),
+                entry("romfs.pak"),
+                entry("spirv.pak"),
+            ]
+        };
+        for (target, layout, other) in [("linux", &LINUX, &WINDOWS), ("windows", &WINDOWS, &LINUX)]
+        {
+            let mut manifest = Manifest {
+                target: target.into(),
+                files: files(),
+            };
+            assert!(validate(&manifest, layout).is_ok(), "{target}");
+            // Another target's manifest, or an Android one, is never accepted.
+            assert!(validate(&manifest, other).is_err(), "{target}");
+            assert!(validate(&manifest, &ANDROID).is_err(), "{target}");
+            // Missing the analysis the game starts from.
+            manifest.files.remove(0);
+            assert!(validate(&manifest, layout).is_err(), "{target}");
+            // The Android game library is not part of a desktop tree.
+            let mut manifest = Manifest {
+                target: target.into(),
+                files: files(),
+            };
+            manifest.files.push(entry("libacnh_game.so"));
+            assert!(validate(&manifest, layout).is_err(), "{target}");
+        }
+        assert!(layout(Os::Linux).is_ok() && layout(Os::Windows).is_ok());
+        assert!(layout(Os::Mac).is_err() && layout(Os::Ios).is_err());
     }
 
     #[test]
@@ -518,18 +649,26 @@ mod tests {
             "user/device_save",
             "exefs/main",
         ] {
-            assert!(!allowed(path), "{path}");
+            assert!(!allowed(path, &ANDROID), "{path}");
+            assert!(!allowed(path, &LINUX), "{path}");
         }
-        assert!(allowed("analysis/main.bin"));
-        assert!(allowed("aoc/1/data"));
-        assert!(allowed("fonts/shared.ttf"));
-        assert!(allowed("mods/custom/romfs/Layout/test.bflyt"));
+        assert!(allowed("analysis/main.bin", &ANDROID));
+        assert!(allowed("analysis/main.bin", &LINUX));
+        assert!(allowed("aoc/1/data", &ANDROID));
+        assert!(allowed("aoc/1/data", &LINUX));
+        assert!(allowed("fonts/shared.ttf", &ANDROID));
+        assert!(allowed("fonts/shared.ttf", &LINUX));
+        assert!(allowed("mods/custom/romfs/Layout/test.bflyt", &ANDROID));
+        assert!(allowed("mods/custom/romfs/Layout/test.bflyt", &LINUX));
         assert!(allowed(
-            "fonts/glyphs_xbox/console/romfs/Font/ScalableFont.sarc.zs"
+            "fonts/glyphs_xbox/console/romfs/Font/ScalableFont.sarc.zs",
+            &ANDROID
         ));
         assert!(!allowed(
-            "fonts/glyphs_xbox/console/romfs/Font/other.sarc.zs"
+            "fonts/glyphs_xbox/console/romfs/Font/other.sarc.zs",
+            &ANDROID
         ));
+        assert!(allowed("romfs.pak", &WINDOWS) && !allowed("libacnh_game.so", &WINDOWS));
     }
 
     #[test]

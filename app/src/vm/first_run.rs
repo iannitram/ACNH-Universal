@@ -55,6 +55,9 @@ pub enum Event {
     Paired(Result<(), String>),
     Stage(Stage),
     Finished(Result<(), String>),
+    /// A pull from a hub ended: `Ok(None)` brought the player and the prepared game,
+    /// `Ok(Some(why))` the player only (the hub has no game for this device).
+    Pulled(Result<Option<String>, String>),
     CloudSyncFinished(Result<(), String>),
     FinishedSetup {
         steam: bool,
@@ -196,7 +199,7 @@ impl FirstRunVm {
             Step::GetBuild if self.cloud_downloading => {
                 "Downloading the game and syncing your island…".into()
             }
-            Step::GetBuild if self.pulling => "Getting the player build".into(),
+            Step::GetBuild if self.pulling => "Getting the player and the game from the hub".into(),
             Step::GetBuild => {
                 let current = self.stage;
                 let list = acnh_core::recipe::STAGES
@@ -630,6 +633,16 @@ impl FirstRunVm {
             _ => {}
         }
     }
+    // The game is on this device (built, or pulled from a hub): save sync, then the last step.
+    fn finish_build(&mut self) {
+        if self.relay_available && !self.relay_set_up {
+            self.relay.reset();
+            self.go(Step::Relay);
+        } else {
+            self.go(Step::DeviceAndSteam);
+        }
+    }
+
     pub fn event(&mut self, event: Event) {
         self.busy = false;
         match event {
@@ -695,20 +708,29 @@ impl FirstRunVm {
                 self.stage = Some(stage);
                 self.busy = true;
             }
+            Event::Pulled(Ok(None)) if self.pulling => {
+                self.pulling = false;
+                self.finish_build();
+            }
+            Event::Pulled(Ok(Some(why))) if self.pulling => {
+                self.pulling = false;
+                self.message = format!(
+                    "Player received. {why} Prepare the game on this device to finish setup."
+                );
+                self.go(Step::FindGame);
+            }
+            Event::Pulled(Err(reason)) if self.pulling => {
+                // `pulling` stays set so Retry pulls again.
+                self.go(Step::BuildFailed(reason));
+            }
+            Event::Pulled(_) => {}
             Event::Finished(Ok(())) if self.pulling => {
                 self.pulling = false;
                 self.message =
                     "Player received. Prepare the game on this device to finish setup.".into();
                 self.go(Step::FindGame);
             }
-            Event::Finished(Ok(())) => {
-                if self.relay_available && !self.relay_set_up {
-                    self.relay.reset();
-                    self.go(Step::Relay);
-                } else {
-                    self.go(Step::DeviceAndSteam);
-                }
-            }
+            Event::Finished(Ok(())) => self.finish_build(),
             Event::Finished(Err(reason)) => self.go(Step::BuildFailed(reason)),
             Event::FinishedSetup { result: Ok(()), .. } => self.go(Step::Done),
             Event::FinishedSetup {
@@ -887,7 +909,7 @@ mod tests {
         assert_eq!(vm.step, Step::Done);
     }
     #[test]
-    fn client_discovers_pairs_pulls_then_requires_local_preparation() {
+    fn client_pulls_player_and_prepared_game_and_finishes() {
         let mut vm = vm();
         vm.activate(1);
         assert!(matches!(vm.take_request(), Some(Request::Discover)));
@@ -912,12 +934,38 @@ mod tests {
         vm.take_request();
         vm.event(Event::Paired(Ok(())));
         assert!(matches!(vm.take_request(), Some(Request::Pull(..))));
-        vm.event(Event::Finished(Err("offline".into())));
+        vm.event(Event::Pulled(Err("offline".into())));
         vm.activate(0);
         assert!(matches!(vm.take_request(), Some(Request::Pull(..))));
-        vm.event(Event::Finished(Ok(())));
+        // The hub sent the player and the prepared game: the same last steps as a local
+        // preparation, then Done.
+        vm.event(Event::Pulled(Ok(None)));
+        assert_eq!(vm.step, Step::DeviceAndSteam);
+        vm.event(Event::FinishedSetup {
+            steam: false,
+            result: Ok(()),
+        });
+        assert_eq!(vm.step, Step::Done);
+    }
+
+    #[test]
+    fn a_pull_from_a_hub_with_no_game_for_this_device_offers_local_preparation() {
+        let mut vm = vm();
+        vm.pulling = true;
+        vm.step = Step::GetBuild;
+        vm.event(Event::Pulled(Ok(Some(
+            "This hub has no prepared game for this device.".into(),
+        ))));
         assert_eq!(vm.step, Step::FindGame);
+        assert!(vm.message.contains("no prepared game"));
         assert!(vm.message.contains("Prepare the game"));
+        assert!(!vm.pulling);
+        // A failed pull offers Retry, which pulls again.
+        vm.pulling = true;
+        vm.step = Step::GetBuild;
+        vm.event(Event::Pulled(Err("offline".into())));
+        assert!(matches!(vm.step, Step::BuildFailed(_)));
+        assert!(vm.pulling);
     }
 
     #[test]

@@ -42,6 +42,11 @@ pub struct Bundle {
 /// `config.ini`, the fan mods, and the game data a prepare made), `logs` the launcher's logs.
 pub const DEVICE_OWNED: &[&str] = &["root", "logs"];
 
+/// What `install` carries from the old install into the new one: the `DEVICE_OWNED` entries and
+/// `game`, the contained game a pull from a hub put beside the player (#358). `game` is not
+/// device-owned for bundling: a build folder holding one is still refused, never skipped.
+const KEPT_ON_INSTALL: &[&str] = &["root", "logs", "game"];
+
 /// True when a path (relative, with `/`) must never be in a bundle: a file name ending, in any
 /// case, in `.nsp`, `.xci`, `.nca`, `.nsz`, `.xcz`, `.nso`, `.pak` or `.keys`; a file whose
 /// name starts with `lib` and contains `_game.` (the game library); any path with a part
@@ -290,7 +295,7 @@ pub fn recover_install(install_dir: &Path) -> Result<()> {
         fs::rename(&old_dir, install_dir)?;
         return Ok(());
     }
-    for &entry in DEVICE_OWNED {
+    for &entry in KEPT_ON_INSTALL {
         let from = old_dir.join(entry);
         if !from.exists() {
             continue;

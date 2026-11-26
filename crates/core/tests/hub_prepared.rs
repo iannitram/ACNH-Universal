@@ -334,3 +334,170 @@ fn pull_prepared_app_refuses_missing_analysis_or_low_free_space() {
     });
     assert_eq!(fs::read(private_dir.join("game/old")).unwrap(), b"keep");
 }
+
+fn desktop_fixture(root: &Path) {
+    fs::create_dir_all(root.join("analysis")).unwrap();
+    fs::create_dir_all(root.join("fonts")).unwrap();
+    fs::create_dir_all(root.join("mods/ptbr/romfs/Pack")).unwrap();
+    for (path, data) in [
+        ("analysis/main.bin", "synthetic analysis"),
+        ("romfs.pak", "synthetic romfs"),
+        ("spirv.pak", "synthetic shaders"),
+        ("libacnh_game.so", "not for a desktop"),
+        ("fonts/shared_0.ttf", "synthetic font"),
+        ("mods/ptbr/romfs/Pack/test.pack", "synthetic mod"),
+        ("mods/ptbr/romfs/secret.keys", "not sent"),
+    ] {
+        fs::write(root.join(path), data).unwrap();
+    }
+}
+
+fn serve_once(
+    listener: &TcpListener,
+    server: &AppDirs,
+    target: Os,
+    source: &Path,
+) -> acnh_core::Result<()> {
+    let (stream, _) = listener.accept().unwrap();
+    hub::serve_prepared(
+        &mut TcpTransport::from_stream(stream).unwrap(),
+        server,
+        "client",
+        target,
+        source,
+    )
+}
+
+#[test]
+fn paired_loopback_installs_the_desktop_game_beside_the_player_and_keeps_client_data() {
+    for target in [Os::Linux, Os::Windows] {
+        let temp = tempfile::tempdir().unwrap();
+        let server = dirs(temp.path(), "server");
+        let client = dirs(temp.path(), "client");
+        pair(&server, &client);
+        let source = temp.path().join("source");
+        desktop_fixture(&source);
+        let packed = vec![0x65; CHUNK_SIZE + 17];
+        fs::write(source.join("romfs.pak"), &packed).unwrap();
+        // The player is installed first, with the device's own data beside it.
+        let install = client.install();
+        fs::create_dir_all(install.join("game")).unwrap();
+        fs::write(install.join("game/old"), "old").unwrap();
+        fs::write(install.join("acnh"), "player").unwrap();
+        fs::create_dir_all(client.data_root()).unwrap();
+        fs::write(client.data_root().join("save"), "island").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        std::thread::scope(|s| {
+            let worker = s.spawn(|| serve_once(&listener, &server, target, &source).unwrap());
+            let mut transport = TcpTransport::connect(listener.local_addr().unwrap()).unwrap();
+            let dest = hub::pull_prepared_desktop(&mut transport, &client, "hub", target, u64::MAX)
+                .unwrap();
+            assert_eq!(dest, install.join("game"));
+            worker.join().unwrap();
+        });
+        let game = install.join("game");
+        assert_eq!(fs::read(game.join("romfs.pak")).unwrap(), packed);
+        assert!(game.join("analysis/main.bin").is_file());
+        assert!(game.join("mods/ptbr/romfs/Pack/test.pack").is_file());
+        // Never sent: the Android library, a key-like file, and nothing of the old tree stays.
+        assert!(!game.join("libacnh_game.so").exists());
+        assert!(!game.join("mods/ptbr/romfs/secret.keys").exists());
+        assert!(!game.join("old").exists());
+        assert_eq!(fs::read(install.join("acnh")).unwrap(), b"player");
+        assert_eq!(
+            fs::read(client.data_root().join("save")).unwrap(),
+            b"island"
+        );
+        assert!(!client.data.join(".prepared-staging").exists());
+        assert!(!client.data.join(".prepared-previous").exists());
+
+        // A player update keeps the pulled game.
+        let build = temp.path().join("player-update");
+        fs::create_dir(&build).unwrap();
+        fs::write(build.join("acnh"), b"new player").unwrap();
+        let bundle = bundle::manifest(&build, target, "3.0.2", "synthetic").unwrap();
+        bundle::install(&bundle, &build, &install).unwrap();
+        assert_eq!(fs::read(install.join("acnh")).unwrap(), b"new player");
+        assert!(install.join("game/analysis/main.bin").is_file());
+    }
+}
+
+#[test]
+fn desktop_pull_refuses_a_hub_with_no_analysis_and_keeps_the_old_game() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = dirs(temp.path(), "server");
+    let client = dirs(temp.path(), "client");
+    pair(&server, &client);
+    let source = temp.path().join("source");
+    desktop_fixture(&source);
+    fs::remove_file(source.join("analysis/main.bin")).unwrap();
+    let install = client.install();
+    fs::create_dir_all(install.join("game")).unwrap();
+    fs::write(install.join("game/old"), "old").unwrap();
+    let (mut a, mut b) = MemoryTransport::pair();
+    std::thread::scope(|s| {
+        let worker =
+            s.spawn(move || hub::serve_prepared(&mut a, &server, "client", Os::Linux, &source));
+        assert!(hub::pull_prepared_desktop(&mut b, &client, "hub", Os::Linux, u64::MAX).is_err());
+        assert!(worker.join().unwrap().is_err());
+    });
+    assert_eq!(fs::read(install.join("game/old")).unwrap(), b"old");
+}
+
+#[test]
+fn desktop_pull_needs_the_free_space_before_writing_and_only_desktop_targets() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = dirs(temp.path(), "server");
+    let client = dirs(temp.path(), "client");
+    pair(&server, &client);
+    let source = temp.path().join("source");
+    desktop_fixture(&source);
+    fs::create_dir_all(client.install()).unwrap();
+    let (mut a, mut b) = MemoryTransport::pair();
+    std::thread::scope(|s| {
+        let server = &server;
+        let source = &source;
+        let worker =
+            s.spawn(move || hub::serve_prepared(&mut a, server, "client", Os::Linux, source));
+        let error = hub::pull_prepared_desktop(&mut b, &client, "hub", Os::Linux, 10).unwrap_err();
+        assert!(error.to_string().contains("free space"), "{error}");
+        drop(b);
+        let _ = worker.join().unwrap();
+    });
+    assert!(!client.install().join("game").exists());
+    assert!(!client.data.join(".prepared-staging").exists());
+    // Android has its own pull; the Apple targets have none.
+    for target in [Os::Android, Os::Mac, Os::Ios] {
+        let (_a, mut b) = MemoryTransport::pair();
+        assert!(hub::pull_prepared_desktop(&mut b, &client, "hub", target, u64::MAX).is_err());
+    }
+    // A hub never builds a manifest for the Apple targets either.
+    for target in [Os::Mac, Os::Ios] {
+        let (mut a, _b) = MemoryTransport::pair();
+        assert!(hub::serve_prepared(&mut a, &server, "client", target, &source).is_err());
+    }
+}
+
+#[test]
+fn a_desktop_client_never_accepts_an_android_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let server = dirs(temp.path(), "server");
+    let client = dirs(temp.path(), "client");
+    pair(&server, &client);
+    let source = temp.path().join("source");
+    fixture(&source);
+    fs::create_dir_all(client.install()).unwrap();
+    // The channel is bound to the target, so a hub answering for Android fails the handshake
+    // of a Linux client before any manifest is read.
+    let (mut a, mut b) = MemoryTransport::pair();
+    std::thread::scope(|s| {
+        let server = &server;
+        let source = &source;
+        let worker =
+            s.spawn(move || hub::serve_prepared(&mut a, server, "client", Os::Android, source));
+        assert!(hub::pull_prepared_desktop(&mut b, &client, "hub", Os::Linux, u64::MAX).is_err());
+        drop(b);
+        let _ = worker.join().unwrap();
+    });
+    assert!(!client.install().join("game").exists());
+}
