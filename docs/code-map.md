@@ -29,7 +29,7 @@ Tracked first-party lines outside `private/` and `third_party/`:
 |---|---|---|---|---|---|---|---|
 | Linux / SteamOS | the AMD handheld, the Strix Halo tablet | recompiled, x86-64 | NVN on Vulkan (RADV) | the Strix Halo tablet; the AMD handheld is meant to pull (blocked: #357, #358) | Slint launcher; the release is an AppImage and `pack_folder` makes the contained folder on the device (#191) | the launcher: Nextcloud, Google Drive or Dropbox | ubuntu-24.04: the workspace, the save-relay link check, the game-data check, the Rust emitter smoke test and Unicorn oracle, C++ unit tests, the game-root check, the fake-game boot, the Android cross-build |
 | Windows | the RTX 3090 Ti desktop | recompiled, x86-64 | NVN on Vulkan | the desktop | Slint launcher; a zip, and `pack_folder` makes the contained folder (#190) | the launcher | windows-2025: the Rust workspace. `cpp-windows` (C++ and the player) has never passed (#322) |
-| macOS | a Mac with Apple silicon + controller | recompiled, ARM64 | MoltenVK, then upstream's Metal | the Mac | Slint launcher inside `ACNH-Universal.app`; Prepare makes the contained Mac app and both `.ipa`s into Dropbox | the launcher | macos-15: the workspace with all features, the MoltenVK assemble test, the layout tests, the Mac package test, the staging test. The Mac player is never built in CI |
+| macOS | a Mac with Apple silicon + controller | recompiled, ARM64 | MoltenVK, then upstream's Metal | the Mac | Slint launcher inside `ACNH-Universal.app`; Prepare makes the contained Mac app and both `.ipa`s into Dropbox | the launcher | macos-15: the workspace with all features, the MoltenVK assemble test, the layout tests, the Mac package test, the staging test. The Mac player is built in CI (arm64, Homebrew SDL3), not run |
 | iOS / iPadOS | iPhone or iPad + controller | recompiled, ARM64 (no JIT) | Metal (or MoltenVK) | the Mac, by Prepare's `ios` target: `ACNH-Universal-<version>.ipa` with the game inside, and a small one with no game in `ios/small/` plus its game folder; installed with SideStore | the game app itself | in the player through save-relay's Rust API: **Nextcloud only** (#361) | macos-15: the Rust target check, the runtime static library, C++ compile for both SDKs, stub bundles and their checks, Prepare's `ios_real` test, the stub `.ipa` and `tests/package_ios_test.sh` |
 | Android | an Adreno device + controller (none named yet); my Pixel Fold (Mali-G710) for information | recompiled, ARM64 | NVN on Vulkan: on Adreno the bundled Turnip (the system driver on Adreno 8xx), elsewhere the device's own driver | the Strix Halo tablet (ADR 0004); Prepare's `android` target is broken for a prepared folder (#365); upstream's on-phone Prepare also builds it on the phone | `LauncherActivity` (the Slint launcher) is the only launcher activity since PR #304 and cannot get or start the game (#363). `Home` (upstream's Java shell: folder picker, on-phone Prepare, hub pull, Dropbox download, start) is reached only by the icon's long-press shortcut, the sign-in return and the game's back-to-start | in the app through save-relay's C interface and JNI: **Dropbox only** | ubuntu-24.04: `cargo build --workspace --target aarch64-linux-android` (without the `android-launcher` feature) and `tests/android_app_check.sh`. No APK, no Android C++ |
 
@@ -162,7 +162,7 @@ The recompiler on every hub (3.05, #49). It replaced upstream's Python `recomp/`
 
 Upstream's C++ recompiler `prepare/recomp/` is a second, separate recompiler (about 5,900 lines with Capstone 5.0.7 vendored in `third_party/capstone`), still built as `nx_recomp`, `acnh_recomp` (the same name as the Rust binary) and `recomp_test`, linked into `nx_prepare` for the APK's on-phone Prepare. Only its source guard `recomp_source_test` left the build (#247); the file is still tracked. One recompiler is #351.
 
-**The check.** `tests/recomp_emit.py` runs the Rust `recomp-emitter` example in four cache and hook modes, checks three substrings in the output, then runs `tests/difftest.py`, which executes Rust-emitted statements against Unicorn. There is no comparison with a Python driver any more. An instruction the emitter does not handle is counted as skipped and CI stays green (#325). Linux CI runs it with `capstone==5.0.6 lz4==4.4.5 unicorn==2.1.4` and the runner's `clang++`.
+**The check.** `tests/recomp_emit.py` runs the Rust `recomp-emitter` example in four cache and hook modes, checks three substrings in the output, then runs `tests/difftest.py`, which executes Rust-emitted statements against Unicorn. There is no comparison with a Python driver any more. An instruction the emitter does not handle (`unhandled <mnemonic>`, or a statement with `unimpl`) fails the run: `recomp_emit.py` passes `--max-unhandled 0`, since the handwritten corpus is meant to be fully handled. Linux CI runs it with `capstone==5.0.6 lz4==4.4.5 unicorn==2.1.4` and the runner's `clang++`.
 
 ```sh
 cargo build -p acnh-recomp --example recomp-emitter
@@ -259,7 +259,7 @@ Upstream's own preparation, ported from ACNHRecomp-Importer v1.0.7 (MIT). It is 
 | `prepare/io/` | the probe of the picks, the NSOs, `romfs.pak` and `spirv.pak` (`prepare_io_test`); included by every desktop configure |
 | `prepare/gamelib/` | the game library from `gen/` with zig |
 | `prepare/recomp/` | upstream's C++ recompiler (see the recompiler section); `acnh/speedfix-3.0.2.pchtxt` and `speedfix-3.0.3.pchtxt` are tmouh's SpeedFix (CC BY-NC 4.0, `acnh/SPEEDFIX.md`; #329) |
-| `prepare/prepare_e2e_test.cpp`, `fake_shader_tool.cpp` | end-to-end tests on synthetic input; CI leaves both out, though only `prepare_e2e_zig` needs zig (#325) |
+| `prepare/prepare_e2e_test.cpp`, `fake_shader_tool.cpp` | end-to-end tests on synthetic input; CI runs `prepare_e2e` on Linux and Windows; only `prepare_e2e_zig` needs zig and stays out |
 
 ## Tools and scripts
 
@@ -292,8 +292,9 @@ Upstream's own preparation, ported from ACNHRecomp-Importer v1.0.7 (MIT). It is 
 | `crates/*/tests/`, `app/tests/` | yes, all three OSes |
 | `tests/recomp_emit.py`, `tests/difftest.py` | Linux |
 | `tests/aspect_test.cpp`, `astc_test.cpp`, `controller_kind_test.cpp`, `game_root_test.cpp`, `glyph_layout_test.cpp`, `gpu_pick_test.cpp`, `ldn_net_test.cpp`, `nextendo_test.cpp`, `pipeline_cache_blob_test.cpp`, `tiling_test.cpp`, `touch_safe_test.cpp`, `prepare_io_test`, `recomp_test` | Linux (`-DNX_TESTS=ON`) |
-| `tests/layout_test.cpp`, `desktop_layout_test.cpp` | macOS |
-| `tests/memguard_test.cpp` (Windows with the runtime archive), `tests/touch_input_test.cpp` (macOS with it), `tests/shader_cache_test.cpp` (needs another game's folder), `prepare_e2e` | **no** (#325) |
+| `tests/layout_test.cpp`, `desktop_layout_test.cpp`, `touch_input_test.cpp` | macOS (with the runtime archive) |
+| `tests/memguard_test.cpp` | Windows, with the runtime archive (in `cpp-windows`, which is red, #322) |
+| `tests/shader_cache_test.cpp` (needs another game's folder), `prepare_e2e_zig` (needs zig) | **no** |
 | `tests/game_root_check.sh`, `tests/android_app_check.sh` | Linux |
 | `tests/package_mac_test.sh`, `tests/package_ios_test.sh`, `tests/stage_dropbox_game_test.sh`, `tests/race_rm.sh`, `tests/ios_stub_gen/` | macOS only (the staging test should also run on Linux, #368) |
 | `tests/astc_check.py`, `tests/metal_shader_check.mm` | no, by hand |
@@ -313,14 +314,14 @@ CI (M15), `.github/workflows/check.yml`; runs on `main` cancel each other, so mo
 | Job | Runner | Runs | State on `main` |
 |---|---|---|---|
 | `no-game-data` | ubuntu-24.04 | `tools/check_no_game_data.sh` over every tracked file | green |
-| `rust` (Linux, Windows) | ubuntu-24.04, windows-2025 | fmt, clippy and tests (default and all features), the save-relay link check; on Linux the emitter smoke test and Unicorn oracle | green |
-| `cpp` | ubuntu-24.04 | CMake with `NX_TESTS`, every `*_test` but `prepare_e2e_test` and `shader_cache_test`, ctest, `tests/game_root_check.sh` | green |
+| `rust` (Linux, Windows) | ubuntu-24.04, windows-2025 | fmt, clippy and tests (default and all features), the save-relay link check; on Linux the emitter smoke test and Unicorn oracle (fails on a corpus instruction the emitter stops handling) | green |
+| `cpp` | ubuntu-24.04 | CMake with `NX_TESTS`, every `*_test` but `shader_cache_test` (and `acnh_prepare`, `fake_shader_tool`), ctest but `prepare_e2e_zig`, `tests/game_root_check.sh` | green |
 | `boot-smoke` | ubuntu-24.04 | SDL3 3.4.16 and Vulkan-Headers 1.4.357 from source, `tools/boot_smoke.sh` | green |
-| `cpp-windows` | windows-2025 | clang-cl (LLVM 20.1.8), the C++ parts and tests, ctest, the player | **red since it was added on 2026-11-24** (the runner's MSVC STL needs Clang 22 or newer); its test and player steps have never run (#322) |
-| `android` | ubuntu-24.04 | NDK 28.2.13676358, `cargo build --workspace --target aarch64-linux-android`, `tests/android_app_check.sh` | green |
-| `rust-macos` | macos-15 | clippy and tests with all features, the iOS check and runtime library, the two layout tests, `check_ios_compile.sh`, `build_ios.sh` for both SDKs, the bundle checks, `prepare_runner ios_real`, the Mac, staging and iOS package tests | green |
+| `cpp-windows` | windows-2025 | clang-cl (LLVM 20.1.8), the runtime archive, the C++ parts and tests (with `memguard_test`), ctest, the player | **red since it was added on 2026-11-24** (the runner's MSVC STL needs Clang 22 or newer); its test and player steps have never run (#322) |
+| `android` | ubuntu-24.04 | NDK 28.2.13676358, `cargo build --workspace --target aarch64-linux-android`, `acnh-app --features android-launcher --lib`, `tests/android_app_check.sh`; no Android C++ (`tools/build_android.sh`) | green |
+| `rust-macos` | macos-15 | clippy and tests with all features, the iOS check and runtime library, the two layout tests and `touch_input_test`, the Mac player (release, arm64), `check_ios_compile.sh`, `build_ios.sh` for both SDKs, the bundle checks, `prepare_runner ios_real`, the Mac, staging and iOS package tests | green |
 
-`release.yml` (a `v*` tag, or by hand) is meant to build `acnh-app` and `acnh-cli` for Linux (AppImage), Windows (zip) and the Mac (zipped app), package the source an installed launcher prepares from, check each file list and publish a draft release. It has never run and cannot: it archives the deleted `recomp/`, and the packaged source lacks `prepare/`, `third_party/` and `android/` (#323). No workflow builds the APK, Android's libvpx, the Mac player or any Android C++, signs or notarises anything, or attaches licence texts (#329). No Rust toolchain is pinned; actions are pinned by tag; `save-relay` is pinned only by `Cargo.lock` (#328). The workspace version is `0.0.0` and origin has no tags (#324).
+`release.yml` (a `v*` tag, or by hand) is meant to build `acnh-app` and `acnh-cli` for Linux (AppImage), Windows (zip) and the Mac (zipped app), package the source an installed launcher prepares from, check each file list and publish a draft release. It has never run and cannot: it archives the deleted `recomp/`, and the packaged source lacks `prepare/`, `third_party/` and `android/` (#323). No workflow builds the APK, Android's libvpx or any Android C++, signs or notarises anything, or attaches licence texts (#329). No Rust toolchain is pinned; actions are pinned by tag; `save-relay` is pinned only by `Cargo.lock` (#328). The workspace version is `0.0.0` and origin has no tags (#324).
 
 ## Build hubs (ADR 0004)
 
@@ -336,7 +337,7 @@ How a hub gets its launcher in the first place is not settled: there is no relea
 
 - The four build ids are upstream's (`games/acnh/versions.txt`); only 3.0.3 has been built for real.
 - Nothing in the audit of 2026-11-25 was run. Each open bug issue says "reproduce before fixing".
-- The Windows player, the Mac player and the Android C++ have never been built in CI; the Windows C++ unit tests have never run there.
+- The Windows player and the Android C++ have never been built in CI; the Windows C++ unit tests (`memguard_test`) have never run there. The Mac player is built in CI but never booted.
 - A release: `release.yml`, an installed launcher preparing from a packaged source, the file-list check on real artefacts.
 - The Android front door since PR #304: every device check on record predates it. Whether the Slint launcher on Android receives pad buttons at all.
 - The Pixel Fold's inner and outer screens on the device (checked on an emulator); Android on Adreno with the bundled Turnip; GPUs other than Mali-G710; the movies and the sound moving to a new output on a phone; the quit push on Android.
