@@ -100,12 +100,11 @@ impl FirstRun {
         if !player.is_file() {
             return true;
         }
-        let prepared_here = self.dirs.data_root().join("analysis/main.bin").is_file();
-        let packaged = player
-            .parent()
-            .and_then(|p| p.parent())
-            .is_some_and(|p| p.join("Resources/game/analysis/main.bin").is_file());
-        !(prepared_here || packaged)
+        let builds = crate::build_actions::BuildActions {
+            dirs: self.dirs.clone(),
+            os: Os::current(),
+        };
+        !builds.has_game_here(&player)
     }
     pub fn complete(&self) -> std::io::Result<()> {
         use std::io::Write;
@@ -277,6 +276,34 @@ impl FirstRun {
         false
     }
 }
+/// The machine's own name as a short, plain label ("deck", "macbook"), or "device".
+fn friendly_host() -> String {
+    let raw = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            let out = std::process::Command::new("hostname").output().ok()?;
+            String::from_utf8(out.stdout).ok()
+        })
+        .unwrap_or_default();
+    let label: String = raw
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(24)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if label.is_empty() {
+        "device".into()
+    } else {
+        label
+    }
+}
+
 pub(crate) fn device(dirs: &AppDirs) -> acnh_core::Result<String> {
     let path = dirs.config.join("hub-device");
     if let Ok(name) = std::fs::read_to_string(&path) {
@@ -287,7 +314,12 @@ pub(crate) fn device(dirs: &AppDirs) -> acnh_core::Result<String> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let name = format!("device-{stamp:x}-{:x}", std::process::id());
+    // The hub lists paired devices by this name: the machine's own name leads it.
+    let name = format!(
+        "{}-{:x}",
+        friendly_host(),
+        (stamp ^ u128::from(std::process::id())) & 0xffff_ffff
+    );
     acnh_core::platform::atomic_write(&path, name.as_bytes())?;
     Ok(name)
 }
@@ -328,6 +360,9 @@ fn run(
 ) -> Event {
     match request {
         Request::Folders(root) => {
+            if root.as_os_str().is_empty() && cfg!(windows) {
+                return Event::Folders(drive_roots(|p| p.is_dir()));
+            }
             let mut folders = std::fs::read_dir(root)
                 .ok()
                 .into_iter()
@@ -397,10 +432,10 @@ fn run(
                     }
                     return Ok(());
                 }
-                let staged = tempfile::Builder::new()
-                    .prefix(".first-run-")
-                    .tempdir_in(&dirs.data)?;
-                let bundle = hub::pull_hub(addr, dirs, &id, &name, Os::current(), staged.path())?;
+                // The same staging folder every time: a pull that was cut continues from
+                // the chunks it already has.
+                let staged = hub::resume_dir(dirs)?;
+                let bundle = hub::pull_hub(addr, dirs, &id, &name, Os::current(), &staged)?;
                 if cancelled
                     .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
                     .is_err()
@@ -411,7 +446,7 @@ fn run(
                     dirs: dirs.clone(),
                     os: Os::current(),
                 }
-                .install_bundle(&bundle, staged.path())?;
+                .install_bundle(&bundle, &staged)?;
                 hub::report_hub_build(addr, dirs, &id, &name, &bundle)?;
                 Ok(())
             })()
@@ -669,6 +704,15 @@ fn pick_folder_native(_start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The drive roots (`A:\\` to `Z:\\`) `exists` accepts: what the Windows browser lists above a
+/// drive root, so it can change drive.
+fn drive_roots(exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    ('A'..='Z')
+        .map(|letter| PathBuf::from(format!("{letter}:\\")))
+        .filter(|root| exists(root))
+        .collect()
+}
+
 fn add_steam(vars: &Vars, dirs: &AppDirs, folder: &Path) -> acnh_core::Result<()> {
     use acnh_core::steam;
     if Os::current() != Os::Linux {
@@ -761,6 +805,33 @@ fn steam_artwork(folder: &Path) -> acnh_core::Result<Vec<(acnh_core::artwork::Ar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drive_roots_lists_the_existing_drives() {
+        let roots = drive_roots(|p| p.to_string_lossy().starts_with(['C', 'D']));
+        assert_eq!(roots, vec![PathBuf::from("C:\\"), PathBuf::from("D:\\")]);
+    }
+
+    #[test]
+    fn needed_reads_the_prepared_and_contained_game() {
+        let root = tempfile::tempdir().unwrap();
+        let vars = Vars {
+            home: root.path().into(),
+            data: root.path().join("data"),
+            config: root.path().join("config"),
+        };
+        let first = FirstRun::new(vars);
+        // The test binary is the launcher; make it the "installed player" too.
+        let launcher = std::env::current_exe().unwrap();
+        let player = acnh_core::assemble::player(Os::current(), &launcher, &first.dirs.install());
+        std::fs::create_dir_all(player.parent().unwrap()).unwrap();
+        std::fs::write(&player, b"p").unwrap();
+        assert!(first.needed());
+        let prepared = acnh_core::prepare::prepared_folder(Os::current(), &first.dirs);
+        std::fs::create_dir_all(prepared.join("analysis")).unwrap();
+        std::fs::write(prepared.join("analysis/main.bin"), []).unwrap();
+        assert!(!first.needed());
+    }
 
     #[test]
     fn launcher_values_preserve_existing_settings() {

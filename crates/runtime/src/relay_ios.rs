@@ -238,45 +238,91 @@ fn present(alert: &Alert, tx: Sender<Answer>) -> bool {
     true
 }
 
+/// Open `url` in Safari (the main thread does it; nothing waits for the result).
+fn open_in_safari(url: &str) {
+    let url = url.to_string();
+    run_on_main(move |mtm| {
+        if let Some(url) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(&url)) {
+            // SAFETY: a valid URL, an empty options dictionary and no completion handler, on the
+            // main thread.
+            unsafe {
+                UIApplication::sharedApplication(mtm).openURL_options_completionHandler(
+                    &url,
+                    &objc2_foundation::NSDictionary::new(),
+                    None,
+                );
+            }
+        }
+    });
+}
+
 /// The alerts, as the `Prompt` of `relay.rs`.
 pub struct UiPrompt;
 
 impl Prompt for UiPrompt {
     fn sign_in(&self, form: &SignInForm) -> SignInAnswer {
+        let leave = if form.allow_not_now {
+            "Not now"
+        } else {
+            "Cancel"
+        };
+        // Save sync that was set up with Dropbox signs in to Dropbox again: no server fields.
+        if save_relay::service::Service::from_server(&form.server)
+            .is_ok_and(|service| service == save_relay::service::Service::Dropbox)
+        {
+            let mut message = String::from(
+                "Sign in to your Dropbox again so your island follows you between devices.",
+            );
+            if let Some(why) = &form.message {
+                message = format!("{why}\n\n{message}");
+            }
+            let (tapped, _) = show(Alert {
+                title: "Save sync".into(),
+                message,
+                fields: Vec::new(),
+                buttons: vec![
+                    ("Sign in to Dropbox".to_string(), false),
+                    (leave.to_string(), true),
+                ],
+            });
+            return match tapped {
+                0 => SignInAnswer::Dropbox,
+                _ if form.allow_not_now => SignInAnswer::NotNow,
+                _ => SignInAnswer::Cancel,
+            };
+        }
         let mut message = String::from(
-            "Sign in to your Nextcloud so your island follows you between devices. \
-             Use an app password (Nextcloud: Settings, Security), not your own password.",
+            "Sign in to Dropbox, or to your Nextcloud, so your island follows you between devices. \
+             For Nextcloud use an app password (Nextcloud: Settings, Security), not your own password.",
         );
         if let Some(why) = &form.message {
             message = format!("{why}\n\n{message}");
         }
-        let mut buttons = vec![("Sign in".to_string(), false)];
-        buttons.push(if form.allow_not_now {
-            ("Not now".to_string(), true)
-        } else {
-            ("Cancel".to_string(), true)
-        });
         let (tapped, texts) = show(Alert {
             title: "Save sync".into(),
             message,
             fields: vec![
                 Field {
-                    placeholder: "Server (https://...)",
+                    placeholder: "Nextcloud server (https://...)",
                     text: form.server.clone(),
                     secure: false,
                 },
                 Field {
-                    placeholder: "User",
+                    placeholder: "Nextcloud user",
                     text: form.user.clone(),
                     secure: false,
                 },
                 Field {
-                    placeholder: "App password",
+                    placeholder: "Nextcloud app password",
                     text: String::new(),
                     secure: true,
                 },
             ],
-            buttons,
+            buttons: vec![
+                ("Sign in to Nextcloud".to_string(), false),
+                ("Sign in to Dropbox".to_string(), false),
+                (leave.to_string(), true),
+            ],
         });
         match (tapped, texts.as_slice()) {
             (0, [server, user, password]) => SignInAnswer::Submit {
@@ -284,8 +330,32 @@ impl Prompt for UiPrompt {
                 user: user.trim().to_string(),
                 password: password.clone(),
             },
+            (1, _) => SignInAnswer::Dropbox,
             _ if form.allow_not_now => SignInAnswer::NotNow,
             _ => SignInAnswer::Cancel,
+        }
+    }
+
+    fn dropbox_code(&self, url: &str) -> Option<String> {
+        open_in_safari(url);
+        let (tapped, texts) = show(Alert {
+            title: "Dropbox sign-in".into(),
+            message: "Safari shows a Dropbox page. Sign in, allow save-relay, then paste the code \
+                      Dropbox shows here."
+                .into(),
+            fields: vec![Field {
+                placeholder: "Code from Dropbox",
+                text: String::new(),
+                secure: false,
+            }],
+            buttons: vec![
+                ("Finish sign-in".to_string(), false),
+                ("Back".to_string(), true),
+            ],
+        });
+        match (tapped, texts.as_slice()) {
+            (0, [code]) if !code.trim().is_empty() => Some(code.trim().to_string()),
+            _ => None,
         }
     }
 

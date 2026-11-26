@@ -20,4 +20,4 @@ tempfile = "3"
 # player through its Rust API (#172), so those builds stay free of its dependencies.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 acnh-core = { path = "../core", features = ["hub", "relay", "cloud-stream"] }
-save-relay = { git = "https://github.com/iannitram/save-relay" }
+save-relay = { git = "https://github.com/iannitram/save-relay", rev = "132b9e57c7a46c596aacbd3d0a56a2579d89b9bc" }

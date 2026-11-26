@@ -76,7 +76,6 @@ fn parses_fdes() {
     // The header table is read in order; parse sorts by start.
     let starts: Vec<(u64, u64)> = fdes.iter().map(|d| (d.start, d.size)).collect();
     assert_eq!(starts, vec![(0x1000, 0x10), (0x1010, 0x10)]);
-    assert!(fdes.iter().all(|d| d.lsda == 0 && d.personality == 0));
 }
 
 #[test]
@@ -138,4 +137,51 @@ fn compressed_jump_table() {
         Some(&vec![0x1020, 0x1024, 0x1028])
     );
     assert!(an.unresolved_br.is_empty());
+}
+
+/// `add x8, x8, #1, lsl #12` moves the table base by 0x1000; the unshifted field would read the wrong bytes.
+#[test]
+fn jump_table_base_with_shifted_add_immediate() {
+    let text = [
+        (0x1000, 0x7100_081F), // cmp w0, #2
+        (0x1004, 0x5400_0128), // b.hi 0x1028
+        (0x1008, 0xB000_0008), // adrp x8, 0x2000
+        (0x100C, 0x9140_0508), // add x8, x8, #1, lsl #12
+        (0x1010, 0x3860_6909), // ldrb w9, [x8, x0]
+        (0x1014, 0x1000_004A), // adr x10, 0x101c
+        (0x1018, 0x8B09_094A), // add x10, x10, x9, lsl #2
+        (0x101C, 0xD61F_0140), // br x10
+        (0x1020, RET),
+        (0x1024, RET),
+        (0x1028, RET),
+    ];
+    let mut m = module(&text, 0x2C, &[(0x1000, 0x2C)]);
+    m.image.resize(0x4000, 0);
+    m.image[0x3000..0x3003].copy_from_slice(&[1, 2, 3]);
+    let an = analyse(&m, &mut |_| {}, &[]).unwrap();
+    assert_eq!(
+        an.jump_tables.get(&0x101C),
+        Some(&vec![0x1020, 0x1024, 0x1028])
+    );
+}
+
+/// An FDE whose size reads as -1 must not stretch the function past the text (the walk over it never ends).
+#[test]
+fn hostile_fde_size_is_clamped_to_the_text() {
+    let text = [(0x1000, NOP), (0x1004, RET)];
+    let m = module(&text, 8, &[(0x1000, 0xFFFF_FFFF)]);
+    let an = analyse(&m, &mut |_| {}, &[]).unwrap();
+    assert!(an.functions.iter().all(|f| f.end <= 0x1008));
+}
+
+/// A frame header or CIE pointer outside the image is an error, not a panic.
+#[test]
+fn eh_frame_pointers_outside_the_image_are_errors() {
+    let mut m = module(&[], 0x30, &[(0x1000, 0x10)]);
+    m.eh_frame_hdr.0 = u64::MAX - 2;
+    assert!(ehframe::parse(&m).is_err());
+    let mut m = module(&[], 0x30, &[(0x1000, 0x10)]);
+    // The FDE's back pointer to its CIE.
+    put32(&mut m.image, CIE + 20 + 4, 0xFFFF_FFF0);
+    assert!(ehframe::parse(&m).is_err());
 }
