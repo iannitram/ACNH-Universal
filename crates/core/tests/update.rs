@@ -61,7 +61,7 @@ fn eleven_backups_prune_to_ten() {
     assert_eq!(names.len(), KEEP);
     assert!(!names.contains(&"20261001-000000".to_owned()));
     assert!(names.contains(&"20261118-090000".to_owned()));
-    assert_eq!(updated.backup, backups.join("20261118-090000"));
+    assert_eq!(updated.backup, Some(backups.join("20261118-090000")));
     fs::remove_dir_all(&d).unwrap();
 }
 
@@ -193,5 +193,24 @@ fn a_fake_build_through_the_prepare_runner_keeps_the_island() {
     assert!(!fake.ran.is_empty());
     assert_eq!(updated.files_before, 3);
     assert_eq!(updated.files_after, 3);
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn an_update_with_no_island_here_rebuilds_and_backs_nothing_up() {
+    // A device that has never played: nothing to keep, and no island to find afterwards.
+    let d = scratch("no-island");
+    let save_dir = d.join("device_save");
+    let backups = d.join("backups");
+    let mut rebuilt = false;
+    let updated = update(&save_dir, &backups, "20261126-160000", &mut || {
+        rebuilt = true;
+        Ok(())
+    })
+    .unwrap();
+    assert!(rebuilt);
+    assert_eq!(updated.backup, None);
+    assert_eq!((updated.files_before, updated.files_after), (0, 0));
+    assert!(!backups.exists());
     fs::remove_dir_all(&d).unwrap();
 }

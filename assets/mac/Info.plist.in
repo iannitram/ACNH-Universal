@@ -11,5 +11,8 @@
 <key>CFBundleShortVersionString</key><string>@VERSION@</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSApplicationCategoryType</key><string>public.app-category.simulation-games</string>
+<!-- The launcher waits behind the full-screen game and must take the exit push's result as soon
+     as it comes: App Nap would throttle its timer while the game hides it. -->
+<key>LSAppNapIsDisabled</key><true/>
 <key>NSLocalNetworkUsageDescription</key><string>ACNH Universal syncs your island with your save server and finds build hubs on this network.</string>
 </dict></plist>
