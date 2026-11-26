@@ -1,4 +1,4 @@
-//! Integer data processing. Format the operations exactly as recomp/emit_int.py.
+//! Integer data processing. The C++ it emits is pinned by `tests/emit.rs` and `tests/difftest.py`.
 
 use super::{hex_signed, unsupported, width_mask, Emitter, Instruction, Reg, Result, B};
 use capstone::arch::arm64::{Arm64OperandType, Arm64Shift};

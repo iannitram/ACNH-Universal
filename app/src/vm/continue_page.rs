@@ -539,6 +539,15 @@ impl ContinuePageVm {
         self.show_drift();
     }
 
+    /// The device that made the island, found after a play or a sync: a warning shows only
+    /// when the page is idle at Ready, so it never replaces a step, a conflict or a hold.
+    pub fn update_saved_by(&mut self, saved_by: DeviceRecord) {
+        self.saved_by = Some(saved_by);
+        if self.state == ContinueState::Ready {
+            self.show_drift();
+        }
+    }
+
     /// Check if there is drift between this device and the latest save's creator.
     pub fn check_drift(&self) -> (Drift, Option<String>, bool) {
         if let (Some(here), Some(by)) = (&self.this_device, &self.saved_by) {
@@ -576,7 +585,7 @@ impl ContinuePageVm {
     }
 
     /// True while a job runs: presses wait for its result.
-    fn busy(&self) -> bool {
+    pub fn busy(&self) -> bool {
         matches!(
             self.state,
             ContinueState::CheckingStatus

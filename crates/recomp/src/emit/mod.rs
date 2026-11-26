@@ -26,6 +26,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 const B: &str = "NXB";
+/// Words handed to Capstone in one call (bounds its per-call allocation).
+const DECODE_RUN: usize = 1024;
 
 /// Optional instrumentation and register caching for generated functions.
 #[derive(Debug, Clone, Default)]
@@ -370,54 +372,65 @@ impl<'a> Emitter<'a> {
         let mut state = FunctionState::default();
         let mut body = Vec::new();
         let mut last_terminal = false;
-        for (offset, data) in bytes.as_chunks::<4>().0.iter().enumerate() {
-            let address = f.start + offset as u64 * 4;
-            let word = u32::from_le_bytes(*data);
-            let decoded = self.decoder.disasm_count(data, address, 1)?;
-            let Some(decoded) = decoded.iter().next() else {
+        // Capstone decodes a run of words in one call (a call per word was most of the decode
+        // cost); it stops at the first word it cannot decode, which is reported and skipped.
+        let words = bytes.as_chunks::<4>().0;
+        let mut offset = 0;
+        while offset < words.len() {
+            let run = &bytes[offset * 4..(offset + DECODE_RUN).min(words.len()) * 4];
+            let decoded = self.decoder.disasm_all(run, f.start + offset as u64 * 4)?;
+            let count = decoded.len();
+            for decoded in decoded.iter() {
+                let address = f.start + offset as u64 * 4;
+                let word = u32::from_le_bytes(words[offset]);
+                offset += 1;
+                let insn = self.instruction_details(decoded, word)?;
+                let mut stmt = match self.statement(f, &insn, &mut state) {
+                    Ok(stmt) => {
+                        self.coverage.handled += 1;
+                        stmt
+                    }
+                    Err(Error::Unsupported(error)) => {
+                        *self
+                            .coverage
+                            .unhandled
+                            .entry(insn.mnemonic.to_owned())
+                            .or_default() += 1;
+                        let text = format!("{} {}", insn.mnemonic, insn.op_str).replace('"', "'");
+                        format!("nx::unimpl(c, {B} + {address:#x}ull, \"{text}\"); // {error}")
+                    }
+                    Err(error) => return Err(error),
+                };
+                if self.options.hooks.contains(&address) {
+                    stmt = format!("nx_hook(c, {B} + {address:#x}ull); {stmt}");
+                }
+                if self.options.trace_sp.contains(&f.start)
+                    && (insn
+                        .op_str
+                        .split(',')
+                        .next()
+                        .is_some_and(|first| first.contains("sp"))
+                        || insn.op_str.contains("[sp") && insn.writeback)
+                {
+                    stmt.push_str(&format!(" nx::trace_sp(c, {B} + {address:#x}ull);"));
+                }
+                last_terminal = matches!(insn.mnemonic, "b" | "br" | "ret" | "udf" | "brk")
+                    || stmt.ends_with("return; }");
+                body.push((
+                    address,
+                    format!("{stmt} // {} {}", insn.mnemonic, insn.op_str),
+                ));
+            }
+            if count == 0 {
+                let address = f.start + offset as u64 * 4;
+                let word = u32::from_le_bytes(words[offset]);
                 body.push((
                     address,
                     format!("nx::unimpl(c, {B} + {address:#x}ull, \"undecodable {word:#010x}\");"),
                 ));
                 last_terminal = true;
-                continue;
-            };
-            let insn = self.instruction_details(decoded, word)?;
-            let mut stmt = match self.statement(f, &insn, &mut state) {
-                Ok(stmt) => {
-                    self.coverage.handled += 1;
-                    stmt
-                }
-                Err(Error::Unsupported(error)) => {
-                    *self
-                        .coverage
-                        .unhandled
-                        .entry(insn.mnemonic.to_owned())
-                        .or_default() += 1;
-                    let text = format!("{} {}", insn.mnemonic, insn.op_str).replace('"', "'");
-                    format!("nx::unimpl(c, {B} + {address:#x}ull, \"{text}\"); // {error}")
-                }
-                Err(error) => return Err(error),
-            };
-            if self.options.hooks.contains(&address) {
-                stmt = format!("nx_hook(c, {B} + {address:#x}ull); {stmt}");
+                offset += 1;
             }
-            if self.options.trace_sp.contains(&f.start)
-                && (insn
-                    .op_str
-                    .split(',')
-                    .next()
-                    .is_some_and(|first| first.contains("sp"))
-                    || insn.op_str.contains("[sp") && insn.writeback)
-            {
-                stmt.push_str(&format!(" nx::trace_sp(c, {B} + {address:#x}ull);"));
-            }
-            last_terminal = matches!(insn.mnemonic, "b" | "br" | "ret" | "udf" | "brk")
-                || stmt.ends_with("return; }");
-            body.push((
-                address,
-                format!("{stmt} // {} {}", insn.mnemonic, insn.op_str),
-            ));
         }
         let mut lines = vec![format!(
             "void {}(nx::CPU& NX_RESTRICT c) {{",

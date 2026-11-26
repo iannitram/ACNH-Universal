@@ -184,3 +184,17 @@ fn steam_add_writes_the_appimage_shortcut_with_persistent_artwork() {
     steam::upsert(&mut shortcuts, &expected).unwrap();
     assert_eq!(vdf::read(&fs::read(file).unwrap()).unwrap(), shortcuts);
 }
+
+#[test]
+fn help_exits_0_for_check_and_build_without_a_game() {
+    for command in ["check", "build"] {
+        let (code, out, _) = run(&[command, "--help"]);
+        assert_eq!(code, Some(0), "{command}");
+        assert!(out.contains("usage:"), "{out}");
+        let (code, _, _) = run(&["--help", command]);
+        assert_eq!(code, Some(0), "{command}");
+        let (code, out, _) = run(&[command]);
+        assert_eq!(code, Some(2), "{command} without --game is a usage error");
+        assert!(out.contains("--game <folder> is needed"), "{out}");
+    }
+}

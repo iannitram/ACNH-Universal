@@ -247,58 +247,76 @@ pub fn verify(b: &Bundle, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `<install_dir>.old`: where the previous install waits while a new one is swapped in.
+fn old_dir_of(install_dir: &Path) -> PathBuf {
+    let mut name = install_dir.as_os_str().to_os_string();
+    name.push(".old");
+    PathBuf::from(name)
+}
+
+/// Finishes or undoes an install a kill interrupted, so the island is never lost:
+/// - `<install_dir>.old` without `install_dir` (killed between the two renames): the old
+///   install is renamed back.
+/// - `<install_dir>.old` beside a new `install_dir` (killed while the device-owned entries
+///   moved across): each `DEVICE_OWNED` entry still in `.old` and missing from `install_dir`
+///   is moved over; `.old` is deleted only when none is left in it. An entry present in both
+///   is kept as `<entry>.recovered-N` in `install_dir`, never deleted.
+///
+/// Without a `.old` this does nothing.
+pub fn recover_install(install_dir: &Path) -> Result<()> {
+    let old_dir = old_dir_of(install_dir);
+    if !old_dir.exists() {
+        return Ok(());
+    }
+    if !install_dir.exists() {
+        fs::rename(&old_dir, install_dir)?;
+        return Ok(());
+    }
+    for &entry in DEVICE_OWNED {
+        let from = old_dir.join(entry);
+        if !from.exists() {
+            continue;
+        }
+        let mut to = install_dir.join(entry);
+        let mut n = 0u32;
+        while to.exists() {
+            // The new install already has its own (a run since the kill made one): keep both.
+            n += 1;
+            to = install_dir.join(format!("{entry}.recovered-{n}"));
+        }
+        fs::rename(&from, &to)?;
+    }
+    fs::remove_dir_all(&old_dir)?;
+    Ok(())
+}
+
 /// Installs a checked build: `verify(b, staged)` first (nothing changes if it fails); then
-/// move each `DEVICE_OWNED` entry the old `install_dir` has into `staged`, rename
-/// `install_dir` to `<install_dir>.old`, rename `staged` to `install_dir`, and delete
-/// `<install_dir>.old`. With no old `install_dir`, `staged` is just renamed. The island lives
-/// in `root/`, so it moves with it; the update flow backs it up before this runs (M7).
-/// A failed step undoes the steps before it: the old install is back in `install_dir` with its
-/// device-owned entries, and `staged` still holds the new build. A leftover `<install_dir>.old`
-/// from an earlier run is removed first; a failure to delete the old install after the swap is
-/// not reported, and the next install removes it.
+/// recover an interrupted earlier install (`recover_install`), rename `install_dir` to
+/// `<install_dir>.old`, rename `staged` to `install_dir`, move each `DEVICE_OWNED` entry from
+/// the old install into the new one, and delete `<install_dir>.old`. With no old
+/// `install_dir`, `staged` is just renamed. The island lives in `root/`, so it moves with it;
+/// the update flow backs it up before this runs (M7).
+/// The device-owned entries never leave the old install except into the new `install_dir`,
+/// and `.old` is only deleted once it holds none of them, so a kill at any step leaves the
+/// island in `.old` or in `install_dir`, and the next call to `install` or `recover_install`
+/// puts it right. A failed rename of the folders undoes the step before it: the old install
+/// is back in `install_dir` and `staged` still holds the new build. A failure to delete the
+/// old install after the swap is not reported, and the next install removes it.
 pub fn install(b: &Bundle, staged: &Path, install_dir: &Path) -> Result<()> {
     verify(b, staged)?;
+    recover_install(install_dir)?;
 
-    let mut old_name = install_dir.as_os_str().to_os_string();
-    old_name.push(".old");
-    let old_dir = PathBuf::from(old_name);
-    if old_dir.exists() {
-        fs::remove_dir_all(&old_dir)?;
-    }
     if !install_dir.exists() {
         fs::rename(staged, install_dir)?;
         return Ok(());
     }
 
-    let mut moved = Vec::new();
-    for &entry in DEVICE_OWNED {
-        let from = install_dir.join(entry);
-        if from.exists() {
-            if let Err(error) = fs::rename(&from, staged.join(entry)) {
-                put_back(&moved, staged, install_dir);
-                return Err(error.into());
-            }
-            moved.push(entry);
-        }
-    }
-
-    if let Err(error) = fs::rename(install_dir, &old_dir) {
-        put_back(&moved, staged, install_dir);
-        return Err(error.into());
-    }
+    let old_dir = old_dir_of(install_dir);
+    fs::rename(install_dir, &old_dir)?;
     if let Err(error) = fs::rename(staged, install_dir) {
-        put_back(&moved, staged, &old_dir);
         let _ = fs::rename(&old_dir, install_dir);
         return Err(error.into());
     }
-
-    let _ = fs::remove_dir_all(&old_dir);
-    Ok(())
-}
-
-/// Moves entries back after a failed install step; the original error is reported.
-fn put_back(moved: &[&str], from: &Path, to: &Path) {
-    for entry in moved {
-        let _ = fs::rename(from.join(entry), to.join(entry));
-    }
+    // From here the new build is in place; an error leaves `.old` for the next recovery.
+    recover_install(install_dir)
 }

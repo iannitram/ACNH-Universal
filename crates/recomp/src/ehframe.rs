@@ -1,4 +1,4 @@
-//! Function bounds from `.eh_frame_hdr` / `.eh_frame` (port of `recomp/ehframe.py`).
+//! Function bounds from `.eh_frame_hdr` / `.eh_frame`.
 //! Every C++ function with unwind info has an FDE; the binary search table in the
 //! header lists them all.
 
@@ -22,10 +22,6 @@ const DATAREL: u8 = 0x30;
 pub struct Fde {
     pub start: u64,
     pub size: u64,
-    /// 0 when absent.
-    pub lsda: u64,
-    /// From the CIE, 0 when absent.
-    pub personality: u64,
 }
 
 fn bad(what: &str, at: usize) -> Error {
@@ -106,8 +102,11 @@ fn read(b: &[u8], p: usize, enc: u8, datarel: u64) -> Result<(u64, usize), Error
     Ok((v, p))
 }
 
-/// Parse the CIE at `p`: (fde pointer encoding, lsda encoding, personality).
-fn cie(b: &[u8], p: usize) -> Result<(u8, u8, u64), Error> {
+/// Parse the CIE at `p`: the FDE pointer encoding.
+fn cie(b: &[u8], p: usize) -> Result<u8, Error> {
+    if p >= b.len() {
+        return Err(bad("CIE outside the image", p));
+    }
     let mut q = p + 8; // length + CIE id
     let version = byte(b, q)?;
     q += 1;
@@ -125,7 +124,7 @@ fn cie(b: &[u8], p: usize) -> Result<(u8, u8, u64), Error> {
     } else {
         q = uleb(b, q)?.1;
     }
-    let (mut fde_enc, mut lsda_enc, mut pers) = (ABSPTR, OMIT, 0u64);
+    let mut fde_enc = ABSPTR;
     if aug.first() == Some(&b'z') {
         q = uleb(b, q)?.1;
         for &c in &aug[1..] {
@@ -135,21 +134,19 @@ fn cie(b: &[u8], p: usize) -> Result<(u8, u8, u64), Error> {
                     q += 1;
                 }
                 b'L' => {
-                    lsda_enc = byte(b, q)?;
+                    byte(b, q)?; // the LSDA encoding: FDEs' LSDA pointers are not read
                     q += 1;
                 }
                 b'P' => {
                     let penc = byte(b, q)?;
-                    let (v, nq) = read(b, q + 1, penc, 0)?;
-                    pers = v;
-                    q = nq;
+                    q = read(b, q + 1, penc, 0)?.1;
                 }
                 b'S' | b'B' => {}
                 _ => break,
             }
         }
     }
-    Ok((fde_enc, lsda_enc, pers))
+    Ok(fde_enc)
 }
 
 /// All FDEs of the module, sorted by start address (stable, like Python's sort).
@@ -159,7 +156,10 @@ pub fn parse(m: &Module) -> Result<Vec<Fde>, Error> {
     if hdr == 0 {
         return Ok(Vec::new());
     }
-    let h = hdr as usize;
+    let h = usize::try_from(hdr)
+        .ok()
+        .filter(|&h| h < b.len())
+        .ok_or_else(|| bad("eh_frame_hdr outside the image", 0))?;
     let [version, frame_enc, count_enc, table_enc] = bytes::<4>(b, h)?;
     if version != 1 {
         return Err(bad(&format!("eh_frame_hdr version {version}"), h));
@@ -167,37 +167,31 @@ pub fn parse(m: &Module) -> Result<Vec<Fde>, Error> {
     let p = h + 4;
     let (_, p) = read(b, p, frame_enc, 0)?;
     let (count, mut p) = read(b, p, count_enc, 0)?;
-    let mut cies: std::collections::HashMap<u64, (u8, u8, u64)> = Default::default();
+    let mut cies: std::collections::HashMap<u64, u8> = Default::default();
     let mut fdes = Vec::new();
     for _ in 0..count {
         let (_, np) = read(b, p, table_enc, hdr)?;
         let (fde, np) = read(b, np, table_enc, hdr)?;
         p = np;
-        let f = fde as usize;
+        let f = usize::try_from(fde)
+            .ok()
+            .filter(|&f| f < b.len())
+            .ok_or_else(|| bad("FDE outside the image", 0))?;
         let back = u32::from_le_bytes(bytes(b, f + 4)?);
         let cie_ptr = fde.wrapping_add(4).wrapping_sub(u64::from(back));
-        let (fde_enc, lsda_enc, personality) = match cies.get(&cie_ptr) {
+        let fde_enc = match cies.get(&cie_ptr) {
             Some(c) => *c,
             None => {
-                let c = cie(b, cie_ptr as usize)?;
+                let at = usize::try_from(cie_ptr).unwrap_or(usize::MAX);
+                let c = cie(b, at)?;
                 cies.insert(cie_ptr, c);
                 c
             }
         };
         let q = f + 8;
         let (start, q) = read(b, q, fde_enc, 0)?;
-        let (size, mut q) = read(b, q, fde_enc & 0x0F, 0)?;
-        let mut lsda = 0;
-        if lsda_enc != OMIT {
-            q = uleb(b, q)?.1;
-            lsda = read(b, q, lsda_enc, 0)?.0;
-        }
-        fdes.push(Fde {
-            start,
-            size,
-            lsda,
-            personality,
-        });
+        let (size, _) = read(b, q, fde_enc & 0x0F, 0)?;
+        fdes.push(Fde { start, size });
     }
     fdes.sort_by_key(|f| f.start);
     Ok(fdes)
