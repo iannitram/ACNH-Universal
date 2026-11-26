@@ -585,18 +585,9 @@ pub(super) fn stage_game_delivery(
         }
     }
 
-    let mut manifest_files = Vec::new();
-    collect_manifest_files(&staging, Path::new(""), &mut manifest_files)?;
-    manifest_files.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let manifest = crate::appgame::Manifest {
-        version: 1,
-        build_id: build_id.to_owned(),
-        nx_game_abi: nx_game_abi.to_owned(),
-        files: manifest_files,
-    };
+    let manifest = crate::appgame::Manifest::scan(&staging, build_id, nx_game_abi)?;
     // Write manifest.json last so an incomplete folder is never mistaken for a finished one.
-    std::fs::write(staging.join("manifest.json"), manifest.to_json().as_bytes())?;
+    manifest.write_to(&staging)?;
 
     // A leftover backup must go first: the rename below needs its name free.
     remove_dir_retrying(&backup)?;
@@ -656,40 +647,6 @@ pub(super) fn copy_dir_follow_symlinks(src: &Path, dst: &Path) -> Result<()> {
             copy_dir_follow_symlinks(&src_path, &dst_path)?;
         } else if meta.is_file() {
             std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn collect_manifest_files(
-    dir: &Path,
-    prefix: &Path,
-    out: &mut Vec<crate::appgame::ManifestFile>,
-) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str == ".DS_Store" || name_str.starts_with("manifest.json") {
-            continue;
-        }
-        let path = entry.path();
-        let rel = prefix.join(&name);
-        let meta = std::fs::metadata(&path)?;
-        if meta.is_dir() {
-            collect_manifest_files(&path, &rel, out)?;
-        } else if meta.is_file() {
-            let rel_str = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            let sha256 = crate::appgame::sha256_file(&path)?;
-            out.push(crate::appgame::ManifestFile {
-                path: rel_str,
-                size: meta.len(),
-                sha256,
-            });
         }
     }
     Ok(())

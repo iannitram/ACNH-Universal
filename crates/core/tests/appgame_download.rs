@@ -477,3 +477,50 @@ fn manifest_allows_omitted_build_id_and_abi() {
         .validate("", "")
         .expect("empty expected build_id/abi validates");
 }
+
+#[test]
+fn scan_and_write_make_a_manifest_with_a_real_size_and_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("fonts")).unwrap();
+    std::fs::write(root.join("romfs.pak"), b"romfs decoy").unwrap();
+    std::fs::write(root.join("fonts/a \"b\".ttf"), b"font").unwrap();
+    std::fs::write(root.join(".DS_Store"), b"junk").unwrap();
+    std::fs::write(root.join("manifest.json"), b"old").unwrap();
+
+    let manifest = Manifest::scan(root, BUILD_ID, ABI).unwrap();
+    manifest.write_to(root).unwrap();
+
+    let raw = std::fs::read(root.join("manifest.json")).unwrap();
+    let parsed = Manifest::from_json(&raw).unwrap();
+    assert_eq!(parsed, manifest);
+    parsed.validate(BUILD_ID, ABI).unwrap();
+    let paths: Vec<_> = parsed.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["fonts/a \"b\".ttf", "romfs.pak"]);
+    let romfs = parsed.files.iter().find(|f| f.path == "romfs.pak").unwrap();
+    assert_eq!(romfs.size, 11);
+    assert_eq!(romfs.sha256, sha256_hex(b"romfs decoy"));
+    assert!(!root.join("manifest.json.tmp").exists());
+}
+
+#[test]
+fn a_manifest_without_a_build_id_or_abi_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("romfs.pak"), b"x").unwrap();
+    assert!(Manifest::scan(dir.path(), "", ABI).is_err());
+    assert!(Manifest::scan(dir.path(), BUILD_ID, " ").is_err());
+    assert!(Manifest::scan(dir.path(), BUILD_ID, ABI).is_ok());
+    let empty = tempfile::tempdir().unwrap();
+    assert!(Manifest::scan(empty.path(), BUILD_ID, ABI).is_err());
+    assert!(!dir.path().join("manifest.json").exists());
+}
+
+#[test]
+fn write_refuses_a_manifest_that_does_not_match_the_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("romfs.pak"), b"abc").unwrap();
+    let mut manifest = Manifest::scan(dir.path(), BUILD_ID, ABI).unwrap();
+    manifest.files[0].size = 99;
+    assert!(manifest.write_to(dir.path()).is_err());
+    assert!(!dir.path().join("manifest.json").exists());
+}

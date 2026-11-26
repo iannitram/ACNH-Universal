@@ -286,6 +286,79 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// The one way to make a manifest to write: a real build id and `NX_GAME_ABI` are required
+    /// (an app that expects either rejects a manifest without it), and so is at least one file.
+    /// Files are sorted by path.
+    pub fn new(build_id: &str, nx_game_abi: &str, mut files: Vec<ManifestFile>) -> Result<Self> {
+        Self::check_stamp(build_id, nx_game_abi)?;
+        if files.is_empty() {
+            return Err(Error::Build("a manifest needs at least one file".into()));
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(Manifest {
+            version: 1,
+            build_id: build_id.to_owned(),
+            nx_game_abi: nx_game_abi.to_owned(),
+            files,
+        })
+    }
+
+    /// Refuse an empty build id or ABI, so a caller can stop before it does slow work.
+    pub fn check_stamp(build_id: &str, nx_game_abi: &str) -> Result<()> {
+        if build_id.trim().is_empty() {
+            return Err(Error::Build(
+                "a manifest needs the game's build id (--build-id)".into(),
+            ));
+        }
+        if nx_game_abi.trim().is_empty() {
+            return Err(Error::Build(
+                "a manifest needs the game library's NX_GAME_ABI (--abi)".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Hash every file under `root` (links followed; `.DS_Store` and any `manifest.json*` left
+    /// out) into a manifest with paths relative to `root`, written with `/`.
+    pub fn scan(root: &Path, build_id: &str, nx_game_abi: &str) -> Result<Self> {
+        let mut files = Vec::new();
+        collect_files(root, Path::new(""), &mut files)?;
+        Self::new(build_id, nx_game_abi, files)
+    }
+
+    /// Write `manifest.json` into `root`: first check that the JSON parses back to this very
+    /// manifest, that every path and digest is well formed, and that every listed file is there
+    /// with the listed size; then write a temporary file and rename it, so the manifest is never
+    /// half written.
+    pub fn write_to(&self, root: &Path) -> Result<PathBuf> {
+        let json = self.to_json();
+        if Manifest::from_json(json.as_bytes())? != *self {
+            return Err(Error::Build(
+                "the manifest does not parse back to itself".into(),
+            ));
+        }
+        self.validate("", "")?;
+        for file in &self.files {
+            let len = fs::metadata(root.join(&file.path))
+                .map_err(|e| Error::Build(format!("{}: {e}", file.path)))?
+                .len();
+            if len != file.size {
+                return Err(Error::Build(format!(
+                    "{} is {len} bytes, the manifest says {}",
+                    file.path, file.size
+                )));
+            }
+        }
+        let tmp = root.join("manifest.json.tmp");
+        fs::write(&tmp, json.as_bytes())?;
+        let dst = root.join("manifest.json");
+        if dst.exists() {
+            set_writable(&dst)?;
+        }
+        fs::rename(&tmp, &dst)?;
+        Ok(dst)
+    }
+
     /// Serialize the manifest as compact JSON.
     pub fn to_json(&self) -> String {
         let mut out = String::from("{\"version\":");
@@ -665,6 +738,35 @@ pub fn install_partial(private_dir: &Path, dest: &Path, manifest_bytes: &[u8]) -
     }
     fs::write(&manifest_dst, manifest_bytes)?;
     finalize_partial(&partial, dest)
+}
+
+fn collect_files(dir: &Path, prefix: &Path, out: &mut Vec<ManifestFile>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == ".DS_Store" || name_str.starts_with("manifest.json") {
+            continue;
+        }
+        let path = entry.path();
+        let rel = prefix.join(&name);
+        let meta = fs::metadata(&path)?;
+        if meta.is_dir() {
+            collect_files(&path, &rel, out)?;
+        } else if meta.is_file() {
+            let rel_str = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.push(ManifestFile {
+                path: rel_str,
+                size: meta.len(),
+                sha256: sha256_file(&path)?,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Compute lowercase hex SHA-256 of a file.

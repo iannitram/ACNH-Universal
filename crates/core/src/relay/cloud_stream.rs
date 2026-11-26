@@ -368,6 +368,8 @@ pub fn upload_game_to_dropbox(
     nx_game_abi: &str,
     progress: &mut dyn FnMut(&str),
 ) -> Result<crate::appgame::Manifest> {
+    // Refused before anything is uploaded: a manifest without a build id and ABI is useless.
+    crate::appgame::Manifest::check_stamp(build_id, nx_game_abi)?;
     let tokens = relay
         .dropbox_tokens()
         .ok_or_else(|| Error::Saves("save-relay is not signed in to Dropbox".into()))?;
@@ -400,12 +402,7 @@ pub fn upload_game_to_dropbox(
         });
     }
 
-    let manifest = crate::appgame::Manifest {
-        version: 1,
-        build_id: build_id.to_owned(),
-        nx_game_abi: nx_game_abi.to_owned(),
-        files: manifest_files,
-    };
+    let manifest = crate::appgame::Manifest::new(build_id, nx_game_abi, manifest_files)?;
     let manifest_path = format!("{base}/manifest.json");
     let manifest_arg = format!(
         "{{\"path\":{},\"mode\":\"overwrite\",\"mute\":true}}",

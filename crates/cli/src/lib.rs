@@ -10,7 +10,8 @@
 //! acnh-universal steam-add
 //! acnh-universal hub    serve|pair|pull|report
 //! acnh-universal fleet
-//! acnh-universal cloud-upload --os <os> --install <folder> --prepared <folder>
+//! acnh-universal cloud-upload --os <os> --install <folder> --prepared <folder> --build-id <id> --abi <abi>
+//! acnh-universal manifest --out <game folder> --build-id <id> --abi <abi>
 //! acnh-universal help | --help
 //! ```
 //!
@@ -53,11 +54,12 @@ use std::process::Command;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::sync::SyncEnv;
 
-const USAGE: &str = "usage: acnh-universal check|build|play|sync|steam-add|hub|fleet|cloud-upload\n\
+const USAGE: &str = "usage: acnh-universal check|build|play|sync|steam-add|hub|fleet|cloud-upload|manifest\n\
 play [--profile <id>] [--keep relay|here] [--anyway]\n\
 sync setup --server <url> --user <name> [--device <name>] (app password on standard input)\n\
 sync sign-in gdrive|dropbox | sync status | sync off | sync push [--keep relay|here]\n\
-cloud-upload --os linux --install <folder> --prepared <folder>\n\
+cloud-upload --os linux --install <folder> --prepared <folder> --build-id <id> --abi <abi>\n\
+manifest --out <game folder> --build-id <id> --abi <abi> (writes manifest.json: every file's path, size and SHA-256)\n\
 exit codes: play 3 conflict, 4 held, 5 relay unreachable, 6 push conflict after the game ran; the game's own failure is 1\n\
 hub publish --out <builds> --version <game version> [--target <os>] [--install <folder>] [--commit <id>]\n\
 hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>] (--pair shows a generated six-digit code)\n\
@@ -85,6 +87,7 @@ struct Options {
     version: Option<String>,
     commit: Option<String>,
     build_id: Option<String>,
+    abi: Option<String>,
     last_sync: Option<String>,
     free: Option<String>,
     keep: Option<Keep>,
@@ -163,8 +166,9 @@ fn parse(args: &[String]) -> std::result::Result<Options, String> {
                 index += 1;
             }
             "--game" | "--target" | "--out" | "--profile" | "--address" | "--name" | "--peer"
-            | "--hub" | "--prepared" | "--version" | "--commit" | "--build-id" | "--last-sync"
-            | "--free" | "--keep" | "--server" | "--user" | "--device" | "--os" | "--install" => {
+            | "--hub" | "--prepared" | "--version" | "--commit" | "--build-id" | "--abi"
+            | "--last-sync" | "--free" | "--keep" | "--server" | "--user" | "--device" | "--os"
+            | "--install" => {
                 let value = match inline {
                     Some(value) => {
                         index += 1;
@@ -205,6 +209,7 @@ fn set_value(options: &mut Options, flag: &str, value: String) -> std::result::R
         "--version" => options.version = Some(value),
         "--commit" => options.commit = Some(value),
         "--build-id" => options.build_id = Some(value),
+        "--abi" => options.abi = Some(value),
         "--last-sync" => options.last_sync = Some(value),
         "--free" => options.free = Some(value),
         "--keep" => {
@@ -296,6 +301,7 @@ pub fn run(args: Vec<String>, cx: &mut Context<'_>) -> i32 {
         "steam-add" => steam_add(&options),
         "hub" => hub_command(&options, cx),
         "fleet" => fleet_command(&options),
+        "manifest" => manifest_command(&options, cx),
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         "cloud-upload" => cloud_upload(&options, cx),
         _ => {
@@ -1006,6 +1012,27 @@ fn fleet_command(_options: &Options) -> Result<i32> {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+/// `manifest`: the one writer of a game folder's `manifest.json` (the staging scripts call it).
+fn manifest_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
+    let folder = options
+        .out
+        .as_deref()
+        .ok_or_else(|| Error::Env("--out <game folder> is required".into()))?;
+    let manifest = acnh_core::appgame::Manifest::scan(
+        folder,
+        options.build_id.as_deref().unwrap_or(""),
+        options.abi.as_deref().unwrap_or(""),
+    )?;
+    manifest.write_to(folder)?;
+    let total_bytes: u64 = manifest.files.iter().map(|f| f.size).sum();
+    let _ = writeln!(
+        cx.out,
+        "{} files, {total_bytes} bytes",
+        manifest.files.len()
+    );
+    Ok(0)
+}
+
 fn cloud_upload(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let os = options.os.as_deref().unwrap_or("linux");
     if os != "linux" {
@@ -1037,7 +1064,7 @@ fn cloud_upload(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
         os,
         &files,
         options.build_id.as_deref().unwrap_or(""),
-        "",
+        options.abi.as_deref().unwrap_or(""),
         &mut |msg| {
             let _ = writeln!(err, "{msg}");
         },
