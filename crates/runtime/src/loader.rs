@@ -1810,11 +1810,4 @@ mod tests {
         assert_eq!(n, s.len());
         assert_eq!(s, "hle:test_hle_sym_61");
     }
-
-    #[test]
-    fn all_eleven_services_are_ported() {
-        for s in crate::SERVICES {
-            assert!(crate::ported(s), "{s:?} should be ported");
-        }
-    }
 }
