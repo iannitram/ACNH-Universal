@@ -93,11 +93,11 @@ fn latest_by_time_and_a_on_a_tie() {
 fn side_by_side_lines() {
     assert_eq!(
         side_by_side(&card(1_793_620_799, "AMD handheld", 3720)),
-        ["AMD handheld, 2026-11-02 11:59", "1 h 02 min played"]
+        ["AMD handheld, 2026-11-02 11:59 UTC", "1 h 02 min played"]
     );
     assert_eq!(
         side_by_side(&card(0, "", 0)),
-        ["unknown device, 1970-01-01 00:00", "play time unknown"]
+        ["unknown device, 1970-01-01 00:00 UTC", "play time unknown"]
     );
     assert_eq!(
         side_by_side(&card(951_782_400, "D", 59))[1],
@@ -105,10 +105,25 @@ fn side_by_side_lines() {
     );
     assert_eq!(
         side_by_side(&card(951_782_400, "D", 360_000))[0],
-        "D, 2000-02-29 00:00"
+        "D, 2000-02-29 00:00 UTC"
     );
     assert_eq!(
         side_by_side(&card(951_782_400, "D", 360_000))[1],
         "100 h 00 min played"
+    );
+}
+
+#[test]
+fn a_relay_stamp_reads_like_a_card_time() {
+    use acnh_core::savecard::readable_stamp;
+    assert_eq!(
+        readable_stamp("2026-11-24T17:39:43Z"),
+        "2026-11-24 17:39 UTC"
+    );
+    assert_eq!(readable_stamp("2026-11-24T17:39Z"), "2026-11-24 17:39 UTC");
+    assert_eq!(readable_stamp("yesterday"), "yesterday");
+    assert_eq!(
+        readable_stamp("2026-11-24T17:39:43+02:00"),
+        "2026-11-24T17:39:43+02:00"
     );
 }

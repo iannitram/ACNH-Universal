@@ -34,3 +34,21 @@ fn random_suffixes_are_six_hex_digits_and_vary() {
         .iter()
         .all(|s| s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit())));
 }
+
+#[test]
+fn a_mac_host_name_loses_its_local_domain() {
+    let name = device_name_from(
+        Some("Shuttle-6.local\n".into()),
+        || None,
+        || panic!("no suffix"),
+    );
+    assert_eq!(name, "Shuttle-6");
+    let name = device_name_from(
+        None,
+        || Some("box.example.org".into()),
+        || panic!("no suffix"),
+    );
+    assert_eq!(name, "box");
+    let name = device_name_from(Some(".local".into()), || None, || "abc123".into());
+    assert_eq!(name, "device-abc123");
+}
