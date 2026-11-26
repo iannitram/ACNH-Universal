@@ -21,7 +21,7 @@ From `SPEC.md` (approved 2026-11-02; M5 widened and approved again 2026-11-17; M
 
 ## Where things stand
 
-This roadmap was audited against `main` on 2026-11-25 by reading the code (eight readers, then a second, independent read of every finding; nothing was built or run for it). The earlier text said the 1.0 code was complete on every platform and only device runs remained. That was too strong. Since then 31 pull requests merged on 2026-11-26 (list in [Merged pieces](#merged-pieces)); `main` is at `15402a3` and its `check` run there passed. Nothing below has been run on a device. What is true now:
+This roadmap was audited against `main` on 2026-11-25 by reading the code (eight readers, then a second, independent read of every finding; nothing was built or run for it). The earlier text said the 1.0 code was complete on every platform and only device runs remained. That was too strong. Since then 31 pull requests merged on 2026-11-26 (list in [Merged pieces](#merged-pieces)); `main` was at `15402a3` for those and is at `cef6ebf` after the docs of PR #417; its `check` run at `15402a3` passed. Nothing below has been run on a device. What is true now:
 
 - **Built and merged:** the engine and Prepare in Rust, the launcher and the command line, the Rust recompiler (cut over, Python `recomp/` deleted), the hub library, the contained app for every platform, the Android and iPhone/iPad in-app download, save sync on every platform, resolution independence. The list with issue and PR numbers is in [Merged pieces](#merged-pieces).
 - **Not what the roadmap said (each line says what the merges of 2026-11-26 changed):**
@@ -36,14 +36,14 @@ This roadmap was audited against `main` on 2026-11-25 by reading the code (eight
 
 ### Open pull requests (2026-11-26)
 
-Four pull requests are open against `main`:
+Four pull requests are open against `main` (#417, the docs, merged since):
 
 | PR | Issue | State |
 |---|---|---|
 | #415 | #324 (Refs) | A version scheme from the workspace manifest, not from git tags (workspace version `0.12.0`, tags `v<version>`). Needs my ruling on the scheme and the baseline |
 | #403 | #335 (Refs) | Archives unpacked in Rust and unused pip packages dropped. Refreshed against `main` after a conflict in `prepare.rs`; CI is pending on the new head and the review verdict predates it. Its body's `Refs` plus `Still owed:` form is read as partial by the merge check |
 | #408 | #336 (Closes) | Splits `prepare.rs`, removes dead script code and the `NotBuilt` skeleton. Its last `Rust (macOS)` job was cancelled after 15 minutes with no log, the other nine checks passed; it was not rerun |
-| #417 | #330 (Refs) | This file and the code map |
+| #418 | #337, #338 (docs) | Roadmap and code map after PR #382 and #386: the Apple acceptance rows and `machine_name` |
 
 The other 31 merged on 2026-11-26. One test, `first_run::tests::steam_artwork_uses_the_size_for_each_library_slot`, fails in `cargo test --workspace` on the build Mac; it looks for assets next to the test binary, so it fails when the target folder is shared, and CI is the authority. It needs its own issue.
 
