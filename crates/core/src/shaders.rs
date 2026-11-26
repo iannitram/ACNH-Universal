@@ -335,7 +335,15 @@ impl Runner for ProcessRunner {
         jobs: u32,
     ) -> Result<()> {
         let tools = Tools::new(root.to_owned(), Tools::default().python);
-        extract_with(&tools, romfs, main, out, jobs, false)?;
+        let summary = extract_with(&tools, romfs, main, out, jobs, false)?;
+        // A run with failures must not stand as the current result: the error keeps the
+        // stage's record unwritten, so the next run extracts again.
+        if summary.failed > 0 {
+            return Err(Error::Build(format!(
+                "{} shader group(s) failed to extract (see the FAIL lines and logs/spirv.log)",
+                summary.failed
+            )));
+        }
         Ok(())
     }
     fn find_program(&self, name: &str) -> Option<PathBuf> {

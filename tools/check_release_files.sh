@@ -9,8 +9,10 @@
 # {ptbr,speedfix60}/romfs/ in the .ipa. There the romfs/ folder and the .zs, .sarc and .pack names (the mods' own
 # files) pass; every other rule still applies to the rest of the path, and nothing else under romfs/ passes.
 mods_prefix='^/([^/]+\.app/contents/resources|payload/acnh\.app)/mods/(ptbr|speedfix60)/romfs/'
+# shellcheck source=tools/game_data_rules.sh
+. "$(dirname "${BASH_SOURCE[0]}")/game_data_rules.sh"
 bad=0
-while IFS= read -r f || [ -n "$f" ]; do
+while IFS= read -r f ||[ -n "$f" ]; do
   lf=/$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]' | tr '\\' '/')
   if [ "${ACNH_ALLOW_BUNDLED_MODS:-}" = 1 ] && [[ $lf =~ $mods_prefix ]]; then
     rest=${lf#"${BASH_REMATCH[0]}"}
@@ -22,10 +24,18 @@ while IFS= read -r f || [ -n "$f" ]; do
          case "$lf" in *.zs|*.sarc|*.pack) lf=$lf.mod ;; esac ;;
     esac
   fi
+  if game_data_ext_blocked "$lf"; then
+    echo "BLOCKED (game/derived file type): $f"; bad=1; continue
+  fi
   case "$lf" in
-    *.nsp|*.xci|*.nsz|*.xcz|*.nca|*.nso|*.npdm|*.keys|*.tik|*.cert|*.spv|*.bin|*.bfsha|*.bntx|*.szs|*.zs|*.sarc|*.bfres|*.ttf|*.otf|*.pack|*.pak|*.sav|*/lib*_game.*|*/acnh_game.*)
-      echo "BLOCKED (game/derived file type): $f"; bad=1 ;;
-    */gen/*|*/exefs/*|*/romfs/*|*/aoc/*|*/game/*|*/private/*|*/refs/*|*/device_save/*|*/backups/*)
+    */lib*_game.*|*/acnh_game.*)
+      echo "BLOCKED (game/derived file type): $f"; bad=1; continue ;;
+  esac
+  if game_data_dir_blocked "$lf"; then
+    echo "BLOCKED (game folder, recompiled code or saves): $f"; bad=1; continue
+  fi
+  case "$lf" in
+    */game/*|*/device_save/*|*/backups/*)
       echo "BLOCKED (game folder, recompiled code or saves): $f"; bad=1 ;;
   esac
 done

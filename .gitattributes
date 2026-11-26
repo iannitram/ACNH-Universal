@@ -1,0 +1,2 @@
+tools/versions.env text eol=lf
+tools/downloads.sha256 text eol=lf

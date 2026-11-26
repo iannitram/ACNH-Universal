@@ -47,6 +47,13 @@ pub trait ScriptRunner {
         rust_shaders(req, &self.root())
     }
 
+    /// Whether the tools the Tools stage leaves under the source folder are all there and
+    /// current. A test runner has no tools to look for, so the default says yes; the process
+    /// runner looks (`tools_current`).
+    fn tools_current(&self) -> bool {
+        true
+    }
+
     /// The Rust fonts stage. The default runs it (`rust_fonts`).
     fn fonts(&mut self, req: &Request) -> Result<()> {
         rust_fonts(req)
@@ -318,6 +325,10 @@ impl ScriptRunner for ProcessRunner {
 
     fn build(&mut self, req: &Request) -> Result<()> {
         rust_build(req, &self.root, self.jobs)
+    }
+
+    fn tools_current(&self) -> bool {
+        tools_current(&self.root)
     }
 
     fn root(&self) -> PathBuf {

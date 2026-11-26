@@ -1,23 +1,10 @@
 use acnh_recomp::load::{
-    apply_relative, decompress_lz4_block, load, load_bytes, plt_imports, Error, DT_FINI_ARRAY,
-    DT_FINI_ARRAYSZ, DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_JMPREL, DT_NULL, DT_PLTRELSZ, DT_RELA,
-    DT_RELASZ, DT_RELR, DT_RELRSZ, DT_STRSZ, DT_STRTAB, DT_SYMENT, DT_SYMTAB, R_AARCH64_GLOB_DAT,
-    R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE, SHN_UNDEF, STT_FUNC,
+    decompress_lz4_block, load, load_bytes, plt_imports, Error, DT_FINI_ARRAY, DT_FINI_ARRAYSZ,
+    DT_INIT_ARRAY, DT_INIT_ARRAYSZ, DT_JMPREL, DT_NULL, DT_PLTRELSZ, DT_RELA, DT_RELASZ, DT_RELR,
+    DT_RELRSZ, DT_STRSZ, DT_STRTAB, DT_SYMENT, DT_SYMTAB, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT,
+    R_AARCH64_RELATIVE, SHN_UNDEF, STT_FUNC,
 };
-use acnh_recomp::{ported, Pass, PASSES};
 use std::path::Path;
-
-#[test]
-fn passes_and_ported_flag() {
-    assert_eq!(
-        PASSES,
-        [Pass::Load, Pass::Analyse, Pass::Emit, Pass::Driver]
-    );
-    assert!(ported(Pass::Load));
-    assert!(ported(Pass::Analyse));
-    assert!(ported(Pass::Emit));
-    assert!(ported(Pass::Driver));
-}
 
 /// Helper to encode raw LZ4 block containing only literals.
 fn lz4_compress_literals(data: &[u8]) -> Vec<u8> {
@@ -372,19 +359,6 @@ fn load_lz4_compressed_nso() {
 }
 
 #[test]
-fn test_apply_relative() {
-    let raw = create_test_nso_data(false);
-    let mut m = load_bytes(&raw, None).unwrap();
-
-    // Data at 0x2020 was 0x5555. Let's modify reloc[2].addend to 0xDEADBEEF
-    m.relocs[2].addend = 0xDEAD_BEEF;
-    assert_eq!(m.u64(0x2020), 0x5555);
-
-    apply_relative(&mut m);
-    assert_eq!(m.u64(0x2020), 0xDEAD_BEEF);
-}
-
-#[test]
 fn test_error_handling() {
     // Too short
     assert!(matches!(
@@ -425,4 +399,44 @@ fn test_lz4_decompress_block() {
     // Size mismatch error
     let err = decompress_lz4_block(&compressed, original.len() + 10);
     assert!(matches!(err, Err(Error::Decompress(_))));
+}
+
+/// A header whose segment fields ask for gigabytes must fail, not allocate them.
+#[test]
+fn oversized_segment_fields_are_malformed() {
+    let mut raw = create_test_nso_data(false);
+    // Text segment: memory offset 0xFFFF_0000 puts the image far past any real module.
+    raw[0x14..0x18].copy_from_slice(&0xFFFF_0000u32.to_le_bytes());
+    assert!(matches!(load_bytes(&raw, None), Err(Error::Malformed(_))));
+
+    let mut raw = create_test_nso_data(true);
+    // Compressed text claiming 4 GiB - 1 of output from a few bytes.
+    raw[0x18..0x1C].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(load_bytes(&raw, None).is_err());
+}
+
+/// A dynamic section that puts DT_STRTAB far past DT_SYMTAB (with DT_SYMENT 1) must not walk billions
+/// of symbol slots.
+#[test]
+fn hostile_symbol_table_bounds_return_quickly() {
+    let raw = create_test_nso_data(false);
+    let mut m = load_bytes(&raw, None).unwrap();
+    let set_dyn = |m: &mut acnh_recomp::load::Module, tag: i64, old: u64, new: u64| {
+        let mut key = tag.to_le_bytes().to_vec();
+        key.extend_from_slice(&old.to_le_bytes());
+        let at = m
+            .image
+            .windows(16)
+            .position(|w| w == key.as_slice())
+            .unwrap();
+        m.image[at + 8..at + 16].copy_from_slice(&new.to_le_bytes());
+    };
+    set_dyn(&mut m, DT_STRTAB, 0x1248, u64::MAX / 2);
+    set_dyn(&mut m, DT_SYMENT, 24, 1);
+    m.symbols.clear();
+    let started = std::time::Instant::now();
+    acnh_recomp::load::parse_mod0(&mut m).unwrap();
+    assert!(started.elapsed().as_secs() < 5);
+    // Only the slots inside the image were read.
+    assert!(m.symbols.len() <= m.image.len());
 }

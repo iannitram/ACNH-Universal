@@ -276,6 +276,37 @@ fn lock_install(data_root: &Path) -> Result<File> {
     }
 }
 
+/// Staging folders made by the pullers; a kill leaves them behind because only `Drop` removes them.
+const STALE_STAGING: [&str; 4] = [".hub-pull-", ".prepared-pull-", ".continue-", ".first-run-"];
+
+/// Remove leftover pull staging folders in `root`. Only real directories are removed (a symlink
+/// is never followed), and the caller must hold the install lock so no live pull is touched.
+fn sweep_staging(root: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !STALE_STAGING.iter().any(|prefix| name.starts_with(prefix)) {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|t| t.is_dir()) && fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Take the install lock for `root` and, while holding it, remove staging folders left by an
+/// earlier killed pull. Keep the returned handle for the whole pull; dropping it releases the lock.
+pub fn lock_install_and_sweep(root: &Path) -> Result<File> {
+    let lock = lock_install(root)?;
+    sweep_staging(root);
+    Ok(lock)
+}
+
 struct Staging(PathBuf);
 
 impl Drop for Staging {
@@ -372,7 +403,7 @@ pub fn pull_prepared(
     (|| {
         target_android(target)?;
         require_dir(data_root)?;
-        let _lock = lock_install(data_root)?;
+        let _lock = lock_install_and_sweep(data_root)?;
         let dest = data_root.join("game");
         let backup = data_root.join(".prepared-previous");
         let stage_path = data_root.join(".prepared-staging");
@@ -424,7 +455,7 @@ pub fn pull_prepared_app_with(
 ) -> Result<PathBuf> {
     target_android(target)?;
     require_dir(private_dir)?;
-    let _lock = lock_install(private_dir)?;
+    let _lock = lock_install_and_sweep(private_dir)?;
     let staged = tempfile::Builder::new()
         .prefix(".prepared-pull-")
         .tempdir_in(private_dir)?;
@@ -499,6 +530,35 @@ mod tests {
         assert!(!allowed(
             "fonts/glyphs_xbox/console/romfs/Font/other.sarc.zs"
         ));
+    }
+
+    #[test]
+    fn sweep_removes_stale_staging_only_and_needs_the_lock() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            ".hub-pull-a",
+            ".prepared-pull-b",
+            ".continue-c",
+            ".first-run-d",
+        ] {
+            fs::create_dir(root.path().join(name)).unwrap();
+            fs::write(root.path().join(name).join("part"), b"x").unwrap();
+        }
+        fs::create_dir(root.path().join("game")).unwrap();
+        fs::write(root.path().join(".hub-pull-file"), b"keep").unwrap();
+        let held = lock_install_and_sweep(root.path()).unwrap();
+        assert!(lock_install_and_sweep(root.path()).is_err());
+        for name in [
+            ".hub-pull-a",
+            ".prepared-pull-b",
+            ".continue-c",
+            ".first-run-d",
+        ] {
+            assert!(!root.path().join(name).exists(), "{name}");
+        }
+        assert!(root.path().join("game").is_dir());
+        assert!(root.path().join(".hub-pull-file").is_file());
+        drop(held);
     }
 
     #[test]

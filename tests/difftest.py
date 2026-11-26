@@ -302,6 +302,9 @@ def main():
     ap.add_argument("--rust-emitter", required=True, help="path to Rust recomp-emitter example for code emission")
     ap.add_argument("--buffer-addr", type=lambda value: int(value, 0), default=BUF,
                     help="override the native/Unicorn scratch address (hex or decimal)")
+    ap.add_argument("--max-unhandled", type=int, default=None, metavar="N",
+                    help="exit 1 when more than N corpus instructions are skipped as 'unhandled <mnemonic>' "
+                         "(the emitter returned nothing) or 'unimpl' (it emitted an unimplemented stub)")
     args = ap.parse_args()
     BUF = args.buffer_addr
     os.makedirs(args.work, exist_ok=True)
@@ -341,11 +344,18 @@ def main():
         if not statement:
             skipped[f"unhandled {text.split()[0]}"] += 1
             continue
-        if "nx::call" in statement or "unimpl" in statement:
+        if "unimpl" in statement:
+            skipped["unimpl"] += 1
+            continue
+        if "nx::call" in statement:
             skipped["control"] += 1
             continue
         tests.append((k, a, text, statement))
     print(f"{len(tests)} tests; skipped {dict(skipped)}")
+    lost = sum(n for why, n in skipped.items() if why.startswith("unhandled ") or why == "unimpl")
+    if args.max_unhandled is not None and lost > args.max_unhandled:
+        print(f"{lost} instructions the emitter does not handle (allowed: {args.max_unhandled})")
+        sys.exit(1)
 
     exe = build_runner(args.work, [t[3] for t in tests])
     rng = random.Random(42)

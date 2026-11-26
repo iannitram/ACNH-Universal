@@ -25,7 +25,7 @@ player = ["dep:cmake"]
 # `relay_ios.rs`); `http` is ureq with rustls.
 [target.'cfg(target_os = "ios")'.dependencies]
 acnh-core = { path = "../core", features = ["relay"] }
-save-relay = { git = "https://github.com/iannitram/save-relay", default-features = false, features = ["http"] }
+save-relay = { git = "https://github.com/iannitram/save-relay", rev = "132b9e57c7a46c596aacbd3d0a56a2579d89b9bc", default-features = false, features = ["http"] }
 security-framework = "3"
 objc2 = "0.6"
 objc2-foundation = "0.3"
@@ -41,13 +41,13 @@ serde_json = "1"
 # TLS of its own to cross-compile.
 [target.'cfg(target_os = "android")'.dependencies]
 acnh-core = { path = "../core", features = ["relay", "hub"] }
-save-relay = { git = "https://github.com/iannitram/save-relay", default-features = false, features = ["ffi"] }
+save-relay = { git = "https://github.com/iannitram/save-relay", rev = "132b9e57c7a46c596aacbd3d0a56a2579d89b9bc", default-features = false, features = ["ffi"] }
 serde_json = "1"
 
 # The tests include `src/relay.rs` and run it with fakes on every desktop runner.
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dev-dependencies]
 acnh-core = { path = "../core", features = ["relay"] }
-save-relay = { git = "https://github.com/iannitram/save-relay" }
+save-relay = { git = "https://github.com/iannitram/save-relay", rev = "132b9e57c7a46c596aacbd3d0a56a2579d89b9bc" }
 serde_json = "1"
 # `tests/ios_appgame.rs`: decoy files and their hashes.
 sha2 = "0.10"

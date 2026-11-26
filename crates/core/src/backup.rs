@@ -97,8 +97,32 @@ pub fn backup_saves(save_dir: &Path, backups: &Path, stamp: &str) -> Result<Path
     Ok(dest)
 }
 
+/// True for a name shaped like a stamp: `YYYYmmdd-HHMMSS` (8 digits, '-', 6 digits). The
+/// runtime keeps its own `<island name> <hash>/` folders and `save-link-fix/` beside the flat
+/// stamps; only stamp-shaped names are ours to list or delete.
+pub fn is_stamp(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() == 15
+        && b.iter().enumerate().all(|(i, &c)| {
+            if i == 8 {
+                c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+}
+
+/// `backup_saves` followed by `prune` to the newest `KEEP`, so a backup made for any reason
+/// (an update, a save conflict) never piles up. Returns the new backup's folder.
+pub fn backup_saves_pruned(save_dir: &Path, backups: &Path, stamp: &str) -> Result<PathBuf> {
+    let dest = backup_saves(save_dir, backups, stamp)?;
+    prune(backups, KEEP)?;
+    Ok(dest)
+}
+
 /// The backups in `backups`, by folder name, oldest first (names are stamps, which sort by
-/// time). A missing `backups` folder is an empty list. Files are not listed.
+/// time). A missing `backups` folder is an empty list. Files and folders whose names are not
+/// stamps (the runtime's island folders) are not listed.
 pub fn list(backups: &Path) -> Result<Vec<String>> {
     if !backups.exists() {
         return Ok(Vec::new());
@@ -108,7 +132,9 @@ pub fn list(backups: &Path) -> Result<Vec<String>> {
         let entry = entry?;
         if entry.path().is_dir() {
             if let Ok(name) = entry.file_name().into_string() {
-                names.push(name);
+                if is_stamp(&name) {
+                    names.push(name);
+                }
             }
         }
     }

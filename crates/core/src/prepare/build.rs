@@ -143,6 +143,16 @@ pub(super) fn find_cargo(root: &Path) -> PathBuf {
         .unwrap_or(found)
 }
 
+/// Whether two paths name the same folder. CMake records a collapsed absolute path, while a
+/// checkout's root keeps its `..`, and Rust's path comparison does not collapse those.
+pub(super) fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 /// The Rust build stage: configures CMake with Ninja and builds the `acnh` target.
 pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
     let stage = Stage::Build;
@@ -163,7 +173,7 @@ pub fn rust_build(req: &Request, root: &Path, jobs: u32) -> Result<()> {
             .and_then(|rest| rest.split_once('='))
             .map(|(_, val)| val.trim())
         {
-            if Path::new(home) != root {
+            if !same_folder(Path::new(home), root) {
                 let _ = std::fs::remove_file(&cache);
                 let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
             }

@@ -12,9 +12,11 @@ use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::build_actions::BuildActions;
-use acnh_core::launch::{self, Game, Keep, Relay};
+use acnh_core::launch::{self, Game, Keep, Relay, Sync as RelaySync};
+use acnh_core::platform::{AppDirs, Os};
 use acnh_core::savecard;
 use acnh_core::{Error, Result};
 
@@ -258,6 +260,7 @@ pub struct Session {
     vm: ContinuePageVm,
     runner: Runner,
     builds: Option<(BuildActions, PathBuf)>,
+    fleet: Option<(AppDirs, Os)>,
     picture: PathBuf,
     sender: Sender<PlayEvent>,
     events: Receiver<PlayEvent>,
@@ -271,6 +274,7 @@ impl Session {
             vm,
             runner,
             builds: None,
+            fleet: None,
             picture,
             sender,
             events,
@@ -337,6 +341,12 @@ impl Session {
         &self.vm
     }
 
+    /// Whether the launcher may close now: not while a job runs (the game, its exit push, a
+    /// sync), so the process lives until the job has reported.
+    pub fn may_close(&self) -> bool {
+        !self.vm.busy()
+    }
+
     /// A controller or keyboard press. True if it committed an action.
     pub fn nav(&mut self, nav: Nav) -> bool {
         let committed = self.vm.handle(nav);
@@ -358,6 +368,41 @@ impl Session {
         committed
     }
 
+    /// Join this device to the fleet: after each sync it tells its paired hub its last sync and
+    /// free space, and the island's maker is looked up in the hub's fleet for the drift check.
+    pub fn set_fleet(&mut self, dirs: AppDirs, os: Os) {
+        self.fleet = Some((dirs, os));
+    }
+
+    /// The device that made the island now on disk, for the drift warning.
+    fn refresh_saved_by(&mut self) {
+        let (Some((dirs, _)), Some(here)) = (&self.fleet, self.vm.this_device.clone()) else {
+            return;
+        };
+        let Ok(card) = savecard::read_card(&self.runner.save_dir, &self.picture) else {
+            return;
+        };
+        let records = acnh_core::hub::read_fleet(dirs).unwrap_or_default();
+        if let Some(by) = crate::fleet_report::saved_by(&card, &records, &here) {
+            self.vm.update_saved_by(by);
+        }
+    }
+
+    /// Tell the paired hub about this sync, off the page's thread; a hub that cannot be
+    /// reached is not a problem for the island.
+    fn report_to_hub(&self) {
+        let Some((dirs, os)) = self.fleet.clone() else {
+            return;
+        };
+        thread::spawn(move || {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|since| since.as_secs())
+                .unwrap_or(0);
+            let _ = crate::fleet_report::report_after_sync(&dirs, os, now);
+        });
+    }
+
     /// Take in what the jobs reported since the last call. True when there was anything, so
     /// the page is drawn again.
     pub fn pump(&mut self) -> bool {
@@ -374,6 +419,13 @@ impl Session {
                 event
             };
             let finished = matches!(event, PlayEvent::Played(_) | PlayEvent::Synced(_));
+            let synced =
+                |sync: &RelaySync| matches!(sync, RelaySync::Done(_) | RelaySync::Resolved { .. });
+            let reportable = match &event {
+                PlayEvent::Synced(Ok(sync)) => synced(sync),
+                PlayEvent::Played(Ok(played)) => synced(&played.pushed),
+                _ => false,
+            };
             let build_finished = matches!(event, PlayEvent::Updated(Ok(())));
             self.vm.on_play_event(event);
             if build_finished {
@@ -384,6 +436,10 @@ impl Session {
                 if let Ok(card) = savecard::read_card(&self.runner.save_dir, &self.picture) {
                     self.vm.set_local_card(Some(card));
                 }
+                self.refresh_saved_by();
+            }
+            if reportable {
+                self.report_to_hub();
             }
         }
         self.dispatch();
@@ -867,6 +923,17 @@ mod tests {
             lines(&log),
             ["pull None", "game /home/user/root", "push None"]
         );
+    }
+
+    #[test]
+    fn the_launcher_cannot_close_while_a_job_runs() {
+        let log = Log::default();
+        let mut session = session(&log, None);
+        assert!(session.may_close());
+        assert!(session.nav(Nav::Accept));
+        assert!(!session.may_close());
+        wait_for(&mut session, &ContinueState::Ready);
+        assert!(session.may_close());
     }
 
     #[test]

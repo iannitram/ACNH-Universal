@@ -6,27 +6,26 @@ use super::*;
 /// runtime (`pack::romfs`, `pack::spirv`). A source that is not there yet leaves its pack
 /// alone, as upstream keeps the loose folder until something packs it.
 pub(super) fn pack_stage(req: &Request) -> Result<()> {
-    std::fs::create_dir_all(&req.out)?;
-    if req.game.romfs.is_dir() {
-        let pak = req.out.join("romfs.pak");
-        let inputs = format!(
-            "romfs.pak v1 {}\n{}",
-            env!("CARGO_PKG_VERSION"),
-            tree_key(&req.game.romfs)?
-        );
-        redo_unless_current(&req.out.join(".romfs.pak.key"), &inputs, &pak, || {
-            crate::pack::romfs(&req.game.romfs, &pak)
+    pack_prepared(&req.out, &req.game.romfs)
+}
+
+/// `pack_stage` on a prepared folder `out` and the game's RomFS folder. A pack whose key
+/// record is missing or stale is rebuilt, so a pack a killed run left truncated never ships;
+/// the deliver paths and `pack_folder` call this rather than only testing the file exists.
+pub(crate) fn pack_prepared(out: &Path, romfs: &Path) -> Result<()> {
+    std::fs::create_dir_all(out)?;
+    if romfs.is_dir() {
+        let pak = out.join("romfs.pak");
+        let inputs = format!("romfs.pak v1 {}\n{}", build_version(), tree_key(romfs)?);
+        redo_unless_current(&out.join(".romfs.pak.key"), &inputs, &pak, || {
+            crate::pack::romfs(romfs, &pak)
         })?;
     }
-    let spirv = req.out.join("spirv");
+    let spirv = out.join("spirv");
     if spirv.is_dir() {
-        let pak = req.out.join("spirv.pak");
-        let inputs = format!(
-            "spirv.pak v1 {}\n{}",
-            env!("CARGO_PKG_VERSION"),
-            tree_key(&spirv)?
-        );
-        redo_unless_current(&req.out.join(".spirv.pak.key"), &inputs, &pak, || {
+        let pak = out.join("spirv.pak");
+        let inputs = format!("spirv.pak v1 {}\n{}", build_version(), tree_key(&spirv)?);
+        redo_unless_current(&out.join(".spirv.pak.key"), &inputs, &pak, || {
             crate::pack::spirv(&spirv, &pak)
         })?;
     }
@@ -119,7 +118,7 @@ pub(super) fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
     let harness = root.join("private/build/spirv_harness");
     let inputs = format!(
         "shaders v1 {}\nspirv-val {}\nromfs {}\nmain {}\nharness {} {}\n",
-        env!("CARGO_PKG_VERSION"),
+        build_version(),
         find_on_path("spirv-val").is_some(),
         tree_key(&req.game.romfs).map_err(invalidate)?,
         file_key(&main),
@@ -160,6 +159,11 @@ pub fn rust_fonts(req: &Request) -> Result<()> {
     .into_iter()
     .map(Path::new)
     .find(|path| path.is_file());
+    if host.is_none() {
+        eprintln!(
+            "warning: no host font found (Arial Unicode, DejaVu Sans): shared.ttf and shared_5.ttf are not written; the player falls back to NX_SHARED_FONT or a host font at run time"
+        );
+    }
     crate::glyphs::stage(&req.out.join("extract/romfs"), &req.out.join("fonts"), host)
         .map_err(|error| Error::Build(format!("stage {}: {error}", Stage::Fonts.key())))
 }

@@ -73,6 +73,17 @@ pub(super) fn missing_cargo(dirs: &[PathBuf], os: Os) -> Option<Missing> {
     })
 }
 
+pub(super) fn missing_zstd(dirs: &[PathBuf], os: Os) -> Option<Missing> {
+    find_tool(dirs, os, "zstd").is_none().then(|| {
+        missing_piece(
+            "zstd",
+            "mod archives cannot be fixed and the dialogue reflow is skipped without it.",
+            install_command(os, "zstd"),
+            true,
+        )
+    })
+}
+
 /// `toolchain` with the Homebrew prefixes to try (the seam the tests use).
 pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> Vec<Missing> {
     let dirs: Vec<PathBuf> = std::env::split_paths(path.as_ref())
@@ -98,6 +109,15 @@ pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> 
                 true,
             ));
         }
+        if find_tool(&dirs, os, "python").is_none() {
+            missing.push(missing_piece(
+                "python",
+                "Prepare runs the shader tools and unpacks zip archives with it.",
+                "winget install Python.Python.3.12",
+                false,
+            ));
+        }
+        missing.extend(missing_zstd(&dirs, os));
         missing.extend(missing_cargo(&dirs, os));
         return missing;
     }
@@ -126,10 +146,46 @@ pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> 
         }
         None => missing.push(missing_piece(
             "python3",
-            "the build script is Python.",
+            "Prepare runs the shader tools, unpacks mod zips and makes its private venv with it.",
             install_command(os, "python3"),
             false,
         )),
+    }
+
+    if find_tool(&dirs, os, "tar").is_none() {
+        missing.push(missing_piece(
+            "tar",
+            "Prepare unpacks its downloads with it.",
+            install_command(os, "tar"),
+            false,
+        ));
+    }
+    missing.extend(missing_zstd(&dirs, os));
+    if let Some(python) = find_tool(&dirs, os, "python3") {
+        // Only a python that runs and says no is reported: one that cannot be started is
+        // left to the checks above.
+        let pillow = Command::new(python)
+            .args(["-c", "import PIL"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if pillow.is_ok_and(|status| !status.success()) {
+            missing.push(missing_piece(
+                "Pillow",
+                "without it the translation's long dialogue lines are not reflowed.",
+                install_command(os, "pillow"),
+                true,
+            ));
+        }
+    }
+    if os == Os::Linux && find_tool(&dirs, os, "patchelf").is_none() {
+        missing.push(missing_piece(
+            "patchelf",
+            "without it the packaged player cannot be given its library path.",
+            install_command(os, "patchelf"),
+            true,
+        ));
     }
 
     if os == Os::Mac {
@@ -369,6 +425,9 @@ pub(super) fn install_command(os: Os, piece: &str) -> &'static str {
             "vulkan-loader" => "brew install vulkan-loader",
             "libvpx" => "brew install libvpx",
             "libvorbis" => "brew install libvorbis",
+            "zstd" => "brew install zstd",
+            "tar" => "xcode-select --install",
+            "pillow" => "python3 -m pip install pillow",
             "brew" => {
                 "/bin/bash -c \"$(curl -fsSL \
                  https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
@@ -384,6 +443,10 @@ pub(super) fn install_command(os: Os, piece: &str) -> &'static str {
             "sdl3" => "sudo apt install libsdl3-dev",
             "libvpx" => "sudo apt install libvpx-dev",
             "libvorbis" => "sudo apt install libvorbis-dev",
+            "zstd" => "sudo apt install zstd  # SteamOS: sudo pacman -S zstd",
+            "tar" => "sudo apt install tar  # SteamOS: sudo pacman -S tar",
+            "pillow" => "sudo apt install python3-pil  # SteamOS: sudo pacman -S python-pillow",
+            "patchelf" => "sudo apt install patchelf  # SteamOS: sudo pacman -S patchelf",
             _ => "install it with your package manager",
         }
     }

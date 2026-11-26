@@ -9,6 +9,7 @@
 #   needs: the Android NDK (as tools/build_android.sh), Homebrew's bison, flex and Python 3.10+ (macOS's are too old)
 cd "$(dirname "$0")/.." || exit 1
 set -e
+. tools/build_common.sh
 MESA=private/third_party/mesa
 TAG=mesa-26.2.5
 # Mesa 26 needs Python 3.10 or newer: its own venv from Homebrew's.
@@ -40,7 +41,7 @@ EOF2
 cd "$MESA"
 # Our changes to the compiler (tools/patches/turnip-*.patch), applied once to the clean release.
 for p in ../../../tools/patches/turnip-*.patch; do
-  git apply --check "$p" 2>/dev/null && git apply "$p" && echo "applied $(basename "$p")"
+  apply_patch_once "$p"
 done
 [ -f build-android/build.ninja ] || meson setup build-android --cross-file "$CROSS" \
   -Dbuildtype=release -Dplatforms=android -Dplatform-sdk-version=29 -Dandroid-stub=true -Dgallium-drivers= \

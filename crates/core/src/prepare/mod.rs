@@ -165,6 +165,44 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     crate::fsutil::copy_tree_skipping(from, to, &|_| false)
 }
 
+/// Copy `source` over `copy` like `copy_tree`, but keep the tools in `copy/private` (the venv,
+/// headers, imgui, Ryubing, .NET and the shader harness are slow to fetch). A first copy for a
+/// new commit (an app update) takes over the `private` of the newest earlier commit's copy:
+/// `rust_tools` refetches only the pieces whose pins changed.
+pub(super) fn refresh_source_copy(source: &Path, copy: &Path) -> Result<()> {
+    let keep = copy.with_file_name(format!(
+        ".private-keep-{}",
+        copy.file_name().and_then(OsStr::to_str).unwrap_or("source")
+    ));
+    let _ = std::fs::remove_dir_all(&keep);
+    let own = copy.join("private");
+    let donor = if own.is_dir() {
+        Some(own)
+    } else {
+        copy.parent()
+            .and_then(|dir| std::fs::read_dir(dir).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path().join("private"))
+            .filter(|path| path.is_dir())
+            .max_by_key(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
+    };
+    let kept = match donor {
+        Some(donor) if !source.join("private").exists() => std::fs::rename(&donor, &keep).is_ok(),
+        _ => false,
+    };
+    let result = copy_tree(source, copy);
+    if kept {
+        if result.is_ok() && !copy.join("private").exists() {
+            std::fs::rename(&keep, copy.join("private"))?;
+        } else {
+            let _ = std::fs::remove_dir_all(&keep);
+        }
+    }
+    result
+}
+
 /// The folder the script runs in: the named source, else the packaged source beside `exe`,
 /// else the checkout. A packaged source is copied to `<data>/source/<commit>/` because the
 /// package may be read-only and the script writes into `private/`. A package from another
@@ -186,7 +224,7 @@ fn source_root(req: &Request, exe: &Path, dirs: &AppDirs, commit: Option<&str>) 
         )));
     }
     let copy = dirs.data.join("source").join(&found);
-    copy_tree(&source, &copy)?;
+    refresh_source_copy(&source, &copy)?;
     Ok(copy)
 }
 
@@ -336,6 +374,7 @@ fn run_stages(
     let expected_recomp_hash = recomp_hash(&runner.root())?;
     let before = STAGES.map(|stage| {
         stage_complete(stage, req, &expected_recomp_hash)
+            && (stage != Stage::Tools || runner.tools_current())
             && !(recheck
                 && matches!(
                     stage,

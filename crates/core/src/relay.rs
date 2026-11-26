@@ -140,7 +140,8 @@ impl SaveRelay {
         let resolve_sync = map_resolve(resolve);
         let report =
             sync::pull(&session, &game, &self.store, resolve_sync, anyway).map_err(map_err)?;
-        persist_card(save_dir, &report, self.version)?;
+        // Best effort: the sync is done; the card is the launcher's picture of it, not the island.
+        let _ = persist_card(save_dir, &report, self.version);
         Ok(map_sync_with_local(report, save_dir))
     }
 }
@@ -344,7 +345,8 @@ impl Relay for SaveRelay {
         };
         let resolve_sync = map_resolve(resolve);
         let report = sync::push(&session, &game, &self.store, resolve_sync).map_err(map_err)?;
-        persist_card(save_dir, &report, self.version)?;
+        // Best effort: the sync is done; the card is the launcher's picture of it, not the island.
+        let _ = persist_card(save_dir, &report, self.version);
         Ok(map_sync_with_local(report, save_dir))
     }
     fn pull_anyway(&self, save_dir: &Path, resolve: Option<Keep>) -> Result<Sync> {
@@ -672,12 +674,7 @@ pub fn start_sign_in(
     let now = save_relay::stamp::now();
 
     if oauth::in_game_mode(&|name| std::env::var(name).ok()) {
-        let client = code_client(service, &clients);
-        let pending = oauth::start_code(provider, client, &*transport, now).map_err(map_err)?;
-        creds
-            .set(&service::pending_account(service), &pending.to_secret())
-            .map_err(map_err)?;
-        return Ok(code_prompt(service, &pending));
+        return start_code_sign_in(service, creds, transport);
     }
 
     let client = platform_client(service, &clients);
@@ -702,6 +699,30 @@ pub fn start_sign_in(
         root,
     });
     Ok(prompt)
+}
+
+/// Start save-relay's code flow for Dropbox or Google Drive whatever the environment: the person
+/// opens the page in a browser (the iPad: Safari) and types the code Dropbox shows into
+/// `finish_sign_in`. The pending sign-in is kept in `creds` until then.
+pub fn start_code_sign_in(
+    service: Service,
+    creds: &dyn CredentialStore,
+    transport: Arc<dyn Transport>,
+) -> Result<SignInPrompt> {
+    if !service.uses_oauth() {
+        return Err(Error::Saves(
+            "Nextcloud is set up with an app password, not a sign-in".into(),
+        ));
+    }
+    let provider = oauth::provider(service)
+        .ok_or_else(|| Error::Saves("this service has no sign-in".into()))?;
+    let client = code_client(service, &ClientSet::shipped());
+    let pending = oauth::start_code(provider, client, &*transport, save_relay::stamp::now())
+        .map_err(map_err)?;
+    creds
+        .set(&service::pending_account(service), &pending.to_secret())
+        .map_err(map_err)?;
+    Ok(code_prompt(service, &pending))
 }
 
 /// Finish the sign-in `start_sign_in` began. `answer` is the app's redirect URL on a desktop,
@@ -958,11 +979,43 @@ fn setup_identity(store: &LocalStore) -> Result<(String, String)> {
     ))
 }
 
+/// This machine's name for save-relay's device slug: the host-name variables, then the
+/// `hostname` command (macOS and most Linux shells do not export `HOSTNAME`), and only when
+/// both are empty a literal "device" with a short random suffix, so two such machines never
+/// share a name. The result is stored in the config at setup, so the suffix stays stable.
 fn default_device_name() -> String {
-    ["HOSTNAME", "COMPUTERNAME"]
-        .iter()
-        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
-        .unwrap_or_else(|| "device".to_string())
+    device_name_from(
+        ["HOSTNAME", "COMPUTERNAME"]
+            .iter()
+            .find_map(|name| std::env::var(name).ok()),
+        || {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+        },
+        random_suffix,
+    )
+}
+
+fn device_name_from(
+    env: Option<String>,
+    command: impl FnOnce() -> Option<String>,
+    suffix: impl FnOnce() -> String,
+) -> String {
+    let usable = |name: String| Some(name.trim().to_owned()).filter(|name| !name.is_empty());
+    env.and_then(usable)
+        .or_else(|| command().and_then(usable))
+        .unwrap_or_else(|| format!("device-{}", suffix()))
+}
+
+/// Six hex digits from the standard library's randomly keyed hasher.
+fn random_suffix() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let value = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    format!("{:06x}", value & 0xff_ffff)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1115,5 +1168,45 @@ impl HeldFallback {
             device: String::new(),
             since: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod device_name_tests {
+    use super::*;
+
+    #[test]
+    fn env_name_wins_and_skips_the_command() {
+        let name = device_name_from(
+            Some("deck".into()),
+            || panic!("command not needed"),
+            || panic!("no suffix"),
+        );
+        assert_eq!(name, "deck");
+    }
+
+    #[test]
+    fn falls_back_to_the_host_name_command_when_env_is_missing_or_blank() {
+        for env in [None, Some("  ".to_string())] {
+            let name = device_name_from(env, || Some("macbook\n".into()), || panic!("no suffix"));
+            assert_eq!(name, "macbook");
+        }
+    }
+
+    #[test]
+    fn unresolvable_name_gets_a_suffix_so_machines_differ() {
+        let a = device_name_from(None, || None, || "aaaaaa".into());
+        let b = device_name_from(None, || Some(String::new()), || "bbbbbb".into());
+        assert_eq!(a, "device-aaaaaa");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn random_suffixes_are_six_hex_digits_and_vary() {
+        let all: std::collections::HashSet<String> = (0..16).map(|_| random_suffix()).collect();
+        assert!(all.len() > 1);
+        assert!(all
+            .iter()
+            .all(|s| s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit())));
     }
 }

@@ -280,9 +280,9 @@ pub(super) fn ios_deliver(
         .delivery
         .as_deref()
         .ok_or_else(|| Error::Env("the delivery folder is not set".into()))?;
-    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
-        pack_stage(req)?;
-    }
+    // Always: a no-op while the packs' key records match, a rebuild of a pack that has no
+    // current record (one a killed run left truncated).
+    pack_stage(req)?;
     let build = req.out.join("build-ios");
     let mut build_args = build_ios_args(&req.out.join("gen"), &build);
     // A Finder-launched app's PATH has only launchd's folders: the build script finds cargo
@@ -366,9 +366,9 @@ pub(super) fn mac_deliver(
         .install
         .as_deref()
         .ok_or_else(|| Error::Env("the install folder is not set".into()))?;
-    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
-        pack_stage(req)?;
-    }
+    // Always: a no-op while the packs' key records match, a rebuild of a pack that has no
+    // current record (one a killed run left truncated).
+    pack_stage(req)?;
     let app = runner
         .assemble(&req.out.join("build"), install)
         .map_err(|e| build_error(Stage::Build, &[e.to_string()], home))?;
@@ -392,9 +392,9 @@ pub(super) fn android_deliver(
         .delivery
         .as_deref()
         .ok_or_else(|| Error::Env("the delivery folder is not set".into()))?;
-    if !(req.out.join("romfs.pak").is_file() && req.out.join("spirv.pak").is_file()) {
-        pack_stage(req)?;
-    }
+    // Always: a no-op while the packs' key records match, a rebuild of a pack that has no
+    // current record (one a killed run left truncated).
+    pack_stage(req)?;
 
     let root = runner.root();
     let lib_path = if let Some(found) = find_android_game_lib(&req.out, &root) {

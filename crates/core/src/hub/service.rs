@@ -162,12 +162,13 @@ fn save_record(dirs: &AppDirs, mut record: DeviceRecord, build_only: bool) -> Re
 
 /// Handle one already accepted home-network connection. `pairing` is present only while
 /// the owner has explicitly armed pairing; its expiry and attempt limit persist across calls.
+/// It is shared between connection threads and locked only while a pairing exchange runs.
 pub fn serve_request(
     t: &mut TcpTransport,
     dirs: &AppDirs,
     builds: &Path,
     prepared: Option<&Path>,
-    pairing: Option<&mut PairingSession>,
+    pairing: Option<&Mutex<PairingSession>>,
 ) -> Result<()> {
     (|| {
         t.0.set_read_timeout(Some(REQUEST_TIMEOUT))?;
@@ -179,7 +180,14 @@ pub fn serve_request(
         match op {
             Operation::Pair => {
                 let session = pairing.ok_or_else(|| hub_error("pairing is not active"))?;
-                pair_with_context(t, session, &device, dirs, &pair_context(&device, target))?;
+                let mut session = session.lock().unwrap_or_else(|e| e.into_inner());
+                pair_with_context(
+                    t,
+                    &mut session,
+                    &device,
+                    dirs,
+                    &pair_context(&device, target),
+                )?;
             }
             Operation::Bundle => {
                 let peer = remembered(dirs, &device)?;

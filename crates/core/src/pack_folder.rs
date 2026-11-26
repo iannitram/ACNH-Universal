@@ -116,6 +116,7 @@ pub fn pack_folder_with(
     out: &Path,
     ctx: &mut PackContext<'_>,
 ) -> Result<PathBuf> {
+    repack_if_stale(prepared, ctx)?;
     check_prepared(prepared, ctx)?;
     check_out_location(out, ctx)?;
 
@@ -259,6 +260,25 @@ fn collect_assembled_files(assembled: &Path, os: Os) -> Result<Vec<(String, Path
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(files)
+}
+
+/// Rebuilds a pack whose key record is missing or stale (a killed run can leave a truncated
+/// `romfs.pak` beside intact records of other stages), when the game's RomFS is at hand. A
+/// no-op while the records match, and without a game folder there is nothing to rebuild from.
+fn repack_if_stale(prepared: &Path, ctx: &PackContext<'_>) -> Result<()> {
+    let Some(game) = ctx.game_folder else {
+        return Ok(());
+    };
+    let Some(romfs) = [game.join("romfs"), game.join("extract").join("romfs")]
+        .into_iter()
+        .find(|dir| dir.is_dir())
+    else {
+        return Ok(());
+    };
+    if !prepared.is_dir() {
+        return Ok(());
+    }
+    crate::prepare::pack_prepared(prepared, &romfs)
 }
 
 fn check_prepared(prepared: &Path, ctx: &PackContext<'_>) -> Result<()> {
