@@ -10,6 +10,7 @@
 //! [`Tools`], so the grouping and the cleanup can be tested without a game folder.
 
 use crate::error::{Error, Result};
+use crate::prepare::{find_on_path, has_dotnet_10, repo_root};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -330,19 +331,10 @@ impl Runner for ProcessRunner {
         Ok(())
     }
     fn find_program(&self, name: &str) -> Option<PathBuf> {
-        find_program(name)
+        find_on_path(name)
     }
     fn has_dotnet_10(&mut self, dotnet: &Path) -> bool {
-        Command::new(dotnet)
-            .arg("--list-sdks")
-            .output()
-            .ok()
-            .is_some_and(|output| {
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .any(|line| line.starts_with("10."))
-            })
+        has_dotnet_10(dotnet)
     }
     fn run(&mut self, args: &[String], out: &Path) -> Result<()> {
         let logs = out.join("logs");
@@ -604,25 +596,4 @@ fn stem(path: &Path) -> String {
         .next()
         .unwrap_or_default()
         .to_owned()
-}
-
-fn find_program(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if cfg!(windows) {
-            let candidate = dir.join(format!("{name}.exe"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
