@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 /// How many backups `prune` keeps after an update.
 pub const KEEP: usize = 10;
 
-/// The stamp for `unix` seconds (UTC): `YYYYmmdd-HHMMSS`, e.g. 0 is "19700101-000000".
-pub fn stamp(unix: u64) -> String {
+/// The UTC date and time of `unix` seconds: year, month, day, hour, minute and second.
+pub(crate) fn civil_utc(unix: u64) -> (i64, u32, u32, u32, u32, u32) {
     let secs = (unix % 60) as u32;
     let mins = ((unix / 60) % 60) as u32;
     let hours = ((unix / 3600) % 24) as u32;
@@ -28,7 +28,12 @@ pub fn stamp(unix: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 1 } else { y };
+    (year, m, d, hours, mins, secs)
+}
 
+/// The stamp for `unix` seconds (UTC): `YYYYmmdd-HHMMSS`, e.g. 0 is "19700101-000000".
+pub fn stamp(unix: u64) -> String {
+    let (year, m, d, hours, mins, secs) = civil_utc(unix);
     format!("{year:04}{m:02}{d:02}-{hours:02}{mins:02}{secs:02}")
 }
 
