@@ -37,10 +37,18 @@ fn session(config: &ShellConfig) -> acnh_core::Result<Session> {
     let root = config.dirs.data_root();
     let save_dir = saves::save_dir(&root);
 
-    // `this_device` and `set_saved_by` take the fleet's records once the app keeps them
-    // (the Fleet page); with neither, no drift is reported.
-    let mut vm = ContinuePageVm::new(savecard::read_card(&save_dir, &config.picture).ok(), None);
+    // This device is the installed build; the island's maker comes from the hub's fleet or the
+    // card. With the build unknown (no bundle, no game folder), no drift is reported.
+    let card = savecard::read_card(&save_dir, &config.picture).ok();
+    let here = crate::fleet_report::this_device(&config.dirs, config.os, 0);
+    let mut vm = ContinuePageVm::new(card.clone(), here.clone());
     vm.home = config.vars.home.clone();
+    if let (Some(card), Some(here)) = (&card, &here) {
+        let records = acnh_core::hub::read_fleet(&config.dirs).unwrap_or_default();
+        if let Some(by) = crate::fleet_report::saved_by(card, &records, here) {
+            vm.set_saved_by(by);
+        }
+    }
 
     let backups = saves::backups_dir(&root);
     let builds = crate::build_actions::BuildActions {
@@ -70,6 +78,7 @@ fn session(config: &ShellConfig) -> acnh_core::Result<Session> {
     };
     let mut session = Session::new(vm, runner, config.picture.clone());
     session.set_build_actions(builds, config.launcher.clone());
+    session.set_fleet(config.dirs.clone(), config.os);
     Ok(session)
 }
 
