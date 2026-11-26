@@ -5,8 +5,8 @@ use acnh_core::gamefolder::GameFolder;
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{
     delivery_folder, delivery_subfolder, install_mod_archive, install_mods, prepare_installed,
-    prepare_with, recomp_hash, rust_version, speedfix_args, speedfix_patch, step, toolchain_with,
-    Missing, ProcessRunner, Request, ScriptRunner, Step,
+    prepare_with, recomp_hash, recomp_hash_with, rust_version, speedfix_args, speedfix_patch, step,
+    toolchain_with, Missing, ProcessRunner, Request, ScriptRunner, Step,
 };
 use acnh_core::recipe::{Hub, Stage, STAGES};
 use acnh_core::version::Version;
@@ -2092,16 +2092,21 @@ fn recompile_with_matching_hash_stays_cached() {
 }
 
 #[test]
-fn recompile_hash_changes_when_recomp_python_file_changes() {
+fn recompile_hash_changes_with_the_emitter_fingerprint_and_the_regcache_switches() {
+    let none = |_: &str| None::<String>;
+    let h1 = recomp_hash_with("emitter-1", none);
+    let h2 = recomp_hash_with("emitter-2", none);
+    assert_ne!(h1, h2);
+    let switched = |name: &str| (name == "NX_REGCACHE").then(|| "0".to_owned());
+    assert_ne!(h1, recomp_hash_with("emitter-1", switched));
+    // The old python files under the source are no longer an input.
     let source = std::env::temp_dir().join(format!("acnh-recomp-src-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&source);
     std::fs::create_dir_all(source.join("recomp")).unwrap();
     std::fs::write(source.join("recomp/emit.py"), "def emit(): return 1\n").unwrap();
-
-    let h1 = recomp_hash(&source).unwrap();
+    let before = recomp_hash(&source).unwrap();
     std::fs::write(source.join("recomp/emit.py"), "def emit(): return 2\n").unwrap();
-    let h2 = recomp_hash(&source).unwrap();
-    assert_ne!(h1, h2);
+    assert_eq!(before, recomp_hash(&source).unwrap());
     let _ = std::fs::remove_dir_all(&source);
 }
 

@@ -54,3 +54,6 @@ save-relay = { git = "https://github.com/iannitram/save-relay", optional = true,
 
 [target.'cfg(target_os = "ios")'.dependencies]
 save-relay = { git = "https://github.com/iannitram/save-relay", optional = true, default-features = false, features = ["http"] }
+
+[build-dependencies]
+sha2 = "0.10"
