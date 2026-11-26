@@ -637,6 +637,10 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             let Some(nav) = key_nav(&text) else {
                 return false;
             };
+            if nav == Nav::Quit {
+                quit_when_idle(&weak, &session.borrow());
+                return true;
+            }
             if weak.upgrade().is_some_and(|w| w.get_first_run_open()) {
                 let mut first = first.borrow_mut();
                 first.nav(nav);
@@ -654,6 +658,7 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
         }
     });
 
+    let close_session = Rc::clone(&session);
     // Every frame: the gamepad's presses go in, and what the running job reported comes out.
     let mut gilrs = gilrs::Gilrs::new().ok();
     let mut stick = Stick::default();
@@ -668,7 +673,16 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
             Some(gilrs) => poll_nav(gilrs, &mut stick, &mut devices.borrow_mut()),
             None => Vec::new(),
         };
+        // Presses on a pad belong to this window only while it has the focus; the events are
+        // still drained above so they do not pile up.
+        if !weak.upgrade().is_some_and(|w| w.get_window_focused()) {
+            navs.clear();
+        }
         navs.extend(extra_nav(&mut devices.borrow_mut()));
+        if navs.contains(&Nav::Quit) {
+            navs.retain(|nav| *nav != Nav::Quit);
+            quit_when_idle(&weak, &session.borrow());
+        }
         if let Some(window) = weak.upgrade() {
             window.set_input_device(devices.borrow().current() as i32);
         }
@@ -729,13 +743,44 @@ pub fn run(config: ShellConfig, mut extra_nav: ExtraNav) -> Result<(), Box<dyn s
         }
     });
 
+    window
+        .window()
+        .on_close_requested(move || close_response(close_session.try_borrow().ok().as_deref()));
+
     window.run()?;
     Ok(())
+}
+
+/// What closing the window does: while a job runs (the game, its exit push, a sync) the
+/// window stays so the process lives until the job has reported; a session that cannot be
+/// looked at counts as busy.
+fn close_response(session: Option<&Session>) -> slint::CloseRequestResponse {
+    match session {
+        Some(session) if session.may_close() => slint::CloseRequestResponse::HideWindow,
+        _ => slint::CloseRequestResponse::KeepWindowShown,
+    }
+}
+
+/// A pad's Quit (Select) closes the launcher when nothing runs, the same as the close button.
+fn quit_when_idle(window: &Weak<MainWindow>, session: &Session) {
+    if close_response(Some(session)) == slint::CloseRequestResponse::HideWindow {
+        if let Some(window) = window.upgrade() {
+            window.hide().ok();
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_that_cannot_be_looked_at_keeps_the_window() {
+        assert_eq!(
+            close_response(None),
+            slint::CloseRequestResponse::KeepWindowShown
+        );
+    }
 
     #[test]
     fn settings_focus_reaches_both_switches_and_back() {
