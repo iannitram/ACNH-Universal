@@ -24,6 +24,7 @@ macro_rules! not_built {
 }
 
 pub mod appgame;
+pub mod archive;
 pub mod artwork;
 pub mod assemble;
 pub mod backup;
