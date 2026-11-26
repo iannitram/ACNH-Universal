@@ -92,9 +92,9 @@ The "Merged" column is what merged on 2026-11-26; nothing in it has been run on 
 | 7.02 (#71), the RTX 3090 Ti desktop | #322, #332, #345 | none listed |
 | 8.02 (#73), the Mac app | #362 (staging outside the synced folder, `docs/MAC.md`) | none listed |
 | 8.03 (#74) and 8.03f (#231), the iPad | #355 | the iOS build needs the `aarch64-apple-ios` Rust target on the Mac; no `.ipa` newer than 1101029 |
-| 8.05 (#76), 8.08 (#121), Mac and iPad save sync | #361 (Dropbox on the iPad), #338, #323, #328 | a release with save-relay pinned (`release.yml` has not run) |
+| 8.05 (#76), 8.08 (#121), Mac and iPad save sync | #361 (Dropbox on the iPad), #323, #328 | a release with save-relay pinned (`release.yml` has not run) |
 | 9.04 (#82), the Android device | #369 (build scripts) | #363 (the front door), #365 (Prepare's `android` target), #366 (signing, libvpx, the APK), #367 (the in-app download), #368 (the manifest on Linux), #364 (`Home` takes a folder from any app), #354 (the final push, sound) |
-| 10.01 (#83), one island on every device | #361, #338, #337, #360 | every run above; #83 names Dropbox |
+| 10.01 (#83), one island on every device | #361, #360 | every run above; #83 names Dropbox |
 | 11.01 (#84), the design pass | #342, #344, #347 (the pad rule), #348 (dead code) | #348 (the brief against the built screens, the rest of its list), #347 (does the Android launcher get pad keys) |
 
 ### Band 3: M13 and cleanup, alongside
