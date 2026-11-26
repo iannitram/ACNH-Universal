@@ -366,12 +366,7 @@ const DLSS: &str = tool_version("DLSS");
 /// vcpkg is fetched at this commit, never at whatever `HEAD` is on the day (#328).
 const VCPKG_COMMIT: &str = "e6d62cc9ce8f8d9687df14521118f2ec3c10ee6a";
 /// Python packages Prepare installs, each at a fixed version (#328).
-const PIP_PACKAGES: [&str; 4] = [
-    "capstone==5.0.7",
-    "lz4==4.4.5",
-    "cmake==4.4.5",
-    "ninja==1.13.2",
-];
+const PIP_PACKAGES: [&str; 2] = ["cmake==4.4.5", "ninja==1.13.2"];
 /// `<sha256>  <url>` per line: every download Prepare makes must be listed here and match (#328).
 /// The same file feeds CI and `tools/build_ios.sh`; `tools/check_pins.sh` guards it.
 const DOWNLOAD_PINS: &str = include_str!("../../../tools/downloads.sha256");
@@ -1445,9 +1440,6 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             "-q".to_owned(),
         ];
         pkgs.extend(PIP_PACKAGES.iter().map(|p| (*p).to_owned()));
-        if cfg!(windows) {
-            pkgs.push("zstandard==0.25.0".to_owned());
-        }
         run_logged(stage, &py, &pkgs, root, &[], &[], None)?;
     }
 
