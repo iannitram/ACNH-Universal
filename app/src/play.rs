@@ -337,6 +337,12 @@ impl Session {
         &self.vm
     }
 
+    /// Whether the launcher may close now: not while a job runs (the game, its exit push, a
+    /// sync), so the process lives until the job has reported.
+    pub fn may_close(&self) -> bool {
+        !self.vm.busy()
+    }
+
     /// A controller or keyboard press. True if it committed an action.
     pub fn nav(&mut self, nav: Nav) -> bool {
         let committed = self.vm.handle(nav);
@@ -867,6 +873,17 @@ mod tests {
             lines(&log),
             ["pull None", "game /home/user/root", "push None"]
         );
+    }
+
+    #[test]
+    fn the_launcher_cannot_close_while_a_job_runs() {
+        let log = Log::default();
+        let mut session = session(&log, None);
+        assert!(session.may_close());
+        assert!(session.nav(Nav::Accept));
+        assert!(!session.may_close());
+        wait_for(&mut session, &ContinueState::Ready);
+        assert!(session.may_close());
     }
 
     #[test]

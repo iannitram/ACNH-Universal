@@ -97,12 +97,19 @@ impl Emitter<'_> {
             }
             "sqabs" | "sqneg" => {
                 let (bits, _) = self.vinfo(i.op(0)?)?;
-                let expr = if i.mnemonic == "sqabs" {
-                    "a < 0 ? -int64_t(a) : int64_t(a)"
+                // 64-bit lanes saturate through a 128-bit intermediate: int64_t negation would overflow (UB) and
+                // nx::sat<int64_t> is a no-op.
+                let (wide, sat) = if bits == 64 {
+                    ("__int128", "nx::sat128<int64_t>".to_owned())
                 } else {
-                    "-int64_t(a)"
+                    ("int64_t", format!("nx::sat<int{bits}_t>"))
                 };
-                self.v_un(i, &format!("nx::sat<int{bits}_t>({expr})"), "s", "s", false)?
+                let expr = if i.mnemonic == "sqabs" {
+                    format!("a < 0 ? -{wide}(a) : {wide}(a)")
+                } else {
+                    format!("-{wide}(a)")
+                };
+                self.v_un(i, &format!("{sat}({expr})"), "s", "s", false)?
             }
             "sqshl" | "sqrshl" | "uqshl" => self.saturating_shift(i)?,
             "sli" | "sri" => {
