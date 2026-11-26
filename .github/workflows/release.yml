@@ -55,7 +55,7 @@ jobs:
           if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
           printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
           # The source has no .git: Prepare reads the package's build version from here.
-          bash tools/build_version.sh > "$SRC/BUILD_VERSION"
+          NX_RELEASE_VERSION="$VERSION" bash tools/build_version.sh > "$SRC/BUILD_VERSION"
           for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
             test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
           done
@@ -112,7 +112,7 @@ jobs:
           if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
           printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
           # The source has no .git: Prepare reads the package's build version from here.
-          bash tools/build_version.sh > "$SRC/BUILD_VERSION"
+          NX_RELEASE_VERSION="$VERSION" bash tools/build_version.sh > "$SRC/BUILD_VERSION"
           for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
             test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
           done
