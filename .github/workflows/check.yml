@@ -154,7 +154,7 @@ jobs:
         with:
           submodules: false
       - name: Tool versions (SDL3, VK_HEADERS from tools/versions.env)
-        run: cat tools/versions.env >> "$GITHUB_ENV"
+        run: grep -E '^[A-Z0-9_]+=' tools/versions.env | tr -d '\r' >> "$GITHUB_ENV"
       - name: Toolchain
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -200,7 +200,7 @@ jobs:
         with:
           submodules: false
       - name: Tool versions (SDL3, VK_HEADERS, LLVM_CI from tools/versions.env)
-        run: cat tools/versions.env >> "$GITHUB_ENV"
+        run: grep -E '^[A-Z0-9_]+=' tools/versions.env | tr -d '\r' >> "$GITHUB_ENV"
       - name: LLVM (clang-cl, lld-link)
         run: |
           T=$(cygpath -u "$RUNNER_TEMP")

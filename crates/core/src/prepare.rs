@@ -325,8 +325,12 @@ const fn tool_version(key: &str) -> &'static str {
         while i < text.len() && text[i] != b'\n' {
             i += 1;
         }
-        let end = i;
+        let mut end = i;
         i += 1;
+        // a Windows checkout may turn the line ends into CRLF: the value stops before the `\r`
+        if end > start && text[end - 1] == b'\r' {
+            end -= 1;
+        }
         // a line is `KEY=value`; comment lines start with `#` and never match
         if end - start > key.len() && text[start + key.len()] == b'=' {
             let mut k = 0;
@@ -3868,6 +3872,13 @@ mod download_pin_tests {
                 pinned_sha256(&url).is_some(),
                 "no pinned checksum for {url}"
             );
+        }
+    }
+
+    #[test]
+    fn tool_versions_carry_no_line_end_bytes() {
+        for v in [VK_HEADERS, SDL3, LLVM, IMGUI, RYUBING, DOTNET, FFX, DLSS] {
+            assert!(!v.contains(['\r', '\n']), "{v:?}");
         }
     }
 
