@@ -32,6 +32,8 @@ jobs:
         run: |
           git checkout -q --orphan _scan
           bash tools/check_no_game_data.sh
+      - name: The check refuses a decoy of each kind
+        run: bash tests/no_game_data_test.sh
 
   rust:
     name: Rust (${{ matrix.name }})
