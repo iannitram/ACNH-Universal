@@ -10,7 +10,9 @@
 # once into private/android-tools/ (PREPARE_TOOLS= another folder; a spirv_harness put in its shaders/ is used as it
 # is).
 #
-# usage: tools/build_android.sh [--install] [--jobs N] [--no-game]
+# usage: tools/build_android.sh [--install] [--jobs N] [--no-game] [--launcher]
+#   --launcher: also build and pack the Slint launcher (libacnh_app.so, LauncherActivity). Off by default: the icon
+#   opens Home, and the Slint app cannot yet download, prepare or start the game on Android (#363).
 #   --no-game: the app only, without the game set up here (what a release carries)
 #   --no-phone-prepare: leave out the on-phone Prepare's tools (zig, the shader tool, which builds only on Linux); the
 #   app then says on its Prepare screen that this build does not carry them. For an APK whose game comes prepared
@@ -50,11 +52,13 @@ if [ -z "${JOBS:-}" ]; then
   [ "$JOBS" -lt 1 ] && JOBS=1
 fi
 GAMELIB=1
+LAUNCHER=0
 while [ $# -gt 0 ]; do
   case $1 in
     --install) INSTALL=1 ;;
     --jobs) JOBS=$2; shift ;;
     --no-game) GAMELIB=0 ;;
+    --launcher) LAUNCHER=1 ;;
     --no-phone-prepare) PHONE_PREPARE=0 ;;
     *) echo "unknown option $1"; exit 1 ;;
   esac
@@ -119,12 +123,14 @@ case "$CARGO_OUT" in /*) ;; *) CARGO_OUT=$PWD/$CARGO_OUT ;; esac
 RUNTIME_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_runtime.a
 [ -f "$RUNTIME_LIB" ] || { echo "$RUNTIME_LIB was not built"; exit 1; }
 
+if [ $LAUNCHER = 1 ]; then
 echo "== the Slint launcher library (cargo, aarch64-linux-android, android-launcher)"
 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android29-clang \
 CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android29-clang AR_aarch64_linux_android=$NDK_BIN/llvm-ar \
   cargo build --locked -p acnh-app --release --target aarch64-linux-android --features android-launcher --lib -j "$JOBS"
 LAUNCHER_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_app.so
 [ -f "$LAUNCHER_LIB" ] || { echo "$LAUNCHER_LIB was not built"; exit 1; }
+fi
 . tools/build_common.sh
 RUNTIME_HEADER=$(newest_runtime_header "$CARGO_OUT/aarch64-linux-android/release/build")
 [ -n "$RUNTIME_HEADER" ] || { echo "acnh_runtime.h was not generated"; exit 1; }
@@ -154,7 +160,7 @@ STRIP=$NDK/toolchains/llvm/prebuilt/$HOST/bin/llvm-strip
 rm -rf "$OUT"; mkdir -p "$OUT/lib/arm64-v8a"
 "$STRIP" --strip-unneeded -o "$OUT/lib/arm64-v8a/lib$GAME.so" "$BUILD/lib$GAME.so"
 "$STRIP" --strip-unneeded -o "$OUT/lib/arm64-v8a/lib${GAME}_prepare.so" "$BUILD/lib${GAME}_prepare.so"
-"$STRIP" --strip-unneeded -o "$OUT/lib/arm64-v8a/libacnh_app.so" "$LAUNCHER_LIB"
+[ $LAUNCHER = 1 ] && "$STRIP" --strip-unneeded -o "$OUT/lib/arm64-v8a/libacnh_app.so" "$LAUNCHER_LIB"
 cp "$NDK/toolchains/llvm/prebuilt/$HOST/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$OUT/lib/arm64-v8a/"
 # The preparation's tools, run from the app's native library folder (extractNativeLibs in the manifest)
 if [ "${PHONE_PREPARE:-1}" = 1 ]; then
