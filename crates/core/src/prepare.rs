@@ -925,13 +925,16 @@ fn file_key(path: &Path) -> String {
     }
 }
 
-/// A SHA-256 over every file under `root` (links followed): its path, size and change time, in
+/// A SHA-256 over every file under `root` (links to files followed): its path, size and change time, in
 /// name order. A file added, removed or rewritten changes it; reading the 10 GB RomFS does not.
 fn tree_key(root: &Path) -> Result<String> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
         for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
-            if path.is_dir() {
+            let entry = entry?;
+            let path = entry.path();
+            // Only real folders, as `pack::romfs` walks: a link to a folder is not followed,
+            // so a link loop cannot recurse forever.
+            if entry.file_type()?.is_dir() {
                 walk(root, &path, out)?;
             } else {
                 let rel = path.strip_prefix(root).unwrap_or(&path);
@@ -3705,6 +3708,18 @@ mod redo_unless_current_tests {
         std::fs::write(dir.join("out.pak"), b"something else entirely").unwrap();
         pack(&dir, &runs);
         assert_eq!(runs.get(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_loop_under_the_source_is_not_followed() {
+        let dir = dir("loop");
+        std::os::unix::fs::symlink("..", dir.join("src/sub/up")).unwrap();
+        let runs = Cell::new(0);
+        pack(&dir, &runs);
+        pack(&dir, &runs);
+        assert_eq!(runs.get(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
