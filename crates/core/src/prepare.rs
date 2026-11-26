@@ -1132,69 +1132,13 @@ fn download_file(stage: Stage, url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn fetch_archive(stage: Stage, url: &str, dest_dir: &Path, strip: bool, py: &Path) -> Result<()> {
+fn fetch_archive(stage: Stage, url: &str, dest_dir: &Path, strip: bool) -> Result<()> {
     std::fs::create_dir_all(dest_dir)?;
     let tmp = PathBuf::from(format!("{}.download", dest_dir.display()));
     download_file(stage, url, &tmp)?;
-    let cwd = dest_dir;
-    if url.ends_with(".tar.zst") {
-        let script = "import sys, tarfile, zstandard; \
-            d = zstandard.ZstdDecompressor(max_window_size=1<<31).stream_reader(open(sys.argv[1],'rb')); \
-            t = tarfile.open(fileobj=d, mode='r|'); \
-            strip = sys.argv[3] == '1'; \
-            [t.extract(m, sys.argv[2], filter='data') for m in t if (not strip or ('/' in m.name and m.name.split('/',1)[1] and not setattr(m,'name',m.name.split('/',1)[1])))]";
-        run_logged(
-            stage,
-            py,
-            &[
-                "-c".to_owned(),
-                script.to_owned(),
-                tmp.display().to_string(),
-                dest_dir.display().to_string(),
-                if strip { "1" } else { "0" }.to_owned(),
-            ],
-            cwd,
-            &[],
-            &[],
-            None,
-        )?;
-    } else if url.ends_with(".zip") {
-        let script = "import os, shutil, sys, zipfile; \
-            z = zipfile.ZipFile(sys.argv[1]); \
-            strip = sys.argv[3] == '1'; \
-            names = z.namelist(); \
-            top = (names[0].split('/')[0] + '/') if (strip and names) else ''; \
-            [None for i in z.infolist() for n in [i.filename[len(top):] if (top and i.filename.startswith(top)) else i.filename] if n and not n.startswith('/') and '..' not in n.split('/') and ((os.makedirs(os.path.join(sys.argv[2], n), exist_ok=True) if i.is_dir() else (os.makedirs(os.path.dirname(os.path.join(sys.argv[2], n)), exist_ok=True), shutil.copyfileobj(z.open(i), open(os.path.join(sys.argv[2], n), 'wb')))) or True)]";
-        run_logged(
-            stage,
-            py,
-            &[
-                "-c".to_owned(),
-                script.to_owned(),
-                tmp.display().to_string(),
-                dest_dir.display().to_string(),
-                if strip { "1" } else { "0" }.to_owned(),
-            ],
-            cwd,
-            &[],
-            &[],
-            None,
-        )?;
-    } else {
-        let mut args = vec![
-            "-xzf".to_owned(),
-            tmp.display().to_string(),
-            "-C".to_owned(),
-            dest_dir.display().to_string(),
-        ];
-        if strip {
-            args.push("--strip-components=1".to_owned());
-        }
-        let tar = if cfg!(windows) { "tar.exe" } else { "tar" };
-        run_logged(stage, Path::new(tar), &args, cwd, &[], &[], None)?;
-    }
+    let unpacked = crate::archive::extract(crate::archive::Kind::of(url), &tmp, dest_dir, strip);
     let _ = std::fs::remove_file(&tmp);
-    Ok(())
+    unpacked.map_err(|e| stage_err(stage, e))
 }
 
 fn find_on_path(program: &str) -> Option<PathBuf> {
@@ -1259,29 +1203,21 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
         )?;
     }
     let check_pkgs = Command::new(&py)
-        .args([
-            "-c",
-            "import capstone, lz4, cmake, ninja, importlib.metadata as m; assert m.version('capstone') == '5.0.7'",
-        ])
+        .args(["-c", "import cmake, ninja"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success());
     if !check_pkgs {
-        let mut pkgs = vec![
+        let pkgs = vec![
             "-m".to_owned(),
             "pip".to_owned(),
             "install".to_owned(),
             "-q".to_owned(),
-            "capstone==5.0.7".to_owned(),
-            "lz4".to_owned(),
             "cmake".to_owned(),
             "ninja".to_owned(),
         ];
-        if cfg!(windows) {
-            pkgs.push("zstandard".to_owned());
-        }
         run_logged(stage, &py, &pkgs, root, &[], &[], None)?;
     }
 
@@ -1292,7 +1228,6 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             &format!("https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v{VK_HEADERS}.tar.gz"),
             &vkh,
             true,
-            &py,
         )?;
     }
     let imgui = t.join("imgui");
@@ -1302,7 +1237,6 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             &format!("https://github.com/ocornut/imgui/archive/refs/tags/v{IMGUI}.tar.gz"),
             &imgui,
             true,
-            &py,
         )?;
     }
     let ryubing = t.join("ryubing");
@@ -1312,12 +1246,11 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             &format!("https://codeberg.org/Software_arch/Ryubing/archive/{RYUBING}.tar.gz"),
             &ryubing,
             true,
-            &py,
         )?;
     }
 
     if cfg!(windows) {
-        rust_tools_windows(req, root, &t, &logs, &py)?;
+        rust_tools_windows(req, root, &t, &logs)?;
     }
 
     let mut dotnet_env = vec![("DOTNET_CLI_TELEMETRY_OPTOUT".to_owned(), "1".to_owned())];
@@ -1335,7 +1268,6 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
                     &format!("https://builds.dotnet.microsoft.com/dotnet/Sdk/{DOTNET}/dotnet-sdk-{DOTNET}-{rid}.{ext}"),
                     &dn,
                     false,
-                    &py,
                 )?;
             }
             dotnet_env.push(("DOTNET_ROOT".to_owned(), dn.display().to_string()));
@@ -1401,7 +1333,7 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn rust_tools_windows(_req: &Request, root: &Path, t: &Path, logs: &Path, py: &Path) -> Result<()> {
+fn rust_tools_windows(_req: &Request, root: &Path, t: &Path, logs: &Path) -> Result<()> {
     let stage = Stage::Tools;
     let base = format!("https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/{FFX}/Kits/FidelityFX");
     let nv = format!("https://raw.githubusercontent.com/NVIDIA/DLSS/{DLSS}");
@@ -1468,7 +1400,6 @@ fn rust_tools_windows(_req: &Request, root: &Path, t: &Path, logs: &Path, py: &P
             &format!("https://github.com/llvm/llvm-project/releases/download/llvmorg-{LLVM}/clang+llvm-{LLVM}-x86_64-pc-windows-msvc.tar.zst"),
             &llvm,
             true,
-            py,
         )?;
     }
     let sdl = t.join(format!("SDL3-{SDL3}"));
@@ -1478,7 +1409,6 @@ fn rust_tools_windows(_req: &Request, root: &Path, t: &Path, logs: &Path, py: &P
             &format!("https://github.com/libsdl-org/SDL/releases/download/release-{SDL3}/SDL3-devel-{SDL3}-VC.zip"),
             &sdl,
             true,
-            py,
         )?;
     }
     let movie_libs = windows_movie_libs(t);
@@ -1663,45 +1593,7 @@ pub fn install_mod_archive(
     let ready = temp.path().join("ready");
     std::fs::create_dir_all(&ready)?;
 
-    let script = r#"import os, re, shutil, sys, zipfile
-def ok(n):
-    return bool(n) and n not in ('.', '..') and not n.endswith((' ', '.')) and not re.search(r'[\\/:<>"|?*\x00-\x1f]', n)
-zpath, ready = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(zpath) as z:
-    names = [e.filename for e in z.infolist()]
-    if any(not all(ok(p) for p in path.rstrip('/').split('/')) for path in names if path.rstrip('/')):
-        sys.exit('unsafe path in the zip')
-    prefix = ''
-    if not any(path.startswith('romfs/') for path in names):
-        tops = {path.split('/')[0] for path in names if '/romfs/' in path}
-        if len(tops) != 1:
-            sys.exit('no romfs/ folder in the zip')
-        prefix = tops.pop() + '/'
-    for entry in z.infolist():
-        if entry.is_dir() or not entry.filename.startswith(prefix + 'romfs/'):
-            continue
-        out = os.path.join(ready, entry.filename[len(prefix):])
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        with z.open(entry) as s, open(out, 'wb') as d:
-            shutil.copyfileobj(s, d)
-if not os.path.isdir(os.path.join(ready, 'romfs')):
-    sys.exit('the mod archive contains no RomFS files')
-"#;
-
-    run_logged(
-        Stage::Game,
-        Path::new(python),
-        &[
-            "-c".to_owned(),
-            script.to_owned(),
-            zpath.display().to_string(),
-            ready.display().to_string(),
-        ],
-        mods_root,
-        &[],
-        &[],
-        None,
-    )?;
+    crate::archive::extract_mod_romfs(zpath, &ready).map_err(|e| stage_err(Stage::Game, e))?;
 
     std::fs::create_dir_all(ready.join(".msg-reflow-pending"))?;
     let previous = temp.path().join("previous");
