@@ -54,11 +54,6 @@ pub fn move_in(rows: &[SettingsFocus], focus: SettingsFocus, nav: crate::vm::Nav
     }
 }
 
-/// Move between Settings controls using a shared navigation action.
-pub fn move_focus(focus: SettingsFocus, nav: crate::vm::Nav) -> SettingsFocus {
-    move_in(&settings_rows(RelayRows::Hidden), focus, nav)
-}
-
 /// The save sync rows of Settings: what is set up, and the actions on it. The account comes
 /// from `RelaySetup::account`; Sign in again opens the same pages as the first run's step 5.
 #[derive(Debug, Clone)]

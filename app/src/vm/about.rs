@@ -1,8 +1,6 @@
 //! About view model: upstream credits, copied project credits, licences,
 //! Slint attribution notice, and list of fixes offered upstream (SPEC.md M8).
 
-use std::path::Path;
-
 /// One project credited in About.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectCredit {
@@ -170,12 +168,6 @@ pub fn parse_offered_fixes(text: &str) -> Vec<OfferedFix> {
     fixes
 }
 
-/// Reads offered fixes from a file path.
-pub fn read_offered_fixes(path: &Path) -> Result<Vec<OfferedFix>, std::io::Error> {
-    let text = std::fs::read_to_string(path)?;
-    Ok(parse_offered_fixes(&text))
-}
-
 /// View model for the About page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AboutVm {
@@ -201,26 +193,12 @@ impl AboutVm {
         }
     }
 
-    pub fn from_file(path: &Path) -> Result<Self, std::io::Error> {
-        let fixes = read_offered_fixes(path)?;
-        Ok(Self {
-            upstream: UPSTREAM_CREDIT,
-            credits: COPIED_PROJECTS.to_vec(),
-            fixes,
-            slint_notice: SLINT_NOTICE.to_owned(),
-        })
-    }
-
     pub fn upstream(&self) -> &ProjectCredit {
         &self.upstream
     }
 
     pub fn credits(&self) -> &[ProjectCredit] {
         &self.credits
-    }
-
-    pub fn all_fixes(&self) -> &[OfferedFix] {
-        &self.fixes
     }
 
     /// List of fixes of ours offered upstream, shown until upstream has them (SPEC.md M8).
@@ -236,14 +214,10 @@ impl AboutVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
-    fn test_view_model_reads_offered_fixes_file_and_checks_slint_notice() {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixes_file = manifest_dir.join("src/vm/offered_fixes.txt");
-
-        let vm = AboutVm::from_file(&fixes_file).expect("should read offered-fixes file");
+    fn test_view_model_reads_offered_fixes_and_checks_slint_notice() {
+        let vm = AboutVm::new();
 
         // The Slint notice must be present
         assert!(!vm.slint_notice().is_empty());

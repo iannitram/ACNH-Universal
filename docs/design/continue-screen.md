@@ -124,7 +124,6 @@ Each is a variant of a plain enum or field, constructible from fake saves, fake 
 
 | State | Card shown | Play button | Notes |
 |---|---|---|---|
-| `NeedsSetup` | none | Set up | first run not finished: no install, no game folder, no hub |
 | `NoIsland` | empty card "No island yet" | Play | a new island starts when the game does; relay may still have one |
 | `Ready` | island card | Play | in sync |
 | `RelayNewer` | local card, relay card summary | Play (pulls first) | status "Newer on another device" |
@@ -137,7 +136,6 @@ Each is a variant of a plain enum or field, constructible from fake saves, fake 
 | `SyncOff` | island card, status "Save sync is off" | Play | save sync is off (Skip or Turn off save sync): plays without sync, and the card says so and where to turn it on |
 | `RelayError(reason)` | last known card | Retry | auth or server failure, with redacted reason |
 | `Syncing(step)` | island card | disabled, shows step | step: Pull, Backup, Push |
-| `Starting` | island card | disabled | player launching |
 | `Playing` | island card | disabled | player running (desktop window stays; Game Mode shows the game) |
 | `Saving` | island card | disabled | push after exit |
 | `PlayerFailed { exit, log_hint }` | island card | Retry | the player exited with an error or crashed; the island is untouched and the next push is skipped if no save changed |

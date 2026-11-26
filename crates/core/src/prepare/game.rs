@@ -57,45 +57,7 @@ pub fn install_mod_archive(
     let ready = temp.path().join("ready");
     std::fs::create_dir_all(&ready)?;
 
-    let script = r#"import os, re, shutil, sys, zipfile
-def ok(n):
-    return bool(n) and n not in ('.', '..') and not n.endswith((' ', '.')) and not re.search(r'[\\/:<>"|?*\x00-\x1f]', n)
-zpath, ready = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(zpath) as z:
-    names = [e.filename for e in z.infolist()]
-    if any(not all(ok(p) for p in path.rstrip('/').split('/')) for path in names if path.rstrip('/')):
-        sys.exit('unsafe path in the zip')
-    prefix = ''
-    if not any(path.startswith('romfs/') for path in names):
-        tops = {path.split('/')[0] for path in names if '/romfs/' in path}
-        if len(tops) != 1:
-            sys.exit('no romfs/ folder in the zip')
-        prefix = tops.pop() + '/'
-    for entry in z.infolist():
-        if entry.is_dir() or not entry.filename.startswith(prefix + 'romfs/'):
-            continue
-        out = os.path.join(ready, entry.filename[len(prefix):])
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        with z.open(entry) as s, open(out, 'wb') as d:
-            shutil.copyfileobj(s, d)
-if not os.path.isdir(os.path.join(ready, 'romfs')):
-    sys.exit('the mod archive contains no RomFS files')
-"#;
-
-    run_logged(
-        Stage::Game,
-        Path::new(python),
-        &[
-            "-c".to_owned(),
-            script.to_owned(),
-            zpath.display().to_string(),
-            ready.display().to_string(),
-        ],
-        mods_root,
-        &[],
-        &[],
-        None,
-    )?;
+    crate::archive::extract_mod_romfs(zpath, &ready).map_err(|e| stage_err(Stage::Game, e))?;
 
     std::fs::create_dir_all(ready.join(".msg-reflow-pending"))?;
     let previous = temp.path().join("previous");

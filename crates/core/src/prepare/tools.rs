@@ -56,12 +56,7 @@ pub(super) const DLSS: &str = tool_version("DLSS");
 /// vcpkg is fetched at this commit, never at whatever `HEAD` is on the day (#328).
 const VCPKG_COMMIT: &str = "e6d62cc9ce8f8d9687df14521118f2ec3c10ee6a";
 /// Python packages Prepare installs, each at a fixed version (#328).
-const PIP_PACKAGES: [&str; 4] = [
-    "capstone==5.0.7",
-    "lz4==4.4.5",
-    "cmake==4.4.5",
-    "ninja==1.13.2",
-];
+const PIP_PACKAGES: [&str; 2] = ["cmake==4.4.5", "ninja==1.13.2"];
 /// `<sha256>  <url>` per line: every download Prepare makes must be listed here and match (#328).
 /// The same file feeds CI and `tools/build_ios.sh`; `tools/check_pins.sh` guards it.
 const DOWNLOAD_PINS: &str = include_str!("../../../../tools/downloads.sha256");
@@ -181,75 +176,13 @@ pub(super) fn download_file(stage: Stage, url: &str, dest: &Path) -> Result<()> 
     Ok(())
 }
 
-pub(super) fn fetch_archive(
-    stage: Stage,
-    url: &str,
-    dest_dir: &Path,
-    strip: bool,
-    py: &Path,
-) -> Result<()> {
+pub(super) fn fetch_archive(stage: Stage, url: &str, dest_dir: &Path, strip: bool) -> Result<()> {
     std::fs::create_dir_all(dest_dir)?;
     let tmp = PathBuf::from(format!("{}.download", dest_dir.display()));
     download_file(stage, url, &tmp)?;
-    let cwd = dest_dir;
-    if url.ends_with(".tar.zst") {
-        let script = "import sys, tarfile, zstandard; \
-            d = zstandard.ZstdDecompressor(max_window_size=1<<31).stream_reader(open(sys.argv[1],'rb')); \
-            t = tarfile.open(fileobj=d, mode='r|'); \
-            strip = sys.argv[3] == '1'; \
-            [t.extract(m, sys.argv[2], filter='data') for m in t if (not strip or ('/' in m.name and m.name.split('/',1)[1] and not setattr(m,'name',m.name.split('/',1)[1])))]";
-        run_logged(
-            stage,
-            py,
-            &[
-                "-c".to_owned(),
-                script.to_owned(),
-                tmp.display().to_string(),
-                dest_dir.display().to_string(),
-                if strip { "1" } else { "0" }.to_owned(),
-            ],
-            cwd,
-            &[],
-            &[],
-            None,
-        )?;
-    } else if url.ends_with(".zip") {
-        let script = "import os, shutil, sys, zipfile; \
-            z = zipfile.ZipFile(sys.argv[1]); \
-            strip = sys.argv[3] == '1'; \
-            names = z.namelist(); \
-            top = (names[0].split('/')[0] + '/') if (strip and names) else ''; \
-            [None for i in z.infolist() for n in [i.filename[len(top):] if (top and i.filename.startswith(top)) else i.filename] if n and not n.startswith('/') and '..' not in n.split('/') and ((os.makedirs(os.path.join(sys.argv[2], n), exist_ok=True) if i.is_dir() else (os.makedirs(os.path.dirname(os.path.join(sys.argv[2], n)), exist_ok=True), shutil.copyfileobj(z.open(i), open(os.path.join(sys.argv[2], n), 'wb')))) or True)]";
-        run_logged(
-            stage,
-            py,
-            &[
-                "-c".to_owned(),
-                script.to_owned(),
-                tmp.display().to_string(),
-                dest_dir.display().to_string(),
-                if strip { "1" } else { "0" }.to_owned(),
-            ],
-            cwd,
-            &[],
-            &[],
-            None,
-        )?;
-    } else {
-        let mut args = vec![
-            "-xzf".to_owned(),
-            tmp.display().to_string(),
-            "-C".to_owned(),
-            dest_dir.display().to_string(),
-        ];
-        if strip {
-            args.push("--strip-components=1".to_owned());
-        }
-        let tar = if cfg!(windows) { "tar.exe" } else { "tar" };
-        run_logged(stage, Path::new(tar), &args, cwd, &[], &[], None)?;
-    }
+    let unpacked = crate::archive::extract(crate::archive::Kind::of(url), &tmp, dest_dir, strip);
     let _ = std::fs::remove_file(&tmp);
-    Ok(())
+    unpacked.map_err(|e| stage_err(stage, e))
 }
 
 pub(crate) fn find_on_path(program: &str) -> Option<PathBuf> {
@@ -328,9 +261,6 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             "-q".to_owned(),
         ];
         pkgs.extend(PIP_PACKAGES.iter().map(|p| (*p).to_owned()));
-        if cfg!(windows) {
-            pkgs.push("zstandard==0.25.0".to_owned());
-        }
         run_logged(stage, &py, &pkgs, root, &[], &[], None)?;
     }
 
@@ -345,7 +275,6 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             &format!("https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v{VK_HEADERS}.tar.gz"),
             &vkh,
             true,
-            &py,
         )?;
     }
     let imgui = t.join("imgui");
@@ -358,7 +287,6 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             &format!("https://github.com/ocornut/imgui/archive/refs/tags/v{IMGUI}.tar.gz"),
             &imgui,
             true,
-            &py,
         )?;
     }
     let ryubing = t.join("ryubing");
@@ -371,12 +299,11 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             &format!("https://codeberg.org/Software_arch/Ryubing/archive/{RYUBING}.tar.gz"),
             &ryubing,
             true,
-            &py,
         )?;
     }
 
     if cfg!(windows) {
-        rust_tools_windows(req, root, &t, &logs, &py)?;
+        rust_tools_windows(req, root, &t, &logs)?;
     }
 
     let mut private_dotnet = false;
@@ -399,7 +326,6 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
                     &format!("https://builds.dotnet.microsoft.com/dotnet/Sdk/{DOTNET}/dotnet-sdk-{DOTNET}-{rid}.{ext}"),
                     &dn,
                     false,
-                    &py,
                 )?;
             }
             dotnet_env.push(("DOTNET_ROOT".to_owned(), dn.display().to_string()));
@@ -475,13 +401,7 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn rust_tools_windows(
-    _req: &Request,
-    root: &Path,
-    t: &Path,
-    logs: &Path,
-    py: &Path,
-) -> Result<()> {
+pub(super) fn rust_tools_windows(_req: &Request, root: &Path, t: &Path, logs: &Path) -> Result<()> {
     let stage = Stage::Tools;
     let base = format!("https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/{FFX}/Kits/FidelityFX");
     let nv = format!("https://raw.githubusercontent.com/NVIDIA/DLSS/{DLSS}");
@@ -548,7 +468,6 @@ pub(super) fn rust_tools_windows(
             &format!("https://github.com/llvm/llvm-project/releases/download/llvmorg-{LLVM}/clang+llvm-{LLVM}-x86_64-pc-windows-msvc.tar.zst"),
             &llvm,
             true,
-            py,
         )?;
     }
     let sdl = t.join(format!("SDL3-{SDL3}"));
@@ -558,7 +477,6 @@ pub(super) fn rust_tools_windows(
             &format!("https://github.com/libsdl-org/SDL/releases/download/release-{SDL3}/SDL3-devel-{SDL3}-VC.zip"),
             &sdl,
             true,
-            py,
         )?;
     }
     let movie_libs = windows_movie_libs(t);

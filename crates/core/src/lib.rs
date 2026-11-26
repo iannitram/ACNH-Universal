@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod appgame;
+pub mod archive;
 pub mod artwork;
 pub mod assemble;
 pub mod backup;

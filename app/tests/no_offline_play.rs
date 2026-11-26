@@ -201,7 +201,6 @@ fn busy(state: &ContinueState) -> bool {
         state,
         ContinueState::CheckingStatus
             | ContinueState::Syncing(_)
-            | ContinueState::Starting
             | ContinueState::Playing
             | ContinueState::Saving
     )
