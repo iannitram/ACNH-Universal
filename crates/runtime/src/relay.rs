@@ -112,6 +112,9 @@ pub enum SignInAnswer {
     /// browser, through save-relay's `save_relay_sign_in_start` / `_finish`). No secret passes
     /// through here: save-relay filed the refresh token in the credential store.
     SignedIn,
+    /// The person chose Dropbox (the iPad: Nextcloud is the form's other choice). The player runs
+    /// the code flow: `Connector::dropbox_start`, `Prompt::dropbox_code`, `Connector::dropbox_finish`.
+    Dropbox,
     /// First start only: leave save sync off, and do not ask again (`relay.ask = 0`).
     NotNow,
     /// Close the form (only the sign-in-again form has no Not now).
@@ -128,6 +131,7 @@ impl std::fmt::Debug for SignInAnswer {
                 .field("password", &"***")
                 .finish(),
             SignInAnswer::SignedIn => f.write_str("SignedIn"),
+            SignInAnswer::Dropbox => f.write_str("Dropbox"),
             SignInAnswer::NotNow => f.write_str("NotNow"),
             SignInAnswer::Cancel => f.write_str("Cancel"),
         }
@@ -157,6 +161,15 @@ pub enum BlockedAnswer {
     TurnOff,
 }
 
+/// How the Dropbox code sign-in ended.
+enum DropboxOutcome {
+    Done,
+    /// The person backed out of the code screen: the sign-in form is shown again.
+    Back,
+    /// The sign-in could not start (offline): the form again, saying why.
+    Failed(String),
+}
+
 /// What the person chose on a held island.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeldAnswer {
@@ -169,6 +182,12 @@ pub enum HeldAnswer {
 /// thread (Android: the home screen's worker).
 pub trait Prompt: std::marker::Sync {
     fn sign_in(&self, form: &SignInForm) -> SignInAnswer;
+    /// Dropbox's code flow, second half: show where to sign in (`url`, opened in the browser) and
+    /// ask for the code Dropbox shows. `None`: the person backed out. Only the iPad offers it.
+    fn dropbox_code(&self, url: &str) -> Option<String> {
+        let _ = url;
+        None
+    }
     /// Both islands side by side; `Keep::Local` is this iPad's.
     fn conflict(&self, server: &SaveCard, local: &SaveCard) -> Keep;
     fn held(&self, device: &str, since: &str) -> HeldAnswer;
@@ -196,6 +215,25 @@ pub trait Connector: std::marker::Sync {
         Err(Error::Saves(
             "this app signs in to its save sync in the browser, not with an app password".into(),
         ))
+    }
+
+    /// Start the Dropbox code sign-in (save-relay's Dropbox app, as the game download uses): the
+    /// page to open in the browser. The iPad's Dropbox choice; the Android app signs in itself.
+    fn dropbox_start(&self, dirs: &AppDirs, creds: &dyn CredentialStore) -> Result<String> {
+        let _ = (dirs, creds);
+        Err(Error::Saves("this app has no Dropbox code sign-in".into()))
+    }
+
+    /// Finish it with the code the person typed: save-relay's config and the refresh token (in
+    /// `creds` only) are written before this returns.
+    fn dropbox_finish(
+        &self,
+        code: &str,
+        dirs: &AppDirs,
+        creds: &dyn CredentialStore,
+    ) -> Result<()> {
+        let _ = (code, dirs, creds);
+        Err(Error::Saves("this app has no Dropbox code sign-in".into()))
     }
 
     /// "Turn off save sync": `acnh_core::relay::forget` (best effort: the config goes even when a
@@ -235,6 +273,30 @@ impl Connector for Live {
             dirs,
             creds,
             std::sync::Arc::new(save_relay::http::UreqTransport::new()),
+        )
+    }
+
+    fn dropbox_start(&self, _dirs: &AppDirs, creds: &dyn CredentialStore) -> Result<String> {
+        acnh_core::relay::start_code_sign_in(
+            save_relay::service::Service::Dropbox,
+            creds,
+            std::sync::Arc::new(save_relay::http::UreqTransport::new()),
+        )
+        .map(|prompt| prompt.url)
+    }
+
+    fn dropbox_finish(
+        &self,
+        code: &str,
+        dirs: &AppDirs,
+        creds: &dyn CredentialStore,
+    ) -> Result<()> {
+        acnh_core::relay::finish_sign_in(
+            save_relay::service::Service::Dropbox,
+            dirs,
+            creds,
+            std::sync::Arc::new(save_relay::http::UreqTransport::new()),
+            code.trim(),
         )
     }
 }
@@ -1079,6 +1141,15 @@ impl Player<'_> {
                     self.log("save sync is set up");
                     return true;
                 }
+                SignInAnswer::Dropbox => match self.dropbox() {
+                    DropboxOutcome::Done => {
+                        self.set_waiting(false);
+                        self.log("save sync is set up (Dropbox)");
+                        return true;
+                    }
+                    DropboxOutcome::Back => {}
+                    DropboxOutcome::Failed(message) => form.message = Some(message),
+                },
                 SignInAnswer::Submit {
                     server,
                     user,
@@ -1118,6 +1189,15 @@ impl Player<'_> {
                     self.log("signed in again");
                     return;
                 }
+                SignInAnswer::Dropbox => match self.dropbox() {
+                    DropboxOutcome::Done => {
+                        self.set_waiting(false);
+                        self.log("signed in to Dropbox again");
+                        return;
+                    }
+                    DropboxOutcome::Back => {}
+                    DropboxOutcome::Failed(message) => form.message = Some(message),
+                },
                 SignInAnswer::Submit {
                     server,
                     user,
@@ -1148,6 +1228,25 @@ impl Player<'_> {
                     }
                 }
             }
+        }
+    }
+
+    /// Dropbox's code sign-in: the page, then the code. A code Dropbox refuses (or a page that
+    /// cannot start, offline) goes back to the form with the reason, and choosing Dropbox again
+    /// starts a new page: a used code is gone, so asking for another on the old page would fail.
+    fn dropbox(&self) -> DropboxOutcome {
+        let dirs = self.roots.dirs();
+        let url = match self.connector.dropbox_start(&dirs, self.creds) {
+            Ok(url) => url,
+            Err(error) => return DropboxOutcome::Failed(self.say(&error, None)),
+        };
+        let Some(code) = self.prompt.dropbox_code(&url) else {
+            return DropboxOutcome::Back;
+        };
+        let code = code.trim().to_string();
+        match self.connector.dropbox_finish(&code, &dirs, self.creds) {
+            Ok(()) => DropboxOutcome::Done,
+            Err(error) => DropboxOutcome::Failed(self.say(&error, Some(&code))),
         }
     }
 

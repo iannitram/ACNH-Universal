@@ -1,7 +1,7 @@
 #!/bin/bash
 # Android (arm64-v8a): builds the app (lib<game>.so: the runtime, no game code; Home.java: the screen that asks for the
 # game folder) and, from the game set up on this computer, the game's recompiled code as lib<game>_game.so, which
-# goes into the game folder on the phone with the data (tools/push_android.sh), never into the APK. Packs the APK,
+# goes into the game folder on the phone with the data (the adb push script was removed in #327), never into the APK. Packs the APK,
 # signs it with a local debug key and, with --install, installs it on the phone connected by adb.
 # The APK also prepares the game folder on the phone (Prepare.java, prepare/prepare_jni.cpp: lib<game>_prepare.so)
 # with the tools it carries as native libraries, the only files Android lets an app run: libzig.so (zig for
@@ -113,7 +113,7 @@ fi
 NDK_BIN=$NDK/toolchains/llvm/prebuilt/$HOST/bin
 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android29-clang \
 CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android29-clang AR_aarch64_linux_android=$NDK_BIN/llvm-ar \
-  cargo build -p acnh-runtime --release --target aarch64-linux-android -j "$JOBS"
+  cargo build --locked -p acnh-runtime --release --target aarch64-linux-android -j "$JOBS"
 CARGO_OUT=${CARGO_TARGET_DIR:-$PWD/target}
 case "$CARGO_OUT" in /*) ;; *) CARGO_OUT=$PWD/$CARGO_OUT ;; esac
 RUNTIME_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_runtime.a
@@ -122,19 +122,21 @@ RUNTIME_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_runtime.a
 echo "== the Slint launcher library (cargo, aarch64-linux-android, android-launcher)"
 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android29-clang \
 CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android29-clang AR_aarch64_linux_android=$NDK_BIN/llvm-ar \
-  cargo build -p acnh-app --release --target aarch64-linux-android --features android-launcher --lib -j "$JOBS"
+  cargo build --locked -p acnh-app --release --target aarch64-linux-android --features android-launcher --lib -j "$JOBS"
 LAUNCHER_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_app.so
 [ -f "$LAUNCHER_LIB" ] || { echo "$LAUNCHER_LIB was not built"; exit 1; }
-RUNTIME_HEADER=$(find "$CARGO_OUT/aarch64-linux-android/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
+. tools/build_common.sh
+RUNTIME_HEADER=$(newest_runtime_header "$CARGO_OUT/aarch64-linux-android/release/build")
 [ -n "$RUNTIME_HEADER" ] || { echo "acnh_runtime.h was not generated"; exit 1; }
 
 . tools/build_version.sh
+. tools/versions.env # VK_HEADERS: one list of tool versions for CI, Prepare and the scripts (#328)
 echo "== configure ($BUILD) [version $VNAME ($VCODE)]"
 cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_STL=c++_shared \
   -DANDROID_PLATFORM=android-29 -DNX_GAME=$GAME -DNX_GEN_DIR="$GEN" \
   -DNX_BUILD_VERSION="$VNAME" \
-  -DNX_VULKAN_SDK="$PWD/private/third_party/Vulkan-Headers-1.4.357" \
+  -DNX_VULKAN_SDK="$PWD/private/third_party/Vulkan-Headers-$VK_HEADERS" \
   -DNX_RUNTIME_ARCHIVE="$RUNTIME_LIB" -DNX_RUNTIME_INCLUDE="$(dirname "$RUNTIME_HEADER")" > "$OUT.cmake.log" 2>&1 ||
   { tail -20 "$OUT.cmake.log"; exit 1; }
 
@@ -142,10 +144,10 @@ TARGETS="$GAME nx_prepare_jni"
 # (NX_ANDROID_GAME_IN_APP=ON in the build's cache, for comparisons: no separate game library)
 [ $GAMELIB = 1 ] && ninja -C "$BUILD" -t targets all | grep -q "^lib${GAME}_game.so:" && TARGETS="$TARGETS ${GAME}_game"
 echo "== build $TARGETS with $JOBS jobs (the first time compiles the whole game: ~$(( 300 / JOBS + 5 )) min)"
-until mkdir private/build.lock 2>/dev/null; do echo "waiting for another build"; sleep 10; done
-trap 'rmdir private/build.lock 2>/dev/null' EXIT
+take_build_lock private/build.lock
+trap 'release_build_lock private/build.lock' EXIT
 ninja -C "$BUILD" -j "$JOBS" $TARGETS
-rmdir private/build.lock; trap - EXIT
+release_build_lock private/build.lock; trap - EXIT
 
 echo "== package"
 STRIP=$NDK/toolchains/llvm/prebuilt/$HOST/bin/llvm-strip
@@ -159,7 +161,7 @@ if [ "${PHONE_PREPARE:-1}" = 1 ]; then
   cp "$TOOLS/zig/zig" "$OUT/lib/arm64-v8a/libzig.so"
   cp "$TOOLS/shaders/spirv_harness" "$OUT/lib/arm64-v8a/libspirv_harness.so"
 fi
-# The game's code, for the game folder (push_android.sh): beside the APK, not in it.
+# The game's code, for the game folder on the phone: beside the APK, not in it.
 [[ " $TARGETS " == *" ${GAME}_game "* ]] && "$STRIP" --strip-unneeded -o "$OUT/lib${GAME}_game.so" "$BUILD/lib${GAME}_game.so"
 # Home.java: javac, then d8 to classes.dex.
 mkdir -p "$OUT/classes"

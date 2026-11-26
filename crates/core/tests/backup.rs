@@ -1,5 +1,5 @@
 // Locked tests for backup (issue 1.10: island backups before an update, SPEC.md M7).
-use acnh_core::backup::{backup_saves, list, prune, stamp, KEEP};
+use acnh_core::backup::{backup_saves, backup_saves_pruned, is_stamp, list, prune, stamp, KEEP};
 use acnh_core::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -110,11 +110,86 @@ fn list_oldest_first_folders_only_missing_is_empty() {
 fn prune_keeps_newest() {
     let d = scratch("prune");
     let backups = d.join("backups");
-    for s in ["A3", "A1", "A4", "A2"] {
+    for s in [
+        "20260103-000000",
+        "20260101-000000",
+        "20260104-000000",
+        "20260102-000000",
+    ] {
         put(&backups, &format!("{s}/main.dat"), s);
     }
-    assert_eq!(prune(&backups, 2).unwrap(), ["A1", "A2"]);
-    assert_eq!(list(&backups).unwrap(), ["A3", "A4"]);
+    assert_eq!(
+        prune(&backups, 2).unwrap(),
+        ["20260101-000000", "20260102-000000"]
+    );
+    assert_eq!(
+        list(&backups).unwrap(),
+        ["20260103-000000", "20260104-000000"]
+    );
     assert_eq!(prune(&backups, 5).unwrap(), Vec::<String>::new());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn only_stamp_shaped_names_count() {
+    assert!(is_stamp("20261102-115959"));
+    for bad in [
+        "1st Isle 00000000",
+        "save-link-fix",
+        "20261102-115959.auto",
+        "20261102-115959-2",
+        "2026110-2115959",
+        "20261102_115959",
+        "",
+    ] {
+        assert!(!is_stamp(bad), "{bad}");
+    }
+}
+
+#[test]
+fn prune_never_touches_island_folders_or_other_folders() {
+    let d = scratch("island");
+    let backups = d.join("backups");
+    // Names that byte-sort before every stamp: the old prune deleted them first.
+    let others = [
+        "1st Isle 00000000",
+        "!odd 12345678",
+        "0 Isle ffffffff",
+        "save-link-fix",
+    ];
+    for o in others {
+        put(&backups, &format!("{o}/20260101-000000/main.dat"), "island");
+    }
+    for i in 0..12 {
+        put(
+            &backups,
+            &format!("202601{:02}-000000/main.dat", i + 1),
+            "s",
+        );
+    }
+    let removed = prune(&backups, KEEP).unwrap();
+    assert_eq!(removed, ["20260101-000000", "20260102-000000"]);
+    assert_eq!(list(&backups).unwrap().len(), KEEP);
+    for o in others {
+        assert!(
+            backups.join(o).join("20260101-000000/main.dat").is_file(),
+            "{o}"
+        );
+    }
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn backup_saves_pruned_keeps_the_newest_ten() {
+    let d = scratch("pruned");
+    let save = d.join("save");
+    put(&save, "main.dat", "x");
+    let backups = d.join("backups");
+    for i in 0..12u64 {
+        backup_saves_pruned(&save, &backups, &stamp(1_762_041_600 + i * 60)).unwrap();
+    }
+    let names = list(&backups).unwrap();
+    assert_eq!(names.len(), KEEP);
+    assert_eq!(names.last().unwrap(), &stamp(1_762_041_600 + 11 * 60));
     fs::remove_dir_all(&d).unwrap();
 }

@@ -506,7 +506,9 @@ static void test_romfs_pak() {
     add("a/a", pattern(6, 6));
     add("a b/c", pattern(7, 7));
     add("Z", pattern(8, 8));
-    add("z", pattern(9, 9));
+#if !defined(_WIN32) && !defined(__APPLE__)
+    add("z", pattern(9, 9));  // not on Windows or macOS: their default filesystems fold the case, "z" would be "Z"
+#endif
     add("deep/er/and/deeper/file.zs", pattern(70, 10));
     fs::create_directories(t / "Empty" / "Folder");  // not in the pack
 

@@ -32,6 +32,9 @@ const USER: &str = "alex";
 const PASSWORD: &str = "first-app-password-4711";
 const SECOND: &str = "second-app-password-8142";
 const THIRD: &str = "third-app-password-5593";
+const DROPBOX_URL: &str = "https://dropbox.test/oauth2/authorize?pending=1";
+const DROPBOX_CODE: &str = "dropbox-code-7731";
+const DROPBOX_TOKEN: &str = "dropbox-refresh-token-9042";
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -147,6 +150,8 @@ struct FakeConnector {
     offline: Arc<AtomicBool>,
     fail_mark_puts: Arc<AtomicUsize>,
     stall: Arc<AtomicBool>,
+    /// A Dropbox sign-in was started and is waiting for its code.
+    dropbox_started: AtomicBool,
 }
 
 impl Connector for FakeConnector {
@@ -165,7 +170,13 @@ impl Connector for FakeConnector {
         else {
             return Ok(None);
         };
-        let account = creds::account(&config.server, &config.user).unwrap();
+        let dropbox = config.server == "dropbox";
+        let account = if dropbox {
+            save_relay::service::token_account(save_relay::service::Service::Dropbox, &config.user)
+                .unwrap()
+        } else {
+            creds::account(&config.server, &config.user).unwrap()
+        };
         let Some(secret) = creds
             .get(&account)
             .map_err(|e| Error::Saves(e.to_string()))?
@@ -174,7 +185,7 @@ impl Connector for FakeConnector {
         };
         let gate = Gate {
             inner: self.remote.clone(),
-            password_ok: secret.expose() == *self.accepted.lock().unwrap(),
+            password_ok: dropbox || secret.expose() == *self.accepted.lock().unwrap(),
             broken: self.broken.clone(),
             offline: self.offline.clone(),
             fail_mark_puts: self.fail_mark_puts.clone(),
@@ -183,6 +194,46 @@ impl Connector for FakeConnector {
         Ok(Some(
             SaveRelay::new(Arc::new(gate), store, config.device).with_root(config.root),
         ))
+    }
+
+    fn dropbox_start(
+        &self,
+        _dirs: &AppDirs,
+        _creds: &dyn CredentialStore,
+    ) -> acnh_core::Result<String> {
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(Error::Saves("Dropbox could not be reached".into()));
+        }
+        self.dropbox_started.store(true, Ordering::SeqCst);
+        Ok(DROPBOX_URL.into())
+    }
+
+    fn dropbox_finish(
+        &self,
+        code: &str,
+        dirs: &AppDirs,
+        creds: &dyn CredentialStore,
+    ) -> acnh_core::Result<()> {
+        if !self.dropbox_started.swap(false, Ordering::SeqCst) || code != DROPBOX_CODE {
+            return Err(Error::Saves("Dropbox refused the code".into()));
+        }
+        // What `acnh_core::relay::finish_sign_in` leaves: the token in the credential store
+        // under the service's account, the config naming the service.
+        let account =
+            save_relay::service::token_account(save_relay::service::Service::Dropbox, "me")
+                .map_err(|e| Error::Saves(e.to_string()))?;
+        creds
+            .set(&account, &Secret::new(DROPBOX_TOKEN))
+            .map_err(|e| Error::Saves(e.to_string()))?;
+        LocalStore::new(dirs.clone())
+            .save_config(&Config {
+                format: save_relay::local::FORMAT,
+                server: "dropbox".into(),
+                user: "me".into(),
+                root: save_relay::cli::DEFAULT_ROOT.to_string(),
+                device: save_relay::layout::device_slug(relay::DEVICE),
+            })
+            .map_err(|e| Error::Saves(e.to_string()))
     }
 
     fn setup(
@@ -220,10 +271,12 @@ enum Shown {
     Conflict(SaveCard, SaveCard),
     Held(String, String),
     Blocked(Blocked),
+    DropboxCode(String),
 }
 
 #[derive(Debug)]
 enum Reply {
+    Code(Option<String>),
     SignIn(SignInAnswer),
     Keep(Keep),
     Held(HeldAnswer),
@@ -290,6 +343,16 @@ impl Prompt for ChannelPrompt {
                 SignInAnswer::Cancel
             }
             None => SignInAnswer::Cancel,
+        }
+    }
+    fn dropbox_code(&self, url: &str) -> Option<String> {
+        match self.ask(Shown::DropboxCode(url.into())) {
+            Some(Reply::Code(code)) => code,
+            Some(other) => {
+                self.wrong(other);
+                None
+            }
+            None => None,
         }
     }
     fn conflict(&self, server: &SaveCard, local: &SaveCard) -> Keep {
@@ -361,6 +424,7 @@ impl Fx {
                 offline: Arc::new(AtomicBool::new(false)),
                 fail_mark_puts: Arc::new(AtomicUsize::new(0)),
                 stall: Arc::new(AtomicBool::new(false)),
+                dropbox_started: AtomicBool::new(false),
             },
             remote,
             creds: Creds {
@@ -1522,4 +1586,147 @@ fn a_final_push_inside_the_bound_is_done_and_clears_the_mark() {
     });
     assert_eq!(outcome, Bounded::Done);
     assert!(!fx.roots.dirs().data.join("push-waiting").exists());
+}
+
+// ---- Dropbox on the iPad (issue #361) ---------------------------------------------------------
+
+fn dropbox_config(fx: &Fx) -> Option<Config> {
+    LocalStore::new(fx.roots.dirs()).load_config().unwrap()
+}
+
+#[test]
+fn the_first_start_can_sign_in_to_dropbox_with_the_code_flow() {
+    let fx = Fx::new("dropbox");
+    island(&fx.saves(), "v1");
+    run(&fx, |game| {
+        let Shown::SignIn(form) = game.shown() else {
+            panic!("expected the sign-in form")
+        };
+        assert!(form.allow_not_now);
+        game.reply(Reply::SignIn(SignInAnswer::Dropbox));
+        let Shown::DropboxCode(url) = game.shown() else {
+            panic!("expected the code screen")
+        };
+        assert_eq!(url, DROPBOX_URL);
+        assert!(!game.returned());
+        game.reply(Reply::Code(Some(DROPBOX_CODE.into())));
+        game.finish();
+    });
+    let config = dropbox_config(&fx).expect("save sync is set up");
+    assert_eq!(config.server, "dropbox");
+    let account =
+        save_relay::service::token_account(save_relay::service::Service::Dropbox, "me").unwrap();
+    assert_eq!(
+        fx.creds.get(&account).unwrap().unwrap().expose(),
+        DROPBOX_TOKEN
+    );
+    // The refresh token is only in the credential store, never in a file or the log.
+    assert!(!fx.all_text().contains(DROPBOX_TOKEN));
+    assert!(!fx.log_text().contains(DROPBOX_TOKEN));
+    assert!(!fx.log_text().contains(DROPBOX_CODE));
+}
+
+#[test]
+fn backing_out_of_the_dropbox_code_screen_returns_to_the_form_and_sets_nothing_up() {
+    let fx = Fx::new("dropbox-back");
+    island(&fx.saves(), "v1");
+    run(&fx, |game| {
+        let Shown::SignIn(_) = game.shown() else {
+            panic!("expected the sign-in form")
+        };
+        game.reply(Reply::SignIn(SignInAnswer::Dropbox));
+        let Shown::DropboxCode(_) = game.shown() else {
+            panic!("expected the code screen")
+        };
+        game.reply(Reply::Code(None));
+        let Shown::SignIn(form) = game.shown() else {
+            panic!("expected the form again")
+        };
+        assert!(form.allow_not_now);
+        game.reply(Reply::SignIn(SignInAnswer::NotNow));
+        game.finish();
+    });
+    assert!(dropbox_config(&fx).is_none());
+}
+
+#[test]
+fn a_refused_dropbox_code_and_an_unreachable_dropbox_show_the_form_again_with_the_reason() {
+    let fx = Fx::new("dropbox-refused");
+    island(&fx.saves(), "v1");
+    run(&fx, |game| {
+        let Shown::SignIn(_) = game.shown() else {
+            panic!("expected the sign-in form")
+        };
+        game.reply(Reply::SignIn(SignInAnswer::Dropbox));
+        let Shown::DropboxCode(_) = game.shown() else {
+            panic!("expected the code screen")
+        };
+        game.reply(Reply::Code(Some("wrong-code-1".into())));
+        let Shown::SignIn(form) = game.shown() else {
+            panic!("expected the form again")
+        };
+        let message = form.message.expect("why");
+        assert!(message.contains("refused"), "{message}");
+        assert!(!message.contains("wrong-code-1"), "{message}");
+        // Offline: the page cannot start, the form says so.
+        fx.connector.offline.store(true, Ordering::SeqCst);
+        game.reply(Reply::SignIn(SignInAnswer::Dropbox));
+        let Shown::SignIn(form) = game.shown() else {
+            panic!("expected the form again")
+        };
+        assert!(form.message.expect("why").contains("could not be reached"));
+        fx.connector.offline.store(false, Ordering::SeqCst);
+        // Then Dropbox again, and the right code.
+        game.reply(Reply::SignIn(SignInAnswer::Dropbox));
+        let Shown::DropboxCode(_) = game.shown() else {
+            panic!("expected the code screen")
+        };
+        game.reply(Reply::Code(Some(DROPBOX_CODE.into())));
+        game.finish();
+    });
+    assert_eq!(dropbox_config(&fx).unwrap().server, "dropbox");
+}
+
+#[test]
+fn nextcloud_still_works_beside_dropbox() {
+    // The same form: choosing Nextcloud (Submit) sets up the app password as before.
+    let fx = Fx::new("dropbox-nextcloud");
+    island(&fx.saves(), "v1");
+    run(&fx, |game| {
+        let Shown::SignIn(_) = game.shown() else {
+            panic!("expected the sign-in form")
+        };
+        game.reply(submit(PASSWORD));
+        game.finish();
+    });
+    assert_eq!(dropbox_config(&fx).unwrap().server, SERVER);
+}
+
+#[test]
+fn a_lost_dropbox_token_asks_for_a_dropbox_sign_in_again() {
+    let fx = Fx::new("dropbox-again");
+    island(&fx.saves(), "v1");
+    // Set up as Dropbox, then the token is gone (the Keychain item was removed).
+    fx.connector.dropbox_started.store(true, Ordering::SeqCst);
+    fx.connector
+        .dropbox_finish(DROPBOX_CODE, &fx.roots.dirs(), &fx.creds)
+        .unwrap();
+    let account =
+        save_relay::service::token_account(save_relay::service::Service::Dropbox, "me").unwrap();
+    fx.creds.delete(&account).unwrap();
+    run(&fx, |game| {
+        // The config names Dropbox but its token is gone: the form comes back for Dropbox.
+        let Shown::SignIn(form) = game.shown() else {
+            panic!("expected the sign-in form")
+        };
+        assert_eq!(form.server, "dropbox");
+        assert!(!form.allow_not_now);
+        assert!(form.message.expect("why").contains("Dropbox"));
+        game.reply(Reply::SignIn(SignInAnswer::Dropbox));
+        let Shown::DropboxCode(_) = game.shown() else {
+            panic!("expected the code screen")
+        };
+        game.reply(Reply::Code(Some(DROPBOX_CODE.into())));
+        game.finish();
+    });
 }

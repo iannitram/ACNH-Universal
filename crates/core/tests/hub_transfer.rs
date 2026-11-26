@@ -572,6 +572,46 @@ fn newest_matching_target_is_selected_by_publication_time() {
 }
 
 #[test]
+fn unreadable_or_invalid_newer_bundle_text_does_not_block_a_good_build() {
+    let folders = Folders::new();
+    let expected = publish(&folders, "good", Os::Mac, 123);
+    let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    File::options()
+        .write(true)
+        .open(folders.path("builds/good/bundle.txt"))
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(old_time))
+        .unwrap();
+    fs::create_dir(folders.path("builds/garbage")).unwrap();
+    fs::write(
+        folders.path("builds/garbage/bundle.txt"),
+        b"not a bundle \xff",
+    )
+    .unwrap();
+    fs::create_dir(folders.path("builds/oversized")).unwrap();
+    fs::write(
+        folders.path("builds/oversized/bundle.txt"),
+        vec![b'x'; 8 << 20],
+    )
+    .unwrap();
+    // A symlinked manifest needs no special rights only on Unix.
+    #[cfg(unix)]
+    {
+        fs::create_dir(folders.path("builds/linked")).unwrap();
+        std::os::unix::fs::symlink(
+            folders.path("builds/good/bundle.txt"),
+            folders.path("builds/linked/bundle.txt"),
+        )
+        .unwrap();
+    }
+    fs::create_dir(folders.path("builds/dirmanifest")).unwrap();
+    fs::create_dir(folders.path("builds/dirmanifest/bundle.txt")).unwrap();
+    let (served, pulled, _) = transfer(&folders, &peer(), &peer(), Fault::None);
+    assert_eq!(served.unwrap(), expected);
+    assert_eq!(pulled.unwrap(), expected);
+}
+
+#[test]
 fn authenticated_wrong_file_hash_leaves_old_install_and_can_retry() {
     let folders = Folders::new();
     folders.old_install();

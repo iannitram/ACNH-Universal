@@ -133,6 +133,7 @@ pub fn button_nav(button: Button) -> Option<Nav> {
         Button::South => Some(Nav::Accept),
         Button::East => Some(Nav::Back),
         Button::Start => Some(Nav::Menu),
+        Button::Select => Some(Nav::Quit),
         Button::LeftTrigger => Some(Nav::Prev),
         Button::RightTrigger => Some(Nav::Next),
         _ => None,
@@ -279,7 +280,7 @@ pub fn poll_nav(gilrs: &mut Gilrs, stick: &mut Stick, devices: &mut Devices) -> 
 }
 
 /// The action for a key press, from the text of Slint's key event: arrows, Enter or Space
-/// (Accept), Esc or Backspace (Back), F1 (Menu), Page Up and Page Down (Prev, Next).
+/// (Accept), Esc or Backspace (Back), F1 (Menu), F10 (Quit), Page Up and Page Down (Prev, Next).
 pub fn key_nav(text: &str) -> Option<Nav> {
     let mut chars = text.chars();
     let (Some(key), None) = (chars.next(), chars.next()) else {
@@ -295,6 +296,7 @@ pub fn key_nav(text: &str) -> Option<Nav> {
         (Key::Escape, Nav::Back),
         (Key::Backspace, Nav::Back),
         (Key::F1, Nav::Menu),
+        (Key::F10, Nav::Quit),
         (Key::PageUp, Nav::Prev),
         (Key::PageDown, Nav::Next),
     ];
@@ -583,6 +585,8 @@ mod tests {
         assert_eq!(button_nav(Button::South), Some(Nav::Accept));
         assert_eq!(button_nav(Button::East), Some(Nav::Back));
         assert_eq!(button_nav(Button::Start), Some(Nav::Menu));
+        assert_eq!(button_nav(Button::Select), Some(Nav::Quit));
+        assert_eq!(key_nav(&char::from(Key::F10).to_string()), Some(Nav::Quit));
         assert_eq!(button_nav(Button::DPadLeft), Some(Nav::Left));
         assert_eq!(button_nav(Button::DPadRight), Some(Nav::Right));
         assert_eq!(button_nav(Button::DPadUp), Some(Nav::Up));

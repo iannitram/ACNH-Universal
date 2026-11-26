@@ -40,7 +40,7 @@ const nx::ModuleInfo* game_module(const char* name);
 [[noreturn]] void game_longjmp(uint64_t buf, uint64_t val);
 #ifndef __ANDROID__
 std::string load_game(const std::string& folder);  // "" when loaded, else why not
-bool load_game_or_explain();  // the data root's; false after showing why it is not playable
+bool load_game_or_explain();  // the game root's (NX_GAME_ROOT, else the data root); false after showing why it is not playable
 void game_set_variant(bool on, uint64_t lo, uint64_t hi);  // Windows: the game DLL's 60 FPS switch (game_abi.cpp)
 #endif
 #endif

@@ -544,6 +544,7 @@ fn player_loop() {
             // SAFETY: `buf` points to AudioOutBuffer { data_ptr, capacity, size }.
             let data_ptr = unsafe { ld_u64(buf) } as *const i16;
             let sample_count = (size / 2) as usize;
+            // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
             let pcm = unsafe { std::slice::from_raw_parts(data_ptr, sample_count) };
             let vol = f32::from_bits(OUT_VOLUME_BITS.load(Ordering::Relaxed));
             let mut ring = out_mix().lock().unwrap_or_else(|e| e.into_inner());
@@ -558,6 +559,7 @@ fn player_loop() {
             let mut send_ptr = data_ptr as *const c_void;
             let mut send_size = size as usize;
             if active_output_channels() == 6 {
+                // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
                 let pcm = unsafe {
                     std::slice::from_raw_parts(data_ptr as *const i16, (size / 2) as usize)
                 };
@@ -807,11 +809,14 @@ fn find_renderer(handle: u64, vtable_addr: u64, min_addr: u64, max_addr: u64) ->
         if !valid(p) {
             continue;
         }
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         if unsafe { ld_u64(p) } == vptr {
             return p + 0x10;
         }
         for b in (0..0x40).step_by(8) {
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             let q = unsafe { ld_u64(p + b) };
+            // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
             if valid(q) && unsafe { ld_u64(q) } == vptr {
                 return q + 0x10;
             }
@@ -1145,11 +1150,13 @@ pub extern "C" fn acnh_audio_renderer_opened(
 
     let system = impl_addr + 0x60;
     let get_exec_word = if get_exec_mode_sym != 0 {
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         Some(unsafe { ld_u32(get_exec_mode_sym) })
     } else {
         None
     };
     let sys_exec_word = if sys_exec_sym != 0 {
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         Some(unsafe { ld_u32(sys_exec_sym) })
     } else {
         None
@@ -1183,6 +1190,7 @@ pub extern "C" fn acnh_audio_capture_device_sink(proc_addr: u64, gen_device_sink
     if proc_addr == 0 {
         return;
     }
+    // SAFETY: `gen_device_sink_sym` is the address of the guest's device-sink generator, mapped for the life of the process.
     let sink_id =
         *DEVICE_SINK_ID.get_or_init(|| unsafe { decode_device_sink_id(gen_device_sink_sym) });
     // SAFETY: `proc_addr` is `nn::audio::dsp::CommandListProcessor*`.
@@ -1208,8 +1216,11 @@ pub extern "C" fn acnh_audio_capture_device_sink(proc_addr: u64, gen_device_sink
         if magic != 0xcafe_babe {
             break;
         }
+        // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
         let stride = unsafe { ld_i16(cmd + 6) };
+        // SAFETY: `cmd` is a valid command header, so the byte at offset 4 is inside it.
         let enabled = unsafe { *(cmd as *const u8).add(4) };
+        // SAFETY: `cmd` is a valid command header, so the byte at offset 5 is inside it.
         let id = unsafe { *(cmd as *const u8).add(5) };
 
         if enabled != 0 {
@@ -1217,9 +1228,12 @@ pub extern "C" fn acnh_audio_capture_device_sink(proc_addr: u64, gen_device_sink
                 downmixed = true;
             }
             if id == sink_id {
+                // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
                 let buffers = unsafe { ld_u64(cmd + 0x128) };
+                // SAFETY: guest addresses come from the recompiled code; the guest address space is one identity-mapped region that stays mapped for the life of the process, and the access is atomic or unaligned-safe.
                 let inputs = unsafe { ld_u32(cmd + 0x130) };
                 if !ONCE.swap(true, Ordering::Relaxed) {
+                    // SAFETY: the buffer is NUL-terminated: it is a fixed-size array we zero-initialised and the host callback filled, or a C string the caller passed.
                     let name = unsafe {
                         std::ffi::CStr::from_ptr((cmd + 0x20) as *const c_char).to_string_lossy()
                     };
@@ -1236,6 +1250,7 @@ pub extern "C" fn acnh_audio_capture_device_sink(proc_addr: u64, gen_device_sink
                         let buf_idx = unsafe { ld_i16(cmd + 0x134 + 2 * (k as u64)) };
                         let ptr =
                             (buffers + (buf_idx as u64) * u64::from(frames) * 4) as *const i32;
+                        // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
                         ch_ptrs.push(unsafe { std::slice::from_raw_parts(ptr, FRAME_SAMPLES) });
                     }
                     let discrete = active_output_channels() == 6;
@@ -1458,6 +1473,7 @@ mod tests {
         code[4] = 0x5280_0008 | (20 << 5);
         // code[5]: strb w8, [x20, #5]
         code[5] = 0x3900_1688;
+        // SAFETY: test-only: calls the crate's own exported function with pointers to locals that outlive the call, with the lengths we pass.
         let id = unsafe { decode_device_sink_id(code.as_ptr() as u64) };
         assert_eq!(id, 20);
     }

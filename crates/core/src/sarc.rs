@@ -346,14 +346,18 @@ pub fn check(path: &Path) -> Result<Endian> {
 
 /// Rewrite every `.sarc.zs` of a mod's RomFS the way the game reads it. Files that already
 /// record their size in the zstd frame and are big-endian are left alone; the rest go through
-/// [`rewrite`] in place. Returns how many were rewritten.
+/// [`rewrite`] in place. Returns how many were rewritten. Fails, naming `zstd`, when there are
+/// archives to check and `zstd` cannot be run.
 pub fn fix_archives(romfs: &Path) -> Result<usize> {
     let mut files = Vec::new();
     collect_sarc_zs(romfs, &mut files)?;
     files.sort();
-    if !files.is_empty() && Command::new("zstd").arg("-V").output().is_err() {
-        eprintln!("zstd not found: the mod archives are left as they are");
-        return Ok(0);
+    if !files.is_empty() {
+        if let Err(error) = Command::new("zstd").arg("-V").output() {
+            return Err(Error::Io(format!(
+                "zstd cannot be run ({error}): the mod archives cannot be fixed; install zstd"
+            )));
+        }
     }
     let mut fixed = 0;
     for path in files {
