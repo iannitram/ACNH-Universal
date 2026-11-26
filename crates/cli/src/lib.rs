@@ -6,18 +6,23 @@
 //! acnh-universal build  --game <folder> [--target <os>] [--out <folder>]
 //! acnh-universal play   [--profile <id>] [--keep relay|here] [--anyway]
 //! acnh-universal sync   setup --server <url> --user <name> | sign-in gdrive|dropbox | status | off
+//!                       | push [--keep relay|here]
 //! acnh-universal steam-add
-//! acnh-universal hub    serve|pair|pull
+//! acnh-universal hub    serve|pair|pull|report
 //! acnh-universal fleet
+//! acnh-universal cloud-upload --os <os> --install <folder> --prepared <folder>
+//! acnh-universal help | --help
 //! ```
 //!
 //! Every command prints a plain message. A runtime error exits 1; with `--json` it prints
-//! `{"code":"<Error::code>"}` instead. An unknown command exits 2 with the usage.
+//! `{"code":"<Error::code>"}` instead. An unknown command exits 2 with the usage; `--help` exits 0.
 //!
 //! `play` never answers a save conflict on its own: a conflict exits 3 (unless `--keep relay`
 //! or `--keep here` was given), a held island exits 4 (unless `--anyway`), and save sync that
-//! is set up but cannot be reached exits 5. None of the three starts the game. A push that conflicts after the game ran exits 6 (settle
-//! it with `sync push --keep relay|here`). A game that quits with a non-zero code makes `play`
+//! is set up but cannot be reached exits 5. None of the three starts the game. A push that
+//! conflicts after the game ran exits 6, whatever `--keep` says (settle it with
+//! `sync push --keep relay|here`); a push that finds the relay unreachable after the game ran
+//! exits 5 (the island stays here). `sync status` exits 5 when the relay cannot be reached. A game that quits with a non-zero code makes `play`
 //! exit 1 and print that code, so its own code never looks like one of these.
 
 #![forbid(unsafe_code)]
@@ -183,9 +188,6 @@ fn parse(args: &[String]) -> std::result::Result<Options, String> {
     if options.command.is_empty() && !options.help {
         return Err(USAGE.to_owned());
     }
-    if matches!(options.command.as_str(), "check" | "build") && options.game.is_none() {
-        return Err(format!("--game <folder> is needed\n{USAGE}"));
-    }
     Ok(options)
 }
 
@@ -279,6 +281,11 @@ pub fn run(args: Vec<String>, cx: &mut Context<'_>) -> i32 {
         println!("{USAGE}");
         return 0;
     }
+    // Checked after `--help`, so `build --help` and `check --help` print the usage and exit 0.
+    if matches!(options.command.as_str(), "check" | "build") && options.game.is_none() {
+        println!("--game <folder> is needed\n{USAGE}");
+        return 2;
+    }
 
     let result = match options.command.as_str() {
         "check" => check(&options),
@@ -350,15 +357,12 @@ fn build(options: &Options) -> Result<i32> {
         None => Os::current(),
     };
     let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
-    // The Mac and iPhone builds hold the recompiled game: by default they are made in the
-    // data root's `prepared/` folder, never in a git work tree.
-    let out = options.out.clone().unwrap_or_else(|| {
-        if matches!(target, Os::Mac | Os::Ios) {
-            AppDirs::new(&vars).data_root().join("prepared")
-        } else {
-            repo_root().join("private").join("acnh")
-        }
-    });
+    // Every build holds the recompiled game: by default it is made in the data root's
+    // `prepared/` folder, never in a git work tree (nor at a path baked in at compile time).
+    let out = options
+        .out
+        .clone()
+        .unwrap_or_else(|| default_build_out(&vars));
     let config_path = AppDirs::new(&vars).data_root().join("config.ini");
     let config = match std::fs::read_to_string(&config_path) {
         Ok(text) => acnh_core::config::Config::parse(&text)?,
@@ -412,6 +416,11 @@ fn build(options: &Options) -> Result<i32> {
     let player = prepare::assemble(target, &out.join("build"), &install)?;
     println!("assembled {}", player.display());
     Ok(0)
+}
+
+/// Where `build` makes its output without `--out`: the data root's `prepared/` folder.
+fn default_build_out(vars: &Vars) -> PathBuf {
+    AppDirs::new(vars).data_root().join("prepared")
 }
 
 fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
@@ -475,6 +484,7 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let guard = Guard {
         inner: relay,
         keep: options.keep,
+        answer_push: false,
         anyway: options.anyway,
         backups: &backups,
         stopped: RefCell::new(None),
@@ -491,7 +501,14 @@ fn play(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
             report_sync(cx.out, "push", &played.pushed)?;
             writeln!(cx.out, "game exited with {}", played.exit_code)?;
             // The game's own code never shares a number with the codes above.
-            Ok(if played.exit_code == 0 { 0 } else { 1 })
+            if played.exit_code != 0 {
+                Ok(1)
+            } else if played.pushed == Sync::Offline {
+                // The island stays here; the same state `sync push` answers with 5.
+                Ok(fail(options, cx, &Error::RelayUnreachable, 5))
+            } else {
+                Ok(0)
+            }
         }
         Err(error) => match guard.stopped.take() {
             Some(Stop::Conflict {
@@ -617,6 +634,9 @@ pub(crate) enum Stop {
 pub(crate) struct Guard<'a> {
     pub(crate) inner: &'a dyn Relay,
     pub(crate) keep: Option<Keep>,
+    /// Whether `keep` also answers a push conflict. `play` leaves it off: a conflict after the
+    /// game ran is never answered on its own (exit 6, settled with `sync push --keep`).
+    pub(crate) answer_push: bool,
     pub(crate) anyway: bool,
     pub(crate) backups: &'a Path,
     pub(crate) stopped: RefCell<Option<Stop>>,
@@ -626,8 +646,12 @@ type Retry<'a> = &'a dyn Fn(Keep) -> Result<Sync>;
 
 impl Guard<'_> {
     fn settle(&self, save_dir: &Path, step: Step, first: Sync, retry: Retry<'_>) -> Result<Sync> {
+        let keep = match step {
+            Step::Push if !self.answer_push => None,
+            _ => self.keep,
+        };
         match first {
-            Sync::Conflict { server, local, .. } => match self.keep {
+            Sync::Conflict { server, local, .. } => match keep {
                 Some(keep) => {
                     if keep == Keep::Server {
                         // The island here is about to be replaced: keep a copy of it first.
@@ -1026,10 +1050,6 @@ fn cloud_upload(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     Ok(0)
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
-}
-
 struct RelayOff;
 
 impl Relay for RelayOff {
@@ -1055,5 +1075,24 @@ impl Game for Player {
                 Error::Io(format!("cannot start {}: {error}", self.program.display()))
             })?;
         Ok(status.code().unwrap_or(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_build_folder_is_under_the_data_root() {
+        let vars = Vars::from_lookup(Os::current(), |name| match name {
+            "HOME" | "USERPROFILE" => Some("/home/player".to_owned()),
+            "LOCALAPPDATA" | "APPDATA" => Some("/home/player/AppData".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let out = default_build_out(&vars);
+        assert!(out.starts_with(AppDirs::new(&vars).data_root()), "{out:?}");
+        assert!(out.ends_with("prepared"));
+        assert!(!out.starts_with(env!("CARGO_MANIFEST_DIR")));
     }
 }
