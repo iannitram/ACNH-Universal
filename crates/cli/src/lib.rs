@@ -1085,7 +1085,7 @@ mod tests {
         let (server, _) = listener.accept().unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let vars = Vars::from_lookup(Os::current(), |name| match name {
-            "HOME" => Some("/home/player".to_owned()),
+            "HOME" | "USERPROFILE" => Some("/home/player".to_owned()),
             "LOCALAPPDATA" | "APPDATA" => Some("/home/player/AppData".to_owned()),
             _ => None,
         })
@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn the_default_build_folder_is_under_the_data_root() {
         let vars = Vars::from_lookup(Os::current(), |name| match name {
-            "HOME" => Some("/home/player".to_owned()),
+            "HOME" | "USERPROFILE" => Some("/home/player".to_owned()),
             "LOCALAPPDATA" | "APPDATA" => Some("/home/player/AppData".to_owned()),
             _ => None,
         })
