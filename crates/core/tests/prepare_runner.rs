@@ -60,6 +60,8 @@ struct Fake {
     ini: Option<&'static str>,
     /// The source folder `root` answers with (the checkout when `None`).
     source_dir: Option<PathBuf>,
+    /// The tools under the source folder are gone or out of date (the record in `out` stands).
+    tools_lost: bool,
 }
 
 /// A script call without the `env PATH=...` a Mac that has Homebrew puts before it.
@@ -120,7 +122,12 @@ impl ScriptRunner for Fake {
     }
 
     fn tools(&mut self, _req: &Request) -> Result<(), Error> {
+        self.tools_lost = false;
         Ok(())
+    }
+
+    fn tools_current(&self) -> bool {
+        !self.tools_lost
     }
 
     fn game(&mut self, _req: &Request) -> Result<(), Error> {
@@ -795,6 +802,34 @@ fn a_complete_build_folder_starts_no_script() {
     .unwrap();
     assert!(seen.is_empty());
     assert_eq!(starts(&req), 0);
+}
+
+#[test]
+fn the_tools_stage_reruns_when_the_tools_are_gone_though_its_record_stands() {
+    let req = request("tools-lost", Os::Linux);
+    std::fs::write(req.out.join(".prepare-tools.json"), "{}").unwrap();
+    for stage in STAGES {
+        make_completed_stage(&req.out, stage);
+    }
+    let mut fake = stand_in_fake();
+    fake.tools_lost = true;
+    let mut seen = vec![];
+    prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap();
+    assert_eq!(seen, vec![Stage::Tools]);
+    // Once it has run, the next Prepare finds them and runs nothing.
+    let mut again = vec![];
+    prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
+        again.push(s)
+    })
+    .unwrap();
+    assert!(again.is_empty());
+}
+
+fn stand_in_fake() -> Fake {
+    Fake::default()
 }
 
 #[test]
