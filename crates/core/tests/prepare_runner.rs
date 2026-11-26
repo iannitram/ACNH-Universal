@@ -5,8 +5,8 @@ use acnh_core::gamefolder::GameFolder;
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{
     delivery_folder, delivery_subfolder, install_mod_archive, install_mods, prepare_installed,
-    prepare_with, recomp_hash, rust_version, speedfix_args, speedfix_patch, step, toolchain_with,
-    Missing, ProcessRunner, Request, ScriptRunner, Step,
+    prepare_with, recomp_hash, recomp_hash_with, rust_version, speedfix_args, speedfix_patch, step,
+    toolchain_with, Missing, ProcessRunner, Request, ScriptRunner, Step,
 };
 use acnh_core::recipe::{Hub, Stage, STAGES};
 use acnh_core::version::Version;
@@ -378,6 +378,42 @@ fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
     assert!(paths.contains(&"libacnh_game.so"));
     assert!(paths.contains(&"romfs.pak"));
     assert!(paths.contains(&"spirv.pak"));
+}
+
+#[test]
+fn android_delivery_rebuilds_a_truncated_pack_whose_key_record_is_missing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut req = request("android-truncated", Os::Android);
+    let delivery_root = tmp.path().join("Dropbox/_transfers/ACNH-Universal");
+    req.delivery = Some(delivery_root.join("android"));
+    std::fs::create_dir_all(&delivery_root).unwrap();
+    let romfs = req.out.join("game-romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    std::fs::write(romfs.join("a.bin"), b"romfs-bytes").unwrap();
+    req.game.romfs = romfs;
+    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
+    std::fs::write(req.out.join("spirv/a.spv"), b"spv-bytes").unwrap();
+    std::fs::create_dir_all(req.out.join("analysis")).unwrap();
+    std::fs::write(req.out.join("analysis/main.bin"), b"main-bytes").unwrap();
+    std::fs::write(
+        req.out.join("version.ini"),
+        "build_id = FCD2BB238ABE99E925B4E452DF1F41F1\n",
+    )
+    .unwrap();
+    std::fs::write(req.out.join("libacnh_game.so"), b"elf-bytes").unwrap();
+    let run = |req: &Request| {
+        let mut fake = Fake::default();
+        fake.tools.push(("git", "false\n"));
+        prepare_with(req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    };
+    run(&req);
+    let pak = req.out.join("romfs.pak");
+    let whole = std::fs::read(&pak).unwrap();
+    // A kill mid-write: the record is removed before the work, the pack is cut short.
+    std::fs::remove_file(req.out.join(".romfs.pak.key")).unwrap();
+    std::fs::write(&pak, &whole[..whole.len() / 2]).unwrap();
+    run(&req);
+    assert_eq!(std::fs::read(&pak).unwrap(), whole);
 }
 
 #[test]
@@ -2056,16 +2092,21 @@ fn recompile_with_matching_hash_stays_cached() {
 }
 
 #[test]
-fn recompile_hash_changes_when_recomp_python_file_changes() {
+fn recompile_hash_changes_with_the_emitter_fingerprint_and_the_regcache_switches() {
+    let none = |_: &str| None::<String>;
+    let h1 = recomp_hash_with("emitter-1", none);
+    let h2 = recomp_hash_with("emitter-2", none);
+    assert_ne!(h1, h2);
+    let switched = |name: &str| (name == "NX_REGCACHE").then(|| "0".to_owned());
+    assert_ne!(h1, recomp_hash_with("emitter-1", switched));
+    // The old python files under the source are no longer an input.
     let source = std::env::temp_dir().join(format!("acnh-recomp-src-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&source);
     std::fs::create_dir_all(source.join("recomp")).unwrap();
     std::fs::write(source.join("recomp/emit.py"), "def emit(): return 1\n").unwrap();
-
-    let h1 = recomp_hash(&source).unwrap();
+    let before = recomp_hash(&source).unwrap();
     std::fs::write(source.join("recomp/emit.py"), "def emit(): return 2\n").unwrap();
-    let h2 = recomp_hash(&source).unwrap();
-    assert_ne!(h1, h2);
+    assert_eq!(before, recomp_hash(&source).unwrap());
     let _ = std::fs::remove_dir_all(&source);
 }
 

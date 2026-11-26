@@ -203,8 +203,48 @@ pub(crate) fn ipc_connect_ptr(port: *const c_char, out_handle: Option<&mut u64>)
     RC_OK
 }
 
-pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u64) -> u32 {
+/// Bytes of the guest message area a HIPC request/reply may use.
+const IPC_MSG_AREA: u64 = 0x100;
+
+/// Smallest message area that still holds a HIPC header (two words) plus the reply code.
+const IPC_MIN_MSG_AREA: u64 = 0x10;
+
+/// End offset, in bytes from the message start, of a TIPC reply: header, optional special
+/// header and handles (`special_words`), the result word, then the payload rounded to words.
+pub(crate) fn tipc_reply_end(special_words: usize, out_len: usize) -> u64 {
+    ((2 + special_words + 1) * 4 + ((out_len + 3) & !3)) as u64
+}
+
+/// End offset, in bytes from the message start, of a CMIF reply written at `buf`: header,
+/// special header and handles (`special_words`), the 16-byte aligned raw data (a domain
+/// header first when `domain_hdr`), the SFCO header, the payload rounded to words and the
+/// returned domain object ids.
+pub(crate) fn cmif_reply_end(
+    buf: u64,
+    special_words: usize,
+    domain_hdr: bool,
+    out_len: usize,
+    n_obj_ids: usize,
+) -> u64 {
+    let rawo = (buf + ((2 + special_words) * 4) as u64 + 15) & !15u64;
+    let o = rawo + if domain_hdr { 16 } else { 0 };
+    o + 16 + ((out_len + 3) & !3) as u64 + 4 * n_obj_ids as u64 - buf
+}
+
+/// Message area for an IPC request: the guest-supplied size, never above the HIPC area.
+pub(crate) fn ipc_msg_capacity(size: u64) -> u64 {
+    size.min(IPC_MSG_AREA)
+}
+
+pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u64) -> u32 {
     let _il = IPC_LOCK.lock();
+    let cap = ipc_msg_capacity(size);
+    if cap < IPC_MIN_MSG_AREA {
+        host_log(&format!(
+            "ipc: message area of {size:#x} bytes is too small"
+        ));
+        return RC_OUT_OF_RANGE;
+    }
     let (sess_service, sess_domain, sess_dom) = {
         let map = sessions().lock().unwrap();
         let Some(sess) = map.get(&handle) else {
@@ -284,8 +324,21 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u
                 out_move_len += 1;
             }
         }
+        let special = if out_copy_len > 0 || out_move_len > 0 {
+            1 + out_copy_len + out_move_len
+        } else {
+            0
+        };
+        let end = tipc_reply_end(special, out_len);
         // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
-        unsafe { std::ptr::write_bytes(buf as *mut u8, 0, 0x100) };
+        unsafe { std::ptr::write_bytes(buf as *mut u8, 0, cap as usize) };
+        if end > cap {
+            host_log(&format!(
+                "ipc: {} tipc cmd {cmd} reply of {out_len:#x} bytes needs {end:#x} bytes but the message area is {cap:#x}",
+                service_name_str(sess_service)
+            ));
+            return RC_OUT_OF_RANGE;
+        }
         let has_special = out_copy_len > 0 || out_move_len > 0;
         let mut q = 2usize;
         if has_special {
@@ -345,7 +398,7 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u
         if domain_cmd == 2 {
             sess_dom.lock().unwrap().objects.remove(&domain_obj);
             // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
-            unsafe { std::ptr::write_bytes(buf as *mut u8, 0, 0x100) };
+            unsafe { std::ptr::write_bytes(buf as *mut u8, 0, cap as usize) };
             w[1] = 8;
             return RC_OK;
         }
@@ -495,8 +548,27 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, _size: u
         }
     }
 
+    let special = if out_copy_len > 0 || out_move_len > 0 {
+        1 + out_copy_len + out_move_len
+    } else {
+        0
+    };
+    let end = cmif_reply_end(
+        buf,
+        special,
+        is_dom && (hdr.msg_type == 4 || hdr.msg_type == 6),
+        out_len,
+        out_obj_ids.len(),
+    );
     // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
-    unsafe { std::ptr::write_bytes(buf as *mut u8, 0, 0x100) };
+    unsafe { std::ptr::write_bytes(buf as *mut u8, 0, cap as usize) };
+    if end > cap {
+        host_log(&format!(
+            "ipc: {} cmif cmd {cmd} reply of {out_len:#x} bytes needs {end:#x} bytes but the message area is {cap:#x}",
+            service_name_str(target)
+        ));
+        return RC_OUT_OF_RANGE;
+    }
     let has_special = out_copy_len > 0 || out_move_len > 0;
     let mut q = 2usize;
     if has_special {

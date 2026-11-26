@@ -23,6 +23,7 @@ pub const RC_OUT_OF_MEMORY: u32 = 0xD001;
 pub const RC_INVALID_HANDLE: u32 = 0xE401;
 pub const RC_TIMEOUT: u32 = 0xEA01;
 pub const RC_CANCELLED: u32 = 0xEC01;
+pub const RC_OUT_OF_RANGE: u32 = 0xDC01;
 pub const RC_INVALID_ENUM: u32 = 0xF001;
 pub const RC_IPC_DOMAIN_NOT_FOUND: u32 = 0xF601;
 pub const RC_INVALID_STATE: u32 = 0xFA01;
@@ -375,6 +376,26 @@ pub use diag::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipc_reply_end_math() {
+        // The largest TIPC and CMIF replies that fit with no handles.
+        assert_eq!(tipc_reply_end(0, 0xF4), 0x100);
+        assert!(tipc_reply_end(0, 0xF5) > 0x100);
+        assert_eq!(cmif_reply_end(0x1000, 0, false, 0xE0, 0), 0x100);
+        assert!(cmif_reply_end(0x1000, 0, false, 0xE1, 0) > 0x100);
+        // A domain header takes another 16 bytes.
+        assert_eq!(cmif_reply_end(0x1000, 0, true, 0xD0, 0), 0x100);
+        assert!(cmif_reply_end(0x1000, 0, true, 0xD1, 0) > 0x100);
+        // Handles lower the threshold.
+        assert!(tipc_reply_end(2, 0xF4) > 0x100);
+        // Worst case (16 copy + 16 move handles, domain, 0x100 payload, 16 ids).
+        assert_eq!(cmif_reply_end(0x1000, 1 + 32, true, 0x100, 16), 0x1F0);
+        // The user-buffer size is honoured but never raised above the HIPC area.
+        assert_eq!(ipc_msg_capacity(0x40), 0x40);
+        assert_eq!(ipc_msg_capacity(0x1000), 0x100);
+        assert_eq!(ipc_msg_capacity(0), 0);
+    }
 
     #[test]
     fn yield_backoff_matches_nxrt_table() {
