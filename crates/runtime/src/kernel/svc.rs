@@ -22,8 +22,7 @@ pub(crate) fn svc_arbitrate_lock(owner: u32, addr: u64, tag: u32) -> u32 {
         d.wait_tag = tag;
     }
     kstate()
-        .lock()
-        .unwrap()
+        .lock_or_recover()
         .mutex_waiters
         .push(Arc::clone(&self_t));
     block_thread(&self_t, -1);
@@ -174,8 +173,7 @@ pub(crate) fn svc_wait_for_address(addr: u64, wait_type: u32, value: i32, timeou
         d.wait_result = 0;
     }
     kstate()
-        .lock()
-        .unwrap()
+        .lock_or_recover()
         .addr_waiters
         .push(Arc::clone(&self_t));
     if !block_thread(&self_t, timeout) {
@@ -308,8 +306,7 @@ pub(crate) fn svc_wait_synchronization(
         return RC_INVALID_STATE;
     };
     kstate()
-        .lock()
-        .unwrap()
+        .lock_or_recover()
         .sync_waiters
         .push(Arc::clone(&self_t));
     struct LeaveGuard(Arc<KThread>);
@@ -414,8 +411,7 @@ pub(crate) fn new_thread(entry: u64, arg: u64, sp: u64, prio: i32, core: i32) ->
     {
         let _kl = KERNEL_LOCK.lock();
         kstate()
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .threads
             .insert(handle, Arc::clone(&t));
     }

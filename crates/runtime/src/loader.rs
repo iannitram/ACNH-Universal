@@ -151,8 +151,7 @@ static LAYOUT: OnceLock<Mutex<AcnhLoaderLayout>> = OnceLock::new();
 fn host() -> AcnhLoaderHost {
     *HOST
         .get_or_init(|| Mutex::new(AcnhLoaderHost::default()))
-        .lock()
-        .unwrap()
+        .lock_or_recover()
 }
 
 fn layout() -> AcnhLoaderLayout {
@@ -164,8 +163,7 @@ fn layout() -> AcnhLoaderLayout {
                 thunk_size: 0x10_0000,
             })
         })
-        .lock()
-        .unwrap()
+        .lock_or_recover()
 }
 
 fn cstr_or_empty<'a>(p: *const c_char) -> &'a str {
@@ -1320,8 +1318,7 @@ pub unsafe extern "C" fn acnh_loader_set_host(h: *const AcnhLoaderHost) {
     let val = unsafe { *h };
     *HOST
         .get_or_init(|| Mutex::new(AcnhLoaderHost::default()))
-        .lock()
-        .unwrap() = val;
+        .lock_or_recover() = val;
 }
 
 /// # Safety
@@ -1452,8 +1449,7 @@ pub unsafe extern "C" fn acnh_loader_register_variant(
     // SAFETY: `words` holds `2 * count` u32s (`(offset, word)` pairs).
     let slice = unsafe { std::slice::from_raw_parts(words, count * 2) };
     variants()
-        .lock()
-        .unwrap()
+        .lock_or_recover()
         .insert(name.to_owned(), slice.to_vec());
 }
 

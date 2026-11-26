@@ -55,8 +55,7 @@ static MONO_START: OnceLock<Instant> = OnceLock::new();
 fn host() -> AcnhPlatformHost {
     *HOST
         .get_or_init(|| Mutex::new(AcnhPlatformHost::default()))
-        .lock()
-        .unwrap()
+        .lock_or_recover()
 }
 
 fn host_log(msg: &str) {
@@ -111,8 +110,7 @@ pub unsafe extern "C" fn acnh_platform_set_host(h: *const AcnhPlatformHost) {
     let val = unsafe { *h };
     *HOST
         .get_or_init(|| Mutex::new(AcnhPlatformHost::default()))
-        .lock()
-        .unwrap() = val;
+        .lock_or_recover() = val;
 }
 
 // ---- Environment, Paths, and Window State ------------------------------------------------------

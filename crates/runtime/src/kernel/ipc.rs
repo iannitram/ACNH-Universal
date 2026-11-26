@@ -538,8 +538,7 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
 
     let mut out_obj_ids = Vec::new();
     let is_dom = sessions()
-        .lock()
-        .unwrap()
+        .lock_or_recover()
         .get(&handle)
         .is_some_and(|s| s.domain);
     for &o in &out_services[..out_services_len] {
