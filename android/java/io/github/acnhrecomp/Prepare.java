@@ -569,8 +569,8 @@ public class Prepare extends Activity {
     private void play(String folder) {
         PrepareService.phase = PrepareService.IDLE;
         getSystemService(NotificationManager.class).cancel(2);
+        Home.pendingInstall = folder;
         Intent h = new Intent(this, Home.class)
-                .putExtra("install_from", folder)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         startActivity(h);
         finish();

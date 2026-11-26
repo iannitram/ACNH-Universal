@@ -34,6 +34,9 @@ import java.util.List;
 import static io.github.acnhrecomp.Screen.t;
 
 public class Home extends Activity {
+    // The game folder Prepare hands over for the copy into <files>/game/ (#192); only in-process code sets it (#364).
+    static volatile String pendingInstall;
+
     static {
         System.loadLibrary("acnh");
     }
@@ -87,7 +90,10 @@ public class Home extends Activity {
             finish();
             return;
         }
-        String installFrom = getIntent().getStringExtra("install_from");
+        // The folder Prepare hands over (#364): taken from this process's own field, never from the starting intent,
+        // because Home is exported for the icon and any app could name a folder in an extra.
+        String installFrom = pendingInstall;
+        pendingInstall = null;
         if (installFrom != null && !installFrom.isEmpty()) {
             check(installFrom, false);
             return;
