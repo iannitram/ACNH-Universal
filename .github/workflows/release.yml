@@ -9,8 +9,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Only the publish job writes (it makes the draft release); the three build jobs only read.
 permissions:
-  contents: write
+  contents: read
 
 env:
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
@@ -51,14 +52,8 @@ jobs:
           cp assets/acnhrecomp.png "$D/usr/share/acnh-universal/"
           SRC="$D/usr/share/acnh-universal/source"
           mkdir -p "$SRC"
-          git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
-          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
-          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
-          # The source has no .git: Prepare reads the package's build version from here.
-          bash tools/build_version.sh > "$SRC/BUILD_VERSION"
-          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
-            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
-          done
+          # The one script for the source package (tools/package_source.sh): the same on every OS.
+          NX_RELEASE_VERSION="$VERSION" bash tools/package_source.sh "$SRC"
           cat > "$D/acnh-universal.desktop" <<DESK
           [Desktop Entry]
           Type=Application
@@ -108,14 +103,8 @@ jobs:
           cp assets/acnhrecomp.ico assets/acnhrecomp.png "$N/"
           SRC="$N/source"
           mkdir -p "$SRC"
-          git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
-          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
-          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
-          # The source has no .git: Prepare reads the package's build version from here.
-          bash tools/build_version.sh > "$SRC/BUILD_VERSION"
-          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
-            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
-          done
+          # The one script for the source package (tools/package_source.sh): the same on every OS.
+          NX_RELEASE_VERSION="$VERSION" bash tools/package_source.sh "$SRC"
           find "$N" -type f | tee files.txt
           bash tools/check_release_files.sh < files.txt
           powershell -NoProfile -Command "Compress-Archive -Path '$N' -DestinationPath '$N.zip'"
@@ -153,17 +142,8 @@ jobs:
           cp assets/acnhrecomp.icns assets/acnhrecomp.png "$A/Contents/Resources/"
           SRC="$A/Contents/Resources/source"
           mkdir -p "$SRC"
-          git archive HEAD CMakeLists.txt runtime games recomp tools assets Cargo.toml Cargo.lock crates app | tar -x -f - -C "$SRC"
-          if git cat-file -e HEAD:ios 2>/dev/null; then git archive HEAD ios | tar -x -f - -C "$SRC"; fi
-          printf '%s\n' "$GITHUB_SHA" > "$SRC/SOURCE"
-          # The packaged source has no .git. Prepare reads the build version (BASE_VER, VCODE) from here, and
-          # tools/build_version.sh reads BASE_VER and the commit count (COMMITS) for the Mac and iOS stamps.
-          v=$(NX_RELEASE_VERSION="$VERSION" bash tools/build_version.sh)
-          base=$(sed -n 's/^BASE_VER=//p' <<<"$v")
-          { printf 'BASE_VER=%s\nCOMMITS=%s\n' "${base%%[-+]*}" "$(git rev-list --count HEAD)"; grep -E '^(VNAME|VCODE)=' <<<"$v"; } > "$SRC/BUILD_VERSION"
-          for f in CMakeLists.txt SOURCE Cargo.lock crates/core/Cargo.toml assets; do
-            test -e "$SRC/$f" || { echo "source/$f is missing from the package"; exit 1; }
-          done
+          # The one script for the source package (tools/package_source.sh): the same on every OS.
+          NX_RELEASE_VERSION="$VERSION" bash tools/package_source.sh "$SRC"
           # The same Info.plist the launcher writes when it makes the bundle from a checkout
           # (crates/core/src/assemble.rs), so the two cannot drift.
           sed "s/@VERSION@/${VERSION#v}/" assets/mac/Info.plist.in > "$A/Contents/Info.plist"
@@ -188,6 +168,8 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [linux, windows, mac]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
