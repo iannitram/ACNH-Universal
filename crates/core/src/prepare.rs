@@ -321,6 +321,26 @@ const RYUBING: &str = "a82350bb77";
 const DOTNET: &str = "10.0.401";
 const FFX: &str = "v2.4.0";
 const DLSS: &str = "v310.9.16";
+/// vcpkg is fetched at this commit, never at whatever `HEAD` is on the day (#328).
+const VCPKG_COMMIT: &str = "e6d62cc9ce8f8d9687df14521118f2ec3c10ee6a";
+/// Python packages Prepare installs, each at a fixed version (#328).
+const PIP_PACKAGES: [&str; 4] = [
+    "capstone==5.0.7",
+    "lz4==4.4.5",
+    "cmake==4.4.5",
+    "ninja==1.13.2",
+];
+/// `<sha256>  <url>` per line: every download Prepare makes must be listed here and match (#328).
+/// The same file feeds CI and `tools/build_ios.sh`; `tools/check_pins.sh` guards it.
+const DOWNLOAD_PINS: &str = include_str!("../../../tools/downloads.sha256");
+
+/// The recorded SHA-256 of `url`, if the pin table has one.
+fn pinned_sha256(url: &str) -> Option<&'static str> {
+    DOWNLOAD_PINS.lines().find_map(|line| {
+        let (sum, u) = line.split_once("  ")?;
+        (u.trim() == url).then_some(sum.trim())
+    })
+}
 
 /// How `stage` runs for `req`. Every stage runs in Rust (`Step::Rust`).
 pub fn step(_stage: Stage, _req: &Request) -> Step {
@@ -1128,6 +1148,21 @@ fn download_file(stage: Stage, url: &str, dest: &Path) -> Result<()> {
         &[],
         None,
     )?;
+    let Some(want) = pinned_sha256(url) else {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(stage_err(
+            stage,
+            format!("no pinned SHA-256 for {url}; record it in tools/downloads.sha256"),
+        ));
+    };
+    let got = crate::appgame::sha256_file(&tmp)?;
+    if !got.eq_ignore_ascii_case(want) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(stage_err(
+            stage,
+            format!("SHA-256 mismatch for {url}: expected {want}, got {got}"),
+        ));
+    }
     std::fs::rename(&tmp, dest)?;
     Ok(())
 }
@@ -1274,13 +1309,10 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
             "pip".to_owned(),
             "install".to_owned(),
             "-q".to_owned(),
-            "capstone==5.0.7".to_owned(),
-            "lz4".to_owned(),
-            "cmake".to_owned(),
-            "ninja".to_owned(),
         ];
+        pkgs.extend(PIP_PACKAGES.iter().map(|p| (*p).to_owned()));
         if cfg!(windows) {
-            pkgs.push("zstandard".to_owned());
+            pkgs.push("zstandard==0.25.0".to_owned());
         }
         run_logged(stage, &py, &pkgs, root, &[], &[], None)?;
     }
@@ -1489,22 +1521,30 @@ fn rust_tools_windows(_req: &Request, root: &Path, t: &Path, logs: &Path, py: &P
         let vcpkg_exe = vcpkg.join("vcpkg.exe");
         if !vcpkg_exe.exists() {
             if !vcpkg.is_dir() {
-                run_logged(
-                    stage,
-                    Path::new("git"),
-                    &[
-                        "clone".to_owned(),
+                let dir = vcpkg.display().to_string();
+                let steps: [Vec<String>; 3] = [
+                    vec!["init".to_owned(), "-q".to_owned(), dir.clone()],
+                    vec![
+                        "-C".to_owned(),
+                        dir.clone(),
+                        "fetch".to_owned(),
                         "-q".to_owned(),
                         "--depth".to_owned(),
                         "1".to_owned(),
                         "https://github.com/microsoft/vcpkg.git".to_owned(),
-                        vcpkg.display().to_string(),
+                        VCPKG_COMMIT.to_owned(),
                     ],
-                    root,
-                    &[],
-                    &[],
-                    None,
-                )?;
+                    vec![
+                        "-C".to_owned(),
+                        dir,
+                        "checkout".to_owned(),
+                        "-q".to_owned(),
+                        "FETCH_HEAD".to_owned(),
+                    ],
+                ];
+                for args in &steps {
+                    run_logged(stage, Path::new("git"), args, root, &[], &[], None)?;
+                }
             }
             run_logged(
                 stage,
@@ -3742,5 +3782,59 @@ mod redo_unless_current_tests {
         .unwrap();
         assert_eq!(runs.get(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod download_pin_tests {
+    use super::{
+        pinned_sha256, DLSS, DOTNET, DOWNLOAD_PINS, FFX, IMGUI, LLVM, RYUBING, SDL3, VK_HEADERS,
+    };
+
+    #[test]
+    fn every_pin_line_is_a_sha256_then_an_https_url() {
+        for line in DOWNLOAD_PINS.lines().filter(|l| !l.trim().is_empty()) {
+            let (sum, url) = line
+                .split_once("  ")
+                .expect("two spaces between sum and url");
+            assert_eq!(sum.len(), 64, "{line}");
+            assert!(sum.bytes().all(|b| b.is_ascii_hexdigit()), "{line}");
+            assert!(url.starts_with("https://"), "{line}");
+        }
+    }
+
+    #[test]
+    fn every_download_prepare_builds_has_a_recorded_checksum() {
+        let mut urls = vec![
+            format!("https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v{VK_HEADERS}.tar.gz"),
+            format!("https://github.com/ocornut/imgui/archive/refs/tags/v{IMGUI}.tar.gz"),
+            format!("https://codeberg.org/Software_arch/Ryubing/archive/{RYUBING}.tar.gz"),
+            format!("https://github.com/llvm/llvm-project/releases/download/llvmorg-{LLVM}/clang+llvm-{LLVM}-x86_64-pc-windows-msvc.tar.zst"),
+            format!("https://github.com/libsdl-org/SDL/releases/download/release-{SDL3}/SDL3-devel-{SDL3}-VC.zip"),
+            format!("https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/{FFX}/Kits/FidelityFX/api/include/ffx_api.h"),
+            format!("https://raw.githubusercontent.com/NVIDIA/DLSS/{DLSS}/LICENSE.txt"),
+        ];
+        for (rid, ext) in [
+            ("win-x64", "zip"),
+            ("linux-x64", "tar.gz"),
+            ("linux-arm64", "tar.gz"),
+            ("osx-arm64", "tar.gz"),
+            ("osx-x64", "tar.gz"),
+        ] {
+            urls.push(format!(
+                "https://builds.dotnet.microsoft.com/dotnet/Sdk/{DOTNET}/dotnet-sdk-{DOTNET}-{rid}.{ext}"
+            ));
+        }
+        for url in urls {
+            assert!(
+                pinned_sha256(&url).is_some(),
+                "no pinned checksum for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unlisted_url_has_no_pin() {
+        assert!(pinned_sha256("https://example.invalid/x.tar.gz").is_none());
     }
 }

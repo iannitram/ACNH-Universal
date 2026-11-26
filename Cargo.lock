@@ -4332,7 +4332,7 @@ dependencies = [
 [[package]]
 name = "save-relay"
 version = "1.0.0-rc.1"
-source = "git+https://github.com/iannitram/save-relay#132b9e57c7a46c596aacbd3d0a56a2579d89b9bc"
+source = "git+https://github.com/iannitram/save-relay?rev=132b9e57c7a46c596aacbd3d0a56a2579d89b9bc#132b9e57c7a46c596aacbd3d0a56a2579d89b9bc"
 dependencies = [
  "getrandom 0.2.17",
  "keyring",

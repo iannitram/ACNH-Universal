@@ -32,7 +32,7 @@ ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 # credential store is the Keychain: crates/runtime, `relay`), neither on Android, where the app
 # brings its own network and credential store through save-relay's C interface (`ffi`, #81).
 # The target-specific lines are below.
-save-relay = { git = "https://github.com/iannitram/save-relay", optional = true, default-features = false }
+save-relay = { git = "https://github.com/iannitram/save-relay", rev = "132b9e57c7a46c596aacbd3d0a56a2579d89b9bc", optional = true, default-features = false }
 # Pure-Rust discovery, PAKE, peer records, and authenticated bounded-memory transfers.
 # Versions follow the credited sibling hub implementation (see NOTICE).
 mdns-sd = { version = "0.21.7", optional = true, default-features = false }
@@ -50,7 +50,7 @@ tempfile = "3"
 ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
 
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
-save-relay = { git = "https://github.com/iannitram/save-relay", optional = true, default-features = false, features = ["http", "keyring"] }
+save-relay = { git = "https://github.com/iannitram/save-relay", rev = "132b9e57c7a46c596aacbd3d0a56a2579d89b9bc", optional = true, default-features = false, features = ["http", "keyring"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-save-relay = { git = "https://github.com/iannitram/save-relay", optional = true, default-features = false, features = ["http"] }
+save-relay = { git = "https://github.com/iannitram/save-relay", rev = "132b9e57c7a46c596aacbd3d0a56a2579d89b9bc", optional = true, default-features = false, features = ["http"] }
