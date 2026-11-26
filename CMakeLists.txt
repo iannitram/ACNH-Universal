@@ -76,7 +76,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
                         -Wno-unused-but-set-variable -Wno-constant-logical-operand -Wno-unused-function)
 endif()
 if(MSVC)
-    add_compile_options(/arch:AVX2)
+    add_compile_options(/arch:AVX2 /EHsc)  # /EHsc: the player catches C++ exceptions (nx::LongJmp); clang-cl has them off
 endif()
 if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -612,7 +612,7 @@ else()
                    runtime/src/app_icon.cpp assets/acnhrecomp.manifest)
     nx_add_windows_rc(${NX_GAME} assets/acnhrecomp.rc)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
-    target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 ole32 psapi winmm dxgi ws2_32 bcrypt)
+    target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 ole32 psapi winmm dxgi ws2_32 bcrypt synchronization)  # synchronization: WaitOnAddress, WakeByAddress*
     if(NX_GAME_FROM_FOLDER)
         # The game's code from game/windows-x64/<game>_game.dll, which the player hands its runtime calls to
         # (game_abi.cpp: nx_game_bind).

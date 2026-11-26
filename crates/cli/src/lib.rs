@@ -35,7 +35,7 @@ use acnh_core::bundle;
 use acnh_core::config::Config;
 use acnh_core::fleet;
 use acnh_core::gamefolder;
-use acnh_core::hub::{self, TcpTransport};
+use acnh_core::hub;
 use acnh_core::launch::{self, Game, Keep, Relay, Sync};
 use acnh_core::platform::{AppDirs, Os, Vars};
 use acnh_core::prepare::{self, Request};
@@ -59,7 +59,8 @@ sync setup --server <url> --user <name> [--device <name>] (app password on stand
 sync sign-in gdrive|dropbox | sync status | sync off | sync push [--keep relay|here]\n\
 cloud-upload --os linux --install <folder> --prepared <folder>\n\
 exit codes: play 3 conflict, 4 held, 5 relay unreachable, 6 push conflict after the game ran; the game's own failure is 1\n\
-hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>]\n\
+hub publish --out <builds> --version <game version> [--target <os>] [--install <folder>] [--commit <id>]\n\
+hub serve --address <ip:port> --name <hub> --hub <role> --out <builds> [--pair] [--prepared <data>] (--pair shows a generated six-digit code)\n\
 hub pair --address <ip:port> --name <device> --peer <hub> [--target <os>]\n\
 hub pull --address <ip:port> --name <device> --peer <hub> [--target <os>] [--prepared <private-data-root>]\n\
 hub report --address <ip:port> --name <device> --peer <hub> --target <os> --version <version> --build-id <id> --last-sync <seconds> --free <bytes>";
@@ -82,6 +83,7 @@ struct Options {
     prepared: Option<PathBuf>,
     pair: bool,
     version: Option<String>,
+    commit: Option<String>,
     build_id: Option<String>,
     last_sync: Option<String>,
     free: Option<String>,
@@ -161,8 +163,8 @@ fn parse(args: &[String]) -> std::result::Result<Options, String> {
                 index += 1;
             }
             "--game" | "--target" | "--out" | "--profile" | "--address" | "--name" | "--peer"
-            | "--hub" | "--prepared" | "--version" | "--build-id" | "--last-sync" | "--free"
-            | "--keep" | "--server" | "--user" | "--device" | "--os" | "--install" => {
+            | "--hub" | "--prepared" | "--version" | "--commit" | "--build-id" | "--last-sync"
+            | "--free" | "--keep" | "--server" | "--user" | "--device" | "--os" | "--install" => {
                 let value = match inline {
                     Some(value) => {
                         index += 1;
@@ -201,6 +203,7 @@ fn set_value(options: &mut Options, flag: &str, value: String) -> std::result::R
         "--hub" => options.hub = Some(value),
         "--prepared" => options.prepared = Some(PathBuf::from(value)),
         "--version" => options.version = Some(value),
+        "--commit" => options.commit = Some(value),
         "--build-id" => options.build_id = Some(value),
         "--last-sync" => options.last_sync = Some(value),
         "--free" => options.free = Some(value),
@@ -865,40 +868,34 @@ fn code(stdin: &mut dyn BufRead) -> Result<String> {
     Ok(code)
 }
 
-/// Serve connections until the iterator ends. An accept error (for example a
-/// connection reset or a descriptor limit) is skipped, never fatal (#343).
-fn serve_incoming(
-    incoming: impl Iterator<Item = std::io::Result<std::net::TcpStream>>,
-    dirs: &AppDirs,
-    builds: &Path,
-    prepared: Option<&Path>,
-    mut pairing: Option<&mut hub::PairingSession>,
-) {
-    for incoming in incoming {
-        let stream = match incoming {
-            Ok(stream) => stream,
-            Err(error) => {
-                eprintln!("Hub accept failed: {}", error.kind());
-                continue;
-            }
-        };
-        let mut transport = match TcpTransport::from_stream(stream) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if let Err(error) = hub::serve_request(
-            &mut transport,
-            dirs,
-            builds,
-            prepared,
-            pairing.as_deref_mut(),
-        ) {
-            eprintln!("Hub request failed: {}", error.code());
-        }
-    }
+fn hub_publish(options: &Options) -> Result<i32> {
+    let builds = options
+        .out
+        .as_deref()
+        .ok_or_else(|| Error::Hub("--out is required".into()))?;
+    let install = match &options.install {
+        Some(install) => install.clone(),
+        None => app_dirs()?.install(),
+    };
+    let published = hub::publish_build(
+        builds,
+        &install,
+        target(options)?,
+        required(&options.version, "--version")?,
+        options.commit.as_deref().unwrap_or("local"),
+    )?;
+    println!(
+        "Published build {} ({} files)",
+        published.build_id,
+        published.files.len()
+    );
+    Ok(0)
 }
 
 fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
+    if options.hub_action.as_deref() == Some("publish") {
+        return hub_publish(options);
+    }
     let dirs = app_dirs()?;
     let name = required(&options.name, "--name")?;
     let addr = address(options)?;
@@ -915,25 +912,35 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
                 .as_deref()
                 .ok_or_else(|| Error::Hub("--out is required".into()))?;
             let listener = TcpListener::bind(addr)?;
-            let hostname = format!("{name}.local.");
-            let _announcement = hub::announce(name, &hostname, role, &[addr.ip()], addr.port())?;
-            let mut pairing = if options.pair {
-                Some(hub::PairingSession::new(&code(cx.stdin)?)?)
-            } else {
-                None
-            };
+            let host = hub::HubHost::start(
+                dirs,
+                listener,
+                hub::HostConfig {
+                    name: name.to_owned(),
+                    role,
+                    builds: builds.to_owned(),
+                    prepared: options.prepared.clone(),
+                    pair: options.pair,
+                    announce: true,
+                },
+            )?;
             println!(
                 "Hub listening; pairing {}",
-                if pairing.is_some() { "armed" } else { "off" }
+                if options.pair { "armed" } else { "off" }
             );
-            serve_incoming(
-                listener.incoming(),
-                &dirs,
-                builds,
-                options.prepared.as_deref(),
-                pairing.as_mut(),
-            );
-            Ok(0)
+            // The hub makes the six-digit code itself; a new device types it. A code that is
+            // used up or has expired is replaced, and the new one is shown here.
+            let mut shown = None;
+            loop {
+                let code = host.status().code;
+                if code != shown {
+                    if let Some(code) = &code {
+                        println!("Pairing code: {code}");
+                    }
+                    shown = code;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
         }
         Some("pair") => {
             let peer = required(&options.peer, "--peer")?;
@@ -951,12 +958,11 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
                 if options.out.is_some() {
                     return Err(Error::Hub("--out is not used for pulls".into()));
                 }
-                std::fs::create_dir_all(&dirs.data)?;
-                let staged = tempfile::Builder::new()
-                    .prefix(".hub-pull-")
-                    .tempdir_in(&dirs.data)?;
-                let bundle = hub::pull_hub(addr, &dirs, name, peer, target, staged.path())?;
-                bundle::install(&bundle, staged.path(), &dirs.install())?;
+                // The same staging folder every time: a pull that was cut continues from the
+                // chunks it already has. A successful install moves the folder away.
+                let staged = hub::resume_dir(&dirs)?;
+                let bundle = hub::pull_hub(addr, &dirs, name, peer, target, &staged)?;
+                bundle::install(&bundle, &staged, &dirs.install())?;
                 hub::report_hub_build(addr, &dirs, name, peer, &bundle)
                     .map_err(|_| Error::Hub("build installed, but fleet report failed".into()))?;
                 println!("Build installed");
@@ -1075,31 +1081,6 @@ impl Game for Player {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hub_serve_survives_an_accept_error() {
-        use std::io::Read;
-        use std::net::{Shutdown, TcpStream};
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        client.shutdown(Shutdown::Write).unwrap();
-        let vars = Vars::from_lookup(Os::current(), |name| match name {
-            "HOME" | "USERPROFILE" => Some("/home/player".to_owned()),
-            "LOCALAPPDATA" | "APPDATA" => Some("/home/player/AppData".to_owned()),
-            _ => None,
-        })
-        .unwrap();
-        let dirs = AppDirs::new(&vars);
-        let incoming = vec![
-            Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted)),
-            Ok(server),
-        ];
-        serve_incoming(incoming.into_iter(), &dirs, Path::new("builds"), None, None);
-        // The connection after the error was served (and closed), not dropped unseen.
-        let mut rest = Vec::new();
-        let _ = client.read_to_end(&mut rest);
-    }
 
     #[test]
     fn the_default_build_folder_is_under_the_data_root() {
