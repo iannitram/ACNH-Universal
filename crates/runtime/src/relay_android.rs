@@ -14,8 +14,8 @@
 
 use super::{
     android_ask_off_file, android_credentials, android_ready, forget_android, sign_out_android,
-    BridgePrompt, CallbackTransport, Connector, FileStore, Player, Roots, Settings, SyncNowSlot,
-    SyncReady,
+    Bounded, BridgePrompt, CallbackTransport, Connector, FileStore, FinalPush, Player, Roots,
+    Settings, SyncNowSlot, SyncReady,
 };
 use acnh_core::relay::SaveRelay;
 use acnh_core::Result;
@@ -241,6 +241,42 @@ pub unsafe extern "C" fn acnh_relay_android_after_game(
 ) {
     if let (Some(root), Some(files)) = (path(data_root), path(files)) {
         with_player(&root, &files, |player| player.after_game());
+    }
+}
+
+/// The bounded final push of this process: claimed once, by the activity's destroy.
+static FINAL_PUSH: FinalPush = FinalPush::new();
+
+/// How long the activity's destroy waits for the final push: the system gives a destroyed
+/// activity's process little time before it may be killed, and the main thread must not hang.
+const TERMINATE_BOUND: std::time::Duration = std::time::Duration::from_millis(3000);
+
+/// When the activity is destroyed (`destroyRequested`, the main thread, which must not block for
+/// long): the push runs on a worker and this waits at most `TERMINATE_BOUND` for it. A push that
+/// is not done by then is not continued: the process ends right after. What saves the island is
+/// the waiting mark, written before the push waits for its turn or sends a byte
+/// (`Player::push_island`), so the next start sends it first. Does nothing before the game has
+/// booted, and returns at once when another caller has the final push.
+///
+/// # Safety
+/// As `acnh_relay_android_before_game`.
+#[no_mangle]
+pub unsafe extern "C" fn acnh_relay_android_terminate(
+    data_root: *const c_char,
+    files: *const c_char,
+) {
+    let (Some(root), Some(files)) = (path(data_root), path(files)) else {
+        return;
+    };
+    if !BOOTED.load(Ordering::SeqCst) {
+        log("relay: no push yet: the game has not booted");
+        return;
+    }
+    let outcome = FINAL_PUSH.run_bounded(TERMINATE_BOUND, move || {
+        with_player(&root, &files, |player| player.after_game())
+    });
+    if outcome == Bounded::Late {
+        log("relay: the final push is not done in time: left waiting for the next start");
     }
 }
 

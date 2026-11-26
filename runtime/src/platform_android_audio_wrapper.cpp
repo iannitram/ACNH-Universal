@@ -71,7 +71,16 @@ std::mutex g_reopen_mu;
 std::condition_variable g_reopen_cv;
 AAudioStream* g_reopen_target = nullptr;
 bool g_shutting_down = false;
+bool g_worker_active = false;  // the worker thread runs (not with NX_MUTE or headless)
+bool g_retry = false;          // a caller asked for another go at opening a stream that is gone
 std::thread g_reopen_thread;
+std::atomic<int64_t> g_last_retry_ms{0};  // when a submit last asked (rate limit)
+constexpr int64_t kRetryEveryMs = 1000;
+
+int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 aaudio_data_callback_result_t audio_cb(AAudioStream*, void*, void* out, int32_t frames) {
     auto* dst = static_cast<uint8_t*>(out);
@@ -133,13 +142,14 @@ void reopen_loop() {
         AAudioStream* target = nullptr;
         {
             std::unique_lock lk(g_reopen_mu);
-            g_reopen_cv.wait(lk, [] { return g_shutting_down || g_reopen_target != nullptr; });
+            g_reopen_cv.wait(lk, [] { return g_shutting_down || g_reopen_target != nullptr || g_retry; });
             if (g_shutting_down) return;
             target = g_reopen_target;
             g_reopen_target = nullptr;
+            g_retry = false;
         }
 
-        {
+        if (target) {
             std::lock_guard lk(g_stream_lock);
             if (g_stream.load() != target) continue;  // already replaced or closed
             log("audio: output changed: opening the stream again");
@@ -168,6 +178,24 @@ void reopen_loop() {
     }
 }
 
+// The worker gave up (or the first open failed) and the stream is still gone: ask it for another go. From
+// audio_pause(false) at once (the app is back in front: the output is likely there again), from audio_submit at most
+// once a second (it is called for every buffer). Never opens here: the caller may be the game's audio thread, and the
+// worker takes g_stream_lock, honours the pause and the shutdown. Does nothing without the worker (NX_MUTE, headless).
+void request_retry(bool rate_limited) {
+    if (rate_limited) {
+        const int64_t now = now_ms();
+        int64_t last = g_last_retry_ms.load();
+        if (now - last < kRetryEveryMs || !g_last_retry_ms.compare_exchange_strong(last, now)) return;
+    }
+    {
+        std::lock_guard lk(g_reopen_mu);
+        if (g_shutting_down || !g_worker_active) return;
+        g_retry = true;
+    }
+    g_reopen_cv.notify_one();
+}
+
 void audio_error(AAudioStream* s, void*, aaudio_result_t error) {
     if (error != AAUDIO_ERROR_DISCONNECTED) {
         log("audio: stream error %d", int(error));
@@ -190,6 +218,8 @@ bool audio_open(AudioDone done, int) {
         std::lock_guard lk(g_reopen_mu);
         g_shutting_down = false;
         g_reopen_target = nullptr;
+        g_retry = false;
+        g_worker_active = true;
         if (!g_reopen_thread.joinable()) g_reopen_thread = std::thread(reopen_loop);
     }
     std::lock_guard lk(g_stream_lock);
@@ -202,6 +232,7 @@ void audio_shutdown() {
     {
         std::lock_guard lk(g_reopen_mu);
         g_shutting_down = true;
+        g_worker_active = false;
         g_reopen_target = nullptr;
         to_join = std::move(g_reopen_thread);
     }
@@ -219,7 +250,10 @@ void audio_pause(bool paused) {
     std::lock_guard lk(g_stream_lock);
     g_paused = paused;
     AAudioStream* s = g_stream.load();
-    if (!s) return;
+    if (!s) {
+        if (!paused) request_retry(false);  // coming back with no stream: try the output again
+        return;
+    }
     if (paused)
         AAudioStream_requestPause(s);
     else
@@ -227,7 +261,10 @@ void audio_pause(bool paused) {
 }
 
 bool audio_submit(const void* data, size_t bytes, void* ctx) {
-    if (!g_stream.load()) return false;  // between a disconnect and the new stream: the caller paces itself
+    if (!g_stream.load()) {  // between a disconnect and the new stream, or after the worker gave up: the caller paces itself
+        request_retry(true);
+        return false;
+    }
     std::lock_guard lk(g_audio);
     g_pending.push_back({static_cast<const uint8_t*>(data), bytes, 0, ctx});
     return true;
