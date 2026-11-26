@@ -34,7 +34,6 @@ impl SyncStep {
 /// The mutually exclusive states the Continue page can be in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContinueState {
-    NeedsSetup,
     NoIsland,
     Ready,
     RelayNewer,
@@ -48,7 +47,6 @@ pub enum ContinueState {
     RelayError(String),
     CheckingStatus,
     Syncing(SyncStep),
-    Starting,
     Playing,
     Saving,
     PlayerFailed { exit: i32, log_hint: String },
@@ -66,7 +64,6 @@ pub enum PlayAction {
     Saving,
     Retry,
     ResolveConflict,
-    SetUp,
     Prepare,
     Pull,
     Update,
@@ -81,7 +78,6 @@ impl PlayAction {
             Self::Saving => "Saving",
             Self::Retry => "Retry",
             Self::ResolveConflict => "Resolve conflict",
-            Self::SetUp => "Set up",
             Self::Prepare => "Prepare",
             Self::Pull => "Pull",
             Self::Update => "Update",
@@ -590,7 +586,6 @@ impl ContinuePageVm {
             self.state,
             ContinueState::CheckingStatus
                 | ContinueState::Syncing(_)
-                | ContinueState::Starting
                 | ContinueState::Playing
                 | ContinueState::Saving
                 | ContinueState::Updating(_)
@@ -1246,7 +1241,6 @@ impl ContinuePageVm {
             ContinueState::Held { .. } => "Wait".to_string(),
             ContinueState::CheckingStatus => "Checking save sync".to_string(),
             ContinueState::Syncing(step) => step.label().to_string(),
-            ContinueState::Starting => "Starting the game".to_string(),
             ContinueState::Saving => SyncStep::Push.label().to_string(),
             ContinueState::Updating(stage) => stage.clone(),
             _ => match self.play_action {

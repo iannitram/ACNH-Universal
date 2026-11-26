@@ -42,66 +42,6 @@ pub enum Nav {
     Quit,
 }
 
-#[allow(non_upper_case_globals)]
-impl Nav {
-    /// The first shell's name for `Prev`: the same value, not another action.
-    pub const Previous: Nav = Nav::Prev;
-    /// The first shell's name for `Accept`: the same value, not another action.
-    pub const Activate: Nav = Nav::Accept;
-}
-
-/// The first shell's page list. The Continue page itself is `ContinuePageVm`.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ContinueVm {
-    selected: usize,
-    status: String,
-}
-
-const SECTIONS: [&str; 5] = ["Continue", "Saves", "Settings", "Fleet", "About"];
-
-impl Default for ContinueVm {
-    fn default() -> Self {
-        Self {
-            selected: 0,
-            status: "Ready to sync and play.".to_owned(),
-        }
-    }
-}
-
-impl ContinueVm {
-    pub fn selected(&self) -> usize {
-        self.selected
-    }
-
-    pub fn status(&self) -> &str {
-        &self.status
-    }
-
-    pub fn selection(&self) -> &'static str {
-        SECTIONS[self.selected]
-    }
-
-    /// Apply a navigation action and return whether activation was requested.
-    pub fn handle(&mut self, nav: Nav) -> bool {
-        match nav {
-            Nav::Prev => self.selected = self.selected.saturating_sub(1),
-            Nav::Next => self.selected = (self.selected + 1) % SECTIONS.len(),
-            Nav::Accept => return true,
-            Nav::Back => self.status = "You are on the Continue screen.".to_owned(),
-            Nav::Up | Nav::Down | Nav::Left | Nav::Right | Nav::Menu | Nav::Quit => {}
-        }
-        false
-    }
-
-    pub fn activate(&mut self) {
-        self.status = if self.selected == 0 {
-            "Sync and play is coming soon.".to_owned()
-        } else {
-            format!("{} is coming soon.", self.selection())
-        };
-    }
-}
-
 /// A fresh folder under the system temp dir for one test; the test removes it when done.
 #[cfg(test)]
 pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
@@ -112,13 +52,13 @@ pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContinueVm, Nav};
+    use super::Nav;
 
     #[test]
     fn visible_page_controls_are_reachable_with_navigation() {
         use super::continue_page::{ContinuePageVm, FocusTarget};
         use super::first_run::{FirstRunVm, Step};
-        use super::settings::{move_focus, SettingsFocus};
+        use super::settings::SettingsFocus;
 
         let mut page = ContinuePageVm::new(None, None);
         page.handle(Nav::Down);
@@ -141,14 +81,6 @@ mod tests {
         assert!(page.about_open());
         page.handle(Nav::Back);
         assert!(!page.about_open());
-
-        let mut focus = SettingsFocus::Ptbr;
-        focus = move_focus(focus, Nav::Down);
-        assert_eq!(focus, SettingsFocus::Speedfix);
-        focus = move_focus(focus, Nav::Down);
-        assert_eq!(focus, SettingsFocus::Back);
-        focus = move_focus(focus, Nav::Up);
-        assert_eq!(focus, SettingsFocus::Speedfix);
 
         let (offset, closed) = super::fleet::navigate(0, 5, Nav::Down);
         assert_eq!((offset, closed), (1, false));
@@ -288,20 +220,5 @@ mod tests {
             }
             assert_eq!(at, rows[0]);
         }
-    }
-
-    #[test]
-    fn continue_view_model_handles_navigation_without_a_window() {
-        let mut vm = ContinueVm::default();
-        assert_eq!(vm.selected(), 0);
-        assert!(!vm.handle(Nav::Previous));
-        assert_eq!(vm.selected(), 0);
-        assert!(!vm.handle(Nav::Next));
-        assert_eq!(vm.selection(), "Saves");
-        assert!(!vm.handle(Nav::Previous));
-        assert!(vm.handle(Nav::Activate));
-
-        vm.activate();
-        assert_eq!(vm.status(), "Sync and play is coming soon.");
     }
 }
