@@ -471,6 +471,32 @@ fn write_table(
     Ok(())
 }
 
+/// Delete every `code_NNN.cpp` in `out` whose index is `keep` or more: a re-run that yields
+/// fewer chunks must not leave the old ones, which the build globs and compiles.
+pub fn remove_stale_chunks(out: &Path, keep: usize) -> std::io::Result<()> {
+    let Ok(entries) = std::fs::read_dir(out) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(digits) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("code_"))
+            .and_then(|n| n.strip_suffix(".cpp"))
+        else {
+            continue;
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if digits.parse::<usize>().map_or(true, |idx| idx >= keep) {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Recompile an NSO module to C++ into `opts.out`.
 pub fn recompile(
     opts: &RecompileOptions,
@@ -622,6 +648,8 @@ pub fn recompile(
             ));
         }
     }
+
+    remove_stale_chunks(&opts.out, chunks.len())?;
 
     let variant_path = opts.out.join("code_variant.cpp");
     if let Some(v) = variant.as_ref() {

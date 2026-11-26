@@ -125,7 +125,8 @@ CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android29-clang AR_aarch64_linux
   cargo build -p acnh-app --release --target aarch64-linux-android --features android-launcher --lib -j "$JOBS"
 LAUNCHER_LIB=$CARGO_OUT/aarch64-linux-android/release/libacnh_app.so
 [ -f "$LAUNCHER_LIB" ] || { echo "$LAUNCHER_LIB was not built"; exit 1; }
-RUNTIME_HEADER=$(find "$CARGO_OUT/aarch64-linux-android/release/build" -name acnh_runtime.h -print 2>/dev/null | head -n 1)
+. tools/build_common.sh
+RUNTIME_HEADER=$(newest_runtime_header "$CARGO_OUT/aarch64-linux-android/release/build")
 [ -n "$RUNTIME_HEADER" ] || { echo "acnh_runtime.h was not generated"; exit 1; }
 
 . tools/build_version.sh
@@ -142,10 +143,10 @@ TARGETS="$GAME nx_prepare_jni"
 # (NX_ANDROID_GAME_IN_APP=ON in the build's cache, for comparisons: no separate game library)
 [ $GAMELIB = 1 ] && ninja -C "$BUILD" -t targets all | grep -q "^lib${GAME}_game.so:" && TARGETS="$TARGETS ${GAME}_game"
 echo "== build $TARGETS with $JOBS jobs (the first time compiles the whole game: ~$(( 300 / JOBS + 5 )) min)"
-until mkdir private/build.lock 2>/dev/null; do echo "waiting for another build"; sleep 10; done
-trap 'rmdir private/build.lock 2>/dev/null' EXIT
+take_build_lock private/build.lock
+trap 'release_build_lock private/build.lock' EXIT
 ninja -C "$BUILD" -j "$JOBS" $TARGETS
-rmdir private/build.lock; trap - EXIT
+release_build_lock private/build.lock; trap - EXIT
 
 echo "== package"
 STRIP=$NDK/toolchains/llvm/prebuilt/$HOST/bin/llvm-strip
