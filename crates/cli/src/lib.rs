@@ -865,6 +865,39 @@ fn code(stdin: &mut dyn BufRead) -> Result<String> {
     Ok(code)
 }
 
+/// Serve connections until the iterator ends. An accept error (for example a
+/// connection reset or a descriptor limit) is skipped, never fatal (#343).
+fn serve_incoming(
+    incoming: impl Iterator<Item = std::io::Result<std::net::TcpStream>>,
+    dirs: &AppDirs,
+    builds: &Path,
+    prepared: Option<&Path>,
+    mut pairing: Option<&mut hub::PairingSession>,
+) {
+    for incoming in incoming {
+        let stream = match incoming {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("Hub accept failed: {}", error.kind());
+                continue;
+            }
+        };
+        let mut transport = match TcpTransport::from_stream(stream) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if let Err(error) = hub::serve_request(
+            &mut transport,
+            dirs,
+            builds,
+            prepared,
+            pairing.as_deref_mut(),
+        ) {
+            eprintln!("Hub request failed: {}", error.code());
+        }
+    }
+}
+
 fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let dirs = app_dirs()?;
     let name = required(&options.name, "--name")?;
@@ -893,22 +926,13 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
                 "Hub listening; pairing {}",
                 if pairing.is_some() { "armed" } else { "off" }
             );
-            for incoming in listener.incoming() {
-                let stream = incoming?;
-                let mut transport = match TcpTransport::from_stream(stream) {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-                if let Err(error) = hub::serve_request(
-                    &mut transport,
-                    &dirs,
-                    builds,
-                    options.prepared.as_deref(),
-                    pairing.as_mut(),
-                ) {
-                    eprintln!("Hub request failed: {}", error.code());
-                }
-            }
+            serve_incoming(
+                listener.incoming(),
+                &dirs,
+                builds,
+                options.prepared.as_deref(),
+                pairing.as_mut(),
+            );
             Ok(0)
         }
         Some("pair") => {
@@ -1051,6 +1075,31 @@ impl Game for Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_serve_survives_an_accept_error() {
+        use std::io::Read;
+        use std::net::{Shutdown, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let vars = Vars::from_lookup(Os::current(), |name| match name {
+            "HOME" => Some("/home/player".to_owned()),
+            "LOCALAPPDATA" | "APPDATA" => Some("/home/player/AppData".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let dirs = AppDirs::new(&vars);
+        let incoming = vec![
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted)),
+            Ok(server),
+        ];
+        serve_incoming(incoming.into_iter(), &dirs, Path::new("builds"), None, None);
+        // The connection after the error was served (and closed), not dropped unseen.
+        let mut rest = Vec::new();
+        let _ = client.read_to_end(&mut rest);
+    }
 
     #[test]
     fn the_default_build_folder_is_under_the_data_root() {
