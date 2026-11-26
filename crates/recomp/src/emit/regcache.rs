@@ -1,5 +1,5 @@
 //! Keep guest registers in locals, synchronizing around calls and function exits.
-//! This pass follows the C++ syntax produced by the emitter, as recomp/regcache.py does.
+//! This pass follows the C++ syntax produced by the emitter, and rewrites it in place.
 
 use super::{Error, Result};
 use regex::{Captures, Regex};

@@ -1,4 +1,4 @@
-//! AdvSIMD structured transfers, matching recomp/emit_vldst.py.
+//! AdvSIMD structured transfers.
 use super::{unsupported, Emitter, Instruction, Result};
 use capstone::arch::arm64::Arm64OperandType;
 

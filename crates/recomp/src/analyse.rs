@@ -1,4 +1,4 @@
-//! Whole-module analysis: functions, PLT stubs, jump tables (port of `recomp/analysis.py`).
+//! Whole-module analysis: functions, PLT stubs, jump tables.
 //! Instructions are decoded on demand from the image (`decode.rs`) instead of held in a table.
 
 use crate::decode::{decode, Insn};
@@ -84,7 +84,7 @@ impl Analysis {
 pub fn analyse(m: &Module, log: &mut dyn FnMut(&str), patched: &[u64]) -> Result<Analysis, Error> {
     let insns = Insns::new(m);
     let (t0, tn) = m.text;
-    let text_end = t0 + tn;
+    let text_end = t0.saturating_add(tn);
     let mut an = Analysis {
         got_imports: load::plt_imports(m),
         ..Analysis::default()
@@ -173,7 +173,7 @@ pub fn analyse(m: &Module, log: &mut dyn FnMut(&str), patched: &[u64]) -> Result
     }
     let mut fde_bounds: BTreeMap<u64, u64> = BTreeMap::new();
     for f in &fdes {
-        fde_bounds.insert(f.start, f.start + f.size);
+        fde_bounds.insert(f.start, f.start.saturating_add(f.size).min(text_end));
     }
     if !patched.is_empty() {
         let grown: BTreeSet<u64> = patched.iter().copied().collect();
@@ -289,17 +289,19 @@ fn ranges(
     fdes: &[Fde],
     fde_bounds: &BTreeMap<u64, u64>,
 ) -> Vec<Function> {
-    let text_end = m.text.0 + m.text.1;
+    let text_end = m.text.0.saturating_add(m.text.1);
     let mut funcs = Vec::with_capacity(entries.len());
     for (i, &e) in entries.iter().enumerate() {
         let (end, fde) = if an.plt.contains_key(&e) {
-            (e + 16, false)
+            (e.saturating_add(16).min(text_end), false)
         } else if let Some(&end) = fde_bounds.get(&e) {
             (end, true)
         } else {
             let k = fdes.partition_point(|f| f.start <= e);
             match k.checked_sub(1).map(|j| &fdes[j]) {
-                Some(f) if e < f.start + f.size => (f.start + f.size, false),
+                Some(f) if e < f.start.saturating_add(f.size) => {
+                    (f.start.saturating_add(f.size).min(text_end), false)
+                }
                 _ => {
                     let mut nxt = entries.get(i + 1).copied().unwrap_or(text_end);
                     if let Some(f) = fdes.get(k) {
@@ -327,8 +329,7 @@ fn find_def(insns: &Insns, f: &Function, before: u64, reg: u32) -> Option<(u64, 
     let mut a = before.checked_sub(4)?;
     while a >= f.start {
         if let Some(ins) = insns.get(a) {
-            let (d1, d2) = ins.dests();
-            if d1 == Some(reg) || (matches!(ins, Insn::Other(..)) && d2 == Some(reg)) {
+            if ins.writes(reg) {
                 return Some((a, ins));
             }
         }
@@ -491,7 +492,7 @@ fn bound(insns: &Insns, f: &Function, before: u64, idx: u32) -> Option<u32> {
                 if regs.contains(&rn) {
                     for k in 1..6 {
                         match insns.get(a + 4 * k) {
-                            Some(Insn::BCond(_, 8)) => return Some(imm as u32 + 1),
+                            Some(Insn::BCond(_, 8)) => return Some((imm as u32).saturating_add(1)),
                             Some(Insn::BCond(_, 2)) => return Some(imm as u32),
                             _ => {}
                         }
@@ -499,8 +500,7 @@ fn bound(insns: &Insns, f: &Function, before: u64, idx: u32) -> Option<u32> {
                     return None;
                 }
             }
-            let (d1, _) = ins.dests();
-            if d1.is_some_and(|d| regs.contains(&d)) {
+            if regs.iter().any(|&r| ins.writes(r)) {
                 return None;
             }
         }
