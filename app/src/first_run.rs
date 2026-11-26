@@ -100,12 +100,11 @@ impl FirstRun {
         if !player.is_file() {
             return true;
         }
-        let prepared_here = self.dirs.data_root().join("analysis/main.bin").is_file();
-        let packaged = player
-            .parent()
-            .and_then(|p| p.parent())
-            .is_some_and(|p| p.join("Resources/game/analysis/main.bin").is_file());
-        !(prepared_here || packaged)
+        let builds = crate::build_actions::BuildActions {
+            dirs: self.dirs.clone(),
+            os: Os::current(),
+        };
+        !builds.has_game_here(&player)
     }
     pub fn complete(&self) -> std::io::Result<()> {
         use std::io::Write;
@@ -328,6 +327,9 @@ fn run(
 ) -> Event {
     match request {
         Request::Folders(root) => {
+            if root.as_os_str().is_empty() && cfg!(windows) {
+                return Event::Folders(drive_roots(|p| p.is_dir()));
+            }
             let mut folders = std::fs::read_dir(root)
                 .ok()
                 .into_iter()
@@ -669,6 +671,15 @@ fn pick_folder_native(_start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The drive roots (`A:\\` to `Z:\\`) `exists` accepts: what the Windows browser lists above a
+/// drive root, so it can change drive.
+fn drive_roots(exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    ('A'..='Z')
+        .map(|letter| PathBuf::from(format!("{letter}:\\")))
+        .filter(|root| exists(root))
+        .collect()
+}
+
 fn add_steam(vars: &Vars, dirs: &AppDirs, folder: &Path) -> acnh_core::Result<()> {
     use acnh_core::steam;
     if Os::current() != Os::Linux {
@@ -761,6 +772,33 @@ fn steam_artwork(folder: &Path) -> acnh_core::Result<Vec<(acnh_core::artwork::Ar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drive_roots_lists_the_existing_drives() {
+        let roots = drive_roots(|p| p.to_string_lossy().starts_with(['C', 'D']));
+        assert_eq!(roots, vec![PathBuf::from("C:\\"), PathBuf::from("D:\\")]);
+    }
+
+    #[test]
+    fn needed_reads_the_prepared_and_contained_game() {
+        let root = tempfile::tempdir().unwrap();
+        let vars = Vars {
+            home: root.path().into(),
+            data: root.path().join("data"),
+            config: root.path().join("config"),
+        };
+        let first = FirstRun::new(vars);
+        // The test binary is the launcher; make it the "installed player" too.
+        let launcher = std::env::current_exe().unwrap();
+        let player = acnh_core::assemble::player(Os::current(), &launcher, &first.dirs.install());
+        std::fs::create_dir_all(player.parent().unwrap()).unwrap();
+        std::fs::write(&player, b"p").unwrap();
+        assert!(first.needed());
+        let prepared = acnh_core::prepare::prepared_folder(Os::current(), &first.dirs);
+        std::fs::create_dir_all(prepared.join("analysis")).unwrap();
+        std::fs::write(prepared.join("analysis/main.bin"), []).unwrap();
+        assert!(!first.needed());
+    }
 
     #[test]
     fn launcher_values_preserve_existing_settings() {

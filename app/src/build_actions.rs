@@ -44,6 +44,12 @@ impl BuildActions {
         }
     }
 
+    /// This device already has the game: contained with `player`, or a prepared folder of
+    /// its own target.
+    pub(crate) fn has_game_here(&self, player: &Path) -> bool {
+        self.has_contained_game(player) || self.prepare_root().join("analysis/main.bin").is_file()
+    }
+
     fn has_contained_game(&self, player: &Path) -> bool {
         match self.os {
             Os::Mac => player
@@ -91,8 +97,10 @@ impl BuildActions {
             .ok()
             .and_then(|text| bundle::from_text(&text).ok())
             .is_some_and(|manifest| {
+                // Existence and size only: this runs on the window thread. The hashes were
+                // checked when the install was made (bundle::install verifies the staged files).
                 manifest.target == self.os
-                    && bundle::verify(&manifest, &self.dirs.install()).is_ok()
+                    && bundle::check_sizes(&manifest, &self.dirs.install()).is_ok()
             })
     }
 
@@ -671,6 +679,11 @@ mod tests {
         assert!(actions.installed(&player));
         std::fs::write(&player, b"modified").unwrap();
         assert!(!actions.installed(&player));
+        // The window-thread check is size only; the hash is the worker's (bundle::install).
+        std::fs::write(&player, b"player").unwrap();
+        std::fs::write(&player, b"Player").unwrap();
+        assert!(actions.installed(&player));
+        assert!(bundle::verify(&manifest, &install).is_err());
     }
 
     #[test]
