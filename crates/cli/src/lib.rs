@@ -841,6 +841,8 @@ fn code(stdin: &mut dyn BufRead) -> Result<String> {
     Ok(code)
 }
 
+const MAX_HUB_CONNECTIONS: usize = 32;
+
 fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
     let dirs = app_dirs()?;
     let name = required(&options.name, "--name")?;
@@ -860,8 +862,10 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
             let listener = TcpListener::bind(addr)?;
             let hostname = format!("{name}.local.");
             let _announcement = hub::announce(name, &hostname, role, &[addr.ip()], addr.port())?;
-            let mut pairing = if options.pair {
-                Some(hub::PairingSession::new(&code(cx.stdin)?)?)
+            let pairing = if options.pair {
+                Some(std::sync::Mutex::new(hub::PairingSession::new(&code(
+                    cx.stdin,
+                )?)?))
             } else {
                 None
             };
@@ -869,22 +873,49 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
                 "Hub listening; pairing {}",
                 if pairing.is_some() { "armed" } else { "off" }
             );
-            for incoming in listener.incoming() {
-                let stream = incoming?;
-                let mut transport = match TcpTransport::from_stream(stream) {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-                if let Err(error) = hub::serve_request(
-                    &mut transport,
-                    &dirs,
-                    builds,
-                    options.prepared.as_deref(),
-                    pairing.as_mut(),
-                ) {
-                    eprintln!("Hub request failed: {}", error.code());
+            // One short-lived thread per connection, so a slow peer holds only its own socket.
+            // The cap keeps a flood of silent connections from exhausting threads.
+            let active = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for incoming in listener.incoming() {
+                    let stream = match incoming {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            eprintln!("Hub accept failed: {}", error.kind());
+                            // Avoid a hot loop on persistent errors such as fd exhaustion.
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            continue;
+                        }
+                    };
+                    if active.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        >= MAX_HUB_CONNECTIONS
+                    {
+                        active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        eprintln!("Hub busy; connection dropped");
+                        continue;
+                    }
+                    let (dirs, active, pairing) = (&dirs, &active, pairing.as_ref());
+                    scope.spawn(move || {
+                        let mut transport = match TcpTransport::from_stream(stream) {
+                            Ok(t) => t,
+                            Err(_) => {
+                                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                                return;
+                            }
+                        };
+                        if let Err(error) = hub::serve_request(
+                            &mut transport,
+                            dirs,
+                            builds,
+                            options.prepared.as_deref(),
+                            pairing,
+                        ) {
+                            eprintln!("Hub request failed: {}", error.code());
+                        }
+                        active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    });
                 }
-            }
+            });
             Ok(0)
         }
         Some("pair") => {
@@ -904,6 +935,7 @@ fn hub_command(options: &Options, cx: &mut Context<'_>) -> Result<i32> {
                     return Err(Error::Hub("--out is not used for pulls".into()));
                 }
                 std::fs::create_dir_all(&dirs.data)?;
+                let _lock = hub::lock_install_and_sweep(&dirs.data)?;
                 let staged = tempfile::Builder::new()
                     .prefix(".hub-pull-")
                     .tempdir_in(&dirs.data)?;

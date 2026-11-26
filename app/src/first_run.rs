@@ -397,6 +397,7 @@ fn run(
                     }
                     return Ok(());
                 }
+                let _lock = hub::lock_install_and_sweep(&dirs.data)?;
                 let staged = tempfile::Builder::new()
                     .prefix(".first-run-")
                     .tempdir_in(&dirs.data)?;

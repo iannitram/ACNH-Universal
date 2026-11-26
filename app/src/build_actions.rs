@@ -281,6 +281,7 @@ impl BuildActions {
     }
     fn install_pulled(&self, pull: impl FnOnce(&Path) -> Result<bundle::Bundle>) -> Result<()> {
         std::fs::create_dir_all(&self.dirs.data)?;
+        let _lock = acnh_core::hub::lock_install_and_sweep(&self.dirs.data)?;
         let staged = tempfile::Builder::new()
             .prefix(".continue-")
             .tempdir_in(&self.dirs.data)?;
@@ -712,7 +713,7 @@ mod tests {
 
         std::thread::scope(|s| {
             let worker = s.spawn(|| {
-                let mut pairing = hub::PairingSession::new("654321").unwrap();
+                let pairing = std::sync::Mutex::new(hub::PairingSession::new("654321").unwrap());
                 for _ in 0..2 {
                     let (stream, _) = listener.accept().unwrap();
                     let mut transport = hub::TcpTransport::from_stream(stream).unwrap();
@@ -721,7 +722,7 @@ mod tests {
                         &hub_dirs,
                         &builds,
                         Some(&source),
-                        Some(&mut pairing),
+                        Some(&pairing),
                     )
                     .unwrap();
                 }
