@@ -361,7 +361,8 @@ fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
     .unwrap();
 
     assert_eq!(out, delivery);
-    assert!(!seen.is_empty());
+    // The Android build makes its own game library: the host player's stage is not run.
+    assert!(!seen.is_empty() && !seen.contains(&Stage::Build));
     let manifest_bytes = std::fs::read(delivery.join("manifest.json")).unwrap();
     let manifest = acnh_core::appgame::Manifest::from_json(&manifest_bytes).unwrap();
     assert_eq!(manifest.build_id, "FCD2BB238ABE99E925B4E452DF1F41F1");
@@ -371,6 +372,15 @@ fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
     assert!(paths.contains(&"libacnh_game.so"));
     assert!(paths.contains(&"romfs.pak"));
     assert!(paths.contains(&"spirv.pak"));
+    // The paks' digests come from the copy: they must still be the staged files' own.
+    for file in &manifest.files {
+        let staged = delivery.join(&file.path);
+        assert_eq!(file.size, std::fs::metadata(&staged).unwrap().len());
+        assert_eq!(
+            file.sha256,
+            acnh_core::appgame::sha256_file(&staged).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -1113,7 +1123,9 @@ fn ios_runs_the_stages_the_packs_and_the_two_scripts() {
         seen.push(s)
     })
     .unwrap();
-    assert_eq!(seen, STAGES.to_vec());
+    // The iOS build carries its own player: the host player's stage is not run.
+    let host_stages: Vec<Stage> = STAGES.into_iter().filter(|s| *s != Stage::Build).collect();
+    assert_eq!(seen, host_stages);
     assert!(req.out.join("romfs.pak").is_file());
     assert!(req.out.join("spirv.pak").is_file());
     let mut stages = scripted();

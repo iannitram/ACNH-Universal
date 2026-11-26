@@ -381,8 +381,15 @@ fn run_stages(
                     Stage::Game | Stage::Recompile | Stage::Shaders | Stage::Build
                 ))
     });
+    // The RomFS is walked once for every key of this run.
+    let _keys = RunKeys::begin();
     let mut last = None;
     for (stage, was_there) in STAGES.into_iter().zip(before) {
+        // The iOS and Android builds carry their own player (`build_ios.sh`, `build_android.sh`):
+        // the host player this stage builds is for the hosts that run it.
+        if stage == Stage::Build && matches!(req.target, Os::Ios | Os::Android) {
+            continue;
+        }
         if was_there && stage_complete(stage, req, &expected_recomp_hash) {
             continue;
         }
