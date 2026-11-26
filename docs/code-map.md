@@ -198,7 +198,7 @@ Also in `crates/runtime`:
 - **`hub_android`** (Android only): the bridges `HubPull.java` calls (#80), with `runtime/src/hub_android.cpp` (63 lines).
 - **Tests:** `tests/ios_relay.rs` (35 tests), `tests/android_relay.rs` (44) and `tests/ios_appgame.rs` (5) include the platform-free sources by path so they run on every desktop runner; `tests/header.rs` checks two properties of the generated header.
 
-`unsafe` blocks: `kernel.rs` (63), `services.rs` (79) and `memory.rs` (9) carry no `// SAFETY:` line; `audio.rs`, `files.rs`, `input.rs` and `saves.rs` carry them on some. ADR 0002 says every block has one (#356).
+Every `unsafe` block in `crates/runtime` carries a `// SAFETY:` line, and `clippy::undocumented_unsafe_blocks` enforces it (#356, #396).
 
 Kernel env (`kernel.rs`): `NX_YIELD_BACKOFF=start_us,cap_us` (default `2000,250`; empty or `0` = off) makes a guest thread that yields in a loop without changing x19..x28 sleep per yield; `NX_SPIN_NAPS=1` takes precedence with the older flat 0.5 ms nap. `runtime/src/yield_backoff.h`, the credited copy from nxrt, is included by nothing (#327).
 
