@@ -844,6 +844,8 @@ fn mac_finds_homebrew_off_path_and_names_a_missing_molten_vk() {
         "python3",
         "xcode-select",
         "cargo",
+        "tar",
+        "zstd",
     ] {
         file(&bin.join(tool));
     }
@@ -870,7 +872,9 @@ fn mac_finds_homebrew_off_path_and_names_a_missing_molten_vk() {
 fn linux_names_a_missing_clang_and_warns_about_missing_libvpx() {
     let base = toolchain_dir("linux-clang");
     let bin = base.join("usr/bin");
-    for tool in ["clang++", "curl", "python3", "cargo"] {
+    for tool in [
+        "clang++", "curl", "python3", "cargo", "tar", "zstd", "patchelf",
+    ] {
         file(&bin.join(tool));
     }
     let prefix = base.join("usr");
@@ -891,7 +895,7 @@ fn linux_names_a_missing_clang_and_warns_about_missing_libvpx() {
 fn a_missing_cargo_is_named_on_every_desktop_os() {
     let base = toolchain_dir("no-cargo");
     let bin = base.join("usr/bin");
-    for tool in ["clang", "clang++", "curl", "python3"] {
+    for tool in ["clang", "clang++", "curl", "python3", "tar", "zstd"] {
         file(&bin.join(tool));
     }
     let missing = toolchain_with(Os::Linux, &bin, &[]);
@@ -906,7 +910,9 @@ fn a_missing_cargo_is_named_on_every_desktop_os() {
 fn a_complete_toolchain_has_nothing_missing() {
     let base = toolchain_dir("linux-complete");
     let bin = base.join("usr/bin");
-    for tool in ["clang", "clang++", "curl", "python3", "cargo"] {
+    for tool in [
+        "clang", "clang++", "curl", "python3", "cargo", "tar", "zstd", "patchelf",
+    ] {
         file(&bin.join(tool));
     }
     let prefix = base.join("usr");
@@ -925,7 +931,9 @@ fn linked_python(name: &str, with_venv: bool) -> Vec<Missing> {
     let base = toolchain_dir(name);
     let prefix = base.join("usr");
     let bin = prefix.join("bin");
-    for tool in ["clang", "clang++", "curl", "cargo"] {
+    for tool in [
+        "clang", "clang++", "curl", "cargo", "tar", "zstd", "patchelf",
+    ] {
         file(&bin.join(tool));
     }
     file(&prefix.join("include/SDL3/SDL.h"));
@@ -2129,4 +2137,28 @@ mkdir -p "$t/release/build/acnh-runtime/abc/out/include"
         "{calls}"
     );
     assert!(lines[2].starts_with("ninja "), "{calls}");
+}
+
+#[test]
+fn a_missing_zstd_or_tar_is_named_with_a_steamos_hint() {
+    let base = toolchain_dir("linux-no-zstd");
+    let bin = base.join("usr/bin");
+    for tool in ["clang", "clang++", "curl", "python3", "cargo"] {
+        file(&bin.join(tool));
+    }
+    let missing = toolchain_with(Os::Linux, &bin, &[]);
+    let zstd = find(&missing, "zstd").expect("zstd is named");
+    assert!(zstd.warning, "{zstd:?}");
+    assert!(zstd.install.contains("pacman -S zstd"), "{zstd:?}");
+    let tar = find(&missing, "tar").expect("tar is named");
+    assert!(!tar.warning, "{tar:?}");
+    assert!(find(&missing, "patchelf").is_some(), "{missing:?}");
+}
+
+#[test]
+fn windows_names_a_missing_python() {
+    let base = toolchain_dir("windows-no-python");
+    let missing = toolchain_with(Os::Windows, base.join("empty"), &[]);
+    let python = find(&missing, "python").expect("python is named");
+    assert!(!python.warning, "{python:?}");
 }
