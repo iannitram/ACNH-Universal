@@ -106,16 +106,18 @@ jobs:
       - name: Configure
         run: cmake -B build -G Ninja -DNX_TESTS=ON -DNX_GAME=acnh -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        # Every *_test target ctest runs, ours and upstream's (nextendo, ldn_net, recomp, prepare_io, ...), except
-        # upstream's end-to-end prepare runs, which need a prepared tool chain (zig) and inputs CI does not have.
+        # Every *_test target ctest runs, ours and upstream's (nextendo, ldn_net, recomp, prepare_io, prepare_e2e, ...),
+        # except shader_cache_test (its ctest entry needs another game's shader folder) and the zig run of the
+        # end-to-end prepare (prepare_e2e_zig), which needs a fetched tool chain.
         run: |
           targets=$(ninja -C build -t targets all | sed -n 's/^[[:space:]]*\([A-Za-z0-9_]*_test\): .*/\1/p' |
-                    grep -v '^cmake_' | grep -v -x -e prepare_e2e_test -e shader_cache_test | sort -u || true)
+                    grep -v '^cmake_' | grep -v -x -e shader_cache_test | sort -u || true)
           [ -n "$targets" ] || { echo "no *_test targets found"; exit 1; }
           echo "test targets: $targets"
-          cmake --build build --target $targets
+          # prepare_e2e runs acnh_prepare and fake_shader_tool: ctest does not build them.
+          cmake --build build --target acnh_prepare fake_shader_tool $targets
       - name: Test
-        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig)$'
+        run: ctest --test-dir build --output-on-failure -E '^prepare_e2e_zig$'
       - name: Game reads stay on the game root
         run: bash tests/game_root_check.sh
 
@@ -206,24 +208,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+      - name: Runtime archive (memguard_test links it)
+        env:
+          # Git Bash puts Git's own /usr/bin/link ahead of MSVC's link.exe on PATH; use LLVM's linker, as CMake does.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
+        run: |
+          cargo build --locked --release -p acnh-runtime --target x86_64-pc-windows-msvc
+          archive="$PWD/target/x86_64-pc-windows-msvc/release/acnh_runtime.lib"
+          [ -f "$archive" ] || { echo "acnh_runtime.lib not found"; exit 1; }
+          echo "NX_RUNTIME_ARCHIVE=$(cygpath -m "$archive")" >> "$GITHUB_ENV"
+          inc=$(find target/x86_64-pc-windows-msvc/release/build -path '*/out/include/acnh_runtime.h' | head -n 1)
+          [ -n "$inc" ] || { echo "acnh_runtime.h not found"; exit 1; }
+          echo "NX_RUNTIME_INCLUDE=$(cygpath -m "$(dirname "$inc")")" >> "$GITHUB_ENV"
       - name: Configure (C++ parts and unit tests)
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_C_COMPILER=clang-cl \
             -DCMAKE_CXX_COMPILER=clang-cl \
             -DCMAKE_LINKER=lld-link \
+            -DNX_RUNTIME_ARCHIVE="$NX_RUNTIME_ARCHIVE" \
+            -DNX_RUNTIME_INCLUDE="$NX_RUNTIME_INCLUDE" \
             -DNX_TESTS=ON \
             -DNX_GAME=acnh \
             -DCMAKE_BUILD_TYPE=Release
       - name: Build C++ parts and unit tests
         run: |
           targets=$(ninja -C build -t targets all | sed -n 's/^[[:space:]]*\([A-Za-z0-9_]*_test\(\.exe\)\?\): .*/\1/p' |
-                    grep -v '^cmake_' | grep -v -x -e prepare_e2e_test -e prepare_e2e_test.exe -e shader_cache_test -e shader_cache_test.exe | sort -u || true)
+                    grep -v '^cmake_' | grep -v -x -e shader_cache_test -e shader_cache_test.exe | sort -u || true)
           [ -n "$targets" ] || { echo "no *_test targets found"; exit 1; }
           echo "test targets: $targets"
-          cmake --build build --target acnh_recomp acnh_prepare $targets
+          cmake --build build --target acnh_recomp acnh_prepare fake_shader_tool $targets
       - name: Test (C++ unit tests)
-        run: ctest --test-dir build --output-on-failure -E '^(prepare_e2e|prepare_e2e_zig)$'
+        run: ctest --test-dir build --output-on-failure -E '^prepare_e2e_zig$'
       - name: Player (clang-cl, lld-link, x86_64-pc-windows-msvc)
         env:
           CC: clang-cl
@@ -298,6 +314,8 @@ jobs:
             echo "AR_aarch64_linux_android=$ARCHIVER"
           } >> "$GITHUB_ENV"
       - run: cargo build --workspace --target aarch64-linux-android
+      - name: Android launcher (android_main, the cdylib the APK loads)
+        run: cargo build --locked -p acnh-app --target aarch64-linux-android --features android-launcher --lib
       - name: Android private-storage checks (#192)
         run: bash tests/android_app_check.sh
 
@@ -333,15 +351,26 @@ jobs:
       - name: iOS runtime library (save-relay in the player)
         run: cargo build -p acnh-runtime --release --target aarch64-apple-ios
       - name: Homebrew headers (SDL3, Vulkan)
-        run: brew install ninja sdl3 vulkan-headers
+        run: brew install ninja sdl3 vulkan-headers libvpx libvorbis
       - name: Compact and desktop guest layout (macOS)
         run: |
           # layout_test links the Rust runtime since the Memory port (#59): build it and hand CMake the archive.
           cargo build -p acnh-runtime --release
           cmake -B build-layout -G Ninja -DNX_GAME=acnh -DNX_TESTS=ON -DCMAKE_BUILD_TYPE=Release \
             -DNX_RUNTIME_ARCHIVE="$PWD/target/release/libacnh_runtime.a"
-          cmake --build build-layout --target layout_test desktop_layout_test
-          ctest --test-dir build-layout -R 'compact_layout|desktop_layout' --output-on-failure
+          cmake --build build-layout --target layout_test desktop_layout_test touch_input_test
+          ctest --test-dir build-layout -R 'compact_layout|desktop_layout|touch_input' --output-on-failure
+      - name: Player (Mac, arm64, Homebrew SDL3 and MoltenVK path)
+        env:
+          ACNH_GAME: acnh
+          ACNH_BUILD_PLAYER: "1"
+        run: |
+          cargo build --locked --release -p acnh-runtime --features player
+          player=$(find target/release/build -path '*/out/player/build/acnh' | head -n 1)
+          [ -n "$player" ] && [ -f "$player" ] || { echo "acnh not found"; exit 1; }
+          [ "$(lipo -archs "$player")" = arm64 ]
+          otool -L "$player" | grep -q libSDL3
+          echo "Built Mac player: $player"
       - name: C++ compiles for iOS
         run: bash tools/check_ios_compile.sh
       - name: Cache the iOS dependencies

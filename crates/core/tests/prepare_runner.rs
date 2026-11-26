@@ -381,6 +381,42 @@ fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
 }
 
 #[test]
+fn android_delivery_rebuilds_a_truncated_pack_whose_key_record_is_missing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut req = request("android-truncated", Os::Android);
+    let delivery_root = tmp.path().join("Dropbox/_transfers/ACNH-Universal");
+    req.delivery = Some(delivery_root.join("android"));
+    std::fs::create_dir_all(&delivery_root).unwrap();
+    let romfs = req.out.join("game-romfs");
+    std::fs::create_dir_all(&romfs).unwrap();
+    std::fs::write(romfs.join("a.bin"), b"romfs-bytes").unwrap();
+    req.game.romfs = romfs;
+    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
+    std::fs::write(req.out.join("spirv/a.spv"), b"spv-bytes").unwrap();
+    std::fs::create_dir_all(req.out.join("analysis")).unwrap();
+    std::fs::write(req.out.join("analysis/main.bin"), b"main-bytes").unwrap();
+    std::fs::write(
+        req.out.join("version.ini"),
+        "build_id = FCD2BB238ABE99E925B4E452DF1F41F1\n",
+    )
+    .unwrap();
+    std::fs::write(req.out.join("libacnh_game.so"), b"elf-bytes").unwrap();
+    let run = |req: &Request| {
+        let mut fake = Fake::default();
+        fake.tools.push(("git", "false\n"));
+        prepare_with(req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
+    };
+    run(&req);
+    let pak = req.out.join("romfs.pak");
+    let whole = std::fs::read(&pak).unwrap();
+    // A kill mid-write: the record is removed before the work, the pack is cut short.
+    std::fs::remove_file(req.out.join(".romfs.pak.key")).unwrap();
+    std::fs::write(&pak, &whole[..whole.len() / 2]).unwrap();
+    run(&req);
+    assert_eq!(std::fs::read(&pak).unwrap(), whole);
+}
+
+#[test]
 fn process_runner_keeps_stdout_and_stderr_lines_separate() {
     // The system's shell, so the test needs nothing a build machine may lack.
     let command = if cfg!(windows) {

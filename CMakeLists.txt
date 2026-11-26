@@ -163,7 +163,7 @@ if(NX_TESTS AND NOT ANDROID)
     if(WIN32 AND NX_RUNTIME_ARCHIVE)
         add_executable(memguard_test tests/memguard_test.cpp runtime/src/memory_wrapper.cpp)
         target_include_directories(memguard_test PRIVATE runtime/include runtime/src)
-        target_link_libraries(memguard_test PRIVATE "${NX_RUNTIME_ARCHIVE}" psapi userenv ntdll)
+        target_link_libraries(memguard_test PRIVATE "${NX_RUNTIME_ARCHIVE}" psapi userenv ntdll ws2_32 bcrypt synchronization advapi32 dbghelp)  # what Rust std links on windows-msvc
         add_test(NAME memguard COMMAND memguard_test)
     endif()
 endif()
