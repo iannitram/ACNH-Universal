@@ -14,22 +14,34 @@ pub mod android;
 
 /// Identify a controller without depending on a particular input backend.
 /// IDs refer to USB vendor and product IDs; name disambiguates 8BitDo modes.
+///
+/// The same rule as the game's (`crates/runtime/src/platform.rs` and `runtime/src/controller_kind.h`),
+/// so one pad gets one set of prompts in both; all three are held to `tests/data/pad_kinds.tsv`.
+/// Only the Steam Deck is told apart here (the game shows it with the generic, Xbox icons).
 pub fn controller_layout(vendor: Option<u16>, product: Option<u16>, name: &str) -> InputDevice {
+    let n = name.to_ascii_lowercase();
     match (vendor, product) {
-        (Some(0x28de), Some(0x1205)) => InputDevice::SteamDeck,
-        (Some(0x057e), Some(0x2006 | 0x2007 | 0x2008 | 0x2009 | 0x200e)) => InputDevice::Switch,
-        (Some(0x054c), Some(0x05c4 | 0x09cc | 0x0ce6 | 0x0df2)) => InputDevice::PlayStation,
-        (Some(0x045e), Some(0x028e | 0x02d1 | 0x02dd | 0x02ea | 0x0b12 | 0x0b13)) => {
-            InputDevice::Xbox
-        }
-        (Some(0x17ef), _) if name.to_ascii_lowercase().contains("legion") => InputDevice::Xbox,
+        (Some(0x28de), Some(0x1205)) => return InputDevice::SteamDeck,
+        (Some(0x057e), _) => return InputDevice::Switch,
+        (Some(0x045e), _) => return InputDevice::Xbox,
+        (Some(0x054c), _) => return InputDevice::PlayStation,
+        (Some(0x17ef), _) if n.contains("legion") => return InputDevice::Xbox,
         (
             Some(0x2dc8),
             Some(0x6001 | 0x6002 | 0x6006 | 0x6007 | 0x6101 | 0x6102 | 0x9006 | 0x9012),
-        ) => InputDevice::Switch,
-        (Some(0x2dc8), Some(0x2000)) => InputDevice::Xbox,
-        (Some(0x2dc8), _) if name.to_ascii_lowercase().contains("switch") => InputDevice::Switch,
-        _ => InputDevice::Generic,
+        ) => return InputDevice::Switch,
+        (Some(0x2dc8), Some(0x2000)) => return InputDevice::Xbox,
+        (Some(0x2dc8), _) if n.contains("switch") => return InputDevice::Switch,
+        _ => {}
+    }
+    if n.contains("nintendo") || n.contains("pro controller") || n.contains("joy-con") {
+        InputDevice::Switch
+    } else if n.contains("xbox") {
+        InputDevice::Xbox
+    } else if n.contains("dualsense") || n.contains("dualshock") || n.contains("playstation") {
+        InputDevice::PlayStation
+    } else {
+        InputDevice::Generic
     }
 }
 
@@ -510,6 +522,37 @@ mod tests {
             assert_eq!(mapped(bottom).and_then(button_nav), Some(Nav::Accept));
             assert_eq!(mapped(right).and_then(button_nav), Some(Nav::Back));
         }
+    }
+
+    /// The shared list the game's two classifiers are held to as well.
+    #[test]
+    fn controller_layout_matches_the_shared_table() {
+        let table = include_str!("../../tests/data/pad_kinds.tsv");
+        let mut rows = 0;
+        for line in table
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let f: Vec<&str> = line.split('\t').collect();
+            assert_eq!(f.len(), 4, "{line}");
+            let hex = |s: &str| u16::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
+            let (vendor, product) = (hex(f[0]), hex(f[1]));
+            let want = match f[3] {
+                "switch" => InputDevice::Switch,
+                "xbox" => InputDevice::Xbox,
+                "playstation" => InputDevice::PlayStation,
+                "deck" => InputDevice::SteamDeck,
+                "generic" => InputDevice::Generic,
+                other => panic!("{other}"),
+            };
+            assert_eq!(
+                controller_layout(Some(vendor), Some(product), f[2]),
+                want,
+                "{line}"
+            );
+            rows += 1;
+        }
+        assert!(rows > 20);
     }
 
     #[test]
