@@ -254,9 +254,14 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
         (sess.service, sess.domain, Arc::clone(&sess.dom))
     };
 
-    // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
-    let w = unsafe { std::slice::from_raw_parts_mut(buf as *mut u32, 0x40) };
-    let hdr = parse_hipc_words(w, desc_addr);
+    // The request words are copied in, and every reply word goes out through `st_word`: no `&mut [u32]` over guest memory lives across the C++ dispatch.
+    // SAFETY: `buf` is guest memory of at least `cap` (at least IPC_MIN_MSG_AREA) bytes, mapped for the life of the process.
+    let req: [u32; 0x40] = std::array::from_fn(|i| unsafe { ld_u32(buf + 4 * i as u64) });
+    let st_word = |i: usize, v: u32| {
+        // SAFETY: word `i` lies inside the message area the guest passed, which stays mapped for the life of the process.
+        unsafe { st_u32(buf + 4 * i as u64, v) }
+    };
+    let hdr = parse_hipc_words(&req, desc_addr);
 
     if hdr.msg_type == 2 || hdr.msg_type == 15 {
         close_handle(handle);
@@ -342,28 +347,34 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
         let has_special = out_copy_len > 0 || out_move_len > 0;
         let mut q = 2usize;
         if has_special {
-            w[q] = ((out_copy_len as u32) << 1) | ((out_move_len as u32) << 5);
+            st_word(
+                q,
+                ((out_copy_len as u32) << 1) | ((out_move_len as u32) << 5),
+            );
             q += 1;
             for &h in &out_copy[..out_copy_len] {
-                w[q] = h;
+                st_word(q, h);
                 q += 1;
             }
             for &h in &out_move[..out_move_len] {
-                w[q] = h;
+                st_word(q, h);
                 q += 1;
             }
         }
-        w[q] = rc;
+        st_word(q, rc);
         // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 out_buf.as_ptr(),
-                (&mut w[q + 1] as *mut u32).cast::<u8>(),
+                (buf + 4 * (q as u64 + 1)) as *mut u8,
                 out_len,
             );
         }
-        w[0] = hdr.msg_type;
-        w[1] = (1 + out_len.div_ceil(4) as u32) | if has_special { 0x8000_0000 } else { 0 };
+        st_word(0, hdr.msg_type);
+        st_word(
+            1,
+            (1 + out_len.div_ceil(4) as u32) | if has_special { 0x8000_0000 } else { 0 },
+        );
         return RC_OK;
     }
 
@@ -399,7 +410,7 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
             sess_dom.lock().unwrap().objects.remove(&domain_obj);
             // SAFETY: the range is guest or caller memory of the length passed, mapped for the life of the process; the C++ dispatcher is stopped while this call runs, so nothing else writes it.
             unsafe { std::ptr::write_bytes(buf as *mut u8, 0, cap as usize) };
-            w[1] = 8;
+            st_word(1, 8);
             return RC_OK;
         }
         let found = sess_dom.lock().unwrap().objects.get(&domain_obj).copied();
@@ -572,14 +583,17 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
     let has_special = out_copy_len > 0 || out_move_len > 0;
     let mut q = 2usize;
     if has_special {
-        w[q] = ((out_copy_len as u32) << 1) | ((out_move_len as u32) << 5);
+        st_word(
+            q,
+            ((out_copy_len as u32) << 1) | ((out_move_len as u32) << 5),
+        );
         q += 1;
         for &h in &out_copy[..out_copy_len] {
-            w[q] = h;
+            st_word(q, h);
             q += 1;
         }
         for &h in &out_move[..out_move_len] {
-            w[q] = h;
+            st_word(q, h);
             q += 1;
         }
     }
@@ -606,7 +620,7 @@ pub(crate) fn ipc_request_inner(c: &mut AcnhCpu, handle: u32, buf: u64, size: u6
         end += 4;
     }
     let words = ((end - (buf + (dstart * 4) as u64)) / 4) as u32 + 4;
-    w[0] = 0;
-    w[1] = words | if has_special { 0x8000_0000 } else { 0 };
+    st_word(0, 0);
+    st_word(1, words | if has_special { 0x8000_0000 } else { 0 });
     RC_OK
 }
