@@ -174,7 +174,11 @@ pub fn preflight(req: &Request, runner: &mut dyn ScriptRunner, home: &Path) -> R
     let delivery = req.delivery.as_deref().ok_or_else(|| {
         Error::Env("the delivery folder is not set (the `dropbox` key in launcher.ini)".into())
     })?;
-    check_delivery(delivery, home)?;
+    if req.target == Os::Android {
+        check_android_delivery(delivery, home)?;
+    } else {
+        check_delivery(delivery, home)?;
+    }
     if req.target == Os::Ios {
         check_ios_tools(runner, home)?;
     }

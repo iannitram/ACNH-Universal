@@ -60,6 +60,8 @@ struct Fake {
     source_dir: Option<PathBuf>,
     /// The tools under the source folder are gone or out of date (the record in `out` stands).
     tools_lost: bool,
+    /// `tools/build_android.sh` makes `libacnh_game.so` in the folder named by its `--out`.
+    android_builds: bool,
 }
 
 /// A script call without the `env PATH=...` a Mac that has Homebrew puts before it.
@@ -111,6 +113,12 @@ impl ScriptRunner for Fake {
         }
         if self.fail_at == Some(stage) {
             return Err(vec!["boom at /home/me/x".to_owned()]);
+        }
+        if self.android_builds && args.first().is_some_and(|a| a == "tools/build_android.sh") {
+            let out = args.iter().position(|a| a == "--out").map(|i| &args[i + 1]);
+            let out = PathBuf::from(out.expect("the script is given --out"));
+            std::fs::create_dir_all(&out).unwrap();
+            std::fs::write(out.join("libacnh_game.so"), b"elf-bytes").unwrap();
         }
         Ok(())
     }
@@ -327,16 +335,16 @@ fn incomplete_module_outputs_are_not_skipped() {
     assert!(!fake.ran.contains(&Stage::Recompile));
 }
 
-#[test]
-fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
+/// An Android request with the prepared outputs the shared stages need, and the delivery
+/// folder where the app downloads from, inside a fake `Apps/save-relay`.
+fn android_request(name: &str) -> (Request, PathBuf, tempfile::TempDir) {
     let tmp = tempfile::TempDir::new().unwrap();
-    let mut req = request("android-deliver", Os::Android);
-    let delivery_root = tmp.path().join("Dropbox/_transfers/ACNH-Universal");
-    let delivery = delivery_root.join("android");
-    std::fs::create_dir_all(&delivery_root).unwrap();
+    let mut req = request(name, Os::Android);
+    let app = tmp.path().join("Dropbox/Apps/save-relay");
+    std::fs::create_dir_all(&app).unwrap();
+    let delivery = delivery_folder(&Config::default(), tmp.path(), "android");
+    assert_eq!(delivery, app.join("acnh-universal-game/android"));
     req.delivery = Some(delivery.clone());
-
-    // Minimal prepared outputs so pack_stage and android_deliver can stage them.
     let romfs = req.out.join("game-romfs");
     std::fs::create_dir_all(&romfs).unwrap();
     std::fs::write(romfs.join("a.bin"), b"romfs-bytes").unwrap();
@@ -350,10 +358,22 @@ fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
         "build_id = FCD2BB238ABE99E925B4E452DF1F41F1\n",
     )
     .unwrap();
-    std::fs::write(req.out.join("libacnh_game.so"), b"elf-bytes").unwrap();
+    (req, delivery, tmp)
+}
 
+fn android_fake() -> Fake {
     let mut fake = Fake::default();
     fake.tools.push(("git", "false\n"));
+    fake.android_builds = true;
+    fake
+}
+
+#[test]
+fn android_delivery_builds_from_the_prepared_folder_and_lands_where_the_app_downloads() {
+    let (req, delivery, _tmp) = android_request("android-deliver");
+    // No library is planted: the script is the only thing that makes one.
+    assert!(!req.out.join("libacnh_game.so").exists());
+    let mut fake = android_fake();
     let mut seen = Vec::new();
     let out = prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
         seen.push(s)
@@ -362,10 +382,26 @@ fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
 
     assert_eq!(out, delivery);
     assert!(!seen.is_empty());
+    // The script gets the folders Prepare made, not the checkout's own.
+    let script = fake
+        .args
+        .iter()
+        .find(|a| a.first().is_some_and(|x| x == "tools/build_android.sh"))
+        .expect("tools/build_android.sh ran");
+    let after = |flag: &str| {
+        let i = script.iter().position(|a| a == flag).unwrap();
+        PathBuf::from(&script[i + 1])
+    };
+    assert_eq!(after("--gen"), req.out.join("gen"));
+    assert_eq!(after("--build"), req.out.join("build-android"));
+    assert_eq!(after("--out"), req.out.join("apk-android"));
+    assert!(script.contains(&"--no-phone-prepare".to_owned()));
+
     let manifest_bytes = std::fs::read(delivery.join("manifest.json")).unwrap();
     let manifest = acnh_core::appgame::Manifest::from_json(&manifest_bytes).unwrap();
     assert_eq!(manifest.build_id, "FCD2BB238ABE99E925B4E452DF1F41F1");
-    assert!(!manifest.nx_game_abi.is_empty());
+    let abi = acnh_core::prepare::nx_game_abi(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    assert_eq!(manifest.nx_game_abi, abi);
     let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
     assert!(paths.contains(&"analysis/main.bin"));
     assert!(paths.contains(&"libacnh_game.so"));
@@ -374,29 +410,138 @@ fn android_delivery_stages_files_and_manifest_with_build_id_and_abi() {
 }
 
 #[test]
-fn android_delivery_rebuilds_a_truncated_pack_whose_key_record_is_missing() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let mut req = request("android-truncated", Os::Android);
-    let delivery_root = tmp.path().join("Dropbox/_transfers/ACNH-Universal");
-    req.delivery = Some(delivery_root.join("android"));
-    std::fs::create_dir_all(&delivery_root).unwrap();
-    let romfs = req.out.join("game-romfs");
-    std::fs::create_dir_all(&romfs).unwrap();
-    std::fs::write(romfs.join("a.bin"), b"romfs-bytes").unwrap();
-    req.game.romfs = romfs;
-    std::fs::create_dir_all(req.out.join("spirv")).unwrap();
-    std::fs::write(req.out.join("spirv/a.spv"), b"spv-bytes").unwrap();
-    std::fs::create_dir_all(req.out.join("analysis")).unwrap();
-    std::fs::write(req.out.join("analysis/main.bin"), b"main-bytes").unwrap();
-    std::fs::write(
-        req.out.join("version.ini"),
-        "build_id = FCD2BB238ABE99E925B4E452DF1F41F1\n",
+fn android_delivery_never_stages_a_library_it_did_not_build() {
+    let (req, delivery, _tmp) = android_request("android-stale");
+    // A library an earlier run left in the folder the script writes, and one in the old places.
+    let apk = req.out.join("apk-android");
+    std::fs::create_dir_all(&apk).unwrap();
+    std::fs::write(apk.join("libacnh_game.so"), b"stale-elf").unwrap();
+    std::fs::write(req.out.join("libacnh_game.so"), b"stale-elf").unwrap();
+    // The script runs but makes no library (the game target is not in the build).
+    let mut fake = android_fake();
+    fake.android_builds = false;
+    let error = prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
     )
-    .unwrap();
-    std::fs::write(req.out.join("libacnh_game.so"), b"elf-bytes").unwrap();
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Build(m) if m.contains("libacnh_game.so was not built")),
+        "{error:?}"
+    );
+    assert!(fake
+        .args
+        .iter()
+        .any(|a| a.first().is_some_and(|x| x == "tools/build_android.sh")));
+    assert!(!delivery.exists());
+}
+
+#[test]
+fn android_refuses_a_prepared_folder_without_a_build_id_before_any_script() {
+    for ini in [
+        "version = 3.0.2\n",
+        "build_id = \nversion = 3.0.2\n",
+        "build_id = xyz\n",
+    ] {
+        let (req, delivery, _tmp) = android_request("android-bad-build-id");
+        let mut fake = android_fake();
+        fake.ini = Some(ini);
+        // The Version stage writes `ini` when no version.ini is there yet.
+        std::fs::remove_file(req.out.join("version.ini")).unwrap();
+        let error = prepare_with(
+            &req,
+            Hub::StrixHalo,
+            &mut fake,
+            Path::new("/h"),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::Build(m) if m.contains("32 hex digit build id")),
+            "{error:?}"
+        );
+        assert!(
+            fake.args
+                .iter()
+                .all(|a| a.first().is_none_or(|x| x != "tools/build_android.sh")),
+            "{ini:?}"
+        );
+        assert!(!delivery.exists());
+    }
+}
+
+#[test]
+fn android_refuses_when_the_runtime_headers_are_missing_before_any_script() {
+    let (req, delivery, _tmp) = android_request("android-no-headers");
+    let mut fake = android_fake();
+    fake.source_dir = Some(req.out.join("empty-source"));
+    let error = prepare_with(
+        &req,
+        Hub::StrixHalo,
+        &mut fake,
+        Path::new("/h"),
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Build(m) if m.contains("ABI of the Android game folder is unknown")),
+        "{error:?}"
+    );
+    assert!(fake
+        .args
+        .iter()
+        .all(|a| a.first().is_none_or(|x| x != "tools/build_android.sh")));
+    assert!(!delivery.exists());
+}
+
+#[test]
+fn android_without_the_relay_app_folder_stops_before_the_first_stage() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut req = request("android-no-app-folder", Os::Android);
+    req.delivery = Some(delivery_folder(&Config::default(), tmp.path(), "android"));
+    let mut fake = android_fake();
+    let mut seen = vec![];
+    let error = prepare_with(&req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |s| {
+        seen.push(s)
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Build(m) if m.contains("relay_app_folder")),
+        "{error:?}"
+    );
+    assert!(fake.ran.is_empty() && seen.is_empty());
+}
+
+#[test]
+fn the_android_delivery_folder_is_the_relay_app_folder_key_or_dropbox_apps() {
+    let home = Path::new("/Users/user");
+    let game = |app: &str| PathBuf::from(app).join("acnh-universal-game/android");
+    assert_eq!(
+        delivery_folder(&Config::default(), home, "android"),
+        game("/Users/user/Dropbox/Apps/save-relay")
+    );
+    let dropbox = Config::parse("dropbox = /d\n").unwrap();
+    assert_eq!(
+        delivery_folder(&dropbox, home, "android"),
+        game("/d/Apps/save-relay")
+    );
+    let keyed = Config::parse("dropbox = /d\nrelay_app_folder = /r/app\n").unwrap();
+    assert_eq!(delivery_folder(&keyed, home, "android"), game("/r/app"));
+    let empty = Config::parse("relay_app_folder = \n").unwrap();
+    assert_eq!(
+        delivery_folder(&empty, home, "android"),
+        game("/Users/user/Dropbox/Apps/save-relay")
+    );
+}
+
+#[test]
+fn android_delivery_rebuilds_a_truncated_pack_whose_key_record_is_missing() {
+    let (req, _delivery, _tmp) = android_request("android-truncated");
     let run = |req: &Request| {
-        let mut fake = Fake::default();
-        fake.tools.push(("git", "false\n"));
+        let mut fake = android_fake();
         prepare_with(req, Hub::StrixHalo, &mut fake, Path::new("/h"), &mut |_| {}).unwrap();
     };
     run(&req);

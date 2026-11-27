@@ -94,7 +94,13 @@ The first time, **ACNH Recomp** shows its home screen:
   app (an App folder app: it sees only `Apps/<that app>/`), so the files wait in
   `Apps/<that app>/acnh-universal-game/android/`, put there on the computer with
   `tools/stage_dropbox_game.sh <work folder> private/acnh/apk/libacnh_game.so ~/Dropbox/Apps/<that app>` (it also
-  writes `manifest.json`: each file's size and SHA-256). The download runs as a foreground service with a progress
+  writes `manifest.json`: each file's size and SHA-256), or by Prepare's `android` target (#365), which builds
+  `libacnh_game.so` from the code it just recompiled (`tools/build_android.sh --gen <work folder>/gen --build <work
+  folder>/build-android --out <work folder>/apk-android --no-phone-prepare`; those three options are for a hand build
+  too), refuses a work folder with no 32 hex digit build id or a runtime with no ABI, and stages the game and its
+  `manifest.json` straight into that folder: `launcher.ini`'s `relay_app_folder` key (the local copy of
+  `Apps/<that app>`), else `<dropbox>/Apps/save-relay`. It works offline, with no Dropbox token in the CLI; the
+  Dropbox client does the upload. The download runs as a foreground service with a progress
   notification: it keeps going with the app in the background or swiped away, picks up a file where it stopped (an
   HTTP range request), checks every file's hash, and the game starts when all are there. Never share that folder
   or make a link to it.
