@@ -25,6 +25,7 @@ use std::time::Instant;
 
 #[allow(unused_imports)]
 use crate::config::{config_get, config_get_bool, config_get_int, config_set};
+use crate::ffi::host_log;
 
 // ---- NpadButton bits & constants (platform.h / hle_hid.cpp) ----
 
@@ -149,17 +150,6 @@ pub(crate) fn call_string_cb(
 
 pub(crate) fn host_data_root() -> String {
     call_string_cb(host_copy().data_root).unwrap_or_default()
-}
-
-pub(crate) fn host_log(msg: &str) {
-    if let Some(f) = host_copy().log {
-        let mut bytes = Vec::with_capacity(msg.len() + 1);
-        for &b in msg.as_bytes() {
-            bytes.push(if b == 0 { b' ' } else { b });
-        }
-        bytes.push(0);
-        f(bytes.as_ptr().cast::<c_char>());
-    }
 }
 
 pub(crate) fn host_describe(addr: u64) -> String {

@@ -6,7 +6,7 @@
 //! `NX_HLE` entries for guest CPU/IPC dispatch.
 
 use std::collections::VecDeque;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_void};
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -14,6 +14,7 @@ use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::config;
+use crate::ffi::host_log;
 
 const BYTES_PER_SECOND: u64 = 48_000 * 2 * 2;
 const MAX_IN_FLIGHT: u32 = 4;
@@ -88,14 +89,6 @@ fn host_sleep_ns(ns: i64) {
         return;
     }
     std::thread::sleep(Duration::from_nanos(ns as u64));
-}
-
-fn host_log(msg: &str) {
-    if let Some(f) = current_host().log {
-        if let Ok(c) = CString::new(msg) {
-            f(c.as_ptr());
-        }
-    }
 }
 
 fn host_audio_queued() -> u32 {
@@ -890,6 +883,7 @@ pub unsafe extern "C" fn acnh_audio_set_host(host: *const AcnhAudioHost) {
     } else {
         // SAFETY: caller guarantees `host` points to a valid `AcnhAudioHost`.
         *slot = unsafe { *host };
+        crate::ffi::set_log(slot.log);
     }
 }
 

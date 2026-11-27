@@ -1,6 +1,7 @@
 //! Guest address space (`memory.cpp`), write watches (`write_watch.cpp`), and memory guard
 //! (`memguard_*.cpp`) in Rust.
 
+use crate::ffi::host_log;
 use std::collections::BTreeMap;
 use std::ffi::{c_char, CStr, CString};
 use std::ops::Bound;
@@ -175,14 +176,6 @@ static MEMGUARD_READ_NEXT: AtomicU32 = AtomicU32::new(0);
 
 fn host_copy() -> AcnhMemoryHost {
     *HOST.lock().unwrap()
-}
-
-fn host_log(msg: &str) {
-    if let Some(f) = host_copy().log {
-        if let Ok(c) = CString::new(msg) {
-            f(c.as_ptr());
-        }
-    }
 }
 
 fn host_fatal(msg: &str) -> ! {
@@ -383,7 +376,9 @@ pub unsafe extern "C" fn acnh_memory_set_host(host: *const AcnhMemoryHost) {
     if host.is_null() {
         return;
     }
-    *HOST.lock().unwrap() = *host;
+    let h = *host;
+    crate::ffi::set_log(h.log);
+    *HOST.lock().unwrap() = h;
 }
 
 /// Initializes the guest address space reservations and initial VM map.

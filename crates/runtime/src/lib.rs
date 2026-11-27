@@ -13,10 +13,15 @@
 /// `runtime/include/nx/runtime.h`); the address space then starts at `0xC0_0800_0000`.
 pub const APPLE_GUEST_SHIFT: u64 = 0xC0_0000_0000;
 
-/// Version of the scaffold's C interface, checked by the player at boot.
+/// Version of the player/runtime C interface this crate implements. The player's copy is
+/// `nx::kRuntimeAbi` in `runtime/include/nx/runtime.h`; it passes it to `acnh_loader_boot`, which
+/// stops the boot when the two differ. `tests/abi.rs` checks the two numbers agree.
+pub const RUNTIME_ABI_VERSION: u32 = 1;
+
+/// Version of the scaffold's C interface (see [`RUNTIME_ABI_VERSION`]).
 #[no_mangle]
 pub extern "C" fn acnh_runtime_abi_version() -> u32 {
-    1
+    RUNTIME_ABI_VERSION
 }
 
 /// save-relay inside the iPad's player and the Android app: pull before the game, push after,
@@ -36,6 +41,7 @@ pub mod appgame;
 pub mod appgame_ios;
 pub mod audio;
 pub mod config;
+pub(crate) mod ffi;
 pub mod files;
 #[cfg(target_os = "android")]
 pub mod hub_android;

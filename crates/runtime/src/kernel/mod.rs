@@ -1,6 +1,7 @@
 //! Horizon kernel, synchronization, IPC (HIPC/CMIF/TIPC), and diagnostics in Rust.
 //! Replaces `runtime/src/kernel.cpp`, `runtime/src/ipc.cpp`, and `runtime/src/kernel_watch.cpp`.
 
+use crate::ffi::host_log;
 #[allow(unused_imports)]
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[allow(unused_imports)]
@@ -217,14 +218,6 @@ pub(crate) static HOST: OnceLock<AcnhKernelHost> = OnceLock::new();
 pub(crate) fn host() -> &'static AcnhKernelHost {
     HOST.get()
         .expect("acnh_kernel_set_host must be called first")
-}
-
-pub(crate) fn host_log(msg: &str) {
-    if let Some(h) = HOST.get() {
-        if let Ok(c) = CString::new(msg) {
-            (h.log)(c.as_ptr());
-        }
-    }
 }
 
 pub(crate) fn host_fatal(msg: &str) -> ! {

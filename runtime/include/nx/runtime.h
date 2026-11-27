@@ -10,6 +10,13 @@
 
 namespace nx {
 
+// ---- runtime ABI ----------------------------------------------------------------------------------------------
+// The version of the player/runtime interface this player was built against. The Rust runtime holds
+// the version it implements (`RUNTIME_ABI_VERSION` in crates/runtime/src/lib.rs), the player passes
+// this one to `acnh_loader_boot`, and the boot stops with a message when they differ.
+// `crates/runtime/tests/abi.rs` checks the two numbers agree; change them together.
+constexpr uint32_t kRuntimeAbi = 1;
+
 // ---- logging --------------------------------------------------------------------------------------------------
 
 void log(const char* fmt, ...);

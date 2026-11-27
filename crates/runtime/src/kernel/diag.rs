@@ -313,7 +313,9 @@ pub(crate) fn frame_profile_on() -> bool {
 pub unsafe extern "C" fn acnh_kernel_set_host(host_ptr: *const AcnhKernelHost) {
     if !host_ptr.is_null() {
         // SAFETY: host_ptr points at a live AcnhKernelHost owned by the caller for this call; we copy it by value.
-        let _ = HOST.set(unsafe { std::ptr::read(host_ptr) });
+        let h = unsafe { std::ptr::read(host_ptr) };
+        crate::ffi::set_log(Some(h.log));
+        let _ = HOST.set(h);
     }
 }
 
