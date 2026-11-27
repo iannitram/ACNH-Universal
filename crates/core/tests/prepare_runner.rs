@@ -678,55 +678,6 @@ fn a_complete_toolchain_has_nothing_missing() {
     assert_eq!(toolchain_with(Os::Linux, &bin, &[]), Vec::new());
 }
 
-/// A Homebrew-style `python3`: `<prefix>/bin/python3` links into the Cellar, and the
-/// `<prefix>/lib/python3.N` beside the link holds only `site-packages`. The standard library
-/// (and its `venv`) is under the link's target.
-#[cfg(unix)]
-fn linked_python(name: &str, with_venv: bool) -> Vec<Missing> {
-    let base = toolchain_dir(name);
-    let prefix = base.join("usr");
-    let bin = prefix.join("bin");
-    for tool in [
-        "clang", "clang++", "curl", "cargo", "tar", "zstd", "patchelf",
-    ] {
-        file(&bin.join(tool));
-    }
-    file(&prefix.join("include/SDL3/SDL.h"));
-    file(&prefix.join("lib/pkgconfig/vpx.pc"));
-    file(&prefix.join("lib/pkgconfig/vorbis.pc"));
-    file(&prefix.join("lib/python3.15/site-packages/placeholder"));
-    let framework = base.join("Cellar/python/3.15.2/Frameworks/Python.framework/Versions/3.15");
-    file(&framework.join("bin/python3.15"));
-    let stdlib = framework.join("lib/python3.15");
-    if with_venv {
-        file(&stdlib.join("venv/__init__.py"));
-    } else {
-        file(&stdlib.join("os.py"));
-    }
-    std::os::unix::fs::symlink(framework.join("bin/python3.15"), bin.join("python3")).unwrap();
-    toolchain_with(Os::Linux, &bin, &[])
-}
-
-#[cfg(unix)]
-#[test]
-fn a_linked_python_finds_venv_under_the_link_target() {
-    let missing = linked_python("linked-venv", true);
-    assert!(
-        find(&missing, "python3's venv module").is_none(),
-        "{missing:?}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_linked_python_without_venv_is_still_named() {
-    let missing = linked_python("linked-no-venv", false);
-    assert!(
-        find(&missing, "python3's venv module").is_some(),
-        "{missing:?}"
-    );
-}
-
 /// A fake installed layout: `<base>/app/usr/bin/acnh-app` and the source under
 /// `<base>/app/usr/share/acnh-universal/source`.
 fn installed(name: &str, commit: &str) -> (PathBuf, PathBuf, AppDirs) {
@@ -910,6 +861,23 @@ fn speedfix_patch_selection_preserves_sources_and_rejects_old_output_after_game_
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A zip of `(name, contents)`; a `None` is a folder entry.
+fn write_zip(path: &Path, entries: &[(&str, Option<&str>)]) {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, body) in entries {
+        match body {
+            Some(body) => {
+                zip.start_file(*name, options).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            None => zip.add_directory(*name, options).unwrap(),
+        }
+    }
+    zip.finish().unwrap();
+}
+
 #[test]
 fn incomplete_mod_archive_preserves_previous_and_opt_in_then_off_preserves_other_mods() {
     let dir = std::env::temp_dir().join(format!("acnh-mods-{}", std::process::id()));
@@ -922,16 +890,8 @@ fn incomplete_mod_archive_preserves_previous_and_opt_in_then_off_preserves_other
     std::fs::write(&installed, "previous translation").unwrap();
     let bad_zip = dir.join("bad.zip");
     // Empty zip with only romfs/ directory entry and no files.
-    let status = std::process::Command::new("python3")
-        .args([
-            "-c",
-            "import sys, zipfile; z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr('romfs/','')",
-            &bad_zip.display().to_string(),
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success());
-    assert!(install_mod_archive(&out.join("mods"), "ptbr", &bad_zip, &dir, "python3").is_err());
+    write_zip(&bad_zip, &[("romfs/", None)]);
+    assert!(install_mod_archive(&out.join("mods"), "ptbr", &bad_zip, &dir).is_err());
     assert_eq!(
         std::fs::read_to_string(&installed).unwrap(),
         "previous translation"
@@ -942,27 +902,19 @@ fn incomplete_mod_archive_preserves_previous_and_opt_in_then_off_preserves_other
     std::fs::create_dir_all(&game).unwrap();
     std::fs::create_dir_all(&root).unwrap();
     let ptbr_zip = game.join("ptbr.zip");
-    let status = std::process::Command::new("python3")
-        .args([
-            "-c",
-            "import sys, zipfile; z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr('romfs/synthetic.txt','translation')",
-            &ptbr_zip.display().to_string(),
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success());
+    write_zip(&ptbr_zip, &[("romfs/synthetic.txt", Some("translation"))]);
     let other = out.join("mods/other/romfs/file");
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
     std::fs::write(&other, "other").unwrap();
 
-    install_mods(&out, &dir, &game, &root, false, &[], "python3").unwrap();
+    install_mods(&out, &dir, &game, &root, false, &[]).unwrap();
     assert!(!out.join("mods/ptbr").exists());
-    install_mods(&out, &dir, &game, &root, true, &[], "python3").unwrap();
+    install_mods(&out, &dir, &game, &root, true, &[]).unwrap();
     assert_eq!(
         std::fs::read_to_string(out.join("mods/ptbr/romfs/synthetic.txt")).unwrap(),
         "translation"
     );
-    install_mods(&out, &dir, &game, &root, false, &[], "python3").unwrap();
+    install_mods(&out, &dir, &game, &root, false, &[]).unwrap();
     assert!(!out.join("mods/ptbr").exists());
     assert!(ptbr_zip.is_file());
     assert_eq!(std::fs::read_to_string(&other).unwrap(), "other");
@@ -1837,8 +1789,8 @@ fn recompile_hash_changes_with_the_emitter_fingerprint_and_the_regcache_switches
     let _ = std::fs::remove_dir_all(&source);
 }
 
-/// Decoy `cargo`, `cmake` and `ninja` in the source's venv folder, where the build tools are
-/// found first. They log their arguments; the cargo decoy lays out what a runtime build leaves.
+/// Decoy `cargo`, `cmake` and `ninja` in the folder of the CMake Prepare fetched, where the
+/// build tools are found first (Ninja's own folder is searched too). They log their arguments; the cargo decoy lays out what a runtime build leaves.
 #[cfg(unix)]
 #[test]
 fn the_desktop_build_builds_the_runtime_and_gives_cmake_its_archive_and_header() {
@@ -1846,7 +1798,11 @@ fn the_desktop_build_builds_the_runtime_and_gives_cmake_its_archive_and_header()
     use std::os::unix::fs::PermissionsExt;
     let req = request("rust-build-runtime", Os::current());
     let root = req.out.join("src");
-    let bin = root.join("private/venv/bin");
+    let bin = if cfg!(target_os = "macos") {
+        root.join("private/third_party/cmake/CMake.app/Contents/bin")
+    } else {
+        root.join("private/third_party/cmake/bin")
+    };
     std::fs::create_dir_all(&bin).unwrap();
     let log = req.out.join("calls.log");
     let decoy = |name: &str, body: &str| {

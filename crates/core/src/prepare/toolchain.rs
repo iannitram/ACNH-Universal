@@ -112,7 +112,7 @@ pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> 
         if find_tool(&dirs, os, "python").is_none() {
             missing.push(missing_piece(
                 "python",
-                "Prepare runs the shader tools and unpacks zip archives with it.",
+                "Prepare runs the shader tools with it.",
                 "winget install Python.Python.3.12",
                 false,
             ));
@@ -133,23 +133,13 @@ pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> 
         }
     }
 
-    match find_tool(&dirs, os, "python3") {
-        Some(python) => {
-            if has_venv(&python) == Some(false) {
-                missing.push(missing_piece(
-                    "python3's venv module",
-                    "the script makes its private venv with it.",
-                    install_command(os, "venv"),
-                    false,
-                ));
-            }
-        }
-        None => missing.push(missing_piece(
+    if find_tool(&dirs, os, "python3").is_none() {
+        missing.push(missing_piece(
             "python3",
-            "Prepare runs the shader tools, unpacks mod zips and makes its private venv with it.",
+            "Prepare runs the shader tools with it.",
             install_command(os, "python3"),
             false,
-        )),
+        ));
     }
 
     if find_tool(&dirs, os, "tar").is_none() {
@@ -161,24 +151,6 @@ pub fn toolchain_with(os: Os, path: impl AsRef<OsStr>, homebrew: &[PathBuf]) -> 
         ));
     }
     missing.extend(missing_zstd(&dirs, os));
-    if let Some(python) = find_tool(&dirs, os, "python3") {
-        // Only a python that runs and says no is reported: one that cannot be started is
-        // left to the checks above.
-        let pillow = Command::new(python)
-            .args(["-c", "import PIL"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if pillow.is_ok_and(|status| !status.success()) {
-            missing.push(missing_piece(
-                "Pillow",
-                "without it the translation's long dialogue lines are not reflowed.",
-                install_command(os, "pillow"),
-                true,
-            ));
-        }
-    }
     if os == Os::Linux && find_tool(&dirs, os, "patchelf").is_none() {
         missing.push(missing_piece(
             "patchelf",
@@ -340,41 +312,6 @@ pub(super) fn has_xcode(dirs: &[PathBuf]) -> bool {
         || Path::new("/Library/Developer/CommandLineTools/usr/bin/clang").is_file()
 }
 
-/// `Some(false)` when the interpreter's standard library is found and has no `venv` module;
-/// `None` when it cannot be told from the folder (a fake in a test). The `lib` folders of both
-/// the path as found and the file it links to are looked in: Homebrew's `bin/python3` is a link
-/// into its Cellar, and the `lib/python3.N` beside the link holds only `site-packages`.
-pub(super) fn has_venv(python: &Path) -> Option<bool> {
-    let mut prefixes = vec![prefix_of(python.parent()?).to_path_buf()];
-    if let Some(dir) = std::fs::canonicalize(python)
-        .ok()
-        .and_then(|real| real.parent().map(Path::to_path_buf))
-    {
-        let prefix = prefix_of(&dir).to_path_buf();
-        if !prefixes.contains(&prefix) {
-            prefixes.push(prefix);
-        }
-    }
-    let mut roots = Vec::new();
-    for prefix in &prefixes {
-        if let Ok(entries) = std::fs::read_dir(prefix.join("lib")) {
-            for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with("python") {
-                    roots.push(entry.path());
-                }
-            }
-        }
-    }
-    if roots.is_empty() {
-        return None;
-    }
-    Some(
-        roots
-            .iter()
-            .any(|root| root.join("venv").join("__init__.py").is_file()),
-    )
-}
-
 pub(super) fn has_sdl3(dirs: &[PathBuf]) -> bool {
     dirs.iter().any(|dir| {
         let prefix = prefix_of(dir);
@@ -419,7 +356,6 @@ pub(super) fn install_command(os: Os, piece: &str) -> &'static str {
             "clang" | "clang++" => "xcode-select --install",
             "curl" => "brew install curl",
             "python3" => "brew install python",
-            "venv" => "brew reinstall python",
             "sdl3" => "brew install sdl3",
             "molten-vk" => "brew install molten-vk",
             "vulkan-loader" => "brew install vulkan-loader",
@@ -427,7 +363,6 @@ pub(super) fn install_command(os: Os, piece: &str) -> &'static str {
             "libvorbis" => "brew install libvorbis",
             "zstd" => "brew install zstd",
             "tar" => "xcode-select --install",
-            "pillow" => "python3 -m pip install pillow",
             "brew" => {
                 "/bin/bash -c \"$(curl -fsSL \
                  https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
@@ -439,13 +374,11 @@ pub(super) fn install_command(os: Os, piece: &str) -> &'static str {
             "clang" | "clang++" => "sudo apt install clang",
             "curl" => "sudo apt install curl",
             "python3" => "sudo apt install python3 python3-venv",
-            "venv" => "sudo apt install python3-venv",
             "sdl3" => "sudo apt install libsdl3-dev",
             "libvpx" => "sudo apt install libvpx-dev",
             "libvorbis" => "sudo apt install libvorbis-dev",
             "zstd" => "sudo apt install zstd  # SteamOS: sudo pacman -S zstd",
             "tar" => "sudo apt install tar  # SteamOS: sudo pacman -S tar",
-            "pillow" => "sudo apt install python3-pil  # SteamOS: sudo pacman -S python-pillow",
             "patchelf" => "sudo apt install patchelf  # SteamOS: sudo pacman -S patchelf",
             _ => "install it with your package manager",
         }

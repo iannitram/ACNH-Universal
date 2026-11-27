@@ -3,7 +3,8 @@
 //! (`acnh_version.py`, `nso2bin.py`, `pack_romfs.py`, `pack_spirv.py`, `extract_shaders.py`,
 //! `sarc_endian.py`, `msg_rewrap.py`, `make_button_font.py`, `make_button_glyphs.py`), stage by
 //! stage (`recipe::Stage`), each skipped when its output is already there. Every stage except
-//! `Stage::Recompile` (`python3 -m recomp` until #49) runs in Rust.
+//! `Stage::Recompile` (`python3 -m recomp` until #49) runs in Rust, bar the shader scripts of
+//! `tools/maxwell` (`shaders.rs`).
 //!
 //! Everything a prepare writes is made from my game folder: it stays in `out` on the hub, and
 //! reaches my other devices only through the hub, over the home network (M11, M14).
@@ -165,7 +166,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     crate::fsutil::copy_tree_skipping(from, to, &|_| false)
 }
 
-/// Copy `source` over `copy` like `copy_tree`, but keep the tools in `copy/private` (the venv,
+/// Copy `source` over `copy` like `copy_tree`, but keep the tools in `copy/private` (CMake, Ninja,
 /// headers, imgui, Ryubing, .NET and the shader harness are slow to fetch). A first copy for a
 /// new commit (an app update) takes over the `private` of the newest earlier commit's copy:
 /// `rust_tools` refetches only the pieces whose pins changed.
@@ -351,7 +352,7 @@ fn run_stages(
     } else {
         &req.game.romfs
     };
-    crate::msg::finish_pending(recovery_romfs, &req.out, script_python(req.target))
+    crate::msg::finish_pending(recovery_romfs, &req.out)
         .map_err(|error| build_error(Stage::Game, &[error.to_string()], home))?;
     // What was there before anything ran. A script that runs on while we look may have
     // finished its next stage already: only an output from before skips a stage.

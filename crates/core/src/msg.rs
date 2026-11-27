@@ -8,9 +8,9 @@ use crate::error::{Error, Result};
 use crate::sarc::{self, Endian};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::Command;
 
 type Line = Vec<Item>;
 
@@ -476,15 +476,15 @@ pub fn reflow_archive(
     }
 }
 
-/// The Python setup child leaves this directory in each mod it just extracted.
+/// The extraction of a mod leaves this directory in each mod it just extracted.
 const PENDING: &str = ".msg-reflow-pending";
 /// Rust publishes this directory only after every replacement has been encoded.
 const READY: &str = ".msg-reflow-ready";
 
 /// Run the game stage's Rust work for newly extracted mods, including pending work
-/// from a previous failed or interrupted prepare. Pillow only supplies the original
+/// from a previous failed or interrupted prepare. The game's own font supplies the original
 /// glyph advances. The two on-disk phases matter because reflow is not idempotent.
-pub(crate) fn finish_pending(game_romfs: &Path, out: &Path, python: &str) -> Result<()> {
+pub(crate) fn finish_pending(game_romfs: &Path, out: &Path) -> Result<()> {
     let mut mods = directory(&out.join("mods"))?;
     mods.sort();
     let mut measure = None;
@@ -494,7 +494,7 @@ pub(crate) fn finish_pending(game_romfs: &Path, out: &Path, python: &str) -> Res
         let romfs = path.join("romfs");
         if pending.is_dir() {
             let messages = romfs.join("Message");
-            if !stage_replacements(game_romfs, python, &messages, &pending, &mut measure)? {
+            if !stage_replacements(game_romfs, &messages, &pending, &mut measure)? {
                 // The tools to measure the lines are missing: leave the work pending so the
                 // next prepare retries it, and do not install anything for this mod now.
                 continue;
@@ -510,7 +510,6 @@ pub(crate) fn finish_pending(game_romfs: &Path, out: &Path, python: &str) -> Res
 
 fn stage_replacements(
     game_romfs: &Path,
-    python: &str,
     messages: &Path,
     pending: &Path,
     measure: &mut Option<Option<Advances>>,
@@ -538,7 +537,7 @@ fn stage_replacements(
         return Ok(true);
     }
     if measure.is_none() {
-        *measure = Some(open_measure(game_romfs, python)?);
+        *measure = Some(open_measure(game_romfs)?);
     }
     if matches!(measure, Some(None)) {
         // Reported by `open_measure`; the reflow is retried the next time.
@@ -589,7 +588,7 @@ fn directory(path: &Path) -> Result<Vec<PathBuf>> {
     }
 }
 
-fn open_measure(game_romfs: &Path, python: &str) -> Result<Option<Advances>> {
+fn open_measure(game_romfs: &Path) -> Result<Option<Advances>> {
     match Command::new("zstd").arg("-V").output() {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -597,19 +596,6 @@ fn open_measure(game_romfs: &Path, python: &str) -> Result<Option<Advances>> {
             return Ok(None);
         }
         Err(error) => return Err(error.into()),
-    }
-    let mut measure = Advances::new(python)?;
-    match measure.byte()? {
-        b'1' => {}
-        b'0' => {
-            eprintln!("Pillow not found: the translation's long lines are not reflowed yet; install Pillow (pip install pillow) and prepare again");
-            return Ok(None);
-        }
-        _ => {
-            return Err(Error::Io(
-                "unexpected reply from the dialogue font tool".to_owned(),
-            ))
-        }
     }
     let bytes = sarc::read(&game_romfs.join("Font").join("ScalableFont.sarc.zs"))?;
     let archive = sarc::parse(&bytes)?;
@@ -625,99 +611,91 @@ fn open_measure(game_romfs: &Path, python: &str) -> Result<Option<Advances>> {
         .zip(key.into_iter().cycle())
         .map(|(&byte, key)| byte ^ key)
         .collect();
-    let len = u32::try_from(font.len())
-        .map_err(|_| Error::Io("dialogue font is too large".to_owned()))?;
-    measure.input.write_all(&len.to_be_bytes())?;
-    measure.input.write_all(&font)?;
-    if measure.byte()? != b'1' {
-        return Err(Error::Io(
-            "Pillow could not open the dialogue font".to_owned(),
-        ));
-    }
-    Ok(Some(measure))
+    Ok(Some(Advances::new(font)?))
 }
 
-// Pillow selects and hints the glyphs as the previous tool did at 100 px. Exchange
-// only the font and individual units with the font probe. Rust owns all archive I/O,
-// parsing and layout. Python's fractional advances are multiples of 1/64 px.
-const FONT_PROBE: &str = r#"
-import io, struct, sys
-reader, writer = sys.stdin.buffer, sys.stdout.buffer
-
-def reply(value):
-    writer.write(value)
-    writer.flush()
-
-try:
-    from PIL import ImageFont
-except ImportError:
-    reply(b"0")
-    sys.exit(0)
-reply(b"1")
-(size,) = struct.unpack(">I", reader.read(4))
-try:
-    font = ImageFont.truetype(io.BytesIO(reader.read(size)), 100)
-except OSError:
-    reply(b"0")
-    sys.exit(1)
-reply(b"1")
-while unit := reader.read(2):
-    (codepoint,) = struct.unpack(">H", unit)
-    reply(struct.pack(">i", round(font.getlength(chr(codepoint)) * 64)))
-"#;
-
+/// The advance of each unit in the dialogue font at 100 px, in 1/64 px: the glyph's design
+/// advance scaled to the size, unhinted (what the previous Pillow probe returned, to within
+/// its rounding). A unit the font has no glyph for measures as the font's `.notdef`.
 struct Advances {
-    child: Child,
-    input: ChildStdin,
-    output: ChildStdout,
+    font: Vec<u8>,
     cache: HashMap<u16, i64>,
 }
 
+/// The size the original dialogue is laid out at.
+const FONT_SIZE: i64 = 100;
+
 impl Advances {
-    fn new(python: &str) -> Result<Self> {
-        let mut child = Command::new(python)
-            .args(["-c", FONT_PROBE])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Error::Io(format!("cannot start the dialogue font tool: {error}")))?;
-        let input = child.stdin.take().expect("the font tool has piped stdin");
-        let output = child.stdout.take().expect("the font tool has piped stdout");
+    fn new(font: Vec<u8>) -> Result<Self> {
+        let face = ttf_parser::Face::parse(&font, 0)
+            .map_err(|_| Error::Io("the dialogue font cannot be opened".to_owned()))?;
+        if face.units_per_em() == 0 {
+            return Err(Error::Io("the dialogue font has no em size".to_owned()));
+        }
         Ok(Self {
-            child,
-            input,
-            output,
+            font,
             cache: HashMap::new(),
         })
-    }
-
-    fn byte(&mut self) -> Result<u8> {
-        let mut reply = [0];
-        self.output
-            .read_exact(&mut reply)
-            .map_err(|_| Error::Io("the dialogue font tool stopped".to_owned()))?;
-        Ok(reply[0])
     }
 
     fn advance(&mut self, unit: u16) -> Result<i64> {
         if let Some(&advance) = self.cache.get(&unit) {
             return Ok(advance);
         }
-        self.input.write_all(&unit.to_be_bytes())?;
-        let mut reply = [0; 4];
-        self.output.read_exact(&mut reply).map_err(|_| {
-            Error::Io("the dialogue font tool could not measure a glyph".to_owned())
-        })?;
-        let advance = i64::from(i32::from_be_bytes(reply));
+        let face = ttf_parser::Face::parse(&self.font, 0)
+            .map_err(|_| Error::Io("the dialogue font cannot be opened".to_owned()))?;
+        let glyph = char::from_u32(u32::from(unit))
+            .and_then(|c| face.glyph_index(c))
+            .unwrap_or(ttf_parser::GlyphId(0));
+        let design = i64::from(face.glyph_hor_advance(glyph).unwrap_or(0));
+        let em = i64::from(face.units_per_em());
+        // round half up, like Pillow's `round` of the 1/64 px value for these magnitudes
+        let advance = (design * FONT_SIZE * 64 * 2 + em) / (em * 2);
         self.cache.insert(unit, advance);
         Ok(advance)
     }
 }
 
-impl Drop for Advances {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The checked-in synthetic font (no game or host font), as lines of hexadecimal.
+    fn synthetic_font() -> Vec<u8> {
+        include_str!("../tests/fixtures/synthetic-buttons.hex")
+            .split_ascii_whitespace()
+            .flat_map(|line| {
+                (0..line.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&line[i..i + 2], 16).unwrap())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn advances_are_the_design_advance_at_100_px_in_64ths() {
+        let font = synthetic_font();
+        let face = ttf_parser::Face::parse(&font, 0).unwrap();
+        let em = i64::from(face.units_per_em());
+        let mut advances = Advances::new(font.clone()).unwrap();
+        let mut checked = 0;
+        for unit in 0x20u16..0x7f {
+            let Some(glyph) = face.glyph_index(char::from_u32(u32::from(unit)).unwrap()) else {
+                continue;
+            };
+            let design = i64::from(face.glyph_hor_advance(glyph).unwrap());
+            let exact = design * 100 * 64;
+            let got = advances.advance(unit).unwrap();
+            assert!((got * em - exact).abs() <= em / 2 + 1, "unit {unit:#x}");
+            checked += 1;
+        }
+        assert!(checked > 0, "the synthetic font maps no ASCII glyph");
+        // a unit the font lacks measures as `.notdef`, not as an error
+        assert!(advances.advance(0xd800).is_ok());
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_font_is_refused() {
+        assert!(Advances::new(b"not a font".to_vec()).is_err());
     }
 }
