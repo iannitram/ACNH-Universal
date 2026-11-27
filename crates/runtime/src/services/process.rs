@@ -1,7 +1,8 @@
 //! Split from the old `services.rs` (issue #356).
 
-#[allow(unused_imports)]
 use super::*;
+#[allow(unused_imports)]
+use crate::sync::LockExt;
 
 // ---- 1. Process SVCs (svc_process.cpp) ------------------------------------------------------------------------------
 
@@ -65,7 +66,7 @@ pub unsafe extern "C" fn acnh_svc_get_info(
         16 => sys_res,
         18 => prog_id,
         20 => {
-            let mut p = PROCESS.lock().unwrap();
+            let mut p = PROCESS.lock_or_recover();
             if p.user_exc_ctx == 0 {
                 p.user_exc_ctx = host_kernel_alloc(0x1000);
             }
@@ -183,7 +184,7 @@ pub extern "C" fn acnh_svc_unmap_transfer_memory(handle: u32, addr: u64, size: u
 /// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
 /// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_set_tls_template(start: u64, end: u64) {
-    let mut p = PROCESS.lock().unwrap();
+    let mut p = PROCESS.lock_or_recover();
     if end > start && start != 0 {
         let len = (end - start) as usize;
         let slice = std::slice::from_raw_parts(start as *const u8, len);
@@ -200,7 +201,7 @@ pub unsafe extern "C" fn acnh_svc_set_tls_template(start: u64, end: u64) {
 /// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
 /// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_svc_init_tls_block(block: u64) {
-    let p = PROCESS.lock().unwrap();
+    let p = PROCESS.lock_or_recover();
     if !p.tls_template.is_empty() && block != 0 {
         std::ptr::copy_nonoverlapping(
             p.tls_template.as_ptr(),

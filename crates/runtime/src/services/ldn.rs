@@ -1,7 +1,8 @@
 //! Split from the old `services.rs` (issue #356).
 
-#[allow(unused_imports)]
 use super::*;
+#[allow(unused_imports)]
+use crate::sync::LockExt;
 
 // ---- 9. LDN (hle_ldn.cpp) -------------------------------------------------------------------------------------------
 
@@ -169,7 +170,7 @@ pub fn ldn_info_is_valid(info: &mut [u8]) -> bool {
 }
 
 pub(crate) fn ldn_visited_island_string() -> String {
-    let g = LDN_LOCK.lock().unwrap();
+    let g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::StationConnected {
         return String::new();
     }
@@ -249,7 +250,7 @@ pub unsafe extern "C" fn acnh_ldn_link_info(out_ptr: *mut u8) -> bool {
     if out_ptr.is_null() {
         return false;
     }
-    let g = LDN_LOCK.lock().unwrap();
+    let g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::AccessPointCreated {
         return false;
     }
@@ -266,7 +267,7 @@ pub unsafe extern "C" fn acnh_ldn_link_add_node(station_ptr: *const u8, own_ip: 
     if station_ptr.is_null() {
         return -1;
     }
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::AccessPointCreated {
         return -1;
     }
@@ -297,7 +298,7 @@ pub extern "C" fn acnh_ldn_link_remove_node(n: i32) {
     if !(0..8).contains(&n) {
         return;
     }
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     let base = NI_NODES + (n as usize) * 0x40;
     if g.info[base + NODE_CONNECTED] == 0 {
         return;
@@ -316,7 +317,7 @@ pub unsafe extern "C" fn acnh_ldn_peer_ips(out_ptr: *mut u32) -> i32 {
     if out_ptr.is_null() {
         return 0;
     }
-    let g = LDN_LOCK.lock().unwrap();
+    let g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::AccessPointCreated && g.state != LdnState::StationConnected {
         return 0;
     }
@@ -347,7 +348,7 @@ pub unsafe extern "C" fn acnh_ldn_link_set_info(info_ptr: *const u8) {
     if info_ptr.is_null() {
         return;
     }
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::StationConnected {
         return;
     }
@@ -357,7 +358,7 @@ pub unsafe extern "C" fn acnh_ldn_link_set_info(info_ptr: *const u8) {
 
 #[no_mangle]
 pub extern "C" fn acnh_ldn_link_lost() {
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::StationConnected {
         return;
     }
@@ -389,7 +390,7 @@ pub extern "C" fn acnh_ldn_initialize() -> u32 {
         // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(true) };
     }
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     if g.state == LdnState::None {
         g.set_state(LdnState::Initialized);
     }
@@ -412,7 +413,7 @@ pub extern "C" fn acnh_ldn_finalize() -> u32 {
         // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f(false) };
     }
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     LDN_SESSION.store(false, Ordering::Release);
     LDN_OWN_IP.store(0, Ordering::Release);
     g.state = LdnState::None;
@@ -421,7 +422,7 @@ pub extern "C" fn acnh_ldn_finalize() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn acnh_ldn_get_state() -> u32 {
-    let g = LDN_LOCK.lock().unwrap();
+    let g = LDN_LOCK.lock_or_recover();
     if LDN_SESSION.load(Ordering::Acquire) {
         g.state as u32
     } else {
@@ -431,13 +432,13 @@ pub extern "C" fn acnh_ldn_get_state() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn acnh_ldn_set_state_event(ev: u32) {
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     g.state_event = ev;
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_ldn_open_access_point() -> u32 {
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::Initialized {
         return LDN_ERR_INVALID_STATE;
     }
@@ -451,7 +452,7 @@ pub extern "C" fn acnh_ldn_close_access_point() -> u32 {
         // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     LDN_OWN_IP.store(0, Ordering::Release);
     g.set_state(LdnState::Initialized);
     SVC_OK
@@ -459,7 +460,7 @@ pub extern "C" fn acnh_ldn_close_access_point() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn acnh_ldn_open_station() -> u32 {
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::Initialized {
         return LDN_ERR_INVALID_STATE;
     }
@@ -473,7 +474,7 @@ pub extern "C" fn acnh_ldn_close_station() -> u32 {
         // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     LDN_OWN_IP.store(0, Ordering::Release);
     g.set_state(LdnState::Initialized);
     SVC_OK
@@ -490,7 +491,7 @@ pub unsafe extern "C" fn acnh_ldn_create_network(
     sec_param_ptr: *const u8,
     user_ptr: *const u8,
 ) -> u32 {
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::AccessPoint
         || cfg_ptr.is_null()
         || sec_ptr.is_null()
@@ -562,7 +563,7 @@ pub extern "C" fn acnh_ldn_destroy_network() -> u32 {
         // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     LDN_OWN_IP.store(0, Ordering::Release);
     if g.state == LdnState::AccessPointCreated {
         g.set_state(LdnState::AccessPoint);
@@ -576,7 +577,7 @@ pub extern "C" fn acnh_ldn_destroy_network() -> u32 {
 /// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
 /// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_set_advertise_data(data_ptr: *const u8, size: u64) -> u32 {
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     let n = size as usize;
     if n > LDN_ADVERTISE_MAX {
         return LDN_ERR_INVALID_STATE;
@@ -597,7 +598,7 @@ pub unsafe extern "C" fn acnh_ldn_set_advertise_data(data_ptr: *const u8, size: 
 
 #[no_mangle]
 pub extern "C" fn acnh_ldn_set_station_accept_policy(policy: u32) -> u32 {
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     g.accept_policy = policy as u8;
     g.info[NI_ACCEPT_POLICY] = g.accept_policy;
     SVC_OK
@@ -613,7 +614,7 @@ pub unsafe extern "C" fn acnh_ldn_connect(
     user_ptr: *const u8,
     version: u16,
 ) -> u32 {
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     if g.state != LdnState::Station || net_ptr.is_null() || user_ptr.is_null() {
         return LDN_ERR_INVALID_STATE;
     }
@@ -649,7 +650,7 @@ pub extern "C" fn acnh_ldn_disconnect() -> u32 {
         // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
         unsafe { f() };
     }
-    let mut g = LDN_LOCK.lock().unwrap();
+    let mut g = LDN_LOCK.lock_or_recover();
     LDN_OWN_IP.store(0, Ordering::Release);
     if g.state == LdnState::StationConnected {
         g.set_state(LdnState::Station);
@@ -663,7 +664,7 @@ pub extern "C" fn acnh_ldn_disconnect() -> u32 {
 /// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
 /// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_get_network_info(out_ptr: *mut u8) -> u32 {
-    let g = LDN_LOCK.lock().unwrap();
+    let g = LDN_LOCK.lock_or_recover();
     let up = g.state == LdnState::AccessPointCreated || g.state == LdnState::StationConnected;
     if !out_ptr.is_null() {
         if up {
@@ -685,7 +686,7 @@ pub unsafe extern "C" fn acnh_ldn_get_network_info(out_ptr: *mut u8) -> u32 {
 /// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
 /// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_get_network_config(out_ptr: *mut u8) -> u32 {
-    let g = LDN_LOCK.lock().unwrap();
+    let g = LDN_LOCK.lock_or_recover();
     let up = g.state == LdnState::AccessPointCreated || g.state == LdnState::StationConnected;
     if !out_ptr.is_null() {
         std::ptr::write_bytes(out_ptr, 0, 0x20);
@@ -711,7 +712,7 @@ pub unsafe extern "C" fn acnh_ldn_get_network_config(out_ptr: *mut u8) -> u32 {
 /// Called only by the C++ runtime. Every pointer argument must be null (where the function checks) or valid
 /// for the reads and writes the function makes, and every `u64` address must lie in mapped guest memory.
 pub unsafe extern "C" fn acnh_ldn_get_security_parameter(out_ptr: *mut u8) -> u32 {
-    let g = LDN_LOCK.lock().unwrap();
+    let g = LDN_LOCK.lock_or_recover();
     let up = g.state == LdnState::AccessPointCreated || g.state == LdnState::StationConnected;
     if !out_ptr.is_null() {
         std::ptr::write_bytes(out_ptr, 0, 0x20);
@@ -730,5 +731,5 @@ pub unsafe extern "C" fn acnh_ldn_get_security_parameter(out_ptr: *mut u8) -> u3
 
 #[no_mangle]
 pub extern "C" fn acnh_ldn_get_disconnect_reason() -> u32 {
-    LDN_LOCK.lock().unwrap().disconnect_reason
+    LDN_LOCK.lock_or_recover().disconnect_reason
 }

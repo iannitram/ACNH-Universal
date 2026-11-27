@@ -1,7 +1,8 @@
 //! Split from the old `services.rs` (issue #356).
 
-#[allow(unused_imports)]
 use super::*;
+#[allow(unused_imports)]
+use crate::sync::LockExt;
 
 // ---- 10. Movie Decoder (hle_movie.cpp) ------------------------------------------------------------------------------
 
@@ -79,12 +80,12 @@ pub extern "C" fn acnh_movie_create(self_addr: u64, codec_type: i32) {
         first_pts: 0,
         codec_ctx: 0,
     };
-    MOVIE_DECODERS.lock().unwrap().insert(self_addr, dec);
+    MOVIE_DECODERS.lock_or_recover().insert(self_addr, dec);
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_movie_destroy(self_addr: u64) {
-    if let Some(d) = MOVIE_DECODERS.lock().unwrap().remove(&self_addr) {
+    if let Some(d) = MOVIE_DECODERS.lock_or_recover().remove(&self_addr) {
         if d.codec_ctx != 0 {
             if let Some(Some(f)) = with_host(|h| h.movie_codec_close) {
                 // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
@@ -109,7 +110,7 @@ pub unsafe extern "C" fn acnh_movie_configure(
     extra_size: usize,
 ) -> u32 {
     let codec_type = {
-        let g = MOVIE_DECODERS.lock().unwrap();
+        let g = MOVIE_DECODERS.lock_or_recover();
         let Some(d) = g.get(&self_addr) else {
             return MOVIE_ERR_INVALID;
         };
@@ -122,7 +123,7 @@ pub unsafe extern "C" fn acnh_movie_configure(
     .flatten()
     .unwrap_or(std::ptr::null_mut());
 
-    let mut g = MOVIE_DECODERS.lock().unwrap();
+    let mut g = MOVIE_DECODERS.lock_or_recover();
     let Some(d) = g.get_mut(&self_addr) else {
         return MOVIE_ERR_INVALID;
     };
@@ -149,7 +150,7 @@ pub extern "C" fn acnh_movie_register_events(
     out_ev: u32,
     err_ev: u32,
 ) -> u32 {
-    let mut g = MOVIE_DECODERS.lock().unwrap();
+    let mut g = MOVIE_DECODERS.lock_or_recover();
     let Some(d) = g.get_mut(&self_addr) else {
         return MOVIE_ERR_INVALID;
     };
@@ -162,7 +163,7 @@ pub extern "C" fn acnh_movie_register_events(
 #[no_mangle]
 pub extern "C" fn acnh_movie_start(self_addr: u64) -> u32 {
     let in_ev = {
-        let mut g = MOVIE_DECODERS.lock().unwrap();
+        let mut g = MOVIE_DECODERS.lock_or_recover();
         let Some(d) = g.get_mut(&self_addr) else {
             return MOVIE_ERR_INVALID;
         };
@@ -180,7 +181,7 @@ pub extern "C" fn acnh_movie_start(self_addr: u64) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn acnh_movie_stop(self_addr: u64) -> u32 {
-    let mut g = MOVIE_DECODERS.lock().unwrap();
+    let mut g = MOVIE_DECODERS.lock_or_recover();
     let Some(d) = g.get_mut(&self_addr) else {
         return MOVIE_ERR_INVALID;
     };
@@ -191,7 +192,7 @@ pub extern "C" fn acnh_movie_stop(self_addr: u64) -> u32 {
 #[no_mangle]
 pub extern "C" fn acnh_movie_flush(self_addr: u64) -> u32 {
     let in_ev = {
-        let mut g = MOVIE_DECODERS.lock().unwrap();
+        let mut g = MOVIE_DECODERS.lock_or_recover();
         let Some(d) = g.get_mut(&self_addr) else {
             return MOVIE_ERR_INVALID;
         };
@@ -225,7 +226,7 @@ pub unsafe extern "C" fn acnh_movie_acquire_input(
     out_idx: *mut i32,
     out_rem: *mut i32,
 ) -> u32 {
-    let mut g = MOVIE_DECODERS.lock().unwrap();
+    let mut g = MOVIE_DECODERS.lock_or_recover();
     let Some(d) = g.get_mut(&self_addr) else {
         return MOVIE_ERR_INVALID;
     };
@@ -256,7 +257,7 @@ pub unsafe extern "C" fn acnh_movie_send_input(
     flags: u32,
 ) -> u32 {
     let (codec_type, codec_ctx, is_audio) = {
-        let g = MOVIE_DECODERS.lock().unwrap();
+        let g = MOVIE_DECODERS.lock_or_recover();
         let Some(d) = g.get(&self_addr) else {
             return MOVIE_ERR_INVALID;
         };
@@ -322,7 +323,7 @@ pub unsafe extern "C" fn acnh_movie_send_input(
     }
 
     let (in_ev, out_ev) = {
-        let mut g = MOVIE_DECODERS.lock().unwrap();
+        let mut g = MOVIE_DECODERS.lock_or_recover();
         let Some(d) = g.get_mut(&self_addr) else {
             return MOVIE_ERR_INVALID;
         };
@@ -385,7 +386,7 @@ pub unsafe extern "C" fn acnh_movie_acquire_output(
     out_flags: *mut u32,
     out_rem: *mut i32,
 ) -> u32 {
-    let mut g = MOVIE_DECODERS.lock().unwrap();
+    let mut g = MOVIE_DECODERS.lock_or_recover();
     let Some(d) = g.get_mut(&self_addr) else {
         return MOVIE_ERR_INVALID;
     };
@@ -462,7 +463,7 @@ pub unsafe extern "C" fn acnh_movie_copy_output(
     cap: usize,
     out_written: *mut usize,
 ) -> u32 {
-    let mut g = MOVIE_DECODERS.lock().unwrap();
+    let mut g = MOVIE_DECODERS.lock_or_recover();
     let Some(d) = g.get_mut(&self_addr) else {
         return MOVIE_ERR_INVALID;
     };
@@ -530,7 +531,7 @@ pub unsafe extern "C" fn acnh_movie_copy_output(
 #[no_mangle]
 pub extern "C" fn acnh_movie_release_output(self_addr: u64, idx: i32) -> u32 {
     let out_ev = {
-        let mut g = MOVIE_DECODERS.lock().unwrap();
+        let mut g = MOVIE_DECODERS.lock_or_recover();
         let Some(d) = g.get_mut(&self_addr) else {
             return MOVIE_ERR_INVALID;
         };
@@ -570,7 +571,7 @@ pub unsafe extern "C" fn acnh_movie_get_output_buffer_size(
     out_size: *mut i32,
     out_count: *mut i32,
 ) -> u32 {
-    let g = MOVIE_DECODERS.lock().unwrap();
+    let g = MOVIE_DECODERS.lock_or_recover();
     let Some(d) = g.get(&self_addr) else {
         return MOVIE_ERR_INVALID;
     };
@@ -603,7 +604,7 @@ pub unsafe extern "C" fn acnh_movie_get_output_format(
     out_ch: *mut i32,
     out_sr: *mut i32,
 ) -> u32 {
-    let g = MOVIE_DECODERS.lock().unwrap();
+    let g = MOVIE_DECODERS.lock_or_recover();
     let Some(d) = g.get(&self_addr) else {
         return MOVIE_ERR_INVALID;
     };

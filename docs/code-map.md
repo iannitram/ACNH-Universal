@@ -202,6 +202,12 @@ Every `unsafe` block in `crates/runtime` carries a `// SAFETY:` line, `clippy::u
 
 Kernel env (`kernel.rs`): `NX_YIELD_BACKOFF=start_us,cap_us` (default `2000,250`; empty or `0` = off) makes a guest thread that yields in a loop without changing x19..x28 sleep per yield; `NX_SPIN_NAPS=1` takes precedence with the older flat 0.5 ms nap. The credited nxrt copy of the back-off was a C++ header (`yield_backoff.h`) that nothing included; it was removed in #327.
 
+### Panics and locks (#402)
+
+Decision: the runtime keeps unwinding. No profile sets `panic = "abort"`. Why: (1) `relay.rs`, `relay_android.rs`, `relay_ios.rs` and `hub_android.rs` use `catch_unwind` so a bug in a save-relay worker or a JNI or iOS entry point shows an error instead of killing the game or launcher mid-session and losing the save push; (2) `panic = "abort"` is set per profile for the whole workspace, not for the runtime staticlib alone, and `cargo test` needs unwinding; (3) a panic that reaches an `extern "C"` entry point already aborts the process (Rust 1.81 and later), so the game path (`kernel/`, `loader.rs`) fails fast without the flag. Locks are poison-tolerant: `crate::sync::LockExt::lock_or_recover` (`crates/runtime/src/sync.rs`) takes the guard of a poisoned mutex, so one panicking thread does not abort every later `lock()`. `CondvarExt::wait_or_recover` and `wait_timeout_or_recover` do the same for condvar waits. Use them instead of `lock().unwrap()` and `wait(..).unwrap()`. Not chosen: a scoped abort in `kernel/` and `loader.rs` only.
+
+Header drift (#402): `acnh_runtime.h` is generated into `OUT_DIR` on every build and is not committed, so it cannot go stale against the Rust. What drifts is the C++ side, which hand-declares the `acnh_*` functions it calls. `crates/runtime/tests/header.rs` compares each prototype in `runtime/src/*_wrapper.cpp` with the generated header (names and types; parameter names and callback typedef names are free) and names the wrapper and symbol that differ.
+
 ### C++ that stays (SPEC M13)
 
 | Path | Owns | Musts |

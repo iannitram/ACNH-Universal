@@ -1,7 +1,8 @@
 //! Split from the old `services.rs` (issue #356).
 
-#[allow(unused_imports)]
 use super::*;
+#[allow(unused_imports)]
+use crate::sync::LockExt;
 
 // ---- 2. Set / Misc / AM Services (svc_set.cpp, svc_misc.cpp, svc_am.cpp) --------------------------------------------
 
@@ -83,7 +84,7 @@ pub(crate) struct AmState {
 pub(crate) static AM_STATE: Mutex<Option<AmState>> = Mutex::new(None);
 
 pub(crate) fn with_am<R>(f: impl FnOnce(&mut AmState) -> R) -> R {
-    let mut g = AM_STATE.lock().unwrap();
+    let mut g = AM_STATE.lock_or_recover();
     let st = g.get_or_insert_with(|| {
         let mut q = VecDeque::new();
         q.push_back(AM_MSG_FOCUS_STATE_CHANGED);
@@ -317,7 +318,7 @@ pub unsafe extern "C" fn acnh_svc_hid_send_vibration(
     let now_ns = host_monotonic_ns();
     let until_ns = now_ns + u64::from(VIB_DURATION_MS) * 1_000_000;
     let mut player_one = false;
-    let mut devs = VIB_DEVICES.lock().unwrap();
+    let mut devs = VIB_DEVICES.lock_or_recover();
     for i in 0..count {
         let handle =
             std::ptr::read_unaligned((handles_addr + (i as u64) * HANDLE_SIZE) as *const u32);
@@ -549,7 +550,7 @@ pub unsafe extern "C" fn acnh_hle_album_save_screenshot(
     };
     let mut stem = format!("{island}_{stamp}");
     {
-        let mut st = ALBUM_STAMP_STATE.lock().unwrap();
+        let mut st = ALBUM_STAMP_STATE.lock_or_recover();
         if st.0 == stem {
             st.1 += 1;
         } else {

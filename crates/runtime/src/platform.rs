@@ -8,6 +8,7 @@
 //! `platform_android_audio_wrapper.cpp`) provide the OS/SDL3/JNI/NDK host callbacks and forward
 //! `nx::plat::*` entry points here.
 
+use crate::sync::LockExt;
 use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr};
 use std::path::Path;
@@ -54,8 +55,7 @@ static MONO_START: OnceLock<Instant> = OnceLock::new();
 fn host() -> AcnhPlatformHost {
     *HOST
         .get_or_init(|| Mutex::new(AcnhPlatformHost::default()))
-        .lock()
-        .unwrap()
+        .lock_or_recover()
 }
 
 fn host_log(msg: &str) {
@@ -110,8 +110,7 @@ pub unsafe extern "C" fn acnh_platform_set_host(h: *const AcnhPlatformHost) {
     let val = unsafe { *h };
     *HOST
         .get_or_init(|| Mutex::new(AcnhPlatformHost::default()))
-        .lock()
-        .unwrap() = val;
+        .lock_or_recover() = val;
 }
 
 // ---- Environment, Paths, and Window State ------------------------------------------------------
@@ -240,13 +239,13 @@ fn pick_mu() -> &'static Mutex<PickState> {
 
 #[no_mangle]
 pub extern "C" fn acnh_platform_pick_begin() {
-    let mut g = pick_mu().lock().unwrap();
+    let mut g = pick_mu().lock_or_recover();
     g.done = false;
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_platform_pick_complete(path: *const c_char) {
-    let mut g = pick_mu().lock().unwrap();
+    let mut g = pick_mu().lock_or_recover();
     g.path = cstr_or_empty(path).to_string();
     g.done = true;
 }
@@ -261,7 +260,7 @@ pub unsafe extern "C" fn acnh_platform_pick_take(
     cap: usize,
     out_len: *mut usize,
 ) -> bool {
-    let mut g = pick_mu().lock().unwrap();
+    let mut g = pick_mu().lock_or_recover();
     if !g.done {
         return false;
     }
@@ -384,7 +383,7 @@ pub extern "C" fn acnh_platform_android_controller_kind(
 pub extern "C" fn acnh_platform_xbox_layout(controller_kind: *const c_char) -> bool {
     static CACHE: OnceLock<Mutex<(u64, String)>> = OnceLock::new();
     let mu = CACHE.get_or_init(|| Mutex::new((u64::MAX, String::new())));
-    let mut g = mu.lock().unwrap();
+    let mut g = mu.lock_or_recover();
     let gen = config_generation();
     if g.0 != gen {
         g.0 = gen;
@@ -628,7 +627,7 @@ pub extern "C" fn acnh_platform_thermal_mode() -> i32 {
     }
     static CACHE: OnceLock<Mutex<(u64, i32)>> = OnceLock::new();
     let mu = CACHE.get_or_init(|| Mutex::new((u64::MAX, 1)));
-    let mut g = mu.lock().unwrap();
+    let mut g = mu.lock_or_recover();
     let gen = config_generation();
     if g.0 != gen {
         g.0 = gen;
@@ -1582,7 +1581,7 @@ fn adpf_mu() -> &'static Mutex<AdpfState> {
 
 #[no_mangle]
 pub extern "C" fn acnh_platform_perf_hint_thread(tid: i32) {
-    let mut g = adpf_mu().lock().unwrap();
+    let mut g = adpf_mu().lock_or_recover();
     if g.tids.len() < 8 && !g.tids.contains(&tid) {
         g.tids.push(tid);
         g.dirty = true;
@@ -1625,7 +1624,7 @@ pub extern "C" fn acnh_platform_perf_hint_frame(ns: i64) {
         fixed
     };
 
-    let mut g = adpf_mu().lock().unwrap();
+    let mut g = adpf_mu().lock_or_recover();
     if g.dirty && !g.tids.is_empty() {
         if g.session != 0 {
             close(g.session as *mut c_void);

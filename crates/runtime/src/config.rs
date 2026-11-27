@@ -1182,6 +1182,7 @@ pub extern "C" fn acnh_config_needs_restart(key: *const c_char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::LockExt;
     use std::sync::atomic::AtomicUsize;
 
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1252,7 +1253,7 @@ mod tests {
             }
             std::env::set_var("NX_DATA_ROOT", &dir);
 
-            *host_lock().lock().unwrap() = AcnhConfigHost {
+            *host_lock().lock_or_recover() = AcnhConfigHost {
                 mods_fetch: Some(test_mods_fetch),
                 game_clock_apply_config: Some(test_clock_apply),
                 ..AcnhConfigHost::default()
@@ -1261,7 +1262,7 @@ mod tests {
             CLOCK_APPLY_COUNT.store(0, Ordering::SeqCst);
 
             {
-                let mut st = state().lock().unwrap();
+                let mut st = state().lock_or_recover();
                 st.entries.clear();
                 st.loaded = false;
                 st.env_from_config.clear();
@@ -1281,7 +1282,7 @@ mod tests {
 
     impl Drop for TestGuard {
         fn drop(&mut self) {
-            *host_lock().lock().unwrap() = AcnhConfigHost::default();
+            *host_lock().lock_or_recover() = AcnhConfigHost::default();
             for (k, v) in &self.saved_env {
                 match v {
                     Some(val) => std::env::set_var(k, val),

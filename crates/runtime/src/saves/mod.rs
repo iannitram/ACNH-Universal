@@ -8,6 +8,7 @@
 //! dispatcher.
 
 #[allow(unused_imports)]
+use crate::sync::LockExt;
 use std::collections::BTreeSet;
 #[allow(unused_imports)]
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -303,7 +304,7 @@ mod tests {
     }
 
     extern "C" fn test_host_data_root(buf: *mut c_char, cap: usize) -> usize {
-        let s = test_data_root_store().lock().unwrap().clone();
+        let s = test_data_root_store().lock_or_recover().clone();
         let bytes = s.as_bytes();
         if !buf.is_null() && cap > 0 {
             let n = bytes.len().min(cap - 1);
@@ -317,7 +318,7 @@ mod tests {
     }
 
     fn set_test_host(root: &str) {
-        *test_data_root_store().lock().unwrap() = root.to_string();
+        *test_data_root_store().lock_or_recover() = root.to_string();
         let host = AcnhSavesHost {
             data_root: Some(test_host_data_root),
             log: None,
@@ -357,7 +358,7 @@ mod tests {
     }
 
     fn reset_users_state() {
-        let mut st = users_lock().lock().unwrap();
+        let mut st = users_lock().lock_or_recover();
         *st = UsersState::default();
     }
 
@@ -412,7 +413,7 @@ mod tests {
 
     #[test]
     fn users_create_find_and_preselected_blob() {
-        let _guard = test_mutex().lock().unwrap();
+        let _guard = test_mutex().lock_or_recover();
         let tmp = TempRoot::new("users");
         std::env::set_var("NX_USER_NAME", "Tester");
         set_test_host(&tmp.str());
@@ -465,7 +466,7 @@ mod tests {
 
     #[test]
     fn saves_import_backup_export_zip_and_restore() {
-        let _guard = test_mutex().lock().unwrap();
+        let _guard = test_mutex().lock_or_recover();
         let tmp = TempRoot::new("saves");
         set_test_host(&tmp.str());
 
