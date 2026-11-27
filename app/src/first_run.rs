@@ -72,6 +72,9 @@ impl FirstRun {
             .unwrap_or(vm.profile);
         vm.relay_available = setup.available();
         vm.relay_set_up = setup.account().is_some();
+        // A prepared game can exist only on Linux (`cloud-upload` makes none for the others),
+        // and only Dropbox has the uploader.
+        vm.cloud_game_offered = vm.relay_available && Os::current() == Os::Linux;
         vm.steam_applicable = Os::current() == Os::Linux
             && acnh_core::steam::userdata_roots(&vars)
                 .iter()
@@ -119,13 +122,19 @@ impl FirstRun {
     pub fn can_cancel(&self) -> bool {
         matches!(
             self.active.as_ref(),
-            Some(Request::Build(_) | Request::Pull(..) | Request::Connect(_) | Request::Discover)
+            Some(
+                Request::Build(_)
+                    | Request::Pull(..)
+                    | Request::Connect(_)
+                    | Request::Discover
+                    | Request::CloudDownloadAndSync
+            )
         ) && self.cancelled.load(Ordering::SeqCst) == 0
     }
     pub fn nav(&mut self, nav: Nav) {
         if nav == Nav::Back && self.vm.busy {
             match self.active.as_ref() {
-                Some(Request::Build(_) | Request::Pull(..)) => {
+                Some(Request::Build(_) | Request::Pull(..) | Request::CloudDownloadAndSync) => {
                     if self.cancelling_build {
                         return;
                     }
@@ -178,16 +187,21 @@ impl FirstRun {
             if generation != self.generation {
                 continue;
             }
-            let final_event = !matches!(event, Event::Stage(_));
+            let final_event = !matches!(event, Event::Stage(_) | Event::Progress(_));
             if self.cancelling_build {
                 if final_event {
+                    let cloud = matches!(self.active, Some(Request::CloudDownloadAndSync));
                     self.cancelling_build = false;
                     self.active = None;
                     self.vm.busy = false;
-                    self.vm.message =
-                        "Setup cancelled. Finished preparation stages are kept.".into();
-                    self.vm.step = Step::FindGame;
-                    self.vm.focus = 0;
+                    if cloud {
+                        self.vm.cloud_cancelled();
+                    } else {
+                        self.vm.message =
+                            "Setup cancelled. Finished preparation stages are kept.".into();
+                        self.vm.step = Step::FindGame;
+                        self.vm.focus = 0;
+                    }
                 }
             } else {
                 if final_event {
@@ -203,7 +217,9 @@ impl FirstRun {
     /// its own focus (a key of the keyboard while it is open) and its own message.
     pub fn page(&self) -> PageView {
         let relay = self.vm.step == Step::Relay;
-        let progress = if self.vm.step == Step::GetBuild {
+        let progress = if self.vm.step == Step::GetBuild && self.vm.progress >= 0 {
+            self.vm.progress
+        } else if self.vm.step == Step::GetBuild {
             self.vm
                 .stage
                 .and_then(|stage| acnh_core::recipe::STAGES.iter().position(|s| *s == stage))
@@ -516,7 +532,8 @@ fn run(
             .map_err(|error| safe_error(error, &vars.home)),
         },
         Request::CloudDownloadAndSync => Event::CloudSyncFinished(
-            cloud_download_and_sync(dirs).map_err(|e| safe_error(e, &vars.home)),
+            cloud_download_and_sync(dirs, &vars.home, sender, generation, cancelled)
+                .map_err(|e| safe_error(e, &vars.home)),
         ),
         Request::SystemPickFolder(start) => Event::SystemPicked(pick_folder_native(&start)),
         Request::CopyLog(_) => unreachable!("clipboard stays on the window thread"),
@@ -534,7 +551,13 @@ fn os_slug(os: Os) -> &'static str {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn cloud_download_and_sync(dirs: &AppDirs) -> acnh_core::Result<()> {
+fn cloud_download_and_sync(
+    dirs: &AppDirs,
+    home: &Path,
+    sender: &Sender<(u64, Event)>,
+    generation: u64,
+    cancelled: &AtomicU8,
+) -> acnh_core::Result<Option<String>> {
     let sr_vars = save_relay::platform::PathVars::current()
         .map_err(|e| acnh_core::Error::Saves(e.to_string()))?;
     let sr_dirs = save_relay::platform::AppDirs::from_vars(&sr_vars);
@@ -543,33 +566,147 @@ fn cloud_download_and_sync(dirs: &AppDirs) -> acnh_core::Result<()> {
     let relay = acnh_core::relay::open(&sr_dirs, &creds, transport)?
         .ok_or_else(|| acnh_core::Error::Saves("Save sync is not set up. Sign in first.".into()))?;
     std::fs::create_dir_all(&dirs.data)?;
-    let game_dir = acnh_core::relay::download_game_from_relay(
+    let mut last = u8::MAX;
+    let mut watch = |done: u64, total: u64| {
+        if cancelled.load(Ordering::SeqCst) != 0 {
+            return false;
+        }
+        if let Some(percent) = (done.min(total) * 100).checked_div(total) {
+            let percent = percent as u8;
+            if percent != last {
+                last = percent;
+                let _ = sender.send((generation, Event::Progress(percent)));
+            }
+        }
+        true
+    };
+    let game_dir = acnh_core::relay::download_game_from_relay_watched(
         &relay,
         &dirs.data,
         &dirs.data.join("game"),
-        u64::MAX,
+        crate::fleet_report::free_bytes(dirs),
         os_slug(Os::current()),
+        &mut watch,
     )?;
-    if Os::current() != Os::Android && Os::current() != Os::Ios {
-        install_downloaded_desktop_game(&game_dir, &dirs.install())?;
+    // From here the install runs to its end: a cancel now is told so (as the Build does).
+    if cancelled
+        .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(acnh_core::Error::Build("download cancelled".into()));
     }
+    install_downloaded_desktop_game(&game_dir, &dirs.install())?;
     let save_dir = dirs.data_root().join("user/device_save");
     std::fs::create_dir_all(&save_dir)?;
-    let _ = relay.pull_with(&save_dir, None, false)?;
-    Ok(())
+    Ok(sync_island(&relay, &save_dir, home))
 }
 
+/// Bring the island down once, then leave this device not marked as playing: a pull writes
+/// this device's playing mark and starts a play session, and no game ran, so a push (as a quit
+/// would do) ends both. What did not sync is returned as a note for the player; the game
+/// itself is installed either way.
+fn sync_island(
+    relay: &dyn acnh_core::launch::Relay,
+    save_dir: &Path,
+    home: &Path,
+) -> Option<String> {
+    use acnh_core::launch::Sync;
+    let note = |sync: Sync| {
+        match sync {
+        Sync::Done(_) | Sync::Resolved { .. } => None,
+        Sync::Offline => Some(
+            "The cloud folder could not be reached, so your island was not synced. It syncs the next time you play online.".to_owned(),
+        ),
+        Sync::Off => Some("Save sync is off, so your island was not synced.".to_owned()),
+        Sync::Held { device, .. } => Some(format!(
+            "Your island is open on {device}, so it was not synced. Close the game there, then choose Play anyway here."
+        )),
+        Sync::Conflict { .. } => Some(
+            "Your island changed here and in the cloud. Nothing was overwritten; you choose which to keep when you play.".to_owned(),
+        ),
+    }
+    };
+    let failed = |error: acnh_core::Error| {
+        Some(format!(
+            "Your island was not synced: {}",
+            prepare::redact(&error.to_string(), home)
+        ))
+    };
+    match relay.pull(save_dir, None) {
+        Ok(pulled @ (Sync::Done(_) | Sync::Resolved { .. })) => {
+            let _ = pulled;
+            match relay.push(save_dir, None) {
+                Ok(pushed) => note(pushed),
+                Err(error) => failed(error),
+            }
+        }
+        Ok(other) => note(other),
+        Err(error) => failed(error),
+    }
+}
+
+/// Put the downloaded game in place from a staged folder, all or nothing: every file is first
+/// set beside the install (the downloaded tree is the stage), then each is swapped in with the
+/// file it replaces kept aside; an error puts the old files back and removes the new ones, so
+/// a failed install never leaves a mix. `root/config.ini` and `root/user` (the player's) are
+/// never touched.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn install_downloaded_desktop_game(game_dir: &Path, install_dir: &Path) -> acnh_core::Result<()> {
     make_tree_writable(game_dir)?;
     std::fs::create_dir_all(install_dir)?;
-    move_game_tree(game_dir, game_dir, install_dir)?;
-    let manifest_src = game_dir.join("manifest.json");
-    if manifest_src.is_file() {
-        move_file_replace(&manifest_src, &install_dir.join("manifest.json"), false)?;
+    let backup = install_dir.with_file_name("install.previous");
+    let _ = make_tree_writable(&backup);
+    let _ = std::fs::remove_dir_all(&backup);
+    let mut journal = Vec::new();
+    let result =
+        move_game_tree(game_dir, game_dir, install_dir, &backup, &mut journal).and_then(|()| {
+            let manifest_src = game_dir.join("manifest.json");
+            if manifest_src.is_file() {
+                swap_in(
+                    &manifest_src,
+                    &install_dir.join("manifest.json"),
+                    false,
+                    &backup.join("manifest.json"),
+                    &mut journal,
+                )?;
+            }
+            Ok(())
+        });
+    if let Err(error) = result {
+        roll_back(&journal);
+        let _ = make_tree_writable(&backup);
+        let _ = std::fs::remove_dir_all(&backup);
+        return Err(error);
     }
+    let _ = make_tree_writable(&backup);
+    let _ = std::fs::remove_dir_all(&backup);
     let _ = std::fs::remove_dir_all(game_dir);
     Ok(())
+}
+
+/// One swapped-in file: where it went, and where the file it replaced was set aside.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+struct Swapped {
+    src: PathBuf,
+    dst: PathBuf,
+    aside: Option<PathBuf>,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn roll_back(journal: &[Swapped]) {
+    for swapped in journal.iter().rev() {
+        // The new file goes back to the stage, the old one back to its place.
+        if std::fs::rename(&swapped.dst, &swapped.src).is_err() {
+            let _ = std::fs::remove_file(&swapped.dst);
+        }
+        if let Some(aside) = &swapped.aside {
+            if std::fs::rename(aside, &swapped.dst).is_err()
+                && std::fs::copy(aside, &swapped.dst).is_ok()
+            {
+                let _ = std::fs::remove_file(aside);
+            }
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -604,7 +741,13 @@ fn make_tree_writable(path: &Path) -> acnh_core::Result<()> {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn move_game_tree(root: &Path, dir: &Path, install_dir: &Path) -> acnh_core::Result<()> {
+fn move_game_tree(
+    root: &Path,
+    dir: &Path,
+    install_dir: &Path,
+    backup: &Path,
+    journal: &mut Vec<Swapped>,
+) -> acnh_core::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -620,27 +763,50 @@ fn move_game_tree(root: &Path, dir: &Path, install_dir: &Path) -> acnh_core::Res
             continue;
         }
         if path.is_dir() {
-            move_game_tree(root, &path, install_dir)?;
+            move_game_tree(root, &path, install_dir, backup, journal)?;
         } else if path.is_file() {
             let executable = rel_str == "acnh"
                 || rel_str.ends_with(".exe")
                 || rel_str.contains(".so")
                 || rel_str.ends_with(".dylib");
-            move_file_replace(&path, &install_dir.join(rel), executable)?;
+            swap_in(
+                &path,
+                &install_dir.join(rel),
+                executable,
+                &backup.join(rel),
+                journal,
+            )?;
         }
     }
     Ok(())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn move_file_replace(src: &Path, dst: &Path, executable: bool) -> acnh_core::Result<()> {
+fn swap_in(
+    src: &Path,
+    dst: &Path,
+    executable: bool,
+    aside: &Path,
+    journal: &mut Vec<Swapped>,
+) -> acnh_core::Result<()> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let mut set_aside = None;
     if dst.exists() {
         let _ = make_tree_writable(dst);
-        let _ = std::fs::remove_file(dst);
+        if let Some(parent) = aside.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(dst, aside)?;
+        set_aside = Some(aside.to_path_buf());
     }
+    // Journalled before the move, so a half-done move is undone too.
+    journal.push(Swapped {
+        src: src.to_path_buf(),
+        dst: dst.to_path_buf(),
+        aside: set_aside,
+    });
     if std::fs::rename(src, dst).is_err() {
         std::fs::copy(src, dst)?;
         let _ = std::fs::remove_file(src);
@@ -656,7 +822,13 @@ fn move_file_replace(src: &Path, dst: &Path, executable: bool) -> acnh_core::Res
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-fn cloud_download_and_sync(_dirs: &AppDirs) -> acnh_core::Result<()> {
+fn cloud_download_and_sync(
+    _dirs: &AppDirs,
+    _home: &Path,
+    _sender: &Sender<(u64, Event)>,
+    _generation: u64,
+    _cancelled: &AtomicU8,
+) -> acnh_core::Result<Option<String>> {
     Err(acnh_core::Error::Unsupported(
         "Cloud download uses the mobile app downloader on this platform.".into(),
     ))
@@ -919,5 +1091,155 @@ mod tests {
             home,
         );
         assert!(message.contains("exefs/sdk"));
+    }
+
+    struct ScriptedRelay {
+        pull: std::sync::Mutex<Option<acnh_core::Result<acnh_core::launch::Sync>>>,
+        pushes: std::sync::atomic::AtomicUsize,
+    }
+    impl ScriptedRelay {
+        fn new(pull: acnh_core::Result<acnh_core::launch::Sync>) -> Self {
+            Self {
+                pull: std::sync::Mutex::new(Some(pull)),
+                pushes: Default::default(),
+            }
+        }
+    }
+    impl acnh_core::launch::Relay for ScriptedRelay {
+        fn pull(
+            &self,
+            _: &Path,
+            _: Option<acnh_core::launch::Keep>,
+        ) -> acnh_core::Result<acnh_core::launch::Sync> {
+            self.pull.lock().unwrap().take().unwrap()
+        }
+        fn push(
+            &self,
+            _: &Path,
+            _: Option<acnh_core::launch::Keep>,
+        ) -> acnh_core::Result<acnh_core::launch::Sync> {
+            self.pushes.fetch_add(1, Ordering::SeqCst);
+            Ok(acnh_core::launch::Sync::Done("pushed".into()))
+        }
+    }
+
+    #[test]
+    fn a_pulled_island_is_pushed_back_to_clear_the_playing_mark() {
+        use acnh_core::launch::Sync;
+        let relay = ScriptedRelay::new(Ok(Sync::Done("pulled".into())));
+        assert_eq!(sync_island(&relay, Path::new("/s"), Path::new("/h")), None);
+        assert_eq!(relay.pushes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_island_that_did_not_sync_is_told_not_called_a_success() {
+        use acnh_core::launch::Sync;
+        let held = ScriptedRelay::new(Ok(Sync::Held {
+            device: "deck".into(),
+            since: "now".into(),
+        }));
+        let note = sync_island(&held, Path::new("/s"), Path::new("/h")).unwrap();
+        assert!(note.contains("deck"));
+        assert_eq!(held.pushes.load(Ordering::SeqCst), 0);
+        let offline = ScriptedRelay::new(Ok(Sync::Offline));
+        assert!(sync_island(&offline, Path::new("/s"), Path::new("/h"))
+            .unwrap()
+            .contains("could not be reached"));
+        let broken = ScriptedRelay::new(Err(acnh_core::Error::Saves("boom".into())));
+        assert!(sync_island(&broken, Path::new("/s"), Path::new("/h"))
+            .unwrap()
+            .contains("not synced"));
+    }
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn a_downloaded_game_replaces_the_old_files_and_keeps_the_players_own() {
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        let install = root.path().join("install");
+        write(&game.join("acnh"), "new player");
+        write(&game.join("romfs.pak"), "new pak");
+        write(&game.join("manifest.json"), "{}");
+        write(&game.join("root/config.ini"), "downloaded");
+        write(&install.join("acnh"), "old player");
+        write(&install.join("root/config.ini"), "mine");
+        write(&install.join("root/user/save"), "island");
+        install_downloaded_desktop_game(&game, &install).unwrap();
+        let read = |p: &str| std::fs::read_to_string(install.join(p)).unwrap();
+        assert_eq!(read("acnh"), "new player");
+        assert_eq!(read("romfs.pak"), "new pak");
+        assert_eq!(read("manifest.json"), "{}");
+        assert_eq!(read("root/config.ini"), "mine");
+        assert_eq!(read("root/user/save"), "island");
+        assert!(!game.exists());
+        assert!(!root.path().join("install.previous").exists());
+    }
+
+    #[test]
+    fn a_failed_install_puts_the_old_game_back_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let game = root.path().join("game");
+        let install = root.path().join("install");
+        write(&game.join("a.bin"), "new a");
+        write(&game.join("z/inner"), "new z");
+        write(&install.join("a.bin"), "old a");
+        // A file where the game needs a folder: whichever is swapped first, the other fails.
+        write(&install.join("z"), "old z");
+        assert!(install_downloaded_desktop_game(&game, &install).is_err());
+        assert_eq!(
+            std::fs::read_to_string(install.join("a.bin")).unwrap(),
+            "old a"
+        );
+        assert_eq!(std::fs::read_to_string(install.join("z")).unwrap(), "old z");
+        assert!(!root.path().join("install.previous").exists());
+        // The staged game is whole again for another try.
+        assert_eq!(
+            std::fs::read_to_string(game.join("a.bin")).unwrap(),
+            "new a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(game.join("z/inner")).unwrap(),
+            "new z"
+        );
+    }
+
+    #[test]
+    fn the_cloud_download_can_be_cancelled_and_the_cancel_returns_to_the_start() {
+        let mut first = fake();
+        first.vm.cloud_game_offered = true;
+        first.vm.step = Step::GetBuild;
+        first.vm.busy = true;
+        first.active = Some(Request::CloudDownloadAndSync);
+        assert!(first.can_cancel());
+        first.nav(Nav::Back);
+        assert_eq!(first.cancelled.load(Ordering::SeqCst), 1);
+        first
+            .sender
+            .send((
+                0,
+                Event::CloudSyncFinished(Err("download cancelled".into())),
+            ))
+            .unwrap();
+        first.pump();
+        assert_eq!(first.vm.step, Step::Welcome);
+        assert!(!first.vm.busy);
+        assert!(first.vm.message.contains("cancelled"));
+    }
+
+    #[test]
+    fn download_progress_reaches_the_page_without_ending_the_request() {
+        let mut first = fake();
+        first.vm.step = Step::GetBuild;
+        first.vm.busy = true;
+        first.active = Some(Request::CloudDownloadAndSync);
+        first.vm.event(Event::Progress(0));
+        first.sender.send((0, Event::Progress(55))).unwrap();
+        first.pump();
+        assert_eq!(first.page().progress, 55);
+        assert!(first.active.is_some());
     }
 }

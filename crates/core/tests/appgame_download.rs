@@ -1,5 +1,5 @@
 use acnh_core::appgame::{
-    download, DownloadTransport, Manifest, ManifestFile, GAME_DIR, PARTIAL_DIR,
+    download, DownloadTransport, Manifest, ManifestFile, Watched, GAME_DIR, PARTIAL_DIR,
 };
 use acnh_core::error::Error;
 use sha2::{Digest, Sha256};
@@ -476,4 +476,46 @@ fn manifest_allows_omitted_build_id_and_abi() {
     parsed
         .validate("", "")
         .expect("empty expected build_id/abi validates");
+}
+
+#[test]
+fn a_watched_download_reports_progress_to_the_manifest_total() {
+    let tmp = TempDir::new().unwrap();
+    let private = tmp.path().join("private");
+    let dest = private.join(GAME_DIR);
+    let total: u64 = decoy_entries().iter().map(|(_, d)| d.len() as u64).sum();
+    let mut seen: Vec<(u64, u64)> = Vec::new();
+    let mut watch = |done: u64, all: u64| {
+        seen.push((done, all));
+        true
+    };
+    let mut transport = Watched::new(
+        FakeTransport::from_files(BUILD_ID, ABI, decoy_entries()),
+        &mut watch,
+    );
+    download(&private, &dest, 1024 * 1024, BUILD_ID, ABI, &mut transport).unwrap();
+    assert!(seen.iter().all(|(done, all)| *all == total && done <= all));
+    assert_eq!(seen.last(), Some(&(total, total)));
+    assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0));
+}
+
+#[test]
+fn a_cancelled_download_stops_and_keeps_partial_files_for_a_resume() {
+    let tmp = TempDir::new().unwrap();
+    let private = tmp.path().join("private");
+    let dest = private.join(GAME_DIR);
+    let mut watch = |done: u64, _all: u64| done < 600;
+    let mut transport = Watched::new(
+        FakeTransport::from_files(BUILD_ID, ABI, decoy_entries()),
+        &mut watch,
+    );
+    let err = download(&private, &dest, 1024 * 1024, BUILD_ID, ABI, &mut transport).unwrap_err();
+    assert!(err.to_string().contains("download cancelled"), "{err}");
+    assert!(!dest.exists());
+    assert!(private.join(PARTIAL_DIR).is_dir());
+
+    // The same call without the cancel finishes from what is there.
+    let mut again = FakeTransport::from_files(BUILD_ID, ABI, decoy_entries());
+    download(&private, &dest, 1024 * 1024, BUILD_ID, ABI, &mut again).unwrap();
+    assert!(dest.join("romfs.pak").is_file());
 }
