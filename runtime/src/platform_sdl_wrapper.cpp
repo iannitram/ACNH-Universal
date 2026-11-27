@@ -33,25 +33,7 @@
 #include "config.h"
 #include "platform.h"
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#else
-extern "C" {
-void acnh_platform_window_set_minimized(bool minimized);
-void acnh_platform_window_set_size(uint32_t w, uint32_t h);
-void acnh_platform_window_set_refresh_hz(int32_t hz);
-void acnh_platform_pick_begin();
-void acnh_platform_pick_complete(const char* path);
-void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
-size_t acnh_platform_pad_kind(int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
-size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
-bool acnh_platform_xbox_layout(const char* controller_kind);
-int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
-uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
-uint32_t acnh_platform_touch_label_code(const char* label);
-bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t now_ns, bool* was_run, uint64_t* past_ns);
-}
-#endif
 
 #include "platform_sdl.h"
 #include "glyph_layout.h"
@@ -101,7 +83,6 @@ SDL_Window* g_window = nullptr;
 std::atomic<bool> g_held_back{false};  // made hidden, for picture_shown to show
 int g_held_x = 0, g_held_y = 0;        // where: a window made hidden was shown elsewhere than it was asked to be
 
-
 std::mutex g_pad_lock;
 PadState g_pad;
 
@@ -120,8 +101,6 @@ bool sdl_start() {
 }
 
 // ---- window ---------------------------------------------------------------------------------------------------
-
-
 
 void* sdl_native_window() {
     SDL_Window* w = g_window;
@@ -189,7 +168,6 @@ void picture_shown() {
     });
 }
 uint64_t window_generation() { return 1; }
-
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 float default_render_scale() { return 1.0f; }
@@ -399,16 +377,11 @@ void show_fatal(const char* text) {
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ACNHRecomp", text, nullptr);
 }
 
-
-
-
 void set_fullscreen(bool on) {
     run_on_main([on] {
         if (g_window) SDL_SetWindowFullscreen(g_window, on);
     });
 }
-
-
 
 std::string controller_name() {
     SDL_Gamepad* pad = g_gamepad;
@@ -481,8 +454,6 @@ void pick_file(const std::string& title, const char* extension) {
         SDL_DestroyProperties(props);
     });
 }
-
-
 
 bool read_player_pad(int, PadState&) { return false; }  // player 1 only on this host
 
@@ -622,7 +593,6 @@ int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface
     *surface = reinterpret_cast<uint64_t>(s);
     return ok ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
-
 
 void sdl_main_loop() {
     for (;;) {

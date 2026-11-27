@@ -10,62 +10,10 @@
 
 #include <nx/runtime.h>
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#endif
 
 #include "kernel.h"
 #include "platform.h"
-
-#ifndef NX_RUST_RUNTIME
-extern "C" {
-struct AcnhAudioHost {
-    bool (*audio_open)(void (*done)(void*), int32_t channels);
-    bool (*audio_submit)(const void* data, size_t bytes, void* ctx);
-    uint32_t (*audio_queued)();
-    uint64_t (*monotonic_ns)();
-    void (*sleep_ns)(int64_t ns);
-    void (*log)(const char* msg);
-    void (*signal_out_event)();
-    void (*clear_out_event)();
-    void (*signal_frame_event)();
-};
-void acnh_audio_set_host(const AcnhAudioHost* host);
-uint64_t acnh_audio_active_output_channel_count();
-int32_t acnh_audio_list_output_device_name(uint64_t names_ptr, int32_t count);
-int32_t acnh_audio_get_active_output_device_name(uint64_t name_ptr);
-void acnh_audio_out_init_parameter(uint64_t param_ptr);
-uint64_t acnh_audio_out_open(uint64_t out_ptr, uint64_t param_ptr);
-uint64_t acnh_audio_out_start();
-void acnh_audio_out_stop();
-void acnh_audio_out_close();
-uint64_t acnh_audio_out_sample_rate();
-uint64_t acnh_audio_out_channel_count();
-uint64_t acnh_audio_out_sample_format();
-void acnh_audio_out_set_volume(float vol);
-uint64_t acnh_audio_out_buffer_data_size(uint64_t buf_ptr);
-void acnh_audio_out_set_buffer_info(uint64_t buf_ptr, uint64_t data, uint64_t capacity, uint64_t size);
-uint64_t acnh_audio_out_buffer_data_pointer(uint64_t buf_ptr);
-uint64_t acnh_audio_out_append_buffer(uint64_t buf_ptr);
-uint64_t acnh_audio_out_get_released_buffer();
-uint64_t acnh_audio_list_audio_ins();
-uint64_t acnh_audio_open_audio_in();
-bool acnh_audio_renderer_opened(uint64_t rc, uint64_t handle, uint64_t vtable_sym, uint64_t sdk_base,
-                                uint64_t get_exec_mode_sym, uint64_t sys_exec_sym, uint64_t impl_exec_sym,
-                                uint64_t min_addr, uint64_t max_addr);
-uint64_t acnh_audio_execute_rendering_addr();
-void acnh_audio_capture_device_sink(uint64_t proc_addr, uint64_t gen_device_sink_sym);
-void acnh_audio_before_render_system_update();
-void acnh_audio_after_render_system_update();
-void acnh_audio_before_execute_rendering();
-void acnh_audio_after_execute_rendering();
-size_t acnh_audio_render_tick_begin(uint64_t* out_impls, size_t max_impls, uint64_t* out_t0);
-void acnh_audio_render_tick_end(uint64_t t0, uint64_t last_rc);
-bool acnh_audio_reverb_should_bypass();
-bool acnh_audio_reverb_should_benchmark(bool off, uint64_t enabled_arg);
-void acnh_audio_reverb_log_benchmark(uint64_t median_ns, uint64_t best_ns);
-}
-#endif
 
 namespace nx {
 

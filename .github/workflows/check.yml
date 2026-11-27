@@ -389,8 +389,12 @@ jobs:
         run: |
           # layout_test links the Rust runtime since the Memory port (#59): build it and hand CMake the archive.
           cargo build --locked -p acnh-runtime --release
+          . tools/build_common.sh
+          inc=$(newest_runtime_header target/release/build)
+          [ -n "$inc" ] || { echo "acnh_runtime.h not found"; exit 1; }
           cmake -B build-layout -G Ninja -DNX_GAME=acnh -DNX_TESTS=ON -DCMAKE_BUILD_TYPE=Release \
-            -DNX_RUNTIME_ARCHIVE="$PWD/target/release/libacnh_runtime.a"
+            -DNX_RUNTIME_ARCHIVE="$PWD/target/release/libacnh_runtime.a" \
+            -DNX_RUNTIME_INCLUDE="$PWD/$(dirname "$inc")"
           cmake --build build-layout --target layout_test desktop_layout_test touch_input_test
           ctest --test-dir build-layout -R 'compact_layout|desktop_layout|touch_input' --output-on-failure
       - name: Player (Mac, arm64, Homebrew SDL3 and MoltenVK path)

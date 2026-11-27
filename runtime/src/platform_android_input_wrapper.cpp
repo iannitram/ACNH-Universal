@@ -43,25 +43,7 @@
 #include "kernel.h"
 #include "platform.h"
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#else
-extern "C" {
-void acnh_platform_window_set_minimized(bool minimized);
-void acnh_platform_window_set_size(uint32_t w, uint32_t h);
-void acnh_platform_window_set_refresh_hz(int32_t hz);
-void acnh_platform_pick_begin();
-void acnh_platform_pick_complete(const char* path);
-void acnh_platform_apply_gain(int16_t* pcm, size_t count, bool window_focused);
-size_t acnh_platform_pad_kind(int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
-size_t acnh_platform_android_controller_kind(bool connected, int32_t vendor, int32_t product, const char* name, char* out, size_t cap);
-bool acnh_platform_xbox_layout(const char* controller_kind);
-int32_t acnh_platform_scale_stick_axis(float val, float deadzone);
-uint64_t acnh_platform_android_key_to_button(int32_t keycode, bool xbox_layout);
-uint32_t acnh_platform_touch_label_code(const char* label);
-bool acnh_platform_touch_stick_run(float dx, float dy, bool can_run, uint64_t now_ns, bool* was_run, uint64_t* past_ns);
-}
-#endif
 
 #include "platform_android.h"
 #include "config.h"
@@ -222,8 +204,6 @@ int32_t on_input(android_app*, AInputEvent* e) {
 
 uint64_t ui_taps() { return g_ui_taps.load(std::memory_order_relaxed); }
 bool ui_finger_down() { return g_ui_finger.load(std::memory_order_relaxed); }
-
-
 
 bool read_player_pad(int, PadState&) { return false; }  // player 1 only on this host
 

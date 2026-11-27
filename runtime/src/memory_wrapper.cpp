@@ -8,9 +8,7 @@
 
 #include <nx/runtime.h>
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#endif
 
 #include "platform.h"
 
@@ -27,66 +25,6 @@
 #include <os/proc.h>
 #endif
 #endif
-#endif
-
-#ifndef NX_RUST_RUNTIME
-extern "C" {
-struct AcnhVmInfo {
-    uint64_t addr;
-    uint64_t size;
-    uint32_t state;
-    uint32_t perm;
-};
-struct AcnhMemoryBounds {
-    uint64_t address_space_base;
-    uint64_t address_space_size;
-    uint64_t module_base;
-    uint64_t module_size;
-    uint64_t heap_base;
-    uint64_t heap_max;
-    uint64_t alias_base;
-    uint64_t alias_size;
-    uint64_t stack_base;
-    uint64_t stack_size;
-    uint64_t kernel_base;
-    uint64_t kernel_size;
-    uint64_t thunk_base;
-    uint64_t thunk_size;
-    bool compact_layout;
-};
-struct AcnhMemoryHost {
-    bool (*reserve)(uint64_t addr, uint64_t size);
-    bool (*commit)(uint64_t addr, uint64_t size);
-    void (*decommit)(uint64_t addr, uint64_t size);
-    void (*log)(const char* msg);
-    void (*fatal)(const char* msg);
-    bool (*mprotect_ro)(uint64_t addr, uint64_t size);
-    bool (*mprotect_rw)(uint64_t addr, uint64_t size);
-    uint64_t (*page_size)();
-    uint64_t (*monotonic_ns)();
-    void (*log_flush)();
-    uint64_t (*memguard_footprint)(bool use_smaps);
-    uint64_t (*memguard_total_ram_bytes)();
-    uint64_t (*memguard_ios_available_bytes)();
-    void (*memguard_terminate)(int32_t code);
-    void (*memguard_stderr)(const char* msg);
-};
-void acnh_memory_set_host(const AcnhMemoryHost* host);
-void acnh_memory_init(const AcnhMemoryBounds* bounds);
-bool acnh_memory_commit(uint64_t addr, uint64_t size);
-void acnh_memory_decommit(uint64_t addr, uint64_t size);
-uint64_t acnh_memory_kernel_alloc(uint64_t size, uint64_t align);
-void acnh_memory_vm_set(uint64_t addr, uint64_t size, uint32_t state, uint32_t perm);
-AcnhVmInfo acnh_memory_vm_query(uint64_t addr);
-bool acnh_write_watch_add(uint64_t addr, uint64_t size);
-void acnh_write_watch_remove(uint64_t addr);
-bool acnh_write_watch_take(uint64_t addr, uint64_t* out_lo, uint64_t* out_hi);
-bool acnh_write_watch_fault(uint64_t at);
-uint64_t acnh_memguard_overlap_ns(uint64_t from, uint64_t to);
-double acnh_memguard_limit_gb(const char* env);
-uint64_t acnh_memguard_footprint();
-void acnh_memguard_start(uint32_t platform);
-}
 #endif
 
 namespace {

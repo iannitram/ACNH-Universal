@@ -11,47 +11,13 @@
 
 #include <nx/runtime.h>
 
-#ifdef NX_RUST_RUNTIME
 #include <acnh_runtime.h>
-#endif
 
 #include "game_clock.h"
 #include "platform.h"
 
 #ifndef NX_VERSION_STRING
 #define NX_VERSION_STRING "dev"
-#endif
-
-#ifndef NX_RUST_RUNTIME
-extern "C" {
-struct AcnhConfigHost {
-    size_t (*data_root)(char*, size_t);
-    size_t (*device_locale)(char*, size_t);
-    const char* version_string;
-    void (*log)(const char*);
-    void (*mods_fetch)();
-    void (*game_clock_apply_config)();
-};
-typedef void (*AcnhConfigStringCb)(const char*, size_t, void*);
-typedef void (*AcnhConfigEntryCb)(const char*, size_t, const char*, size_t, void*);
-void acnh_config_set_host(const AcnhConfigHost* host);
-void acnh_config_load();
-void acnh_config_apply();
-bool acnh_config_save();
-void acnh_config_get(const char* key, const char* fallback, AcnhConfigStringCb cb, void* ctx);
-int acnh_config_get_int(const char* key, int fallback);
-int64_t acnh_config_get_int64(const char* key, int64_t fallback);
-float acnh_config_get_float(const char* key, float fallback);
-bool acnh_config_get_bool(const char* key, bool fallback);
-void acnh_config_set(const char* key, const char* value);
-void acnh_config_all(AcnhConfigEntryCb cb, void* ctx);
-uint64_t acnh_config_generation();
-bool acnh_config_is_env_from_config(const char* name);
-bool acnh_config_show_fps();
-bool acnh_config_is_handheld();
-void acnh_config_preset(const char* name, AcnhConfigEntryCb cb, void* ctx);
-bool acnh_config_needs_restart(const char* key);
-}
 #endif
 
 namespace nx {
