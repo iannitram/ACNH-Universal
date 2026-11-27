@@ -173,96 +173,20 @@ impl Module {
 
 /// Decompress an LZ4 raw block with known uncompressed size (as used in NSO segments).
 pub fn decompress_lz4_block(input: &[u8], uncompressed_size: usize) -> Result<Vec<u8>, Error> {
-    // An LZ4 block cannot expand by more than 255x, so a larger claim is not worth reserving.
-    let mut output = Vec::with_capacity(uncompressed_size.min(input.len().saturating_mul(255)));
-    let mut ip = 0;
-
-    while ip < input.len() && output.len() < uncompressed_size {
-        let token = input[ip];
-        ip += 1;
-
-        // High 4 bits: literal length
-        let mut lit_len = ((token >> 4) & 0x0F) as usize;
-        if lit_len == 15 {
-            while ip < input.len() {
-                let extra = input[ip];
-                ip += 1;
-                lit_len = lit_len
-                    .checked_add(extra as usize)
-                    .ok_or_else(|| Error::Decompress("literal length overflow".into()))?;
-                if extra != 255 {
-                    break;
-                }
-            }
-        }
-
-        if ip.checked_add(lit_len).is_none_or(|end| end > input.len()) {
-            return Err(Error::Decompress("literal length exceeds input".into()));
-        }
-        if output
-            .len()
-            .checked_add(lit_len)
-            .is_none_or(|end| end > uncompressed_size)
-        {
-            return Err(Error::Decompress(
-                "uncompressed size exceeded by literals".into(),
-            ));
-        }
-        output.extend_from_slice(&input[ip..ip + lit_len]);
-        ip += lit_len;
-
-        if ip >= input.len() || output.len() >= uncompressed_size {
-            break;
-        }
-
-        // Match copy: 2-byte offset
-        if ip.saturating_add(2) > input.len() {
-            return Err(Error::Decompress("truncated match offset".into()));
-        }
-        let offset = u16::from_le_bytes([input[ip], input[ip + 1]]) as usize;
-        ip += 2;
-        if offset == 0 || offset > output.len() {
-            return Err(Error::Decompress(format!("invalid match offset {offset}")));
-        }
-
-        let mut match_len = ((token & 0x0F) as usize) + 4;
-        if (token & 0x0F) == 15 {
-            while ip < input.len() {
-                let extra = input[ip];
-                ip += 1;
-                match_len = match_len
-                    .checked_add(extra as usize)
-                    .ok_or_else(|| Error::Decompress("match length overflow".into()))?;
-                if extra != 255 {
-                    break;
-                }
-            }
-        }
-
-        if output
-            .len()
-            .checked_add(match_len)
-            .is_none_or(|end| end > uncompressed_size)
-        {
-            return Err(Error::Decompress(
-                "uncompressed size exceeded by match".into(),
-            ));
-        }
-
-        let start = output.len() - offset;
-        for i in 0..match_len {
-            let b = output[start + i];
-            output.push(b);
-        }
+    // `decompress` allocates `uncompressed_size` up front, so cap the claim at what a block can expand to (255x) before reserving.
+    if uncompressed_size > input.len().saturating_mul(255) {
+        return Err(Error::Decompress(
+            "uncompressed size exceeds what the input can expand to".into(),
+        ));
     }
-
+    let output = lz4_flex::block::decompress(input, uncompressed_size)
+        .map_err(|e| Error::Decompress(e.to_string()))?;
     if output.len() != uncompressed_size {
         return Err(Error::Decompress(format!(
             "decompressed size mismatch: got {} bytes, expected {uncompressed_size}",
             output.len()
         )));
     }
-
     Ok(output)
 }
 

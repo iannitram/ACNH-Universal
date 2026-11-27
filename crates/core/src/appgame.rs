@@ -315,86 +315,75 @@ impl Manifest {
     pub fn from_json(raw: &[u8]) -> Result<Self> {
         let text = std::str::from_utf8(raw)
             .map_err(|e| Error::BadGameFolder(format!("manifest.json is not valid UTF-8: {e}")))?;
-        let mut parser = JsonParser::new(text);
-        let root = parser.parse_object()?;
-        parser.skip_ws();
-        if !parser.is_eof() {
-            return Err(Error::BadGameFolder(
-                "manifest.json has trailing characters".into(),
-            ));
-        }
+        // serde_json bounds its own recursion (128 levels), so a hostile manifest cannot
+        // overflow the stack, and it rejects trailing characters.
+        let root: serde_json::Value = serde_json::from_str(text)
+            .map_err(|e| Error::BadGameFolder(format!("manifest.json is not valid JSON: {e}")))?;
+        let root = root
+            .as_object()
+            .ok_or_else(|| Error::BadGameFolder("manifest.json must be a JSON object".into()))?;
 
         let version = match root.get("version") {
-            Some(JsonVal::Num(n)) => u32::try_from(*n)
-                .map_err(|_| Error::BadGameFolder("manifest.json version out of range".into()))?,
+            Some(v) => v
+                .as_u64()
+                .ok_or_else(|| {
+                    Error::BadGameFolder("manifest.json version must be an integer".into())
+                })
+                .and_then(|n| {
+                    u32::try_from(n).map_err(|_| {
+                        Error::BadGameFolder("manifest.json version out of range".into())
+                    })
+                })?,
             None => 1,
-            _ => {
-                return Err(Error::BadGameFolder(
-                    "manifest.json version must be an integer".into(),
-                ))
-            }
         };
         let build_id = match root.get("build_id") {
-            Some(JsonVal::Str(s)) => s.clone(),
+            Some(v) => v
+                .as_str()
+                .ok_or_else(|| {
+                    Error::BadGameFolder("manifest.json build_id must be a string".into())
+                })?
+                .to_owned(),
             None => String::new(),
-            _ => {
-                return Err(Error::BadGameFolder(
-                    "manifest.json build_id must be a string".into(),
-                ))
-            }
         };
         let nx_game_abi = match root.get("nx_game_abi") {
-            Some(JsonVal::Str(s)) => s.clone(),
+            Some(v) => v
+                .as_str()
+                .ok_or_else(|| {
+                    Error::BadGameFolder("manifest.json nx_game_abi must be a string".into())
+                })?
+                .to_owned(),
             None => String::new(),
-            _ => {
-                return Err(Error::BadGameFolder(
-                    "manifest.json nx_game_abi must be a string".into(),
-                ))
-            }
         };
-        let files_val = match root.get("files") {
-            Some(JsonVal::Arr(arr)) => arr,
-            _ => {
-                return Err(Error::BadGameFolder(
-                    "manifest.json is missing files array".into(),
-                ))
-            }
-        };
+        let files_val = root
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| Error::BadGameFolder("manifest.json is missing files array".into()))?;
 
         let mut files = Vec::with_capacity(files_val.len());
         for entry in files_val {
-            let obj = match entry {
-                JsonVal::Obj(map) => map,
-                _ => {
-                    return Err(Error::BadGameFolder(
-                        "manifest.json files entry must be an object".into(),
-                    ))
-                }
-            };
-            let path = match obj.get("path") {
-                Some(JsonVal::Str(s)) => s.clone(),
-                _ => {
-                    return Err(Error::BadGameFolder(
-                        "manifest.json file entry is missing path".into(),
-                    ))
-                }
-            };
-            let size = match obj.get("size") {
-                Some(JsonVal::Num(n)) => *n,
-                _ => {
-                    return Err(Error::BadGameFolder(format!(
-                        "manifest.json file '{path}' is missing size"
-                    )))
-                }
-            };
-            let sha256 = match obj.get("sha256") {
-                Some(JsonVal::Str(s)) => s.to_ascii_lowercase(),
-                _ => {
-                    return Err(Error::BadGameFolder(format!(
-                        "manifest.json file '{path}' is missing sha256"
-                    )))
-                }
-            };
+            let obj = entry.as_object().ok_or_else(|| {
+                Error::BadGameFolder("manifest.json files entry must be an object".into())
+            })?;
+            let path = obj
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    Error::BadGameFolder("manifest.json file entry is missing path".into())
+                })?
+                .to_owned();
+            let size = obj
+                .get("size")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    Error::BadGameFolder(format!("manifest.json file '{path}' is missing size"))
+                })?;
+            let sha256 = obj
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    Error::BadGameFolder(format!("manifest.json file '{path}' is missing sha256"))
+                })?
+                .to_ascii_lowercase();
             files.push(ManifestFile { path, size, sha256 });
         }
 
@@ -685,199 +674,5 @@ fn push_json_escaped(out: &mut String, s: &str) {
             }
             c => out.push(c),
         }
-    }
-}
-
-enum JsonVal {
-    Str(String),
-    Num(u64),
-    Arr(Vec<JsonVal>),
-    Obj(std::collections::HashMap<String, JsonVal>),
-}
-
-struct JsonParser<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> JsonParser<'a> {
-    fn new(s: &'a str) -> Self {
-        Self {
-            bytes: s.as_bytes(),
-            pos: 0,
-        }
-    }
-
-    fn is_eof(&self) -> bool {
-        self.pos >= self.bytes.len()
-    }
-
-    fn skip_ws(&mut self) {
-        while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
-            self.pos += 1;
-        }
-    }
-
-    fn peek(&mut self) -> Option<u8> {
-        self.skip_ws();
-        self.bytes.get(self.pos).copied()
-    }
-
-    fn expect(&mut self, ch: u8) -> Result<()> {
-        self.skip_ws();
-        if self.bytes.get(self.pos).copied() == Some(ch) {
-            self.pos += 1;
-            Ok(())
-        } else {
-            Err(Error::BadGameFolder(format!(
-                "manifest.json syntax error at byte {}",
-                self.pos
-            )))
-        }
-    }
-
-    fn parse_val(&mut self) -> Result<JsonVal> {
-        match self.peek() {
-            Some(b'"') => Ok(JsonVal::Str(self.parse_str()?)),
-            Some(b'[') => Ok(JsonVal::Arr(self.parse_array()?)),
-            Some(b'{') => Ok(JsonVal::Obj(self.parse_object()?)),
-            Some(b'0'..=b'9') => Ok(JsonVal::Num(self.parse_u64()?)),
-            _ => Err(Error::BadGameFolder(format!(
-                "manifest.json unexpected token at byte {}",
-                self.pos
-            ))),
-        }
-    }
-
-    fn parse_object(&mut self) -> Result<std::collections::HashMap<String, JsonVal>> {
-        self.expect(b'{')?;
-        let mut map = std::collections::HashMap::new();
-        if self.peek() == Some(b'}') {
-            self.pos += 1;
-            return Ok(map);
-        }
-        loop {
-            let key = self.parse_str()?;
-            self.expect(b':')?;
-            let val = self.parse_val()?;
-            map.insert(key, val);
-            match self.peek() {
-                Some(b',') => self.pos += 1,
-                Some(b'}') => {
-                    self.pos += 1;
-                    break;
-                }
-                _ => {
-                    return Err(Error::BadGameFolder(format!(
-                        "manifest.json expected ',' or '}}' at byte {}",
-                        self.pos
-                    )))
-                }
-            }
-        }
-        Ok(map)
-    }
-
-    fn parse_array(&mut self) -> Result<Vec<JsonVal>> {
-        self.expect(b'[')?;
-        let mut arr = Vec::new();
-        if self.peek() == Some(b']') {
-            self.pos += 1;
-            return Ok(arr);
-        }
-        loop {
-            arr.push(self.parse_val()?);
-            match self.peek() {
-                Some(b',') => self.pos += 1,
-                Some(b']') => {
-                    self.pos += 1;
-                    break;
-                }
-                _ => {
-                    return Err(Error::BadGameFolder(format!(
-                        "manifest.json expected ',' or ']' at byte {}",
-                        self.pos
-                    )))
-                }
-            }
-        }
-        Ok(arr)
-    }
-
-    fn parse_u64(&mut self) -> Result<u64> {
-        self.skip_ws();
-        let start = self.pos;
-        while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
-            self.pos += 1;
-        }
-        let s = std::str::from_utf8(&self.bytes[start..self.pos])
-            .map_err(|_| Error::BadGameFolder("invalid number in manifest.json".into()))?;
-        s.parse::<u64>()
-            .map_err(|_| Error::BadGameFolder(format!("invalid integer '{s}' in manifest.json")))
-    }
-
-    fn parse_str(&mut self) -> Result<String> {
-        self.expect(b'"')?;
-        let mut out = String::new();
-        while self.pos < self.bytes.len() {
-            let b = self.bytes[self.pos];
-            self.pos += 1;
-            match b {
-                b'"' => return Ok(out),
-                b'\\' => {
-                    let esc = *self
-                        .bytes
-                        .get(self.pos)
-                        .ok_or_else(|| Error::BadGameFolder("unterminated string".into()))?;
-                    self.pos += 1;
-                    match esc {
-                        b'"' => out.push('"'),
-                        b'\\' => out.push('\\'),
-                        b'/' => out.push('/'),
-                        b'n' => out.push('\n'),
-                        b'r' => out.push('\r'),
-                        b't' => out.push('\t'),
-                        b'u' => {
-                            if self.pos + 4 > self.bytes.len() {
-                                return Err(Error::BadGameFolder("bad \\u escape".into()));
-                            }
-                            let hex = std::str::from_utf8(&self.bytes[self.pos..self.pos + 4])
-                                .map_err(|_| Error::BadGameFolder("bad \\u escape".into()))?;
-                            self.pos += 4;
-                            let code = u32::from_str_radix(hex, 16)
-                                .map_err(|_| Error::BadGameFolder("bad \\u escape".into()))?;
-                            let ch = char::from_u32(code)
-                                .ok_or_else(|| Error::BadGameFolder("bad \\u codepoint".into()))?;
-                            out.push(ch);
-                        }
-                        _ => {
-                            return Err(Error::BadGameFolder(
-                                "unsupported escape in manifest.json".into(),
-                            ))
-                        }
-                    }
-                }
-                _ => {
-                    // Decode UTF-8 sequence starting at self.pos - 1.
-                    let rest = std::str::from_utf8(&self.bytes[self.pos - 1..])
-                        .or_else(|e| {
-                            std::str::from_utf8(
-                                &self.bytes[self.pos - 1..self.pos - 1 + e.valid_up_to()],
-                            )
-                        })
-                        .map_err(|_| {
-                            Error::BadGameFolder("invalid UTF-8 in manifest.json".into())
-                        })?;
-                    let ch = rest.chars().next().ok_or_else(|| {
-                        Error::BadGameFolder("invalid UTF-8 in manifest.json".into())
-                    })?;
-                    self.pos += ch.len_utf8() - 1;
-                    out.push(ch);
-                }
-            }
-        }
-        Err(Error::BadGameFolder(
-            "unterminated string in manifest.json".into(),
-        ))
     }
 }

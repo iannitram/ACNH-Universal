@@ -19,6 +19,8 @@ path = "src/main.rs"
 # Use the same Capstone 5 ARM64 aliases, operand details, and comments as the Python emitter.
 capstone = { version = "0.14", default-features = false, features = ["std", "full", "arch_arm64"] }
 regex = "1"
+# LZ4 block decoding for NSO segments; same pure-Rust build as acnh-core.
+lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
 
 [build-dependencies]
 sha2 = "0.10"
