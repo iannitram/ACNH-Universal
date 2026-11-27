@@ -173,8 +173,6 @@ std::unordered_map<uint32_t, std::shared_ptr<KObject>> g_handles;
 thread_local KThread* t_self = nullptr;
 }  // namespace kstate
 
-extern std::atomic<uint64_t> g_tick_calls, g_yield_calls, g_yield_naps, g_sleep_calls;
-
 namespace {
 
 std::mutex g_obj_lock;
@@ -499,24 +497,18 @@ void ensure_host() {
     });
 }
 
-void sync_counters() {
-    uint64_t t = 0, y = 0, n = 0, s = 0;
-    acnh_kernel_counters(&t, &y, &n, &s);
-    g_tick_calls.store(t, std::memory_order_relaxed);
-    g_yield_calls.store(y, std::memory_order_relaxed);
-    g_yield_naps.store(n, std::memory_order_relaxed);
-    g_sleep_calls.store(s, std::memory_order_relaxed);
-}
-
 void hle_get_system_tick(CPU& c) {
     ensure_host();
     acnh_kernel_hle_get_system_tick(reinterpret_cast<AcnhCpu*>(&c));
-    sync_counters();
 }
 
 }  // namespace
 
-std::atomic<uint64_t> g_tick_calls{0}, g_yield_calls{0}, g_yield_naps{0}, g_sleep_calls{0};
+// The SVC counters live in Rust; the one reader (the CPU profile line in nvn_queue.cpp) asks for them when it prints.
+void kernel_counters(uint64_t& tick_calls, uint64_t& yield_calls, uint64_t& yield_naps, uint64_t& sleep_calls) {
+    ensure_host();
+    acnh_kernel_counters(&tick_calls, &yield_calls, &yield_naps, &sleep_calls);
+}
 
 NX_HLE("_ZN2nn2os13GetSystemTickEv", hle_get_system_tick);
 
@@ -580,7 +572,6 @@ void kernel_init() {
 NX_GAME_API void svc(CPU& c, uint32_t imm, uint64_t pc) {
     ensure_host();
     acnh_kernel_svc(reinterpret_cast<AcnhCpu*>(&c), imm, pc);
-    sync_counters();
 }
 
 void svc_profile_mark(int role) {
@@ -602,7 +593,6 @@ bool frame_profile_on() {
 void svc_frame_take(uint64_t& total, uint64_t& top_ns, uint32_t& top_imm, uint64_t& top_pc) {
     ensure_host();
     acnh_kernel_svc_frame_take(&total, &top_ns, &top_imm, &top_pc);
-    sync_counters();
 }
 
 void register_service(const std::string& name, ServiceFactory f) { factories()[name] = std::move(f); }
