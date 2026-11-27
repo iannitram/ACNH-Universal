@@ -14,6 +14,8 @@ The game folder lives on three hubs only:
 
 A hub runs the prepare stages (`recipe::Stage`: tools, game, version, recompile, shaders, fonts, build) and serves the result. A device without the game folder finds a hub by mDNS, pairs once with a code shown on both screens (SPAKE2), and pulls over a sealed stream (ChaCha20-Poly1305), on the home network only (`hub::is_home_network` checks every address).
 
+Status 2026-11-26: the three hubs and the home-network rule stand. The one exception is my own Dropbox: the final builds go to `Dropbox/_transfers/ACNH-Universal/`, and the Android and Apple apps download the game from it at first start (`SPEC.md`, M18 and the Dropbox exception, approved 2026-11-18 and 2026-11-23).
+
 Two kinds of transfer, kept apart:
 
 - **The bundle** (`bundle`): the player we built, listed with sizes and SHA-256. It never holds game data: `bundle::is_forbidden` refuses the game folder, the game library, `romfs.pak`, `spirv.pak`, `gen/` and saves.

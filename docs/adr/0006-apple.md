@@ -8,8 +8,12 @@ The same recompiled C++ is compiled for `aarch64-apple-darwin` and `aarch64-appl
 
 ## Risks, checked first (piece 8.01)
 
-- **Address space.** Guest pointers are host pointers, so the runtime reserves the guest's whole 39-bit address space at a fixed host address (`runtime/include/nx/runtime.h`: moved up by `kGuestShift` = `0xC0_0000_0000` on Apple, a heap of up to 6 GiB). On iOS that needs the extended virtual addressing entitlement and may not fit an iPhone's limits.
-- **Signing.** A free Apple ID re-signs every 7 days and limits memory; the paid Apple Developer Program lifts both. That is my decision when stage 8 starts.
+- **Address space.** Guest pointers are host pointers, so the runtime reserves the guest's whole 39-bit address space at a fixed host address (`runtime/include/nx/runtime.h`: moved up by `kGuestShift` = `0xC0_0000_0000` on Apple, a heap of up to 6 GiB). On iOS that needs the extended virtual addressing entitlement and may not fit an iPhone's limits. Settled by #72 and my iPad probe in #150: it does not fit even with the entitlement, so the Apple builds use a compact guest layout (8.03c, PR #210; `docs/apple-ios.md`).
+- **Signing.** A free Apple ID re-signs every 7 days and limits memory; the paid Apple Developer Program lifts both. That is my decision when stage 8 starts. Status 2026-11-26: the free Apple ID stands ("Free Apple ID for now"), and the entitlement risk is the one #150 settled.
+
+## Status 2026-11-26
+
+The `.ipa` comes in two forms: the big one with the game inside (`--game`) and the small one that downloads it at first start (`--small`, #231, built by Prepare's `ios` target, #306). An earlier version of this ADR had no small `.ipa`. Neither is installed on a device yet.
 
 ## Why
 

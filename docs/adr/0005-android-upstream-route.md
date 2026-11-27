@@ -6,7 +6,7 @@
 
 Upstream's Android work (`docs/ANDROID.md`, `android/`, `tools/build_android.sh`, `tools/build_turnip.sh`) is our base:
 
-- The APK carries the runtime only (`lib<game>.so` loader and `android/java/.../Home.java`); the game library and the game's data go into the game folder on the device.
+- The APK carries the runtime only (`lib<game>.so` loader and `android/java/.../Home.java`); the game library and the game's data go into the game folder on the device. Status 2026-11-26: the game's files now go into the app's private storage, by the in-app download from my own Dropbox (M18; 9.02, 9.02b), not a game folder on the device.
 - The build runs on Linux with NDK 28.2, so the Strix Halo tablet is the Android hub.
 - Turnip on Adreno, as upstream builds it. Mali is after 1.0.
 
