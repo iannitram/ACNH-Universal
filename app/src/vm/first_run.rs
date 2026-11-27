@@ -55,7 +55,11 @@ pub enum Event {
     Paired(Result<(), String>),
     Stage(Stage),
     Finished(Result<(), String>),
-    CloudSyncFinished(Result<(), String>),
+    /// A percentage (0 to 100) of the cloud game downloaded so far.
+    Progress(u8),
+    /// The game is installed. `Ok(Some(note))` says the island could not be synced (offline,
+    /// held by another device, in conflict) and names what to do; the game is usable.
+    CloudSyncFinished(Result<Option<String>, String>),
     FinishedSetup {
         steam: bool,
         result: Result<(), String>,
@@ -86,6 +90,11 @@ pub struct FirstRunVm {
     pub system_picker: bool,
     /// Save sync can be set up on this build, and is not set up yet: step 5 is shown.
     pub relay_available: bool,
+    /// The cloud game can be downloaded here: only where a prepared game can exist (Linux,
+    /// from Dropbox). Windows and Mac have no uploader, so they are not offered it.
+    pub cloud_game_offered: bool,
+    /// Percent of the cloud game downloaded, or -1 when not known.
+    pub progress: i32,
     pub relay_set_up: bool,
     /// The relay step's pages.
     pub relay: RelaySetupVm,
@@ -124,6 +133,8 @@ impl FirstRunVm {
             steam_applicable: cfg!(target_os = "linux"),
             system_picker: cfg!(target_os = "linux"),
             relay_available: false,
+            cloud_game_offered: false,
+            progress: -1,
             relay_set_up: false,
             relay: RelaySetupVm::new(true),
             profile: profile::builtin().len() - 1,
@@ -193,6 +204,9 @@ impl FirstRunVm {
                 Self::with_caret(&self.port, self.port_caret, self.editing_port)
             ),
             Step::Pair => format!("Enter the six-digit code used on the hub: {}", self.code),
+            Step::GetBuild if self.cloud_downloading && self.progress >= 0 => {
+                format!("Downloading the game: {}%", self.progress)
+            }
             Step::GetBuild if self.cloud_downloading => {
                 "Downloading the game and syncing your island…".into()
             }
@@ -231,10 +245,8 @@ impl FirstRunVm {
             return vec![];
         }
         match self.step {
-            Step::Welcome if self.relay_available => vec![
+            Step::Welcome if self.cloud_game_offered => vec![
                 "Sign in with Dropbox".into(),
-                "Sign in with Google Drive".into(),
-                "Sign in with Nextcloud".into(),
                 "Choose a local game folder".into(),
                 "Pull from a hub on this network".into(),
             ],
@@ -342,11 +354,9 @@ impl FirstRunVm {
             return;
         }
         match self.step.clone() {
-            Step::Welcome if self.relay_available => match index {
+            Step::Welcome if self.cloud_game_offered => match index {
                 0 => self.start_cloud_sign_in(relay_setup::Service::Dropbox),
-                1 => self.start_cloud_sign_in(relay_setup::Service::GoogleDrive),
-                2 => self.start_cloud_sign_in(relay_setup::Service::Nextcloud),
-                3 => {
+                1 => {
                     self.pulling = false;
                     self.go(Step::PickFolder);
                     self.request(Request::Folders(self.folder.clone()));
@@ -481,6 +491,16 @@ impl FirstRunVm {
         }
     }
 
+    /// The cloud download was cancelled: back to the first choice. The partial files stay, so
+    /// the next try continues from them.
+    pub fn cloud_cancelled(&mut self) {
+        self.cloud_downloading = false;
+        self.pulling = false;
+        self.progress = -1;
+        self.message = "Download cancelled. What was downloaded is kept for the next try.".into();
+        self.go(Step::Welcome);
+    }
+
     fn finish_setup(&mut self, add_steam: bool) {
         self.message.clear();
         self.request(Request::Finish {
@@ -506,6 +526,7 @@ impl FirstRunVm {
                     self.cloud_download_pending = false;
                     self.cloud_downloading = true;
                     self.pulling = true;
+                    self.progress = -1;
                     self.go(Step::GetBuild);
                     self.request(Request::CloudDownloadAndSync);
                 } else {
@@ -641,14 +662,22 @@ impl FirstRunVm {
             Event::SystemPicked(None) => {
                 self.message = "No folder was chosen. Pick one from the list.".into();
             }
-            Event::CloudSyncFinished(Ok(())) => {
+            Event::Progress(percent) => {
+                self.progress = i32::from(percent.min(100));
+                self.busy = true;
+            }
+            Event::CloudSyncFinished(Ok(note)) => {
                 self.cloud_downloading = false;
                 self.pulling = false;
-                self.go(Step::Done);
+                self.progress = -1;
+                // Same last step as a local Prepare: the device profile and Add to Steam.
+                self.go(Step::DeviceAndSteam);
+                self.message = note.unwrap_or_default();
             }
             Event::CloudSyncFinished(Err(reason)) => {
                 self.cloud_downloading = false;
                 self.pulling = false;
+                self.progress = -1;
                 self.go(Step::BuildFailed(reason));
             }
             Event::Checked(Ok(version)) => {
@@ -921,16 +950,15 @@ mod tests {
     }
 
     #[test]
-    fn cloud_first_welcome_lists_providers_and_downloads_after_sign_in() {
+    fn cloud_first_welcome_offers_dropbox_and_downloads_after_sign_in() {
         let mut vm = vm();
         vm.relay_available = true;
+        vm.cloud_game_offered = true;
         let opts = vm.options();
         assert_eq!(
             opts,
             vec![
                 "Sign in with Dropbox",
-                "Sign in with Google Drive",
-                "Sign in with Nextcloud",
                 "Choose a local game folder",
                 "Pull from a hub on this network",
             ]
@@ -947,14 +975,78 @@ mod tests {
             vm.take_request(),
             Some(Request::CloudDownloadAndSync)
         ));
-        vm.event(Event::CloudSyncFinished(Ok(())));
+        vm.event(Event::Progress(40));
+        assert_eq!(vm.progress, 40);
+        assert!(vm.title().contains("40%"));
+        vm.event(Event::CloudSyncFinished(Ok(None)));
+        // The same last step as a local Prepare, then Finish.
+        assert_eq!(vm.step, Step::DeviceAndSteam);
+        assert_eq!(vm.progress, -1);
+        assert!(vm.message.is_empty());
+        vm.activate(if vm.steam_applicable { 2 } else { 1 });
+        assert!(matches!(vm.take_request(), Some(Request::Finish { .. })));
+        vm.event(Event::FinishedSetup {
+            steam: false,
+            result: Ok(()),
+        });
         assert_eq!(vm.step, Step::Done);
+    }
+
+    #[test]
+    fn cloud_download_shows_why_the_island_was_not_synced() {
+        let mut vm = vm();
+        vm.cloud_game_offered = true;
+        vm.activate(0);
+        vm.relay_outcome(relay_setup::Outcome::Done(relay_setup::Account {
+            service: relay_setup::Service::Dropbox,
+            name: "u@example.com".into(),
+            address: None,
+        }));
+        let _ = vm.take_request();
+        vm.event(Event::CloudSyncFinished(Ok(Some(
+            "The island is held by another device.".into(),
+        ))));
+        assert_eq!(vm.step, Step::DeviceAndSteam);
+        assert!(vm.message.contains("held by another device"));
+    }
+
+    #[test]
+    fn cloud_game_is_not_offered_where_none_can_exist() {
+        let mut vm = vm();
+        vm.relay_available = true;
+        vm.cloud_game_offered = false;
+        assert_eq!(
+            vm.options(),
+            vec![
+                "Choose a local game folder",
+                "Pull from a hub on this network"
+            ]
+        );
+    }
+
+    #[test]
+    fn cancelling_the_cloud_download_returns_to_the_first_choice() {
+        let mut vm = vm();
+        vm.cloud_game_offered = true;
+        vm.activate(0);
+        vm.relay_outcome(relay_setup::Outcome::Done(relay_setup::Account {
+            service: relay_setup::Service::Dropbox,
+            name: "u@example.com".into(),
+            address: None,
+        }));
+        let _ = vm.take_request();
+        vm.event(Event::Progress(10));
+        vm.cloud_cancelled();
+        assert_eq!(vm.step, Step::Welcome);
+        assert_eq!(vm.progress, -1);
+        assert!(vm.message.contains("cancelled"));
     }
 
     #[test]
     fn cloud_download_failure_shows_error_and_allows_fallback() {
         let mut vm = vm();
         vm.relay_available = true;
+        vm.cloud_game_offered = true;
         vm.activate(0);
         vm.relay_outcome(relay_setup::Outcome::Done(relay_setup::Account {
             service: relay_setup::Service::Dropbox,

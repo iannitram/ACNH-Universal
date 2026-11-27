@@ -466,6 +466,85 @@ pub trait DownloadTransport {
     fn fetch_range(&mut self, path: &str, offset: u64, out: &mut dyn Write) -> Result<u64>;
 }
 
+/// A [`DownloadTransport`] that reports the bytes fetched so far and can stop the download.
+///
+/// `watch(done, total)` is called as bytes arrive (`total` is the manifest's size sum, `done`
+/// the bytes fetched by this transport, so a resumed download starts again from 0 for what it
+/// already had); returning `false` cancels: the transfer stops and the call fails with
+/// `Error::Io("download cancelled")`, leaving the partial files for a later resume.
+pub struct Watched<'a, T> {
+    inner: T,
+    total: u64,
+    done: u64,
+    watch: &'a mut dyn FnMut(u64, u64) -> bool,
+}
+
+impl<'a, T: DownloadTransport> Watched<'a, T> {
+    pub fn new(inner: T, watch: &'a mut dyn FnMut(u64, u64) -> bool) -> Self {
+        Self {
+            inner,
+            total: 0,
+            done: 0,
+            watch,
+        }
+    }
+}
+
+struct CountingWriter<'w> {
+    out: &'w mut dyn Write,
+    total: u64,
+    done: &'w mut u64,
+    watch: &'w mut dyn FnMut(u64, u64) -> bool,
+    cancelled: bool,
+}
+
+impl Write for CountingWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.out.write(buf)?;
+        *self.done += n as u64;
+        if !(self.watch)(*self.done, self.total) {
+            self.cancelled = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "download cancelled",
+            ));
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.flush()
+    }
+}
+
+impl<T: DownloadTransport> DownloadTransport for Watched<'_, T> {
+    fn fetch_manifest(&mut self) -> Result<Vec<u8>> {
+        let bytes = self.inner.fetch_manifest()?;
+        if let Ok(manifest) = Manifest::from_json(&bytes) {
+            self.total = manifest.files.iter().map(|f| f.size).sum();
+        }
+        if !(self.watch)(self.done, self.total) {
+            return Err(Error::Io("download cancelled".into()));
+        }
+        Ok(bytes)
+    }
+
+    fn fetch_range(&mut self, path: &str, offset: u64, out: &mut dyn Write) -> Result<u64> {
+        let mut counting = CountingWriter {
+            out,
+            total: self.total,
+            done: &mut self.done,
+            watch: &mut *self.watch,
+            cancelled: false,
+        };
+        let result = self.inner.fetch_range(path, offset, &mut counting);
+        if counting.cancelled {
+            return Err(Error::Io("download cancelled".into()));
+        }
+        result
+    }
+}
+
 /// Download the prepared game into `<private_dir>/game.partial/`, resume partial files via
 /// `DownloadTransport::fetch_range`, verify every file's size and SHA-256, and finalize into
 /// `dest` (`<private_dir>/game/`).

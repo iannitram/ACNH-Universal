@@ -502,8 +502,24 @@ pub fn download_game_from_remote(
     free_bytes: u64,
     os: &str,
 ) -> Result<std::path::PathBuf> {
-    use crate::appgame::{download, DownloadTransport, Manifest};
-    let mut transport = RemoteDownloadTransport::new(remote, format!("acnh-universal-game/{os}"));
+    download_game_from_remote_watched(remote, private_dir, dest, free_bytes, os, &mut |_, _| true)
+}
+
+/// [`download_game_from_remote`] reporting `watch(done, total)` bytes as they arrive; `watch`
+/// returning `false` cancels (the partial files stay for a resume).
+pub fn download_game_from_remote_watched(
+    remote: Arc<dyn Remote>,
+    private_dir: &Path,
+    dest: &Path,
+    free_bytes: u64,
+    os: &str,
+    watch: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<std::path::PathBuf> {
+    use crate::appgame::{download, DownloadTransport, Manifest, Watched};
+    let mut transport = Watched::new(
+        RemoteDownloadTransport::new(remote, format!("acnh-universal-game/{os}")),
+        watch,
+    );
     let manifest_bytes = transport.fetch_manifest()?;
     let manifest = Manifest::from_json(&manifest_bytes)?;
     download(
@@ -526,11 +542,26 @@ pub fn download_game_from_relay(
     free_bytes: u64,
     os: &str,
 ) -> Result<std::path::PathBuf> {
+    download_game_from_relay_watched(relay, private_dir, dest, free_bytes, os, &mut |_, _| true)
+}
+
+/// [`download_game_from_relay`] reporting `watch(done, total)` bytes as they arrive; `watch`
+/// returning `false` cancels (the partial files stay for a resume).
+pub fn download_game_from_relay_watched(
+    relay: &SaveRelay,
+    private_dir: &Path,
+    dest: &Path,
+    free_bytes: u64,
+    os: &str,
+    watch: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<std::path::PathBuf> {
     #[cfg(feature = "cloud-stream")]
     if let Some(tokens) = relay.dropbox_tokens() {
-        use crate::appgame::{download, DownloadTransport, Manifest};
-        let mut transport =
-            DropboxStreamTransport::new(tokens, format!("acnh-universal-game/{os}"));
+        use crate::appgame::{download, DownloadTransport, Manifest, Watched};
+        let mut transport = Watched::new(
+            DropboxStreamTransport::new(tokens, format!("acnh-universal-game/{os}")),
+            watch,
+        );
         let manifest_bytes = transport.fetch_manifest()?;
         let manifest = Manifest::from_json(&manifest_bytes)?;
         return download(
@@ -542,12 +573,13 @@ pub fn download_game_from_relay(
             &mut transport,
         );
     }
-    download_game_from_remote(
+    download_game_from_remote_watched(
         Arc::clone(relay.remote()),
         private_dir,
         dest,
         free_bytes,
         os,
+        watch,
     )
 }
 
