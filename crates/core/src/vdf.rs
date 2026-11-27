@@ -69,7 +69,7 @@ pub fn write(doc: &[(String, Value)]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Decode a document written as above. Errors, all `Error::Steam`:
+/// Decode a document written as above; no bytes at all is an empty document. Errors, all `Error::Steam`:
 /// - the bytes end before the document's closing 0x08, inside a key, a string or a number:
 ///   "shortcuts.vdf is cut short";
 /// - a type byte other than 0x00, 0x01, 0x02 where an item starts:
@@ -78,6 +78,10 @@ pub fn write(doc: &[(String, Value)]) -> Result<Vec<u8>> {
 /// - bytes after the closing 0x08: "shortcuts.vdf has bytes after its end";
 /// - maps nested more than 64 deep: "shortcuts.vdf is nested too deep".
 pub fn read(bytes: &[u8]) -> Result<Vec<(String, Value)>> {
+    // A file with nothing in it (Steam leaves one when it is reset) holds no shortcuts.
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
     fn steam(message: &'static str) -> Error {
         Error::Steam(message.to_string())
     }

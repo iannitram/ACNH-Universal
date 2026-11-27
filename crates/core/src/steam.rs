@@ -190,13 +190,53 @@ pub fn shortcut_entry(s: &Shortcut) -> Value {
 }
 
 /// Add `s` to a shortcuts.vdf document, or replace the entry with the same "appid", and return
-/// its app id. An empty document gets the "shortcuts" map first. Entries keep their order (a
-/// new one goes last) and are renumbered "0", "1", ... A document whose first item is not the
-/// map "shortcuts" is `Error::Steam("shortcuts.vdf has no shortcuts list")`.
-// A Vec, not a slice: an empty document gets its "shortcuts" map pushed. Drop the allow
-// when the body is built (it pushes, so clippy is satisfied).
-#[allow(clippy::ptr_arg)]
+/// its app id. See [`upsert_replacing`], which also says which older launcher entries went.
 pub fn upsert(doc: &mut Vec<(String, Value)>, s: &Shortcut) -> Result<u32> {
+    upsert_replacing(doc, s).map(|(app_id, _)| app_id)
+}
+
+/// Whether `exe` (as stored, quotes allowed) is a path the launcher itself has been added
+/// under: an AppImage, or the packed `ACNH-Universal/acnh-app`.
+fn is_launcher_exe(exe: &str) -> bool {
+    let path = Path::new(exe.trim_matches('"'));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let packed = matches!(name, "acnh-app" | "acnh-app.exe")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|dir| dir == "ACNH-Universal");
+    packed || name.to_ascii_lowercase().ends_with(".appimage")
+}
+
+fn text_field<'a>(fields: &'a [(String, Value)], name: &str) -> Option<&'a str> {
+    fields.iter().find_map(|(key, value)| match value {
+        Value::Str(text) if key == name => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+fn entry_app_id(fields: &[(String, Value)]) -> Option<u32> {
+    fields.iter().find_map(|(key, value)| match value {
+        Value::Int(id) if key == "appid" => Some(*id),
+        _ => None,
+    })
+}
+
+/// Add `s` to a shortcuts.vdf document and return its app id and the app ids of the older
+/// launcher entries it replaced. An entry is replaced when it has the same "appid", or the same
+/// "AppName" and an "Exe" the launcher itself uses (an AppImage or the packed
+/// `ACNH-Universal/acnh-app`): the launcher moves from the AppImage to the packed folder, which
+/// changes the app id, and the old entry must not stay beside the new one. The new entry takes
+/// the place of the first one it replaces; else it goes last. Other entries keep their order. An
+/// empty document gets the "shortcuts" map first. Entries are renumbered "0", "1", ... A document
+/// whose first item is not the map "shortcuts" is
+/// `Error::Steam("shortcuts.vdf has no shortcuts list")`.
+// A Vec, not a slice: an empty document gets its "shortcuts" map pushed.
+#[allow(clippy::ptr_arg)]
+pub fn upsert_replacing(doc: &mut Vec<(String, Value)>, s: &Shortcut) -> Result<(u32, Vec<u32>)> {
     if doc.is_empty() {
         doc.push(("shortcuts".into(), Value::Map(vec![])));
     }
@@ -210,14 +250,38 @@ pub fn upsert(doc: &mut Vec<(String, Value)>, s: &Shortcut) -> Result<u32> {
 
     let app_id = s.app_id();
     let entry = shortcut_entry(s);
-    let mut shortcuts = std::mem::take(entries);
-    if let Some(index) = shortcuts.iter().position(|(_, value)| {
-        matches!(value, Value::Map(fields) if fields.iter().any(|(key, value)| {
-            key == "appid" && *value == Value::Int(app_id)
-        }))
-    }) {
-        shortcuts[index].1 = entry;
-    } else {
+    let mut replaced = Vec::new();
+    let mut shortcuts: Vec<(String, Value)> = Vec::new();
+    let mut placed = false;
+    for (key, value) in std::mem::take(entries) {
+        let ours = match &value {
+            Value::Map(fields) => {
+                let same_id = entry_app_id(fields) == Some(app_id);
+                let older = text_field(fields, "AppName") == Some(s.name.as_str())
+                    && text_field(fields, "Exe").is_some_and(is_launcher_exe);
+                if older && !same_id {
+                    // The id Steam shows the artwork under: stored, else worked out from the
+                    // entry the way the launcher made it.
+                    let old = entry_app_id(fields).or_else(|| {
+                        Some(shortcut_app_id(
+                            text_field(fields, "Exe")?,
+                            text_field(fields, "AppName")?,
+                        ))
+                    });
+                    replaced.extend(old.filter(|old| *old != app_id));
+                }
+                same_id || older
+            }
+            _ => false,
+        };
+        if !ours {
+            shortcuts.push((key, value));
+        } else if !placed {
+            shortcuts.push((key, entry.clone()));
+            placed = true;
+        }
+    }
+    if !placed {
         shortcuts.push((String::new(), entry));
     }
 
@@ -225,7 +289,8 @@ pub fn upsert(doc: &mut Vec<(String, Value)>, s: &Shortcut) -> Result<u32> {
         *key = index.to_string();
     }
     *entries = shortcuts;
-    Ok(app_id)
+    replaced.dedup();
+    Ok((app_id, replaced))
 }
 
 /// Where Steam keeps its user folders on the OS this is built for, in the order to try: Linux
@@ -248,10 +313,72 @@ pub fn userdata_roots(vars: &Vars) -> Vec<PathBuf> {
     }
 }
 
+/// What a person is told when Steam is (or may be) running: `shortcuts.vdf` is only safe to
+/// write while Steam is closed, and Steam is always running in Game Mode.
+pub const CLOSE_STEAM: &str =
+    "Steam must be closed first. Switch to Desktop Mode and quit Steam (Steam menu, Exit), then add the shortcut again";
+
+/// The steps of [`CLOSE_STEAM`] as the end of a sentence that starts "To add this to Steam, ".
+pub const CLOSE_STEAM_STEPS: &str =
+    "switch to Desktop Mode, quit Steam (Steam menu, Exit), then run Add to Steam from there. The launcher never stops Steam for you.";
+
+/// Whether the device is in Game Mode: the gamescope session, or Steam's gamepad UI. `desktop`
+/// is `XDG_CURRENT_DESKTOP`; `gamepad_ui` is whether `SteamGamepadUI` is set.
+pub fn game_mode(desktop: Option<&str>, gamepad_ui: bool) -> bool {
+    desktop == Some("gamescope") || gamepad_ui
+}
+
+/// [`game_mode`] for this process's environment.
+pub fn in_game_mode() -> bool {
+    game_mode(
+        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+        std::env::var_os("SteamGamepadUI").is_some(),
+    )
+}
+
+/// Whether Steam is running. It fails closed: a check that cannot be made (the program is
+/// missing, will not start, or answers with an error) reads as running, so the file is never
+/// written under a Steam that might rewrite it.
+pub fn steam_running() -> bool {
+    steam_running_on(None)
+}
+
+/// [`steam_running`] looking the check program up on `path` (instead of `PATH`), for tests.
+pub fn steam_running_on(path: Option<&std::ffi::OsStr>) -> bool {
+    use std::process::Command;
+    let command = |program: &str| {
+        let mut command = Command::new(program);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        command
+    };
+    if cfg!(target_os = "windows") {
+        return match command("tasklist")
+            .args(["/FI", "IMAGENAME eq steam.exe", "/NH"])
+            .output()
+        {
+            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+                .to_ascii_lowercase()
+                .contains("steam.exe"),
+            _ => true,
+        };
+    }
+    ["steam", "steam_osx", "Steam"].iter().any(|name| {
+        // pgrep: 0 a match, 1 no match, anything else (2, 3, a signal) did not answer.
+        !matches!(
+            command("pgrep").args(["-x", name]).output(),
+            Ok(output) if output.status.code() == Some(1)
+        )
+    })
+}
+
 /// Write the shortcut into every Steam user's `config/shortcuts.vdf` under `userdata`
-/// (keeping a `.bak` of the old file) and each of `images` at `artwork::paths`, only when
-/// Steam is not running (`steam_running`); else `Error::Steam("close Steam first")` and
-/// nothing is written. Returns the shortcuts files written.
+/// (keeping the first `.bak` of the old file, never replacing it) and each of `images` at
+/// `artwork::paths`, only when Steam is not running (`steam_running`); else
+/// `Error::Steam(CLOSE_STEAM)` and nothing is written. An older launcher entry the new one
+/// replaces loses its artwork files. An empty `shortcuts.vdf` reads as no shortcuts. Returns
+/// the shortcuts files written.
 pub fn write_shortcut(
     userdata: &Path,
     s: &Shortcut,
@@ -259,7 +386,7 @@ pub fn write_shortcut(
     steam_running: &dyn Fn() -> bool,
 ) -> Result<Vec<PathBuf>> {
     if steam_running() {
-        return Err(Error::Steam("close Steam first".into()));
+        return Err(Error::Steam(CLOSE_STEAM.into()));
     }
     let mut written = Vec::new();
     for entry in std::fs::read_dir(userdata)? {
@@ -268,18 +395,30 @@ pub fn write_shortcut(
             continue;
         }
         let file = user_dir.join("config").join("shortcuts.vdf");
-        let mut doc = if file.exists() {
-            vdf::read(&std::fs::read(&file)?)?
+        let old = if file.exists() {
+            std::fs::read(&file)?
         } else {
             Vec::new()
         };
-        let app_id = upsert(&mut doc, s)?;
+        let mut doc = vdf::read(&old)?;
+        let (app_id, replaced) = upsert_replacing(&mut doc, s)?;
         let bytes = vdf::write(&doc)?;
-        if file.exists() {
-            std::fs::copy(&file, file.with_extension("vdf.bak"))?;
+        let backup = file.with_extension("vdf.bak");
+        if !old.is_empty() && !backup.exists() {
+            std::fs::copy(&file, &backup)?;
         }
         std::fs::create_dir_all(artwork::grid_dir(&user_dir))?;
         crate::platform::atomic_write(&file, &bytes)?;
+        for old_id in replaced {
+            for (_, path) in artwork::paths(&user_dir, old_id) {
+                match std::fs::remove_file(&path) {
+                    Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(err.into())
+                    }
+                    _ => {}
+                }
+            }
+        }
         for (art, path) in artwork::paths(&user_dir, app_id) {
             if let Some((_, bytes)) = images.iter().find(|(a, _)| *a == art) {
                 crate::platform::atomic_write(&path, bytes)?;
@@ -293,6 +432,23 @@ pub fn write_shortcut(
 #[cfg(test)]
 mod launcher_tests {
     use super::*;
+
+    #[test]
+    fn game_mode_is_gamescope_or_the_gamepad_ui() {
+        assert!(game_mode(Some("gamescope"), false));
+        assert!(game_mode(None, true));
+        assert!(!game_mode(Some("KDE"), false));
+        assert!(!game_mode(None, false));
+    }
+
+    #[test]
+    fn launcher_exes_are_the_appimage_and_the_packed_app() {
+        assert!(is_launcher_exe("\"/home/u/ACNH Universal.AppImage\""));
+        assert!(is_launcher_exe("/home/u/ACNH-Universal/acnh-app"));
+        assert!(is_launcher_exe("C:\\x/ACNH-Universal/acnh-app.exe"));
+        assert!(!is_launcher_exe("/home/u/other/acnh-app"));
+        assert!(!is_launcher_exe("/usr/bin/some-game"));
+    }
 
     #[test]
     fn appimage_shortcut_uses_outer_path_and_fullscreen() {
