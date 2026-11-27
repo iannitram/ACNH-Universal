@@ -164,12 +164,18 @@ fn status(cx: &mut Context<'_>) -> Result<i32> {
         "save sync is on: {service}, {} (this device: {})",
         config.user, config.device
     )?;
-    let Some(opened) = relay::open(&dirs, cx.sync.creds, cx.sync.transport.clone())? else {
-        writeln!(
-            cx.out,
-            "the sign-in is missing: run sync setup or sync sign-in again"
-        )?;
-        return Ok(0);
+    let missing = Error::Saves(relay::SIGN_IN_MISSING.into());
+    let opened = match relay::open(&dirs, cx.sync.creds, cx.sync.transport.clone()) {
+        Ok(Some(opened)) => opened,
+        Ok(None) => return Ok(0),
+        Err(error) if error == missing => {
+            writeln!(
+                cx.out,
+                "the sign-in is missing: run sync setup or sync sign-in again"
+            )?;
+            return Ok(0);
+        }
+        Err(error) => return Err(error),
     };
     let vars = acnh_core::platform::Vars::from_lookup(cx.os, cx.var)?;
     let save_dir = saves::save_dir(&acnh_core::platform::AppDirs::new(&vars).data_root());

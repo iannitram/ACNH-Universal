@@ -120,6 +120,21 @@ pub fn backup_saves_pruned(save_dir: &Path, backups: &Path, stamp: &str) -> Resu
     Ok(dest)
 }
 
+/// `backup_saves_pruned` before something replaces the island here (Play anyway, keeping the
+/// relay's island): `None` when this device has no save folder yet, so there is nothing to lose
+/// and nothing is written. A device that has never played can then take the island from the
+/// relay. Every other failure is `backup_saves_pruned`'s.
+pub fn backup_before_replacing(
+    save_dir: &Path,
+    backups: &Path,
+    stamp: &str,
+) -> Result<Option<PathBuf>> {
+    if !save_dir.exists() {
+        return Ok(None);
+    }
+    backup_saves_pruned(save_dir, backups, stamp).map(Some)
+}
+
 /// The backups in `backups`, by folder name, oldest first (names are stamps, which sort by
 /// time). A missing `backups` folder is an empty list. Files and folders whose names are not
 /// stamps (the runtime's island folders) are not listed.
