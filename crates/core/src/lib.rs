@@ -1,5 +1,6 @@
-//! acnh-core: the launcher's engine (docs/code-map.md). The Slint app (`app/`, planned) and
-//! the `acnh-universal` command line both drive it; neither has logic of its own.
+//! acnh-core: the launcher's engine (docs/code-map.md). The Slint app (`app/`) and
+//! the `acnh-universal` command line both drive it; neither has logic of its own. The Android
+//! and iOS players link it too (the in-app download, `appgame`).
 //!
 //! The generic modules (platform, vdf, steam, artwork, backup, bundle, fleet, launch, update,
 //! hub) follow iannitram/totk-universal (MIT), copied here with credit by their issues. MIT.

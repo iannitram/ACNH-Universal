@@ -557,10 +557,17 @@ mod cloud_stream;
 #[cfg(feature = "cloud-stream")]
 pub use cloud_stream::{collect_linux_cloud_files, upload_game_to_dropbox, DropboxStreamTransport};
 
+/// What `open` answers when save sync is set up on this device but its sign-in (the password or
+/// token in the credential store) is gone, as after an update of an ad-hoc signed Mac app or a
+/// cleared keychain. Play must not fall back to "save sync is off" then: the island would drift
+/// from the relay's.
+pub const SIGN_IN_MISSING: &str =
+    "the save sync sign-in on this device is missing: sign in again in Settings";
+
 /// Open the save-relay machine setup this app shares with the `save-relay` CLI: its config
-/// through its `LocalStore`, and its app password or stored tokens through `creds`. Nothing
-/// set up (no config, or no secret yet) is `Ok(None)`, never an error. A credential store that
-/// cannot be reached is a plain error, so the launcher can play on with the local island.
+/// through its `LocalStore`, and its app password or stored tokens through `creds`. No config
+/// (save sync never set up, or turned off) is `Ok(None)`. A config whose secret is gone is
+/// `Error::Saves(SIGN_IN_MISSING)`. A credential store that cannot be reached is a plain error.
 pub fn open(
     dirs: &AppDirs,
     creds: &dyn CredentialStore,
@@ -583,7 +590,7 @@ pub fn open(
     if !service.uses_oauth() {
         let (config, password) = match save_relay::cli::connection(&store, creds) {
             Ok(connection) => connection,
-            Err(save_relay::Error::NotSetUp) => return Ok(None),
+            Err(save_relay::Error::NotSetUp) => return Err(Error::Saves(SIGN_IN_MISSING.into())),
             Err(error) => return Err(map_err(error)),
         };
         let remote =
@@ -602,7 +609,7 @@ pub fn open(
         &ClientSet::shipped(),
     ) {
         Ok(opened) => opened,
-        Err(save_relay::Error::NotSetUp) => return Ok(None),
+        Err(save_relay::Error::NotSetUp) => return Err(Error::Saves(SIGN_IN_MISSING.into())),
         Err(error) => return Err(map_err(error)),
     };
     Ok(Some(
@@ -983,7 +990,9 @@ fn setup_identity(store: &LocalStore) -> Result<(String, String)> {
 /// `hostname` command (macOS and most Linux shells do not export `HOSTNAME`), and only when
 /// both are empty a literal "device" with a short random suffix, so two such machines never
 /// share a name. The result is stored in the config at setup, so the suffix stays stable.
-fn default_device_name() -> String {
+/// A Mac's `hostname` ends in `.local` (`Name.local`): only the part before the first dot is
+/// kept, so the relay does not list the device as `name-local`.
+pub fn default_device_name() -> String {
     device_name_from(
         ["HOSTNAME", "COMPUTERNAME"]
             .iter()
@@ -1003,10 +1012,16 @@ fn device_name_from(
     command: impl FnOnce() -> Option<String>,
     suffix: impl FnOnce() -> String,
 ) -> String {
-    let usable = |name: String| Some(name.trim().to_owned()).filter(|name| !name.is_empty());
+    let usable = |name: String| Some(short_host_name(&name)).filter(|name| !name.is_empty());
     env.and_then(usable)
         .or_else(|| command().and_then(usable))
         .unwrap_or_else(|| format!("device-{}", suffix()))
+}
+
+/// A host name without its domain: `Name.local` and `name.example.org` give `Name` and `name`.
+fn short_host_name(name: &str) -> String {
+    let name = name.trim();
+    name.split('.').next().unwrap_or(name).trim().to_owned()
 }
 
 /// Six hex digits from the standard library's randomly keyed hasher.

@@ -351,5 +351,7 @@ plutil -lint "$work/template.plist" >/dev/null || fail "assets/mac/Info.plist.in
   || fail "the Mac Info.plist lacks LSApplicationCategoryType simulation-games (Game Mode)"
 [ -n "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$work/template.plist")" ] \
   || fail "the Mac Info.plist lacks NSLocalNetworkUsageDescription"
+[ "$(/usr/libexec/PlistBuddy -c 'Print :LSAppNapIsDisabled' "$work/template.plist")" = true ] \
+  || fail "the Mac Info.plist lets App Nap throttle the launcher while the game covers it"
 pass "Info.plist template keys"
 echo "all package_mac tests passed"
