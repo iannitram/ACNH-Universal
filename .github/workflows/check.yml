@@ -209,7 +209,7 @@ jobs:
         run: grep -E '^[A-Z0-9_]+=' tools/versions.env | tr -d '\r' >> "$GITHUB_ENV"
       - name: LLVM (clang-cl, lld-link)
         run: |
-          # One pin: LLVM in tools/versions.env, the version crates/core/src/prepare.rs uses (MSVC STL on the runner needs Clang 22 or newer).
+          # One pin: LLVM in tools/versions.env, the version crates/core/src/prepare/tools.rs uses (MSVC STL on the runner needs Clang 22 or newer).
           echo "LLVM $LLVM"
           T=$(cygpath -u "$RUNNER_TEMP")
           mkdir -p "$T/llvm"

@@ -107,7 +107,7 @@ pub fn latest<'a>(a: &'a SaveCard, b: &'a SaveCard) -> &'a SaveCard {
 }
 
 /// The two lines the conflict screen shows under each card, in this order: "<device>, <date>"
-/// (date `YYYY-MM-DD HH:MM` UTC; "unknown device" when `device` is empty) and
+/// (date `YYYY-MM-DD HH:MM UTC`; "unknown device" when `device` is empty) and
 /// "<h> h <mm> min played" (`play_seconds`; "play time unknown" when 0).
 pub fn side_by_side(card: &SaveCard) -> [String; 2] {
     let device_part = if card.device.is_empty() {
@@ -130,20 +130,32 @@ pub fn side_by_side(card: &SaveCard) -> [String; 2] {
 }
 
 fn format_utc_datetime(unix: u64) -> String {
-    let day_seconds = unix % 86400;
-    let hour = day_seconds / 3600;
-    let minute = (day_seconds % 3600) / 60;
+    let (year, m, d, hour, minute, _) = crate::backup::civil_utc(unix);
+    format!("{year:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC")
+}
 
-    let z = (unix / 86400) as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = y + if m <= 2 { 1 } else { 0 };
-
-    format!("{year:04}-{m:02}-{d:02} {hour:02}:{minute:02}")
+/// An RFC 3339 UTC stamp as save-relay writes it (`2026-11-24T17:39:43Z`) the way the cards
+/// show times (`2026-11-24 17:39 UTC`); anything else comes back unchanged.
+pub fn readable_stamp(stamp: &str) -> String {
+    let b = stamp.as_bytes();
+    let digits = |from: usize, to: usize| {
+        b.get(from..to)
+            .is_some_and(|d| d.iter().all(u8::is_ascii_digit))
+    };
+    let shaped = b.len() >= 17
+        && digits(0, 4)
+        && b[4] == b'-'
+        && digits(5, 7)
+        && b[7] == b'-'
+        && digits(8, 10)
+        && b[10] == b'T'
+        && digits(11, 13)
+        && b[13] == b':'
+        && digits(14, 16)
+        && stamp.ends_with('Z');
+    if shaped {
+        format!("{} {} UTC", &stamp[0..10], &stamp[11..16])
+    } else {
+        stamp.to_owned()
+    }
 }

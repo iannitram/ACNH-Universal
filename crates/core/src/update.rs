@@ -10,15 +10,17 @@ use std::path::{Path, PathBuf};
 /// What an update did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Updated {
-    /// The backup made before the rebuild (`backup::backup_saves`).
-    pub backup: PathBuf,
+    /// The backup made before the rebuild (`backup::backup_saves`); `None` when this device
+    /// had no save folder yet, so there was no island to keep.
+    pub backup: Option<PathBuf>,
     /// Synced files in the save folder before and after; equal on success.
     pub files_before: usize,
     pub files_after: usize,
 }
 
 /// Back up `save_dir` into `backups` under `stamp`, prune to the newest `backup::KEEP`, run
-/// `rebuild`, then check the island is still there and count the synced files again. A
+/// `rebuild`, then check the island is still there and count the synced files again. With no
+/// save folder (a device that has never played) there is nothing to keep: only `rebuild` runs. A
 /// failure after the backup keeps it and names its folder (`; restore <backup>`), so the
 /// island can be put back by hand. Fewer synced files after than before is
 /// `Error::Saves("saves changed during the update; restore <backup>")` and nothing is
@@ -29,6 +31,15 @@ pub fn update(
     stamp: &str,
     rebuild: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Updated> {
+    // A device that has never played has no island to keep: rebuild, and check nothing after.
+    if !save_dir.exists() {
+        rebuild()?;
+        return Ok(Updated {
+            backup: None,
+            files_before: 0,
+            files_after: 0,
+        });
+    }
     let backup = backup_saves(save_dir, backups, stamp)?;
     prune(backups, KEEP).map_err(|error| name_backup(error, &backup))?;
     let files_before = synced_files(save_dir).map_err(|error| name_backup(error, &backup))?;
@@ -42,7 +53,7 @@ pub fn update(
         )));
     }
     Ok(Updated {
-        backup,
+        backup: Some(backup),
         files_before,
         files_after,
     })

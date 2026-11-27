@@ -2,7 +2,7 @@
 # Download a URL to a file and check it against the SHA-256 recorded in tools/downloads.sha256 (#328).
 # Usage: tools/fetch_pinned.sh <url> <output-file>
 # A URL with no recorded checksum is refused; a mismatch deletes the download and fails.
-# The same table feeds Prepare (crates/core/src/prepare.rs) and tools/build_ios.sh.
+# The same table feeds Prepare (crates/core/src/prepare/tools.rs) and tools/build_ios.sh.
 set -euo pipefail
 
 [ $# -eq 2 ] || { echo "usage: $0 <url> <output-file>" >&2; exit 2; }

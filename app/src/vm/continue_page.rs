@@ -1275,7 +1275,10 @@ impl ContinuePageVm {
         }
         match &self.state {
             ContinueState::Held { device, since } => {
-                format!("{device} has the island open since {since}. Wait, or play anyway.")
+                format!(
+                    "{device} has the island open since {}. Wait, or play anyway.",
+                    acnh_core::savecard::readable_stamp(since)
+                )
             }
             ContinueState::NoIsland => "A new island starts when the game does.".to_string(),
             ContinueState::RelayUnavailable => {
