@@ -51,8 +51,8 @@ pub(super) const SDL3: &str = tool_version("SDL3");
 pub(super) const IMGUI: &str = tool_version("IMGUI");
 pub(super) const RYUBING: &str = tool_version("RYUBING");
 pub(super) const DOTNET: &str = tool_version("DOTNET");
-pub(super) const CMAKE: &str = tool_version("CMAKE");
-pub(super) const NINJA: &str = tool_version("NINJA");
+pub(super) const CMAKE: &str = tool_version("CMAKE_VERSION");
+pub(super) const NINJA: &str = tool_version("NINJA_VERSION");
 pub(super) const FFX: &str = tool_version("FFX");
 pub(super) const DLSS: &str = tool_version("DLSS");
 /// vcpkg is fetched at this commit, never at whatever `HEAD` is on the day (#328).
