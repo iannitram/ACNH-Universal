@@ -42,28 +42,17 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+/// Parse a Dropbox response body, or `None` when it is not JSON.
+fn parse_json(body: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(body).ok()
+}
+
 fn extract_json_str(body: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let idx = body.find(&needle)?;
-    let rest = &body[idx + needle.len()..];
-    let colon = rest.find(':')?;
-    let after_colon = rest[colon + 1..].trim_start();
-    let after_quote = after_colon.strip_prefix('"')?;
-    let end = after_quote.find('"')?;
-    Some(after_quote[..end].to_owned())
+    parse_json(body)?.get(key)?.as_str().map(str::to_owned)
 }
 
 fn extract_json_u64(body: &str, key: &str) -> Option<u64> {
-    let needle = format!("\"{key}\"");
-    let idx = body.find(&needle)?;
-    let rest = &body[idx + needle.len()..];
-    let colon = rest.find(':')?;
-    let after_colon = rest[colon + 1..].trim_start();
-    let digits: String = after_colon
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().ok()
+    parse_json(body)?.get(key)?.as_u64()
 }
 
 /// Streaming [`crate::appgame::DownloadTransport`] against Dropbox's content API.

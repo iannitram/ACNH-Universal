@@ -401,6 +401,19 @@ fn test_lz4_decompress_block() {
     assert!(matches!(err, Err(Error::Decompress(_))));
 }
 
+/// A block with a back-reference (overlapping match) decodes, and an absurd size claim fails
+/// without reserving it.
+#[test]
+fn lz4_match_and_oversized_claim() {
+    // Token 0x14: one literal 'a', then a match of 4+4 bytes at offset 1; final token: 1 literal.
+    let block = [0x14, b'a', 0x01, 0x00, 0x10, b'b'];
+    assert_eq!(decompress_lz4_block(&block, 10).unwrap(), b"aaaaaaaaab");
+    assert!(matches!(
+        decompress_lz4_block(&block, usize::MAX),
+        Err(Error::Decompress(_))
+    ));
+}
+
 /// A header whose segment fields ask for gigabytes must fail, not allocate them.
 #[test]
 fn oversized_segment_fields_are_malformed() {

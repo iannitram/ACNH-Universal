@@ -296,6 +296,16 @@ fn bad_manifests_are_refused() {
         assert!(parsed.is_err(), "{bad}");
     }
     assert!(Manifest::from_json(b"not json").is_err());
+    // Trailing characters and a wrongly typed version are rejected.
+    assert!(Manifest::from_json(br#"{"files":[]} x"#).is_err());
+    assert!(Manifest::from_json(br#"{"version":-1,"files":[]}"#).is_err());
+    // Hostile nesting fails cleanly instead of overflowing the stack.
+    let deep = format!(
+        r#"{{"files":{}{}}}"#,
+        "[".repeat(100_000),
+        "]".repeat(100_000)
+    );
+    assert!(Manifest::from_json(deep.as_bytes()).is_err());
     // No build id or ABI: parses (they default to empty) but never validates.
     assert!(Manifest::from_json(br#"{"version":1,"files":[]}"#)
         .and_then(|m| m.validate(BUILD_ID, ABI))

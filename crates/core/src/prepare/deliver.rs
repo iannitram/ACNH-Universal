@@ -462,62 +462,9 @@ pub fn nx_game_abi(root: &Path) -> String {
 }
 
 pub(super) fn sha1_hex_12(data: &[u8]) -> String {
-    let mut h: [u32; 5] = [
-        0x6745_2301,
-        0xEFCD_AB89,
-        0x98BA_DCFE,
-        0x1032_5476,
-        0xC3D2_E1F0,
-    ];
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while (msg.len() % 64) != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.as_chunks::<64>().0 {
-        let mut w = [0u32; 80];
-        for (i, word) in w[..16].iter_mut().enumerate() {
-            let b = &chunk[i * 4..i * 4 + 4];
-            *word = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e] = h;
-        for (i, &wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1u32),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
-                _ => (b ^ c ^ d, 0xCA62_C1D6),
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-    }
-
-    let full = format!(
-        "{:08x}{:08x}{:08x}{:08x}{:08x}",
-        h[0], h[1], h[2], h[3], h[4]
-    );
-    full[..12].to_owned()
+    use sha1::{Digest, Sha1};
+    let digest = Sha1::digest(data);
+    digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Stage the prepared Android game files and `manifest.json` atomically into `delivery`.
@@ -803,5 +750,19 @@ mod remove_dir_retrying_tests {
             Err(Error::from(ErrorKind::NotFound))
         });
         assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod sha1_tests {
+    use super::sha1_hex_12;
+
+    /// The ABI string is compared against shipped manifests, so the digest must stay the
+    /// standard SHA-1 truncated to 12 hex digits: one block, empty, and a multi-block input.
+    #[test]
+    fn sha1_hex_12_is_standard_sha1_truncated() {
+        assert_eq!(sha1_hex_12(b"abc"), "a9993e364706");
+        assert_eq!(sha1_hex_12(b""), "da39a3ee5e6b");
+        assert_eq!(sha1_hex_12(&[b'a'; 200]), "e61cfffe0d91");
     }
 }
