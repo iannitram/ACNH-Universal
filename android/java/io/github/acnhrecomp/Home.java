@@ -391,13 +391,13 @@ public class Home extends Activity {
                             + "3.0.3 (Ryujinx: right-click the game, Extract Data; yuzu or Eden: Dump RomFS, and Dump "
                             + "ExeFS in the debug settings), into one folder as exefs and romfs, copy that folder to "
                             + "the phone and choose it here: the app prepares the game from it. A computer does that "
-                            + "faster: ACNHRecomp's launcher there prepares a folder for Android too.",
+                            + "faster: ACNH Universal's launcher there prepares a folder for Android too.",
                     "Esta pasta não tem nem o jogo preparado (" + GAME_LIB + ") nem os arquivos extraídos do jogo. "
                             + "Com o seu emulador, extraia o ExeFS e o RomFS da sua cópia do jogo, com a atualização "
                             + "3.0.3 (Ryujinx: botão direito no jogo, Extract Data; yuzu ou Eden: Dump RomFS, e Dump "
                             + "ExeFS nas configurações de depuração), numa pasta como exefs e romfs, copie essa pasta "
                             + "para o celular e escolha-a aqui: o app prepara o jogo a partir dela. Um computador faz "
-                            + "isso mais rápido: o launcher do ACNHRecomp nele também prepara uma pasta para Android.");
+                            + "isso mais rápido: o launcher do ACNH Universal nele também prepara uma pasta para Android.");
         if (why.contains("cannot locate symbol"))  // a library from ACNHRecomp-Importer before 1.0.4 (no DT_NEEDED)
             return t("The app can't load the game in this folder. Usually it was prepared by an older "
                             + "ACNHRecomp-Importer (before 1.0.4): prepare it again (on this phone, below, or on a "

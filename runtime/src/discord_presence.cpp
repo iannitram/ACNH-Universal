@@ -5,7 +5,7 @@
 // clock). It talks to the Discord client over its local IPC (\\.\pipe\discord-ipc-N on Windows, a Unix socket
 // discord-ipc-N in $XDG_RUNTIME_DIR, $TMPDIR or /tmp elsewhere): a frame is {u32 opcode, u32 length} and JSON.
 //
-// config.ini, [discord]: enabled (default 1; the settings' Discord page, applied within 2 s), client_id (the Application ID of a Discord application, default
+// config.ini, [discord]: enabled (default 0: the Application ID below is upstream's, so the player turns it on; the settings' Discord page, applied within 2 s), client_id (the Application ID of a Discord application, default
 // ACNHRecomp's: its name is what Discord shows), island (the island's name; else the save's), hemisphere
 // (north / south), large_image (default "acnh")
 // and the small images winter, spring, summer, autumn (defaults: those names): Rich Presence art assets of that
@@ -264,7 +264,7 @@ void presence_thread(Settings s) {
     bool told = false;
     uint64_t nonce = 0;
     // discord.enabled (the settings' Discord page) is read again every turn: off closes the pipe, which clears it
-    auto enabled = [] { return config_get_bool("discord.enabled", true); };
+    auto enabled = [] { return config_get_bool("discord.enabled", false); };
     for (;;) {
         if (!enabled()) {
             std::this_thread::sleep_for(std::chrono::seconds(2));

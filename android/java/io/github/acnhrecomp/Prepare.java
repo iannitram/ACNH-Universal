@@ -192,12 +192,12 @@ public class Prepare extends Activity {
                     + "nem XCI."), 16, Screen.TEXT));
         TextView note = Screen.text(this, t("It takes long on a phone: often an hour or more, most of it compiling "
                         + "the game's code, and the phone gets warm. Keep it charging; you can leave the app, a "
-                        + "notification shows how it goes. A computer does it much faster: ACNHRecomp's launcher "
+                        + "notification shows how it goes. A computer does it much faster: ACNH Universal's launcher "
                         + "there can prepare the folder for Android (platform android-arm64); copy that folder to "
                         + "the phone and choose it on the first screen.",
                 "No celular demora: muitas vezes uma hora ou mais, a maior parte compilando o código do jogo, e o "
                         + "celular esquenta. Deixe-o carregando; você pode sair do app, uma notificação mostra o "
-                        + "andamento. Um computador faz isso bem mais rápido: o launcher do ACNHRecomp nele pode "
+                        + "andamento. Um computador faz isso bem mais rápido: o launcher do ACNH Universal nele pode "
                         + "preparar a pasta para Android (plataforma android-arm64); copie essa pasta para o "
                         + "celular e escolha-a na primeira tela."), 14, Screen.ORANGE);
         box.addView(note);
@@ -636,10 +636,10 @@ public class Prepare extends Activity {
         PT.put("prepare.input.found", "ExeFS: {} · RomFS: {}");
         PT.put("prepare.input.missing", "{} não existe");
         PT.put("prepare.input.not_folder", "{} é um arquivo: escolha a pasta em que o seu emulador extraiu");
-        PT.put("prepare.input.container", "{} é um pacote do jogo (NSP, XCI, NSZ, XCZ ou NCA). O ACNHRecomp não lê "
+        PT.put("prepare.input.container", "{} é um pacote do jogo (NSP, XCI, NSZ, XCZ ou NCA). O ACNH Universal não lê "
                 + "esses arquivos: extraia o ExeFS e o RomFS com o seu emulador" + extract + " e escolha as pastas "
                 + "que ele criou");
-        PT.put("prepare.input.container_ignored", "{} é um pacote do jogo (NSP, XCI, NSZ, XCZ ou NCA): o ACNHRecomp "
+        PT.put("prepare.input.container_ignored", "{} é um pacote do jogo (NSP, XCI, NSZ, XCZ ou NCA): o ACNH Universal "
                 + "nunca lê esses arquivos e o deixa onde está. O jogo é preparado só a partir do ExeFS e do RomFS "
                 + "extraídos" + extract);
         PT.put("prepare.input.layout", "{} não tem um ExeFS (main, sdk, subsdk0, main.npdm), nem um RomFS (Shader, "
@@ -666,13 +666,13 @@ public class Prepare extends Activity {
                 + "Horizons (01006F8002326000)");
         PT.put("prepare.exefs.version", "Animal Crossing: New Horizons {}");
         PT.put("prepare.exefs.version_302", "Versão 3.0.2: ainda aceita para as pastas do jogo feitas com ela, mas o "
-                + "ACNHRecomp é feito para a atualização 3.0.3. Instale a atualização 3.0.3 no seu emulador e extraia "
+                + "ACNH Universal é feito para a atualização 3.0.3. Instale a atualização 3.0.3 no seu emulador e extraia "
                 + "o ExeFS e o RomFS de novo");
-        PT.put("prepare.exefs.needs_303", "Este ExeFS é da versão {}: o ACNHRecomp precisa da atualização 3.0.3. "
+        PT.put("prepare.exefs.needs_303", "Este ExeFS é da versão {}: o ACNH Universal precisa da atualização 3.0.3. "
                 + "Instale a atualização 3.0.3 no seu emulador e extraia o ExeFS e o RomFS de novo (com a "
                 + "atualização aplicada)");
         PT.put("prepare.exefs.unknown_build", "O main deste ExeFS (build id {}) não é uma versão do Animal Crossing: "
-                + "New Horizons que o ACNHRecomp conhece: ele precisa da atualização 3.0.3. Instale-a no seu emulador "
+                + "New Horizons que o ACNH Universal conhece: ele precisa da atualização 3.0.3. Instale-a no seu emulador "
                 + "e extraia o ExeFS e o RomFS de novo");
         PT.put("prepare.romfs.missing", "A pasta do RomFS {} não existe");
         PT.put("prepare.romfs.unreadable", "Não foi possível ler o RomFS: {}");

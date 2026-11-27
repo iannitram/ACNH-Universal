@@ -6,9 +6,9 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>ACNHRecomp</string>
+    <string>ACNH Universal</string>
     <key>CFBundleDisplayName</key>
-    <string>ACNHRecomp</string>
+    <string>ACNH Universal</string>
     <key>CFBundleIdentifier</key>
     <string>io.github.acnhrecomp</string>
     <key>CFBundleExecutable</key>

@@ -298,7 +298,7 @@ Upstream's own preparation, ported from ACNHRecomp-Importer v1.0.7 (MIT). It is 
 | `tests/shader_cache_test.cpp` (needs another game's folder), `prepare_e2e_zig` (needs zig) | **no** |
 | `tests/game_root_check.sh`, `tests/android_app_check.sh` | Linux |
 | `tests/package_mac_test.sh`, `tests/package_ios_test.sh`, `tests/stage_dropbox_game_test.sh`, `tests/build_common_test.sh`, `tests/race_rm.sh`, `tests/ios_stub_gen/` | macOS only (the staging test should also run on Linux, #368) |
-| `tests/no_game_data_test.sh`, `tests/check_pins_test.sh`, `tests/package_source_test.sh`, `tests/data/pad_kinds.tsv` (read by the launcher, runtime and C++ pad tests) | Linux |
+| `tests/no_game_data_test.sh`, `tests/check_pins_test.sh`, `tests/user_facing_name_test.sh`, `tests/package_source_test.sh`, `tests/data/pad_kinds.tsv` (read by the launcher, runtime and C++ pad tests) | Linux |
 | `tests/astc_check.py`, `tests/metal_shader_check.mm` | no, by hand |
 
 ## Build and test

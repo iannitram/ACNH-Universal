@@ -718,7 +718,7 @@ pub(crate) fn note_lost_file(st: &mut FsState, p: &Path) {
     host_log(&format!(
         "fs: {rel} was written when the game was prepared but is no longer in the game folder \
          (an antivirus or an unfinished copy may have removed it): prepare the game folder again \
-         in the ACNHRecomp launcher from the same extracted files (a RomFS prepared in place: \
+         in the ACNH Universal launcher from the same extracted files (a RomFS prepared in place: \
          extract it again), what is right is kept"
     ));
 }

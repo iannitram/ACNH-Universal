@@ -571,7 +571,7 @@ fn log_environment() {
             items.push(entry);
         }
     }
-    host_log(&format!("ACNHRecomp {}", host_version_string()));
+    host_log(&format!("ACNH Universal {}", host_version_string()));
     if items.is_empty() {
         host_log("config: environment: no NX_* variables");
     } else {
@@ -1000,7 +1000,7 @@ pub fn config_save() -> bool {
     };
     let mut write_ok = writeln!(
         file,
-        "# ACNHRecomp settings (edited by the settings screen; F1 or Minus+Plus in game)"
+        "# ACNH Universal settings (edited by the settings screen; F1 or Minus+Plus in game)"
     )
     .is_ok();
     if write_ok {

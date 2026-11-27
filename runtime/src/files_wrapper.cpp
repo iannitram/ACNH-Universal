@@ -531,7 +531,7 @@ std::string load_game(const std::string& folder) {
     auto abi = reinterpret_cast<const char* (*)()>(sym("nx_game_abi"));
     auto jmp = reinterpret_cast<LongJmpFn>(sym("nx_game_longjmp"));
     if (!abi || !jmp || !sym("nx_module_main") || !sym("nx_module_sdk")) return "not a game library: " + lib;
-    if (std::strcmp(abi(), NX_GAME_ABI) != 0) return "abi " + std::string(abi()) + " (this ACNHRecomp: " + NX_GAME_ABI + ")";
+    if (std::strcmp(abi(), NX_GAME_ABI) != 0) return "abi " + std::string(abi()) + " (this ACNH Universal: " + NX_GAME_ABI + ")";
 #ifdef _WIN32
     struct Api {
         void (*call)(nx::CPU&, uint64_t);
@@ -580,11 +580,7 @@ bool load_game_or_explain() {
     std::string msg;
     acnh_files_format_load_error(why.c_str(), string_cb, &msg);
     nx::log("platform: %s", why.c_str());
-    const SDL_MessageBoxButtonData buttons[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Discord"},
-                                                {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Close"}};
-    const SDL_MessageBoxData box = {SDL_MESSAGEBOX_ERROR, nullptr, nx::game::kInfo.title, msg.c_str(), 2, buttons, nullptr};
-    int pressed = 0;
-    if (SDL_ShowMessageBox(&box, &pressed) && pressed == 1) SDL_OpenURL("https://discord.gg/VJW9Dtdu7a");
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, nx::game::kInfo.title, msg.c_str(), nullptr);
     return false;
 }
 
