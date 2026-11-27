@@ -96,7 +96,7 @@ The "Merged" column is what merged on 2026-11-26; only the Mac's first pull (#42
 | 8.03 (#74) and 8.03f (#231), the iPad | #355 | none listed (the 1101159 `.ipa`s are staged) |
 | 8.05 (#76), 8.08 (#121), Mac and iPad save sync | #361 (Dropbox on the iPad), #323, #328, #429 (the Mac's first pull) | the iPad leg; a release with save-relay pinned (`release.yml` has not run) |
 | 9.04 (#82), the Android device | #369 (build scripts), #363 code (PR #423; the device check is owed) | #365 (Prepare's `android` target), #366 (signing, libvpx, the APK; my ruling on the key), #367 (the in-app download), #368 (the manifest on Linux; PR #435), #364 (`Home` takes a folder from any app; PR #428), #354 (the final push, sound; PR #424) |
-| 10.01 (#83), one island on every device | #361, #360 | Android to relay to Mac to relay ran once with Dropbox (2026-11-26); still the iPad leg, Mac to Android, the Linux and Windows devices, and #354 (the phone's final push left the island held); #83 names Dropbox |
+| 10.01 (#83), one island on every device | #361, #360 | Android to relay to Mac to relay ran once with Dropbox (2026-11-26); still the iPad leg, Mac to Android, the Linux and Windows devices, and #354 (the phone's final push left the island held); naming Dropbox as the provider in #83 (my edit) |
 | 11.01 (#84), the design pass | #342, #344, #347 (the pad rule), #348 (dead code) | #348 (the brief against the built screens, the rest of its list), #347 (does the Android launcher get pad keys) |
 
 ### Band 3: M13 and cleanup, alongside
