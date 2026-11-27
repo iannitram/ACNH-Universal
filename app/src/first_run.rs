@@ -853,6 +853,10 @@ mod tests {
     #[test]
     fn steam_artwork_uses_the_size_for_each_library_slot() {
         let root = tempfile::tempdir().unwrap();
+        // A generated icon keeps the test independent of where the executable lives.
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([10, 120, 200, 255]))
+            .save(root.path().join("icon.png"))
+            .unwrap();
         let images = steam_artwork(root.path()).unwrap();
         assert_eq!(images.len(), acnh_core::artwork::ALL.len());
         for (art, bytes) in images {

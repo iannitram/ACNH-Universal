@@ -894,3 +894,37 @@ fn pull_anyway_answers_a_conflict_with_the_given_keep() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn a_set_up_device_whose_sign_in_is_gone_says_so_instead_of_sync_off() {
+    // An update of the ad-hoc signed Mac app, or a cleared keychain: the config stays, the
+    // password does not. Opening must not look like "save sync is off".
+    let (root, dirs) = temp_dirs("open-no-secret");
+    let creds = MemoryStore::new();
+    let fake = Arc::new(FakeDav::new(PASSWORD));
+    setup_nextcloud(
+        "https://cloud.test",
+        "alex",
+        PASSWORD,
+        "desktop",
+        &dirs,
+        &creds,
+        fake.clone(),
+    )
+    .unwrap();
+    let account = creds::account("https://cloud.test", "alex").unwrap();
+    creds.delete(&account).unwrap();
+
+    match open(&dirs, &creds, fake) {
+        Err(error) => assert_eq!(
+            error,
+            acnh_core::Error::Saves(acnh_core::relay::SIGN_IN_MISSING.into())
+        ),
+        Ok(found) => panic!(
+            "expected the sign-in to be missing, got {:?}",
+            found.is_some()
+        ),
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}

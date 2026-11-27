@@ -10,7 +10,7 @@ Our code becomes one Cargo workspace:
 - `crates/recomp` (`acnh_recomp`, binary `acnh-recompiler`): the AArch64 to C++ recompiler, replacing upstream's Python `recomp/`.
 - `crates/runtime` (`acnh_runtime`): the host runtime, replacing `runtime/src` outside the renderer.
 - `crates/cli` (`acnh-universal`): the launcher without its window.
-- `app/` (`acnh-app`, planned): the Slint launcher (ADR 0003).
+- `app/` (`acnh-app`): the Slint launcher (ADR 0003). Built; it is a workspace member.
 
 What stays in its language, behind the game library's C interface (`runtime/include/nx/game.h`, `nx_game_abi()`): the recompiled game code and `games/acnh/` (C++), the NVN renderer (`runtime/src/nvn`, `vk_*`, `mtl/`), the in-game settings overlay (`runtime/src/ui`), and the Android Java shell (`android/java`). CMake keeps building those, driven from `crates/runtime`'s build script once it links them.
 

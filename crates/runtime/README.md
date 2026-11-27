@@ -1,4 +1,4 @@
-The runtime scaffold builds as `rlib` for Rust callers and `staticlib` for the C++ player. `build.rs` generates `acnh_runtime.h` with cbindgen; header generation failures stop the build.
+The runtime (the Rust cores of all 11 groups of upstream's `runtime/src`, with the renderer, `games/acnh` and the overlay still C++: ADR 0002, `docs/code-map.md`) builds as `rlib` for Rust callers and `staticlib` for the C++ player. `build.rs` generates `acnh_runtime.h` with cbindgen; header generation failures stop the build.
 
 Build the folder-loaded player with CMake and Ninja installed, plus SDL3 and Vulkan development headers:
 

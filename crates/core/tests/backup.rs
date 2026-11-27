@@ -1,5 +1,7 @@
 // Locked tests for backup (issue 1.10: island backups before an update, SPEC.md M7).
-use acnh_core::backup::{backup_saves, backup_saves_pruned, is_stamp, list, prune, stamp, KEEP};
+use acnh_core::backup::{
+    backup_before_replacing, backup_saves, backup_saves_pruned, is_stamp, list, prune, stamp, KEEP,
+};
 use acnh_core::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -191,5 +193,32 @@ fn backup_saves_pruned_keeps_the_newest_ten() {
     let names = list(&backups).unwrap();
     assert_eq!(names.len(), KEEP);
     assert_eq!(names.last().unwrap(), &stamp(1_762_041_600 + 11 * 60));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn replacing_with_no_save_folder_backs_nothing_up() {
+    // A Mac that has never played takes the island from the relay with Play anyway.
+    let d = scratch("replace-none");
+    let (saves, backups) = (d.join("device_save"), d.join("backups"));
+    assert_eq!(
+        backup_before_replacing(&saves, &backups, "20261126-160000"),
+        Ok(None)
+    );
+    assert!(!backups.exists());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn replacing_an_island_backs_it_up_first() {
+    let d = scratch("replace-some");
+    let (saves, backups) = (d.join("device_save"), d.join("backups"));
+    put(&saves, "main.dat", "here");
+    let made = backup_before_replacing(&saves, &backups, "20261126-160000").unwrap();
+    assert_eq!(made, Some(backups.join("20261126-160000")));
+    assert_eq!(
+        fs::read_to_string(backups.join("20261126-160000/main.dat")).unwrap(),
+        "here"
+    );
     fs::remove_dir_all(&d).unwrap();
 }

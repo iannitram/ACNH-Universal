@@ -231,7 +231,7 @@ mod system {
                 }),
                 Arc::new(|| save_relay::oauth::in_game_mode(&|name| std::env::var(name).ok())),
                 Arc::new(|url| save_relay::oauth::open_browser(url).is_ok()),
-                machine_name(),
+                acnh_core::relay::default_device_name(),
             ))
         }
 
@@ -282,22 +282,6 @@ mod system {
             Service::GoogleDrive => Relay::Gdrive,
             Service::Dropbox => Relay::Dropbox,
         }
-    }
-
-    /// The machine's own name, for save-relay's history entries.
-    fn machine_name() -> String {
-        ["HOSTNAME", "COMPUTERNAME"]
-            .iter()
-            .find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
-            .or_else(|| {
-                std::process::Command::new("hostname")
-                    .output()
-                    .ok()
-                    .and_then(|out| String::from_utf8(out.stdout).ok())
-                    .map(|name| name.trim().to_owned())
-                    .filter(|name| !name.is_empty())
-            })
-            .unwrap_or_else(|| "device".into())
     }
 
     /// A sentence for the page from a save-relay failure: no addresses of ours, no secrets.
