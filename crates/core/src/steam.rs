@@ -248,6 +248,30 @@ pub fn userdata_roots(vars: &Vars) -> Vec<PathBuf> {
     }
 }
 
+/// Whether the Steam client is running on this device: `tasklist` on Windows, `pgrep` for the
+/// Linux and Mac client names elsewhere. The one check the CLI and the launcher both use
+/// before they touch Steam's files.
+pub fn steam_running() -> bool {
+    if cfg!(target_os = "windows") {
+        return std::process::Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq steam.exe", "/NH"])
+            .output()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .to_ascii_lowercase()
+                    .contains("steam.exe")
+            })
+            .unwrap_or(false);
+    }
+    ["steam", "steam_osx", "Steam"].iter().any(|name| {
+        std::process::Command::new("pgrep")
+            .args(["-x", name])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
 /// Write the shortcut into every Steam user's `config/shortcuts.vdf` under `userdata`
 /// (keeping a `.bak` of the old file) and each of `images` at `artwork::paths`, only when
 /// Steam is not running (`steam_running`); else `Error::Steam("close Steam first")` and

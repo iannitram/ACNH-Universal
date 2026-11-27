@@ -38,7 +38,7 @@ use acnh_core::gamefolder;
 use acnh_core::hub;
 use acnh_core::launch::{self, Game, Keep, Relay, Sync};
 use acnh_core::platform::{AppDirs, Os, Vars};
-use acnh_core::prepare::{self, Request};
+use acnh_core::prepare;
 use acnh_core::profile;
 use acnh_core::savecard;
 use acnh_core::saves;
@@ -363,58 +363,24 @@ fn build(options: &Options) -> Result<i32> {
         .out
         .clone()
         .unwrap_or_else(|| default_build_out(&vars));
-    let config_path = AppDirs::new(&vars).data_root().join("config.ini");
-    let config = match std::fs::read_to_string(&config_path) {
-        Ok(text) => acnh_core::config::Config::parse(&text)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
-        Err(error) => {
-            return Err(Error::Io(format!(
-                "cannot read {}: {error}",
-                config_path.display()
-            )))
-        }
-    };
-    let delivery = match prepare::delivery_subfolder(target) {
-        Some(subfolder @ ("ios" | "mac")) => {
-            let launcher =
-                match std::fs::read_to_string(AppDirs::new(&vars).config.join("launcher.ini")) {
-                    Ok(text) => acnh_core::config::Config::parse(&text)?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        Default::default()
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-            Some(prepare::delivery_folder(&launcher, &vars.home, subfolder))
-        }
-        _ => None,
-    };
-    let request = Request {
-        game: gamefolder::check(game)?,
-        out,
+    let dirs = AppDirs::new(&vars);
+    let request = prepare::local_request(
+        &dirs,
+        &vars.home,
+        gamefolder::check(game)?,
         target,
-        jobs: 0,
-        source: None,
-        fan_mods: prepare::FanMods {
-            ptbr: config.enabled("mods.ptbr"),
-            speedfix: config.enabled("mods.speedfix"),
-        },
-        delivery,
-        install: (target == Os::Mac).then(|| AppDirs::new(&vars).install()),
-    };
+        out,
+        true,
+    )?;
     let out = prepare::prepare(&request, &mut |stage| println!("== {}", stage.key()))?;
-    if matches!(target, Os::Ios | Os::Mac) {
-        // The one contained app is the `.ipa` or `.zip` in Dropbox (the Mac's app was
-        // assembled in the install folder on the way): nothing to assemble here.
-        println!("built {} for {}", out.display(), target.key());
-        return Ok(0);
-    }
     println!("built {} for {}", out.display(), target.key());
     // The bare player becomes a self-contained one in the install folder (on the Mac, the
-    // one contained app).
-    let vars = Vars::from_lookup(Os::current(), |name| std::env::var(name).ok())?;
-    let install = AppDirs::new(&vars).install();
-    let player = prepare::assemble(target, &out.join("build"), &install)?;
-    println!("assembled {}", player.display());
+    // one contained app, already in Dropbox), as the launcher's own build does.
+    let launcher = prepare::read_settings(&dirs.config.join("launcher.ini"))?;
+    if let Some(player) = prepare::finish_local_build(&dirs, &vars.home, &launcher, target, &out)? {
+        println!("assembled {}", player.display());
+    }
+    prepare::save_game_folder(&dirs, &request.game.root)?;
     Ok(0)
 }
 
@@ -779,7 +745,7 @@ fn steam_add(_options: &Options) -> Result<i32> {
     if !appimage.as_deref().unwrap_or(&exe).is_file() {
         return Err(Error::Steam("the launcher executable is missing".into()));
     }
-    if steam_running() {
+    if steam::steam_running() {
         return Err(Error::Steam("close Steam first".into()));
     }
     let mut icon = steam::assets_dir()?.join("acnhrecomp.png");
@@ -793,7 +759,7 @@ fn steam_add(_options: &Options) -> Result<i32> {
         file.persist(&icon).map_err(|err| err.error)?;
     }
     let shortcut = steam::launcher_shortcut(&exe, appimage.as_deref(), NAME, &icon);
-    let written = steam::write_shortcut(&userdata, &shortcut, &[], &steam_running)?;
+    let written = steam::write_shortcut(&userdata, &shortcut, &[], &steam::steam_running)?;
     if written.is_empty() {
         return Err(Error::Steam("no Steam user folder found".into()));
     }
@@ -804,27 +770,6 @@ fn steam_add(_options: &Options) -> Result<i32> {
         .join(", ");
     println!("added {NAME} to Steam ({paths})");
     Ok(0)
-}
-
-fn steam_running() -> bool {
-    if cfg!(target_os = "windows") {
-        return Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq steam.exe", "/NH"])
-            .output()
-            .map(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .to_ascii_lowercase()
-                    .contains("steam.exe")
-            })
-            .unwrap_or(false);
-    }
-    ["steam", "steam_osx", "Steam"].iter().any(|name| {
-        Command::new("pgrep")
-            .args(["-x", name])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    })
 }
 
 fn app_dirs() -> Result<AppDirs> {
