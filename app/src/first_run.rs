@@ -549,6 +549,10 @@ fn cloud_download_and_sync(dirs: &AppDirs) -> acnh_core::Result<()> {
         &dirs.data.join("game"),
         u64::MAX,
         os_slug(Os::current()),
+        // The app embeds no build id or game ABI to compare against yet (#339, ruling #321);
+        // empty skips those two checks, and the manifest is still validated and every file hashed.
+        "",
+        "",
     )?;
     if Os::current() != Os::Android && Os::current() != Os::Ios {
         install_downloaded_desktop_game(&game_dir, &dirs.install())?;
