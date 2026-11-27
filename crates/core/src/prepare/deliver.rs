@@ -16,14 +16,40 @@ pub fn delivery_subfolder(target: Os) -> Option<&'static str> {
     }
 }
 
-/// The delivery folder `<dropbox>/_transfers/ACNH-Universal/<subfolder>/` for `subfolder`
-/// ("ios" or "mac"): `<dropbox>` is `launcher.ini`'s `dropbox` key when it is set and not
-/// empty, else `<home>/Dropbox`.
-pub fn delivery_folder(config: &Config, home: &Path, subfolder: &str) -> PathBuf {
-    let dropbox = match config.get("dropbox") {
+/// The folders the app's in-app download reads, under save-relay's Dropbox app folder:
+/// `acnh-universal-game/android/` (`GameDownload.java`).
+pub const ANDROID_GAME_FOLDER: [&str; 2] = ["acnh-universal-game", "android"];
+
+/// The local copy of save-relay's Dropbox app folder, where the Android game is staged:
+/// `launcher.ini`'s `relay_app_folder` key when it is set and not empty, else
+/// `<dropbox>/Apps/save-relay`. The Dropbox client uploads what lands there, and the app
+/// signs in to that same app and reads only that folder.
+pub fn relay_app_folder(config: &Config, home: &Path) -> PathBuf {
+    match config.get("relay_app_folder") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => dropbox_folder(config, home).join("Apps").join("save-relay"),
+    }
+}
+
+fn dropbox_folder(config: &Config, home: &Path) -> PathBuf {
+    match config.get("dropbox") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         _ => home.join("Dropbox"),
-    };
+    }
+}
+
+/// The delivery folder for `subfolder` ("ios", "mac" or "android"). For "ios" and "mac":
+/// `<dropbox>/_transfers/ACNH-Universal/<subfolder>/`, where `<dropbox>` is `launcher.ini`'s
+/// `dropbox` key when it is set and not empty, else `<home>/Dropbox`. For "android": the
+/// folder the app downloads from, `<relay app folder>/acnh-universal-game/android/`
+/// (`relay_app_folder`).
+pub fn delivery_folder(config: &Config, home: &Path, subfolder: &str) -> PathBuf {
+    if subfolder == "android" {
+        return ANDROID_GAME_FOLDER
+            .iter()
+            .fold(relay_app_folder(config, home), |path, part| path.join(part));
+    }
+    let dropbox = dropbox_folder(config, home);
     DELIVERY_ROOT
         .iter()
         .fold(dropbox, |path, part| path.join(part))
@@ -41,6 +67,23 @@ pub fn check_delivery(delivery: &Path, home: &Path) -> Result<()> {
         "the folder {} is not there: make it in your Dropbox, or set the `dropbox` key in \
          launcher.ini to the folder that holds _transfers/ACNH-Universal/",
         redact(&root.display().to_string(), home)
+    )))
+}
+
+/// Stop with `Error::Build` unless save-relay's Dropbox app folder, two above the Android
+/// `delivery` (`<app folder>/acnh-universal-game/android`), is there. Android does not make
+/// it: only the Dropbox client does, once the app is made there. The message names the
+/// `relay_app_folder` key of `launcher.ini` (paths through `redact`).
+pub fn check_android_delivery(delivery: &Path, home: &Path) -> Result<()> {
+    let game = delivery.parent().unwrap_or(delivery);
+    let app = game.parent().unwrap_or(game);
+    if app.is_dir() {
+        return Ok(());
+    }
+    Err(Error::Build(format!(
+        "the folder {} is not there: it is the local copy of save-relay's Dropbox app folder          (Apps/save-relay in your Dropbox, which the Dropbox client makes). Set the \
+         `relay_app_folder` key in launcher.ini to it",
+        redact(&app.display().to_string(), home)
     )))
 }
 
@@ -308,20 +351,7 @@ pub(super) fn ios_deliver(
     let version = package_version(&root);
     // The small .ipa's game folder names its build and ABI: refuse before any script runs
     // when the prepared folder has no build id (the player refuses a game of another build).
-    let build_id = read_prepared_build_id(&req.out).to_ascii_uppercase();
-    if build_id.len() != 32 || !build_id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(Error::Build(
-            "the prepared folder has no 32 hex digit build id (version.ini) for the small .ipa"
-                .into(),
-        ));
-    }
-    let abi = nx_game_abi(&root);
-    if abi == "unknown" {
-        return Err(Error::Build(
-            "the runtime headers (runtime/include/nx) are missing, so the ABI of the small .ipa is unknown"
-                .into(),
-        ));
-    }
+    let (build_id, abi) = game_build_and_abi(&req.out, &root, "the small .ipa")?;
     let small = delivery.join(IOS_SMALL_FOLDER);
     let (mods_dest, mods, mods_cache) = bundled_mods_folder(&req.out);
     run_script(runner, &build_args, home)?;
@@ -380,9 +410,52 @@ pub(super) fn mac_deliver(
     Ok(zip_path(delivery, &version))
 }
 
+/// The prepared folder's build id (32 hex digits, upper case) and the runtime's ABI, which a
+/// game folder's manifest names (the player refuses a game of another build or ABI):
+/// `Error::Build` when either is missing, naming `what` the manifest is for.
+pub(super) fn game_build_and_abi(out: &Path, root: &Path, what: &str) -> Result<(String, String)> {
+    let build_id = read_prepared_build_id(out).to_ascii_uppercase();
+    if build_id.len() != 32 || !build_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::Build(format!(
+            "the prepared folder has no 32 hex digit build id (version.ini) for {what}"
+        )));
+    }
+    let abi = nx_game_abi(root);
+    if abi == "unknown" {
+        return Err(Error::Build(format!(
+            "the runtime headers (runtime/include/nx) are missing, so the ABI of {what} is unknown"
+        )));
+    }
+    Ok((build_id, abi))
+}
+
+/// The folder `tools/build_android.sh` makes its output in, under the prepared folder: the
+/// only place `android_deliver` takes the game library from.
+pub(super) fn android_apk_folder(out: &Path) -> PathBuf {
+    out.join("apk-android")
+}
+
+/// The arguments of `tools/build_android.sh`: the recompiled code in `gen`, the CMake build
+/// folder and the output folder, all under the prepared folder; no on-phone Prepare tools
+/// (the game comes prepared from this computer, not from the phone).
+pub(super) fn build_android_args(gen: &Path, build: &Path, apk: &Path) -> Vec<String> {
+    vec![
+        "tools/build_android.sh".to_owned(),
+        "--no-phone-prepare".to_owned(),
+        "--gen".to_owned(),
+        gen.display().to_string(),
+        "--build".to_owned(),
+        build.display().to_string(),
+        "--out".to_owned(),
+        apk.display().to_string(),
+    ]
+}
+
 /// What the `android` target does after the shared stages: ensures `romfs.pak` and `spirv.pak`,
-/// builds `libacnh_game.so` when missing, stages the prepared game files into the Dropbox
-/// delivery folder (`_transfers/ACNH-Universal/android/`), and writes `manifest.json` last.
+/// refuses a prepared folder with no build id, builds `libacnh_game.so` from the code just
+/// recompiled (`<out>/gen`; the script always runs, as its build is incremental), stages that
+/// library and the prepared game files into the folder the app downloads from
+/// (`<relay app folder>/acnh-universal-game/android/`), and writes `manifest.json` last.
 pub(super) fn android_deliver(
     req: &Request,
     runner: &mut dyn ScriptRunner,
@@ -397,35 +470,24 @@ pub(super) fn android_deliver(
     pack_stage(req)?;
 
     let root = runner.root();
-    let lib_path = if let Some(found) = find_android_game_lib(&req.out, &root) {
-        found
-    } else {
-        let args = vec!["tools/build_android.sh".to_owned()];
-        runner
-            .run(Stage::Build, &args)
-            .map_err(|log| build_error(Stage::Build, &log, home))?;
-        runner
-            .finish()
-            .map_err(|log| build_error(Stage::Build, &log, home))?;
-        find_android_game_lib(&req.out, &root)
-            .ok_or_else(|| Error::Build("libacnh_game.so was not built for Android".into()))?
-    };
-
-    let build_id = read_prepared_build_id(&req.out);
-    let abi = nx_game_abi(&root);
+    let (build_id, abi) = game_build_and_abi(&req.out, &root, "the Android game folder")?;
+    let apk = android_apk_folder(&req.out);
+    let lib_path = apk.join("libacnh_game.so");
+    // A library an earlier run left must not stand for this one's.
+    match std::fs::remove_file(&lib_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let args = build_android_args(&req.out.join("gen"), &req.out.join("build-android"), &apk);
+    run_script(runner, &args, home)?;
+    if !lib_path.is_file() {
+        return Err(Error::Build(
+            "libacnh_game.so was not built for Android".into(),
+        ));
+    }
     stage_android_delivery(&req.out, &lib_path, delivery, &build_id, &abi)?;
     Ok(delivery.to_path_buf())
-}
-
-pub(super) fn find_android_game_lib(out: &Path, root: &Path) -> Option<PathBuf> {
-    [
-        out.join("libacnh_game.so"),
-        out.join("game/android-arm64/libacnh_game.so"),
-        out.join("build-android/libacnh_game.so"),
-        root.join("private/acnh/apk/libacnh_game.so"),
-    ]
-    .into_iter()
-    .find(|p| p.is_file())
 }
 
 pub(super) fn read_prepared_build_id(out: &Path) -> String {
