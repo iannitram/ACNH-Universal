@@ -2,14 +2,6 @@
 
 use super::*;
 
-pub(super) fn script_python(target: Os) -> &'static str {
-    if target == Os::Windows {
-        "python"
-    } else {
-        "python3"
-    }
-}
-
 /// Runs the script of a stage. `Err` holds the log lines of a failed run; a line
 /// `== <stage>` in them names the stage the script was in (`Stage::from_line`).
 pub trait ScriptRunner {

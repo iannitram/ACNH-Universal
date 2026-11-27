@@ -1,4 +1,4 @@
-//! The tools stage: fetch and build the tools a prepare needs (pins, downloads, venv).
+//! The tools stage: fetch and build the tools a prepare needs (pins, downloads).
 
 use super::*;
 
@@ -51,12 +51,12 @@ pub(super) const SDL3: &str = tool_version("SDL3");
 pub(super) const IMGUI: &str = tool_version("IMGUI");
 pub(super) const RYUBING: &str = tool_version("RYUBING");
 pub(super) const DOTNET: &str = tool_version("DOTNET");
+pub(super) const CMAKE: &str = tool_version("CMAKE");
+pub(super) const NINJA: &str = tool_version("NINJA");
 pub(super) const FFX: &str = tool_version("FFX");
 pub(super) const DLSS: &str = tool_version("DLSS");
 /// vcpkg is fetched at this commit, never at whatever `HEAD` is on the day (#328).
 const VCPKG_COMMIT: &str = "e6d62cc9ce8f8d9687df14521118f2ec3c10ee6a";
-/// Python packages Prepare installs, each at a fixed version (#328).
-const PIP_PACKAGES: [&str; 2] = ["cmake==4.4.5", "ninja==1.13.2"];
 /// `<sha256>  <url>` per line: every download Prepare makes must be listed here and match (#328).
 /// The same file feeds CI and `tools/build_ios.sh`; `tools/check_pins.sh` guards it.
 const DOWNLOAD_PINS: &str = include_str!("../../../../tools/downloads.sha256");
@@ -69,20 +69,57 @@ fn pinned_sha256(url: &str) -> Option<&'static str> {
     })
 }
 
-pub(super) fn venv_dir(root: &Path) -> PathBuf {
-    root.join("private/venv")
+/// Where Prepare keeps the CMake it fetched (`private/third_party/cmake`).
+pub(super) fn cmake_dir(root: &Path) -> PathBuf {
+    root.join("private/third_party/cmake")
 }
 
-pub(super) fn venv_bin(root: &Path) -> PathBuf {
-    venv_dir(root).join(if cfg!(windows) { "Scripts" } else { "bin" })
+/// Where Prepare keeps the Ninja it fetched (`private/third_party/ninja`).
+pub(super) fn ninja_dir(root: &Path) -> PathBuf {
+    root.join("private/third_party/ninja")
 }
 
-pub(super) fn venv_python(root: &Path) -> PathBuf {
-    venv_bin(root).join(if cfg!(windows) {
-        "python.exe"
+/// The folders holding the fetched `cmake` and `ninja` (the macOS CMake keeps its binaries
+/// inside the `.app`).
+pub(super) fn build_tool_dirs(root: &Path) -> [PathBuf; 2] {
+    let cmake = cmake_dir(root);
+    let cmake = if cfg!(target_os = "macos") {
+        cmake.join("CMake.app/Contents/bin")
     } else {
-        "python"
-    })
+        cmake.join("bin")
+    };
+    [cmake, ninja_dir(root)]
+}
+
+/// The pinned CMake and Ninja downloads for this host: `(cmake url, ninja url)`. `None` where
+/// the projects publish no binary for the host; Prepare then uses the ones on the PATH.
+pub(super) fn build_tool_urls() -> Option<(String, String)> {
+    let cmake = |name: &str| {
+        format!("https://github.com/Kitware/CMake/releases/download/v{CMAKE}/cmake-{CMAKE}-{name}")
+    };
+    let ninja = |name: &str| {
+        format!("https://github.com/ninja-build/ninja/releases/download/v{NINJA}/{name}")
+    };
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some((cmake("linux-x86_64.tar.gz"), ninja("ninja-linux.zip"))),
+        ("linux", "aarch64") => Some((
+            cmake("linux-aarch64.tar.gz"),
+            ninja("ninja-linux-aarch64.zip"),
+        )),
+        ("macos", _) => Some((cmake("macos-universal.tar.gz"), ninja("ninja-mac.zip"))),
+        ("windows", "x86_64") => Some((cmake("windows-x86_64.zip"), ninja("ninja-win.zip"))),
+        _ => None,
+    }
+}
+
+/// Whether the fetched CMake and Ninja are in place (true where none is published).
+fn build_tools_present(root: &Path) -> bool {
+    if build_tool_urls().is_none() {
+        return true;
+    }
+    let [cmake, ninja] = build_tool_dirs(root);
+    cmake.join(executable(Os::current(), "cmake")).is_file()
+        && ninja.join(executable(Os::current(), "ninja")).is_file()
 }
 
 pub(super) fn stage_err(stage: Stage, message: impl std::fmt::Display) -> Error {
@@ -219,7 +256,7 @@ pub(super) fn dotnet_rid() -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// The Rust tools stage: ensures Python venv (for `python3 -m recomp` until #49), fetches
+/// The Rust tools stage: fetches CMake and Ninja,
 /// Vulkan-Headers, Dear ImGui, Ryubing (and Windows SDKs/LLVM/SDL3/vcpkg), ensures .NET 10,
 /// and builds `spirv_harness.dll`.
 pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
@@ -230,41 +267,26 @@ pub fn rust_tools(req: &Request, root: &Path) -> Result<()> {
     std::fs::create_dir_all(&t)?;
     std::fs::create_dir_all(&logs)?;
 
-    let py = venv_python(root);
-    if !py.exists() {
-        run_logged(
-            stage,
-            Path::new(script_python(req.target)),
-            &[
-                "-m".to_owned(),
-                "venv".to_owned(),
-                venv_dir(root).display().to_string(),
-            ],
-            root,
-            &[],
-            &[],
-            None,
-        )?;
-    }
-    let check_pkgs = Command::new(&py)
-        .args(["-c", "import cmake, ninja"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    if !check_pkgs {
-        let mut pkgs = vec![
-            "-m".to_owned(),
-            "pip".to_owned(),
-            "install".to_owned(),
-            "-q".to_owned(),
-        ];
-        pkgs.extend(PIP_PACKAGES.iter().map(|p| (*p).to_owned()));
-        run_logged(stage, &py, &pkgs, root, &[], &[], None)?;
+    let old_stamp = read_tools_stamp(root);
+    if let Some((cmake_url, ninja_url)) = build_tool_urls() {
+        let [cmake_bin, _] = build_tool_dirs(root);
+        if old_stamp.get("cmake").map(String::as_str) != Some(CMAKE) && cmake_dir(root).exists() {
+            std::fs::remove_dir_all(cmake_dir(root))?;
+        }
+        if !cmake_bin.join(executable(req.target, "cmake")).is_file() {
+            fetch_archive(stage, &cmake_url, &cmake_dir(root), true)?;
+        }
+        if old_stamp.get("ninja").map(String::as_str) != Some(NINJA) && ninja_dir(root).exists() {
+            std::fs::remove_dir_all(ninja_dir(root))?;
+        }
+        if !ninja_dir(root)
+            .join(executable(req.target, "ninja"))
+            .is_file()
+        {
+            fetch_archive(stage, &ninja_url, &ninja_dir(root), false)?;
+        }
     }
 
-    let old_stamp = read_tools_stamp(root);
     let pins = tools_pins(root);
     let stale = |k: &str| old_stamp.get(k) != pins.get(k);
 
@@ -610,9 +632,9 @@ pub(super) fn msvc_env(stage: Stage, root: &Path, t: &Path) -> Result<Vec<(Strin
         }
     }
     let llvm_bin = t.join(format!("llvm-{LLVM}")).join("bin");
-    let venv_scripts = venv_bin(root);
+    let [cmake_bin, ninja_bin] = build_tool_dirs(root);
     let joined = std::env::join_paths(
-        [llvm_bin, venv_scripts]
+        [llvm_bin, cmake_bin, ninja_bin]
             .into_iter()
             .chain(std::env::split_paths(&path_val)),
     )
@@ -683,6 +705,8 @@ fn tools_pins(root: &Path) -> std::collections::BTreeMap<String, String> {
     [
         ("imgui", IMGUI.to_owned()),
         ("ryubing", RYUBING.to_owned()),
+        ("cmake", CMAKE.to_owned()),
+        ("ninja", NINJA.to_owned()),
         (
             "harness",
             tree_hash(&root.join("tools/maxwell/spirv_harness")),
@@ -706,8 +730,10 @@ fn harness_built(root: &Path) -> bool {
 pub fn seed_tools_for_test(root: &Path) -> std::io::Result<()> {
     let p = root.join("private");
     let t = p.join("third_party");
+    let [cmake_bin, ninja_bin] = build_tool_dirs(root);
     let files = [
-        venv_python(root),
+        cmake_bin.join(executable(Os::current(), "cmake")),
+        ninja_bin.join(executable(Os::current(), "ninja")),
         t.join(format!("Vulkan-Headers-{VK_HEADERS}/include/stand-in")),
         t.join("imgui/imgui.cpp"),
         t.join("ryubing/Ryujinx.sln"),
@@ -740,7 +766,9 @@ pub(crate) fn tools_current(root: &Path) -> bool {
             .join(executable(Os::current(), "dotnet"))
             .exists()
             && stamp.get("dotnet").map(String::as_str) == Some(DOTNET));
-    venv_python(root).exists()
+    build_tools_present(root)
+        && pinned("cmake")
+        && pinned("ninja")
         && t.join(format!("Vulkan-Headers-{VK_HEADERS}")).is_dir()
         && t.join("imgui/imgui.cpp").exists()
         && t.join("ryubing/Ryujinx.sln").exists()
@@ -794,8 +822,10 @@ mod tools_cache_tests {
     fn tools_are_not_current_when_missing_or_unstamped() {
         let root = temp("current");
         assert!(!tools_current(&root));
-        // A venv alone is not the whole set.
-        touch(&super::venv_python(&root));
+        // The build tools alone are not the whole set.
+        let [cmake, ninja] = super::build_tool_dirs(&root);
+        touch(&cmake.join(executable(Os::current(), "cmake")));
+        touch(&ninja.join(executable(Os::current(), "ninja")));
         assert!(!tools_current(&root));
         // Without a stamp, built tools are of unknown pins and are not trusted.
         let p = root.join("private");
@@ -825,17 +855,17 @@ mod tools_cache_tests {
         let source = data.join("pkg");
         touch(&source.join("CMakeLists.txt"));
         let old = data.join("source/old");
-        touch(&old.join("private/venv/bin/python"));
+        touch(&old.join("private/third_party/ninja/ninja"));
         touch(&old.join("stale.txt"));
         // Same commit again: the copy is replaced, private/ stays.
         refresh_source_copy(&source, &old).unwrap();
-        assert!(old.join("private/venv/bin/python").is_file());
+        assert!(old.join("private/third_party/ninja/ninja").is_file());
         assert!(!old.join("stale.txt").exists());
         assert!(old.join("CMakeLists.txt").is_file());
         // A new commit takes over the tools of the earlier one.
         let new = data.join("source/new");
         refresh_source_copy(&source, &new).unwrap();
-        assert!(new.join("private/venv/bin/python").is_file());
+        assert!(new.join("private/third_party/ninja/ninja").is_file());
         assert!(new.join("CMakeLists.txt").is_file());
         assert!(!data.join("source/.private-keep-new").exists());
     }

@@ -30,13 +30,7 @@ pub(super) fn mod_component(name: &str) -> bool {
 }
 
 /// Extracts `zpath`'s `romfs/` into `<mods_root>/<name>` with pending message reflow.
-pub fn install_mod_archive(
-    mods_root: &Path,
-    name: &str,
-    zpath: &Path,
-    romfs: &Path,
-    python: &str,
-) -> Result<()> {
+pub fn install_mod_archive(mods_root: &Path, name: &str, zpath: &Path, romfs: &Path) -> Result<()> {
     let dst = mods_root.join(name);
     if crate::platform::is_dir_link(&dst) {
         return Err(Error::Build(
@@ -72,7 +66,7 @@ pub fn install_mod_archive(
         return Err(err.into());
     }
     let out = mods_root.parent().unwrap_or(mods_root);
-    crate::msg::finish_pending(romfs, out, python).map_err(|e| stage_err(Stage::Game, e))?;
+    crate::msg::finish_pending(romfs, out).map_err(|e| stage_err(Stage::Game, e))?;
     Ok(())
 }
 
@@ -84,7 +78,6 @@ pub fn install_mods(
     root: &Path,
     ptbr_enabled: bool,
     mods: &[(&str, &Path)],
-    python: &str,
 ) -> Result<()> {
     let mods_root = out.join("mods");
     if crate::platform::is_dir_link(&mods_root) {
@@ -140,7 +133,7 @@ pub fn install_mods(
         to_install.push(((*name).to_owned(), zpath.to_path_buf()));
     }
     for (name, zpath) in to_install {
-        install_mod_archive(&mods_root, &name, &zpath, romfs, python)?;
+        install_mod_archive(&mods_root, &name, &zpath, romfs)?;
     }
     Ok(())
 }
@@ -275,7 +268,6 @@ pub fn rust_game(req: &Request, root: &Path) -> Result<()> {
         root,
         req.fan_mods.ptbr,
         &[],
-        script_python(req.target),
     )?;
     Ok(())
 }

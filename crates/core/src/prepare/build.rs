@@ -3,9 +3,11 @@
 use super::*;
 
 pub(super) fn find_build_tool(root: &Path, name: &str) -> PathBuf {
-    let in_venv = venv_bin(root).join(executable(Os::current(), name));
-    if in_venv.is_file() {
-        return in_venv;
+    for dir in build_tool_dirs(root) {
+        let fetched = dir.join(executable(Os::current(), name));
+        if fetched.is_file() {
+            return fetched;
+        }
     }
     if let Some(on_path) = find_on_path(name) {
         return on_path;
