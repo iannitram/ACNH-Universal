@@ -239,13 +239,14 @@ The APK shell, no Gradle; Java in `java/io/github/acnhrecomp/` and `java/org/sav
 | File | Whose | Owns |
 |---|---|---|
 | `LauncherActivity.java` | ours (#79 / PR #304) | an empty `NativeActivity` subclass that loads `libacnh_app.so`; not exported, no launcher filter (#363); `tools/build_android.sh --launcher` builds and packs it |
-| `Home.java`, `Screen.java`, `Picker.java`, `SignIn.java`, `TextInput.java` | upstream's, extended | the start screen: folder picker, on-phone Prepare, hub pull, Dropbox download, the save-sync step, start. Exported, and takes an `install_from` folder from the starting intent with no check (#364). `<files>/game/` and `<files>/root/` (#192) |
+| `Home.java`, `Screen.java`, `Picker.java`, `SignIn.java`, `TextInput.java` | upstream's, extended | the start screen: folder picker, on-phone Prepare, hub pull, Dropbox download, the save-sync step, start. Exported for the icon only: the folder Prepare hands over travels in `Home.pendingInstall`, an in-process field, never in the starting intent (#364). `<files>/game/` and `<files>/root/` (#192) |
+| `SignInReturn.java` | ours (#364) | the way back from the Dropbox sign-in page: holds the `acnhrecomp://signed-in` VIEW/BROWSABLE filter, is exported for that link only, and forwards just the Uri to `Home` |
 | `Prepare.java`, `PrepareService.java`, `PrepareNative.java` | upstream's | the on-phone Prepare over `libacnh_prepare.so` |
 | `HubPull.java` | ours (#80 / PR #296) | a paired hub pull into `<files>/game/` |
 | `GameDownload.java`, `GameDownloadJob.java` | ours (#230 / PRs #233, #298) | the in-app download: a user-initiated `JobService` on API 34+ or a `dataSync` foreground service; its own manifest parse, HTTP Range resume, SHA-256 and move-in, no Rust; ignores the manifest's build id and ABI (#367) |
 | `DropboxAuth.java` | ours | OAuth 2 with PKCE through save-relay's Dropbox app (#261, #262) |
 | `Relay.java`, `org.saverelay.*`, `third_party/save-relay/save_relay_jni.c` | ours and save-relay's | save sync (#81 / PR #259) |
-| `AndroidManifest.xml`, `res/` | | `allowBackup="false"`, Vulkan 1.1, the game's resizable `NativeActivity` (exported), `LauncherActivity` (`exported="false"`, no launcher filter), `Home` `singleTask` (exported, with the MAIN/LAUNCHER filter and the `android.app.shortcuts` meta-data, so the icon opens `Home`), `RUN_USER_INITIATED_JOBS`, `MANAGE_EXTERNAL_STORAGE` (for the folder picker), `res/xml/shortcuts.xml` (the long-press "Change game folder" into `Home`) |
+| `AndroidManifest.xml`, `res/` | | `allowBackup="false"`, Vulkan 1.1, the game's resizable `NativeActivity` (not exported), `LauncherActivity` (`exported="false"`, no launcher filter), `Home` `singleTask` (exported, with the MAIN/LAUNCHER filter and the `android.app.shortcuts` meta-data, so the icon opens `Home`; no sign-in filter), `SignInReturn` (exported, holds the sign-in filter), `RUN_USER_INITIATED_JOBS`, `MANAGE_EXTERNAL_STORAGE` (for the folder picker), `res/xml/shortcuts.xml` (the long-press "Change game folder" into `Home`) |
 
 ## Upstream's Prepare in C++: `prepare/` (from the sync, #246)
 
