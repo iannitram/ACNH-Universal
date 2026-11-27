@@ -72,7 +72,9 @@ impl FirstRun {
             .unwrap_or(vm.profile);
         vm.relay_available = setup.available();
         vm.relay_set_up = setup.account().is_some();
+        vm.steam_game_mode = Os::current() == Os::Linux && acnh_core::steam::in_game_mode();
         vm.steam_applicable = Os::current() == Os::Linux
+            && !vm.steam_game_mode
             && acnh_core::steam::userdata_roots(&vars)
                 .iter()
                 .any(|p| p.is_dir());
@@ -724,20 +726,10 @@ fn add_steam(vars: &Vars, dirs: &AppDirs, folder: &Path) -> acnh_core::Result<()
         .into_iter()
         .find(|p| p.is_dir())
         .ok_or_else(|| acnh_core::Error::Steam("No Steam user folder found".into()))?;
-    let running = || {
-        std::process::Command::new("pgrep")
-            .arg("-x")
-            .arg("steam")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-    if running() {
-        return Err(acnh_core::Error::Steam(
-            "Close Steam before adding the shortcut".into(),
-        ));
+    if steam::steam_running() {
+        return Err(acnh_core::Error::Steam(steam::CLOSE_STEAM.into()));
     }
-    let images = steam_artwork(folder)?;
+    let images = acnh_core::artwork::build(Some(folder))?;
     let icon = dirs.data.join("steam-icon.png");
     if let Some((_, bytes)) = images
         .iter()
@@ -753,53 +745,10 @@ fn add_steam(vars: &Vars, dirs: &AppDirs, folder: &Path) -> acnh_core::Result<()
         "Animal Crossing: New Horizons",
         &icon,
     );
-    if steam::write_shortcut(&userdata, &shortcut, &images, &running)?.is_empty() {
+    if steam::write_shortcut(&userdata, &shortcut, &images, &steam::steam_running)?.is_empty() {
         return Err(acnh_core::Error::Steam("No Steam user folder found".into()));
     }
     Ok(())
-}
-
-fn steam_artwork(folder: &Path) -> acnh_core::Result<Vec<(acnh_core::artwork::Art, Vec<u8>)>> {
-    use acnh_core::artwork;
-    use image::{imageops, ImageFormat, RgbaImage};
-    use std::io::Cursor;
-
-    let icon = folder.join("icon.png");
-    let source = icon
-        .metadata()
-        .ok()
-        .filter(|metadata| metadata.is_file() && metadata.len() <= 8 * 1024 * 1024)
-        .and_then(|_| image::open(&icon).ok())
-        .map(Ok)
-        .unwrap_or_else(|| {
-            image::open(
-                acnh_core::steam::assets_dir()
-                    .unwrap_or_default()
-                    .join("acnhrecomp.png"),
-            )
-        })
-        .map_err(|_| acnh_core::Error::Steam("Could not load shortcut artwork".into()))?;
-    artwork::ALL
-        .into_iter()
-        .map(|art| {
-            let (width, height) = artwork::size(art);
-            let resized = source
-                .resize(width, height, imageops::FilterType::Lanczos3)
-                .to_rgba8();
-            let mut canvas = RgbaImage::new(width, height);
-            imageops::overlay(
-                &mut canvas,
-                &resized,
-                i64::from((width - resized.width()) / 2),
-                i64::from((height - resized.height()) / 2),
-            );
-            let mut bytes = Cursor::new(Vec::new());
-            canvas
-                .write_to(&mut bytes, ImageFormat::Png)
-                .map_err(|_| acnh_core::Error::Steam("Could not encode shortcut artwork".into()))?;
-            Ok((art, bytes.into_inner()))
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -857,7 +806,7 @@ mod tests {
         image::RgbaImage::from_pixel(64, 64, image::Rgba([10, 120, 200, 255]))
             .save(root.path().join("icon.png"))
             .unwrap();
-        let images = steam_artwork(root.path()).unwrap();
+        let images = acnh_core::artwork::build(Some(root.path())).unwrap();
         assert_eq!(images.len(), acnh_core::artwork::ALL.len());
         for (art, bytes) in images {
             let image =

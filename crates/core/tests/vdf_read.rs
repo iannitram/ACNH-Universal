@@ -31,6 +31,11 @@ fn empty_document() {
 }
 
 #[test]
+fn an_empty_file_is_an_empty_document() {
+    assert_eq!(read(&[]), Ok(vec![]));
+}
+
+#[test]
 fn int_is_little_endian_u32() {
     let b = b"\x02n\x00\x67\x45\x23\x81\x08";
     assert_eq!(read(b), Ok(vec![kv("n", Value::Int(0x8123_4567))]));
@@ -38,7 +43,7 @@ fn int_is_little_endian_u32() {
 
 #[test]
 fn cut_short_anywhere() {
-    for end in 0..FILE.len() {
+    for end in 1..FILE.len() {
         assert_eq!(
             read(&FILE[..end]),
             Err(steam("shortcuts.vdf is cut short")),

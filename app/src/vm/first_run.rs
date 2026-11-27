@@ -82,6 +82,9 @@ pub struct FirstRunVm {
     pub busy: bool,
     pub message: String,
     pub steam_applicable: bool,
+    /// The device is in Game Mode: Add to Steam is not offered, the step says to switch to
+    /// Desktop Mode and quit Steam instead (Steam is always running here).
+    pub steam_game_mode: bool,
     /// The system folder picker works on this device (Linux only); else it is not offered.
     pub system_picker: bool,
     /// Save sync can be set up on this build, and is not set up yet: step 5 is shown.
@@ -122,6 +125,7 @@ impl FirstRunVm {
             busy: false,
             message: String::new(),
             steam_applicable: cfg!(target_os = "linux"),
+            steam_game_mode: false,
             system_picker: cfg!(target_os = "linux"),
             relay_available: false,
             relay_set_up: false,
@@ -216,7 +220,15 @@ impl FirstRunVm {
             Step::BuildFailed(reason) => reason.lines().next().unwrap_or("Build failed").into(),
             Step::Relay => self.relay.title(),
             Step::DeviceAndSteam => {
-                format!("Device profile: {}", profile::builtin()[self.profile].name)
+                let profile = format!("Device profile: {}", profile::builtin()[self.profile].name);
+                if self.steam_game_mode {
+                    format!(
+                        "{profile}\nTo add this to Steam, {}",
+                        acnh_core::steam::CLOSE_STEAM_STEPS
+                    )
+                } else {
+                    profile
+                }
             }
             Step::ChooseProfile => "Choose a device profile".into(),
             Step::SteamFailed(reason) => reason.clone(),
@@ -733,6 +745,18 @@ mod tests {
     fn vm() -> FirstRunVm {
         FirstRunVm::new(PathBuf::from("/fake"))
     }
+    #[test]
+    fn in_game_mode_add_to_steam_is_a_message_not_a_button() {
+        let mut vm = FirstRunVm::new(std::path::PathBuf::from("/fake"));
+        vm.step = Step::DeviceAndSteam;
+        vm.steam_game_mode = true;
+        vm.steam_applicable = false;
+        assert_eq!(vm.options(), vec!["Change profile", "Done"]);
+        let text = vm.title();
+        assert!(text.contains("Desktop Mode"), "{text}");
+        assert!(text.contains("quit Steam"), "{text}");
+    }
+
     #[test]
     fn manual_address_retains_errors_and_edits_at_caret() {
         let mut vm = vm();

@@ -779,21 +779,28 @@ fn steam_add(_options: &Options) -> Result<i32> {
     if !appimage.as_deref().unwrap_or(&exe).is_file() {
         return Err(Error::Steam("the launcher executable is missing".into()));
     }
-    if steam_running() {
-        return Err(Error::Steam("close Steam first".into()));
+    if steam::steam_running() {
+        return Err(Error::Steam(steam::CLOSE_STEAM.into()));
     }
-    let mut icon = steam::assets_dir()?.join("acnhrecomp.png");
-    if appimage.is_some() {
-        // Steam reads the icon after this AppImage mount has been removed.
-        let dir = AppDirs::new(&vars).data;
-        std::fs::create_dir_all(&dir)?;
-        let mut file = tempfile::NamedTempFile::new_in(&dir)?;
-        std::io::copy(&mut std::fs::File::open(&icon)?, &mut file)?;
-        icon = dir.join("steam-launcher-icon.png");
-        file.persist(&icon).map_err(|err| err.error)?;
+    // The same artwork the app writes: the game folder's icon when it has one (the folder the
+    // launcher was set up with), else the project's own.
+    let dirs = AppDirs::new(&vars);
+    let game_folder = std::fs::read_to_string(dirs.config.join("launcher.ini"))
+        .ok()
+        .and_then(|text| acnh_core::config::Config::parse(&text).ok())
+        .and_then(|config| config.get("game_folder").map(PathBuf::from));
+    let images = acnh_core::artwork::build(game_folder.as_deref())?;
+    // Steam reads the icon after an AppImage mount has been removed, so it lives in the data folder.
+    std::fs::create_dir_all(&dirs.data)?;
+    let icon = dirs.data.join("steam-icon.png");
+    if let Some((_, bytes)) = images
+        .iter()
+        .find(|(art, _)| *art == acnh_core::artwork::Art::Icon)
+    {
+        acnh_core::platform::atomic_write(&icon, bytes)?;
     }
     let shortcut = steam::launcher_shortcut(&exe, appimage.as_deref(), NAME, &icon);
-    let written = steam::write_shortcut(&userdata, &shortcut, &[], &steam_running)?;
+    let written = steam::write_shortcut(&userdata, &shortcut, &images, &steam::steam_running)?;
     if written.is_empty() {
         return Err(Error::Steam("no Steam user folder found".into()));
     }
@@ -804,27 +811,6 @@ fn steam_add(_options: &Options) -> Result<i32> {
         .join(", ");
     println!("added {NAME} to Steam ({paths})");
     Ok(0)
-}
-
-fn steam_running() -> bool {
-    if cfg!(target_os = "windows") {
-        return Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq steam.exe", "/NH"])
-            .output()
-            .map(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .to_ascii_lowercase()
-                    .contains("steam.exe")
-            })
-            .unwrap_or(false);
-    }
-    ["steam", "steam_osx", "Steam"].iter().any(|name| {
-        Command::new("pgrep")
-            .args(["-x", name])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    })
 }
 
 fn app_dirs() -> Result<AppDirs> {

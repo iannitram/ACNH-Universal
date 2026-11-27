@@ -62,3 +62,51 @@ pub fn paths(user_dir: &Path, app_id: u32) -> Vec<(Art, PathBuf)> {
         .map(|art| (art, grid_dir.join(file_name(art, app_id))))
         .collect()
 }
+
+/// Every image at its size (`size`), made from `folder/icon.png` when that is a file of at most
+/// 8 MiB that decodes, else from `assets/acnhrecomp.png` (`steam::assets_dir`). The icon is
+/// fitted inside the canvas and centred on a transparent background. The app and the CLI both
+/// call this, so they write the same files. Errors are `Error::Steam` ("Could not load shortcut
+/// artwork", "Could not encode shortcut artwork").
+pub fn build(folder: Option<&Path>) -> crate::Result<Vec<(Art, Vec<u8>)>> {
+    use image::{imageops, ImageFormat, RgbaImage};
+    use std::io::Cursor;
+
+    let own = folder
+        .map(|folder| folder.join("icon.png"))
+        .and_then(|icon| {
+            icon.metadata()
+                .ok()
+                .filter(|metadata| metadata.is_file() && metadata.len() <= 8 * 1024 * 1024)
+                .and_then(|_| image::open(&icon).ok())
+        });
+    let source = match own {
+        Some(image) => image,
+        None => image::open(
+            crate::steam::assets_dir()
+                .unwrap_or_default()
+                .join("acnhrecomp.png"),
+        )
+        .map_err(|_| crate::Error::Steam("Could not load shortcut artwork".into()))?,
+    };
+    ALL.into_iter()
+        .map(|art| {
+            let (width, height) = size(art);
+            let resized = source
+                .resize(width, height, imageops::FilterType::Lanczos3)
+                .to_rgba8();
+            let mut canvas = RgbaImage::new(width, height);
+            imageops::overlay(
+                &mut canvas,
+                &resized,
+                i64::from((width - resized.width()) / 2),
+                i64::from((height - resized.height()) / 2),
+            );
+            let mut bytes = Cursor::new(Vec::new());
+            canvas
+                .write_to(&mut bytes, ImageFormat::Png)
+                .map_err(|_| crate::Error::Steam("Could not encode shortcut artwork".into()))?;
+            Ok((art, bytes.into_inner()))
+        })
+        .collect()
+}

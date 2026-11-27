@@ -53,6 +53,7 @@ dependencies = [
  "chacha20poly1305",
  "flate2",
  "hmac 0.12.1",
+ "image",
  "lz4_flex",
  "mdns-sd",
  "ruzstd",

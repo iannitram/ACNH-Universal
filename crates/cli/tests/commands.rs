@@ -120,6 +120,16 @@ fn no_command_exits_2_with_usage() {
     );
 }
 
+/// A 1x1 PNG: the project icon of a fake mount, so no real image is needed.
+#[cfg(unix)]
+const TINY_PNG: [u8; 70] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xe0, 0xaa, 0x38, 0xf1,
+    0x1f, 0x00, 0x04, 0x24, 0x02, 0x4a, 0x36, 0x33, 0xa1, 0x38, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
 #[cfg(unix)]
 #[test]
 fn steam_add_writes_the_appimage_shortcut_with_persistent_artwork() {
@@ -134,7 +144,7 @@ fn steam_add_writes_the_appimage_shortcut_with_persistent_artwork() {
     let assets = mount.join("usr/share/acnh-universal");
     fs::create_dir_all(&assets).unwrap();
     fs::write(&appimage, []).unwrap();
-    fs::write(assets.join("acnhrecomp.png"), b"fake icon").unwrap();
+    fs::write(assets.join("acnhrecomp.png"), TINY_PNG).unwrap();
 
     let home = root.join("user");
     let data = root.join("data");
@@ -165,8 +175,14 @@ fn steam_add_writes_the_appimage_shortcut_with_persistent_artwork() {
         String::from_utf8_lossy(&result.stderr)
     );
     drop(fs::remove_dir_all(&mount));
-    let icon = AppDirs::new(&vars).data.join("steam-launcher-icon.png");
-    assert_eq!(fs::read(&icon).unwrap(), b"fake icon");
+    // The CLI writes the artwork the app writes: the icon is the generated one, and the grid
+    // folder holds every library image.
+    let icon = AppDirs::new(&vars).data.join("steam-icon.png");
+    let icon_image = image_size(&fs::read(&icon).unwrap());
+    assert_eq!(
+        icon_image,
+        acnh_core::artwork::size(acnh_core::artwork::Art::Icon)
+    );
     let file = user.join("config/shortcuts.vdf");
     let prev_home = std::env::var_os("HOME");
     std::env::set_var("HOME", &home);
@@ -181,8 +197,62 @@ fn steam_add_writes_the_appimage_shortcut_with_persistent_artwork() {
         None => std::env::remove_var("HOME"),
     }
     let mut shortcuts = vec![];
-    steam::upsert(&mut shortcuts, &expected).unwrap();
+    let app_id = steam::upsert(&mut shortcuts, &expected).unwrap();
     assert_eq!(vdf::read(&fs::read(file).unwrap()).unwrap(), shortcuts);
+    for (art, path) in acnh_core::artwork::paths(&user, app_id) {
+        assert_eq!(
+            image_size(&fs::read(&path).unwrap()),
+            acnh_core::artwork::size(art),
+            "{art:?}"
+        );
+    }
+}
+
+/// The width and height a PNG's header gives.
+#[cfg(unix)]
+fn image_size(png: &[u8]) -> (u32, u32) {
+    let number = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    (number(16), number(20))
+}
+
+#[cfg(unix)]
+#[test]
+fn steam_add_treats_a_missing_pgrep_as_steam_running() {
+    use acnh_core::platform::{Os, Vars};
+    use acnh_core::steam;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let appimage = root.join("ACNH Universal.AppImage");
+    fs::write(&appimage, []).unwrap();
+    let home = root.join("user");
+    let data = root.join("data");
+    let vars = Vars::from_lookup(Os::current(), |name| match name {
+        "HOME" => Some(home.display().to_string()),
+        "XDG_DATA_HOME" => Some(data.display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    let user = steam::userdata_roots(&vars)[0].join("1");
+    fs::create_dir_all(&user).unwrap();
+    let empty_path = root.join("no-programs");
+    fs::create_dir_all(&empty_path).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_acnh-universal"))
+        .arg("steam-add")
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", &data)
+        .env("APPIMAGE", &appimage)
+        .env("PATH", &empty_path)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("Desktop Mode"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!user.join("config/shortcuts.vdf").exists());
 }
 
 #[test]
