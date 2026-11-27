@@ -6,8 +6,9 @@
 # that folder. Only for the owner's own Dropbox: never a shared or public link, never the repo or CI (M14).
 #
 # usage:
-#   Android (default): tools/stage_dropbox_game.sh <prepared folder> <game library> <dest>
-#   Linux:             tools/stage_dropbox_game.sh --os linux --install <install folder> <prepared folder> <dest>
+#   Android (default): tools/stage_dropbox_game.sh --build-id <id> [--abi <abi>] <prepared folder> <game library> <dest>
+#   Linux:             tools/stage_dropbox_game.sh --build-id <id> [--abi <abi>] --os linux --install <install folder> <prepared folder> <dest>
+# --build-id (the game's 32 hex digit build id) is required; --abi defaults to the headers' NX_GAME_ABI. The manifest is written by `acnh-universal manifest` (tools/write_manifest.sh) and checked before the swap.
 #   <prepared folder>: Prepare's work folder (analysis/, fonts/, aoc/, romfs.pak, spirv.pak)
 #   <game library>:    libacnh_game.so from tools/build_android.sh (private/acnh/apk/libacnh_game.so)
 set -euo pipefail
@@ -19,16 +20,25 @@ while [ -L "$self" ]; do
 done
 # shellcheck source=tools/remove_tree.sh
 . "$(cd "$(dirname "$self")" && pwd -P)/remove_tree.sh"
+# shellcheck source=tools/write_manifest.sh
+. "$(cd "$(dirname "$self")" && pwd -P)/write_manifest.sh"
 OS=android
 INSTALL=""
+BUILD_ID=""
+ABI=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --os) OS=$2; shift 2 ;;
     --install) INSTALL=$2; shift 2 ;;
+    --build-id) BUILD_ID=$2; shift 2 ;;
+    --abi) ABI=$2; shift 2 ;;
     -*) echo "unknown option: $1"; exit 2 ;;
     *) break ;;
   esac
 done
+
+[ -n "$BUILD_ID" ] || { echo "--build-id <the game's 32 hex digit build id> is required: the app rejects a manifest without it" >&2; sed -n 2,13p "$0"; exit 2; }
+[ -n "$ABI" ] || ABI=$(default_game_abi)
 
 copy() { cp -c "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
 
@@ -74,25 +84,12 @@ else
 fi
 # The manifest last, so a half-copied folder is never mistaken for a finished one (on this computer: the Dropbox
 # client may still upload it before the big files; the app then says the files are not there yet).
-TMP=$(mktemp)
-(
-  cd "$DEST.new"
-  echo '{"version":1,"build_id":"","nx_game_abi":"","files":['
-  first=1
-  find . -type f ! -name 'manifest.json*' ! -name .DS_Store | sed 's|^\./||' | sort | while read -r f; do
-    size=$(stat -f %z "$f" 2>/dev/null || stat -c %s "$f")
-    sha=$(shasum -a 256 "$f" | cut -d' ' -f1)
-    [ $first = 1 ] || echo ','
-    first=0
-    printf '{"path":"%s","size":%s,"sha256":"%s"}' "$f" "$size" "$sha"
-  done
-  echo ']}'
-) > "$TMP"
-mv "$TMP" "$DEST.new/manifest.json"
+# It refuses an empty build id or ABI and checks every listed file's size before it writes, and nothing is swapped
+# in if it fails.
+write_manifest "$DEST.new" "$BUILD_ID" "$ABI" || { echo "error: no manifest.json written, $DEST left as it was" >&2; exit 1; }
 chmod 644 "$DEST.new/manifest.json"
 # A leftover .old must go first (mv would put DEST inside it); after the swap, failing to remove it is only a warning.
 remove_tree "$DEST.old" || { echo "error: $DEST.old is left from an earlier run and cannot be removed: remove it, then run again" >&2; exit 1; }
 if [ -d "$DEST" ]; then mv "$DEST" "$DEST.old"; fi
 mv "$DEST.new" "$DEST"
 remove_tree "$DEST.old" || echo "warning: could not remove $DEST.old (something keeps writing into it): remove it" >&2
-python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(len(m["files"]), "files,", round(sum(f["size"] for f in m["files"])/1e9, 2), "GB")' "$DEST/manifest.json"

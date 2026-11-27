@@ -93,8 +93,9 @@ The first time, **ACNH Recomp** shows its home screen:
   (`<files>/game/`), with nothing of it outside the app (issue #230, #192). The app signs in with save-relay's Dropbox
   app (an App folder app: it sees only `Apps/<that app>/`), so the files wait in
   `Apps/<that app>/acnh-universal-game/android/`, put there on the computer with
-  `tools/stage_dropbox_game.sh <work folder> private/acnh/apk/libacnh_game.so ~/Dropbox/Apps/<that app>` (it also
-  writes `manifest.json`: each file's size and SHA-256), or by Prepare's `android` target (#365), which builds
+  `tools/stage_dropbox_game.sh --build-id <32 hex> <work folder> private/acnh/apk/libacnh_game.so ~/Dropbox/Apps/<that app>`
+  (it also writes `manifest.json` with `acnh-universal manifest`: each file's size and SHA-256, the build id and the ABI),
+  or by Prepare's `android` target (#365), which builds
   `libacnh_game.so` from the code it just recompiled (`tools/build_android.sh --gen <work folder>/gen --build <work
   folder>/build-android --out <work folder>/apk-android --no-phone-prepare`; those three options are for a hand build
   too), refuses a work folder with no 32 hex digit build id or a runtime with no ABI, and stages the game and its

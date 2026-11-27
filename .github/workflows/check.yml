@@ -103,6 +103,11 @@ jobs:
           host=$(rustc -vV | sed -n 's/^host: //p')
           test -n "$(cargo tree --locked -e normal --target "$host" -p acnh-app -i save-relay)"
           test -n "$(cargo tree --locked -e normal --target "$host" -p acnh-cli -i save-relay)"
+      - name: Stage the Dropbox game folder (Linux and Android modes, a size and a hash)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked -p acnh-cli --bin acnh-universal
+          ACNH_UNIVERSAL_CLI="$PWD/target/debug/acnh-universal" bash tests/stage_dropbox_game_test.sh
       - name: Rust emitter matches Unicorn (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -449,7 +454,9 @@ jobs:
       - name: Package the Mac app (fake app, empty decoys)
         run: bash tests/package_mac_test.sh
       - name: Stage the Dropbox game folder (decoys, a write during removal)
-        run: bash tests/stage_dropbox_game_test.sh
+        run: |
+          cargo build --locked -p acnh-cli --bin acnh-universal
+          ACNH_UNIVERSAL_CLI="$PWD/target/debug/acnh-universal" bash tests/stage_dropbox_game_test.sh
       - name: Build-script helpers (newest header, stale lock, Turnip patches)
         run: bash tests/build_common_test.sh
       - name: Package the iOS device stub

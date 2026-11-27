@@ -174,6 +174,8 @@ fi
 
 # shellcheck source=tools/remove_tree.sh
 . "$root/tools/remove_tree.sh"
+# shellcheck source=tools/write_manifest.sh
+. "$root/tools/write_manifest.sh"
 stage=
 made_out=
 [ -d "$out" ] || made_out=1
@@ -220,24 +222,7 @@ if [ -n "$small" ] && [ -z "$nofolder" ]; then
         fi
     done
     find "$files" -name .DS_Store -delete
-    python3 - "$files" "$build_id" "$abi" <<'PY'
-import hashlib, json, os, sys
-root, build_id, abi = sys.argv[1:4]
-files = []
-for base, dirs, names in os.walk(root):
-    dirs.sort()
-    for name in sorted(names):
-        path = os.path.join(base, name)
-        digest = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                digest.update(chunk)
-        files.append({"path": os.path.relpath(path, root).replace(os.sep, "/"),
-                      "size": os.path.getsize(path), "sha256": digest.hexdigest()})
-files.sort(key=lambda e: e["path"])
-with open(os.path.join(root, "manifest.json"), "w") as out:
-    json.dump({"version": 1, "build_id": build_id, "nx_game_abi": abi, "files": files}, out, separators=(",", ":"))
-PY
+    write_manifest "$files" "$build_id" "$abi" > /dev/null
     chmod -R u+rw,go+r "$files"
 fi
 # Sign nested frameworks first; no entitlement file or provisioning profile is supplied. game/ holds no frameworks.
