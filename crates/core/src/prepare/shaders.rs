@@ -148,7 +148,8 @@ pub(super) fn rust_shaders(req: &Request, root: &Path) -> Result<()> {
 }
 
 /// The Rust fonts stage for the Prepare runner.
-pub fn rust_fonts(req: &Request) -> Result<()> {
+/// Returns the warnings for the caller to show.
+pub fn rust_fonts(req: &Request) -> Result<Vec<String>> {
     let host = [
         r"C:\Windows\Fonts\arial.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
@@ -159,13 +160,16 @@ pub fn rust_fonts(req: &Request) -> Result<()> {
     .into_iter()
     .map(Path::new)
     .find(|path| path.is_file());
+    let mut warnings = Vec::new();
     if host.is_none() {
-        eprintln!(
-            "warning: no host font found (Arial Unicode, DejaVu Sans): shared.ttf and shared_5.ttf are not written; the player falls back to NX_SHARED_FONT or a host font at run time"
+        warnings.push(
+            "no host font found (Arial Unicode, DejaVu Sans): shared.ttf and shared_5.ttf are not written; the player falls back to NX_SHARED_FONT or a host font at run time"
+                .to_owned(),
         );
     }
     crate::glyphs::stage(&req.out.join("extract/romfs"), &req.out.join("fonts"), host)
-        .map_err(|error| Error::Build(format!("stage {}: {error}", Stage::Fonts.key())))
+        .map_err(|error| Error::Build(format!("stage {}: {error}", Stage::Fonts.key())))?;
+    Ok(warnings)
 }
 
 #[cfg(test)]
