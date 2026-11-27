@@ -381,7 +381,7 @@ fn build(options: &Options) -> Result<i32> {
         }
     };
     let delivery = match prepare::delivery_subfolder(target) {
-        Some(subfolder @ ("ios" | "mac")) => {
+        Some(subfolder @ ("ios" | "mac" | "android")) => {
             let launcher =
                 match std::fs::read_to_string(AppDirs::new(&vars).config.join("launcher.ini")) {
                     Ok(text) => acnh_core::config::Config::parse(&text)?,

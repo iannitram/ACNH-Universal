@@ -68,7 +68,9 @@ pub struct Request {
     /// Snapshot of the two opt-in settings for the whole prepare.
     pub fan_mods: FanMods,
     /// Where a target's final deliverable goes (`delivery_folder`): `<dropbox>/_transfers/
-    /// ACNH-Universal/<ios|mac>/`. The `ios` and `mac` targets need it; the others ignore it.
+    /// ACNH-Universal/<ios|mac>/`, or for `android` the folder the app downloads from,
+    /// `<relay app folder>/acnh-universal-game/android/`. These targets need it; the others
+    /// ignore it.
     pub delivery: Option<PathBuf>,
     /// The folder the `mac` target assembles its app in (`<data>/install`); the other targets
     /// ignore it.

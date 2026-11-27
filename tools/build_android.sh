@@ -10,7 +10,11 @@
 # once into private/android-tools/ (PREPARE_TOOLS= another folder; a spirv_harness put in its shaders/ is used as it
 # is).
 #
-# usage: tools/build_android.sh [--install] [--jobs N] [--no-game] [--launcher]
+# usage: tools/build_android.sh [--install] [--jobs N] [--no-game] [--launcher] [--gen DIR] [--build DIR] [--out DIR]
+#   --gen DIR: the game's recompiled code (default private/<game>/gen). Prepare passes the folder it just recompiled.
+#   --build DIR: the CMake build folder (default private/<game>/build-android).
+#   --out DIR: where the APK and lib<game>_game.so are made (default private/<game>/apk). The script removes it first:
+#   give it a folder of its own, never one that holds anything else. Prepare passes folders under its work folder.
 #   --launcher: also build and pack the Slint launcher (libacnh_app.so, LauncherActivity). Off by default: the icon
 #   opens Home, and the Slint app cannot yet download, prepare or start the game on Android (#363).
 #   --no-game: the app only, without the game set up here (what a release carries)
@@ -53,6 +57,8 @@ if [ -z "${JOBS:-}" ]; then
 fi
 GAMELIB=1
 LAUNCHER=0
+GEN_ARG=""
+absolute() { case "$1" in /*) echo "$1" ;; *) echo "$PWD/$1" ;; esac; }
 while [ $# -gt 0 ]; do
   case $1 in
     --install) INSTALL=1 ;;
@@ -60,6 +66,9 @@ while [ $# -gt 0 ]; do
     --no-game) GAMELIB=0 ;;
     --launcher) LAUNCHER=1 ;;
     --no-phone-prepare) PHONE_PREPARE=0 ;;
+    --gen) [ $# -ge 2 ] || { echo "--gen needs a folder"; exit 1; }; GEN_ARG=$(absolute "$2"); shift ;;
+    --build) [ $# -ge 2 ] || { echo "--build needs a folder"; exit 1; }; BUILD=$(absolute "$2"); shift ;;
+    --out) [ $# -ge 2 ] || { echo "--out needs a folder"; exit 1; }; OUT=$(absolute "$2"); shift ;;
     *) echo "unknown option $1"; exit 1 ;;
   esac
   shift
@@ -96,13 +105,13 @@ if [ ! -f "$TOOLS/zig-lib.zip" ] || [ "$TOOLS/zig/sizes.txt" -nt "$TOOLS/zig-lib
   mv "$TOOLS/zig-lib.zip.tmp" "$TOOLS/zig-lib.zip"
 fi
 fi  # PHONE_PREPARE
-GEN=$PWD/private/$GAME/gen
+GEN=${GEN_ARG:-$PWD/private/$GAME/gen}
 if [ $GAMELIB = 0 ]; then
   BUILD=private/$GAME/build-android-app
   OUT=private/$GAME/apk-app
   GEN=$PWD/$BUILD/no-gen
 elif [ ! -d "$GEN/main" ]; then
-  echo "the game is not set up on this computer (python3 tools/setup_acnh.py --game <folder>); --no-game: the app only"
+  echo "the game's recompiled code is not in $GEN (python3 tools/setup_acnh.py --game <folder>, or Prepare); --no-game: the app only"
   exit 1
 fi
 mkdir -p "$(dirname "$OUT")"
