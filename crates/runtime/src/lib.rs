@@ -2,8 +2,8 @@
 //! It has taken over upstream's `runtime/src` (C++: memory, the kernel and IPC, the OS services the
 //! game calls, input, audio, files, the platform layers) one group of files at a time (4.02 to
 //! 4.12, all 11 groups), each Rust module exporting the same C symbols as the files it replaces,
-//! behind the interface the
-//! game library already uses (`runtime/include/nx/game.h`, `nx_game_abi()`). The renderer
+//! behind the interface the game library already uses (`runtime/include/nx/game.h`,
+//! `nx_game_abi()`). The renderer
 //! (`runtime/src/nvn`, `vk_*`, `mtl`), `games/acnh` and the `ui/` overlay stay C++.
 
 // ADR 0002: every `unsafe` block says why it is sound.
