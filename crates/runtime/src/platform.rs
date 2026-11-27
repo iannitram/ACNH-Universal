@@ -2,10 +2,10 @@
 //! input/controller helpers, and window/path state, ported from `runtime/src/platform_*.cpp`,
 //! `runtime/src/thermal.cpp`, and `runtime/src/perf_hint.cpp`.
 //!
-//! `runtime/src/platform_wrapper.cpp` and the thin per-OS wrappers (`platform_linux_wrapper.cpp`,
-//! `platform_mac_wrapper.cpp`, `platform_win_wrapper.cpp`, `platform_sdl_wrapper.cpp`,
+//! `runtime/src/platform_wrapper.cpp` and the thin per-OS wrappers (`platform_linux.cpp`,
+//! `platform_mac_wrapper.cpp`, `platform_win.cpp`, `platform_sdl_wrapper.cpp`,
 //! `platform_android_wrapper.cpp`, `platform_android_input_wrapper.cpp`,
-//! `platform_android_audio_wrapper.cpp`) provide the OS/SDL3/JNI/NDK host callbacks and forward
+//! `platform_android_audio.cpp`) provide the OS/SDL3/JNI/NDK host callbacks and forward
 //! `nx::plat::*` entry points here.
 
 use std::collections::HashSet;

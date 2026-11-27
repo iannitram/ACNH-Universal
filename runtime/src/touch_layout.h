@@ -6,7 +6,7 @@
 
 #include "platform.h"
 
-// The iPhone and iPad player (platform_mac_wrapper.cpp) has the drawn touch controls too; the Mac player has none.
+// The iPhone and iPad player (platform_sdl_wrapper.cpp) has the drawn touch controls too; the Mac player has none.
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #define NX_TOUCH_IOS TARGET_OS_IPHONE

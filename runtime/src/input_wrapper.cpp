@@ -432,7 +432,7 @@ uint64_t touch_hit(float x, float y, float aspect) {
     return acnh_input_touch_hit(x, y, aspect);
 }
 
-// Android draws them in platform_android_input_wrapper.cpp, iOS in platform_mac_wrapper.cpp (touch_input.cpp).
+// Android draws them in platform_android_input_wrapper.cpp, iOS in platform_sdl_wrapper.cpp (touch_input.cpp).
 #if !defined(__ANDROID__) && !NX_TOUCH_IOS
 size_t touch_overlay(OverlayShape* out, size_t max) {
     ensure_host();

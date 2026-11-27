@@ -407,7 +407,7 @@ if(ANDROID)
     # NativeActivity app: lib<game>.so, entry android_main (android_native_app_glue).
     set(GLUE "${ANDROID_NDK}/sources/android/native_app_glue")
     add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android_wrapper.cpp
-        runtime/src/platform_android_input_wrapper.cpp runtime/src/platform_android_audio_wrapper.cpp
+        runtime/src/platform_android_input_wrapper.cpp runtime/src/platform_android_audio.cpp
         runtime/src/hub_android.cpp runtime/src/relay_android.cpp third_party/save-relay/save_relay_jni.c
         "${GLUE}/android_native_app_glue.c")
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/include" "${GLUE}"
@@ -499,7 +499,7 @@ elseif(IOS)
     endif()
     # save-relay in the player (issue #172): the Rust runtime library, built by tools/build_ios.sh
     # (cargo build -p acnh-runtime --release --target aarch64-apple-ios[-sim]), exports acnh_relay_before_game and
-    # acnh_relay_after_game (platform_mac.cpp calls them); the generic block below links it.
+    # acnh_relay_after_game (platform_mac_wrapper.cpp calls them); the generic block below links it.
     if(NOT NX_RUNTIME_ARCHIVE)
         message(FATAL_ERROR "NX_RUNTIME_ARCHIVE is not set: run tools/build_ios.sh <sdk> (it builds libacnh_runtime.a)")
     endif()
@@ -507,7 +507,8 @@ elseif(IOS)
     # its screens; its plan, checks and Dropbox sign-in are in the Rust runtime library above (appgame_ios.rs).
     enable_language(OBJCXX)
     add_executable(${NX_GAME} MACOSX_BUNDLE ${NX_RUNTIME_SOURCES} runtime/src/platform_mac_wrapper.cpp
-                   runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp runtime/src/appgame_ios.mm)
+                   runtime/src/platform_sdl_wrapper.cpp runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp
+                   runtime/src/appgame_ios.mm)
     set_source_files_properties(runtime/src/appgame_ios.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-std=c++20")
     target_compile_definitions(${NX_GAME} PRIVATE NX_APPGAME_ABI="${NX_GAME_ABI}")
     # The game build(s) the linked code was recompiled from (tools/build_ios.sh reads them from game.ini): the small .ipa
@@ -543,8 +544,8 @@ elseif(APPLE)
     # (brew install sdl3 vulkan-headers vulkan-loader molten-vk).
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS /opt/homebrew/include /usr/local/include)
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_mac_wrapper.cpp runtime/src/cpu_profile.cpp
-                   runtime/src/app_icon.cpp)
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_mac_wrapper.cpp runtime/src/platform_sdl_wrapper.cpp
+                   runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3)
     if(NX_GAME_FROM_FOLDER)
@@ -572,8 +573,8 @@ elseif(UNIX)
     find_package(SDL3 REQUIRED CONFIG)
     find_package(Threads REQUIRED)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/include" /usr/include /usr/local/include)
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_linux_wrapper.cpp runtime/src/cpu_profile.cpp
-                   runtime/src/app_icon.cpp)
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_linux.cpp runtime/src/platform_sdl_wrapper.cpp
+                   runtime/src/cpu_profile.cpp runtime/src/app_icon.cpp)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE SDL3::SDL3 Threads::Threads ${CMAKE_DL_LIBS})
     target_compile_options(${NX_GAME} PRIVATE -fvisibility=hidden -march=x86-64-v3 -ffp-contract=off)
@@ -602,7 +603,7 @@ else()
     # Vulkan loader of the GPU driver. Vulkan headers: NX_VULKAN_INCLUDE (the setup's Vulkan-Headers) or the LunarG SDK.
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/Include")
-    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win_wrapper.cpp runtime/src/platform_sdl_wrapper.cpp
+    add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win.cpp runtime/src/platform_sdl_wrapper.cpp
                    runtime/src/app_icon.cpp assets/acnhrecomp.manifest)
     nx_add_windows_rc(${NX_GAME} assets/acnhrecomp.rc)
     target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
