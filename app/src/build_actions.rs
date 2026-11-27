@@ -172,13 +172,7 @@ impl BuildActions {
                     target.key()
                 )));
             }
-            assemble::assemble(target, &out.join("build"), &self.dirs.install())?;
-            if matches!(target, Os::Linux | Os::Windows) {
-                let launcher_exe = std::env::current_exe()?;
-                let local_data = self.dirs.data.parent().unwrap_or(&self.dirs.data);
-                let app_dir = prepare::app_out_dir_for(target, launcher, local_data, home);
-                prepare::pack_folder(&launcher_exe, &self.dirs.install(), &out, &app_dir)?;
-            }
+            prepare::finish_local_build(&self.dirs, home, launcher, target, &out)?;
             // The hub keeps the build for the devices that pull: a failure to publish is
             // told, not hidden, but the build itself is made.
             if let Err(error) = self.publish(target, game) {
