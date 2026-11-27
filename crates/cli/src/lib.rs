@@ -401,7 +401,11 @@ fn build(options: &Options) -> Result<i32> {
         delivery,
         install: (target == Os::Mac).then(|| AppDirs::new(&vars).install()),
     };
-    let out = prepare::prepare(&request, &mut |stage| println!("== {}", stage.key()))?;
+    let (out, warnings) =
+        prepare::prepare_with_warnings(&request, &mut |stage| println!("== {}", stage.key()))?;
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
     if matches!(target, Os::Ios | Os::Mac) {
         // The one contained app is the `.ipa` or `.zip` in Dropbox (the Mac's app was
         // assembled in the install folder on the way): nothing to assemble here.

@@ -8,14 +8,13 @@
 use crate::bundle::is_forbidden;
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::fsutil::{make_read_only_recursive, remove_tree_writable};
+use crate::fsutil::{make_read_only_recursive, remove_tree_writable, GitTree};
 use crate::platform::{AppDirs, Os, Vars};
 use crate::prepare::redact;
 use crate::recipe::output;
 use crate::steam::assets_dir_for;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
 
 const APP_FOLDER: &str = "ACNH-Universal";
 const PARTIAL_FOLDER: &str = ".ACNH-Universal.partial";
@@ -317,13 +316,7 @@ fn check_out_location(out: &Path, ctx: &mut PackContext<'_>) -> Result<()> {
     let abs_out = normalize_abs(out)?;
     let redacted = redact(&abs_out.display().to_string(), ctx.home);
 
-    let mut existing = abs_out.as_path();
-    while !existing.is_dir() {
-        match existing.parent() {
-            Some(parent) => existing = parent,
-            None => break,
-        }
-    }
+    let existing = crate::fsutil::nearest_existing_dir(&abs_out);
     if (ctx.git_in_work_tree)(existing)? {
         return Err(Error::Build(format!(
             "cannot pack into {redacted}: it is inside a git work tree"
@@ -495,30 +488,19 @@ fn set_executable(path: &Path) -> Result<()> {
 }
 
 fn host_git_in_work_tree(existing: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(existing)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|err| {
-            Error::Build(format!(
-                "cannot tell whether {} is inside a git work tree (is git installed?): {err}",
-                existing.display()
-            ))
-        })?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim() == "true");
+    match crate::fsutil::host_git_in_work_tree(existing) {
+        GitTree::Inside => Ok(true),
+        GitTree::Outside => Ok(false),
+        GitTree::Unknown(detail) => Err(Error::Build(format!(
+            "cannot tell whether {} is inside a git work tree (is git installed?){}",
+            existing.display(),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        ))),
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("not a git repository") {
-        return Ok(false);
-    }
-    Err(Error::Build(format!(
-        "cannot tell whether {} is inside a git work tree: {}",
-        existing.display(),
-        stderr.trim()
-    )))
 }
 
 fn normalize_abs(path: &Path) -> Result<PathBuf> {

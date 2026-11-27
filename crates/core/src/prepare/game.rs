@@ -29,14 +29,15 @@ pub(super) fn mod_component(name: &str) -> bool {
         })
 }
 
-/// Extracts `zpath`'s `romfs/` into `<mods_root>/<name>` with pending message reflow.
+/// Extracts `zpath`'s `romfs/` into `<mods_root>/<name>` with pending message reflow. The
+/// warnings are what the caller should show: a missing tool that leaves the reflow pending.
 pub fn install_mod_archive(
     mods_root: &Path,
     name: &str,
     zpath: &Path,
     romfs: &Path,
     python: &str,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let dst = mods_root.join(name);
     if crate::platform::is_dir_link(&dst) {
         return Err(Error::Build(
@@ -72,11 +73,11 @@ pub fn install_mod_archive(
         return Err(err.into());
     }
     let out = mods_root.parent().unwrap_or(mods_root);
-    crate::msg::finish_pending(romfs, out, python).map_err(|e| stage_err(Stage::Game, e))?;
-    Ok(())
+    crate::msg::finish_pending(romfs, out, python).map_err(|e| stage_err(Stage::Game, e))
 }
 
 /// Installs or removes opted-in fan mods (`ptbr`) and explicit `--mod <name>=<zip>` archives.
+/// Returns the warnings for the caller to show.
 pub fn install_mods(
     out: &Path,
     romfs: &Path,
@@ -85,7 +86,7 @@ pub fn install_mods(
     ptbr_enabled: bool,
     mods: &[(&str, &Path)],
     python: &str,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let mods_root = out.join("mods");
     if crate::platform::is_dir_link(&mods_root) {
         if ptbr_enabled || !mods.is_empty() {
@@ -93,7 +94,7 @@ pub fn install_mods(
                 "mod output must be a regular directory".into(),
             ));
         }
-        return Ok(());
+        return Ok(Vec::new());
     }
     let ptbr = mods_root.join("ptbr");
     let explicit_ptbr = mods.iter().any(|(name, _)| *name == "ptbr");
@@ -139,10 +140,13 @@ pub fn install_mods(
         }
         to_install.push(((*name).to_owned(), zpath.to_path_buf()));
     }
+    let mut warnings = Vec::new();
     for (name, zpath) in to_install {
-        install_mod_archive(&mods_root, &name, &zpath, romfs, python)?;
+        warnings.extend(install_mod_archive(
+            &mods_root, &name, &zpath, romfs, python,
+        )?);
     }
-    Ok(())
+    Ok(warnings)
 }
 
 /// Finds a player-supplied SpeedFix patch without using a stale output patch after a game change.
@@ -204,7 +208,7 @@ pub fn speedfix_args(
 
 /// The Rust game stage: links ExeFS/RomFS/AOC, extracts flat NSO images (`nso2bin`), and
 /// installs/removes opted-in fan mods.
-pub fn rust_game(req: &Request, root: &Path) -> Result<()> {
+pub fn rust_game(req: &Request, root: &Path) -> Result<Vec<String>> {
     let stage = Stage::Game;
     let exefs = req.out.join("exefs");
     let romfs = req.out.join("extract/romfs");
@@ -276,8 +280,7 @@ pub fn rust_game(req: &Request, root: &Path) -> Result<()> {
         req.fan_mods.ptbr,
         &[],
         script_python(req.target),
-    )?;
-    Ok(())
+    )
 }
 
 /// The Rust version stage: reads `exefs/main`'s build id, matches `games/acnh/versions.txt`,

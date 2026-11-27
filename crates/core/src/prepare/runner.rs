@@ -1,6 +1,7 @@
 //! The runner of a prepare: `ScriptRunner`, the real `ProcessRunner` and the pre-flight checks.
 
 use super::*;
+use crate::fsutil::GitTree;
 
 pub(super) fn script_python(target: Os) -> &'static str {
     if target == Os::Windows {
@@ -23,8 +24,15 @@ pub trait ScriptRunner {
 
     /// The Rust game stage. The default runs it (`rust_game`).
     fn game(&mut self, req: &Request) -> Result<()> {
-        rust_game(req, &self.root())
+        for warning in rust_game(req, &self.root())? {
+            self.warn(&warning);
+        }
+        Ok(())
     }
+
+    /// A warning a stage wants shown: the build goes on. The default drops it; the process
+    /// runner keeps it for `prepare_with_warnings`.
+    fn warn(&mut self, _message: &str) {}
 
     /// The Rust version stage. The default runs it (`rust_version`).
     fn version(&mut self, req: &Request) -> Result<()> {
@@ -56,7 +64,10 @@ pub trait ScriptRunner {
 
     /// The Rust fonts stage. The default runs it (`rust_fonts`).
     fn fonts(&mut self, req: &Request) -> Result<()> {
-        rust_fonts(req)
+        for warning in rust_fonts(req)? {
+            self.warn(&warning);
+        }
+        Ok(())
     }
 
     /// The Rust build stage. The default runs it (`rust_build`).
@@ -216,38 +227,28 @@ pub(super) fn check_outside_git(
     runner: &mut dyn ScriptRunner,
     home: &Path,
 ) -> Result<()> {
-    // The nearest folder that exists, as `git -C` needs one; a relative `out` is taken from
-    // the working folder.
+    // A relative `out` is taken from the working folder.
     let out = absolute(&req.out)?;
-    let mut existing = out.as_path();
-    while !existing.is_dir() {
-        match existing.parent() {
-            Some(parent) => existing = parent,
-            None => break,
-        }
-    }
-    let git = [
-        "-C",
-        &existing.display().to_string(),
-        "rev-parse",
-        "--is-inside-work-tree",
-    ];
-    match runner.probe("git", &git) {
-        Some(answer) if answer.trim() == "true" => Err(Error::Build(format!(
+    let existing = crate::fsutil::nearest_existing_dir(&out);
+    let mut ask = |args: &[&str]| match runner.probe("git", args) {
+        Some(answer) => Some((true, answer, String::new())),
+        None => runner
+            .probe_stderr("git", args)
+            .filter(|(ok, _)| !ok)
+            .map(|(ok, error)| (ok, String::new(), error)),
+    };
+    match crate::fsutil::git_in_work_tree(existing, &mut ask) {
+        GitTree::Inside => Err(Error::Build(format!(
             "the prepared folder {} is inside a git work tree: the Apple builds hold the \
              recompiled game and must not be made there. Use a folder outside it.",
             redact(&out.display().to_string(), home)
         ))),
-        Some(_) => Ok(()),
-        // Git failed: only its own word that this is no repository lets the build go on.
-        None => match runner.probe_stderr("git", &git) {
-            Some((false, error)) if error.contains("not a git repository") => Ok(()),
-            _ => Err(Error::Build(format!(
-                "cannot tell whether {} is inside a git work tree (is git installed?): the \
-                 Apple builds hold the recompiled game and must not be made in one",
-                redact(&out.display().to_string(), home)
-            ))),
-        },
+        GitTree::Outside => Ok(()),
+        GitTree::Unknown(_) => Err(Error::Build(format!(
+            "cannot tell whether {} is inside a git work tree (is git installed?): the \
+             Apple builds hold the recompiled game and must not be made in one",
+            redact(&out.display().to_string(), home)
+        ))),
     }
 }
 
@@ -256,17 +257,31 @@ pub(super) fn check_outside_git(
 pub struct ProcessRunner {
     root: PathBuf,
     jobs: u32,
+    warnings: Vec<String>,
 }
 
 impl ProcessRunner {
     /// A runner for commands in `root` (the source folder). `jobs` above 0 is passed on as
     /// `JOBS`.
     pub fn new(root: PathBuf, jobs: u32) -> ProcessRunner {
-        ProcessRunner { root, jobs }
+        ProcessRunner {
+            root,
+            jobs,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// The warnings the stages raised so far, in order; the runner forgets them.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 }
 
 impl ScriptRunner for ProcessRunner {
+    fn warn(&mut self, message: &str) {
+        self.warnings.push(message.to_owned());
+    }
+
     fn run(&mut self, _stage: Stage, args: &[String]) -> std::result::Result<(), Vec<String>> {
         let Some((program, rest)) = args.split_first() else {
             return Err(vec!["no command".to_owned()]);

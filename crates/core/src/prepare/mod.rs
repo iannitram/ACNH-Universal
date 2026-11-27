@@ -246,6 +246,15 @@ fn app_commit() -> Option<&'static str> {
 /// returns the `.ipa`'s path in the delivery folder instead of `Request::out`. The `mac` target
 /// (`Request::install` too) does the same with the contained app and returns the `.zip`'s path.
 pub fn prepare(req: &Request, progress: &mut dyn FnMut(Stage)) -> Result<PathBuf> {
+    prepare_with_warnings(req, progress).map(|(out, _)| out)
+}
+
+/// `prepare`, also returning the warnings the stages raised (a missing tool that leaves part
+/// of the work for a later run), for the caller to show where its user will see them.
+pub fn prepare_with_warnings(
+    req: &Request,
+    progress: &mut dyn FnMut(Stage),
+) -> Result<(PathBuf, Vec<String>)> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -256,17 +265,19 @@ pub fn prepare(req: &Request, progress: &mut dyn FnMut(Stage)) -> Result<PathBuf
     let dirs = AppDirs::new(&vars);
     let path = std::env::var_os("PATH").unwrap_or_default();
     let missing = toolchain(Os::current(), &path);
-    prepare_installed(
+    let mut runner = ProcessRunner::new(repo_root(), req.jobs);
+    let out = prepare_installed(
         req,
         hub_for(Os::current()),
         &exe,
         &dirs,
         app_commit(),
         &missing,
-        &mut ProcessRunner::new(repo_root(), req.jobs),
+        &mut runner,
         &home,
         progress,
-    )
+    )?;
+    Ok((out, runner.take_warnings()))
 }
 
 /// `prepare` for an executable at `exe`, the app folders `dirs`, the source's `commit` and the
@@ -351,8 +362,11 @@ fn run_stages(
     } else {
         &req.game.romfs
     };
-    crate::msg::finish_pending(recovery_romfs, &req.out, script_python(req.target))
-        .map_err(|error| build_error(Stage::Game, &[error.to_string()], home))?;
+    for warning in crate::msg::finish_pending(recovery_romfs, &req.out, script_python(req.target))
+        .map_err(|error| build_error(Stage::Game, &[error.to_string()], home))?
+    {
+        runner.warn(&warning);
+    }
     // What was there before anything ran. A script that runs on while we look may have
     // finished its next stage already: only an output from before skips a stage.
     let flags = format!("{} {}\n", req.fan_mods.ptbr, req.fan_mods.speedfix);

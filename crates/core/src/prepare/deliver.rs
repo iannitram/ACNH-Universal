@@ -581,7 +581,7 @@ pub(super) fn stage_game_delivery(
     for dir in ["analysis", "fonts", "aoc"] {
         let src_dir = prepared_out.join(dir);
         if src_dir.is_dir() {
-            copy_dir_follow_symlinks(&src_dir, &staging.join(dir))?;
+            crate::fsutil::copy_tree_following_links(&src_dir, &staging.join(dir))?;
         }
     }
 
@@ -639,26 +639,6 @@ pub(super) fn remove_dir_retrying_with(
             }
         }
     }
-}
-
-pub(super) fn copy_dir_follow_symlinks(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name == ".DS_Store" {
-            continue;
-        }
-        let src_path = entry.path();
-        let dst_path = dst.join(&name);
-        let meta = std::fs::metadata(&src_path)?;
-        if meta.is_dir() {
-            copy_dir_follow_symlinks(&src_path, &dst_path)?;
-        } else if meta.is_file() {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
 }
 
 pub(super) fn collect_manifest_files(

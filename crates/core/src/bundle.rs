@@ -10,7 +10,6 @@
 
 use crate::error::{Error, Result};
 use crate::platform::Os;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -203,7 +202,7 @@ pub fn manifest(dir: &Path, target: Os, version: &str, commit: &str) -> Result<B
                 files.push(BundleFile {
                     path: rel_path,
                     size: bytes.len() as u64,
-                    sha256: format!("{:x}", Sha256::digest(&bytes)),
+                    sha256: crate::fsutil::sha256_hex(&bytes),
                 });
             }
         }
@@ -217,7 +216,7 @@ pub fn manifest(dir: &Path, target: Os, version: &str, commit: &str) -> Result<B
         .iter()
         .map(|file| format!("file {} {} {}\n", file.size, file.sha256, file.path))
         .collect::<String>();
-    let build_id = format!("{:x}", Sha256::digest(lines.as_bytes()))[..16].to_string();
+    let build_id = crate::fsutil::sha256_hex(lines.as_bytes())[..16].to_string();
     Ok(Bundle {
         target,
         version: version.to_string(),
@@ -234,8 +233,7 @@ pub fn verify(b: &Bundle, dir: &Path) -> Result<()> {
     for file in &b.files {
         let path: PathBuf = dir.join(&file.path);
         let matches = fs::read(path).ok().is_some_and(|bytes| {
-            bytes.len() as u64 == file.size
-                && format!("{:x}", Sha256::digest(&bytes)) == file.sha256
+            bytes.len() as u64 == file.size && crate::fsutil::sha256_hex(&bytes) == file.sha256
         });
         if !matches {
             return Err(Error::Hub(format!(
