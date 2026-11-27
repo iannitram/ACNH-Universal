@@ -721,7 +721,7 @@ void update_refresh_hz() {
 
 void show_fatal(const char* text) {
     if (headless()) return;
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ACNHRecomp", text, nullptr);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ACNH Universal", text, nullptr);
 }
 
 
@@ -1213,7 +1213,7 @@ int main(int argc, char** argv) {
         }
     }
     // One app id with the launcher: Wayland and the taskbars find the icon in io.github.acnhrecomp.desktop.
-    SDL_SetAppMetadata("ACNHRecomp", NX_VERSION_STRING, "io.github.acnhrecomp");
+    SDL_SetAppMetadata("ACNH Universal", NX_VERSION_STRING, "io.github.acnhrecomp");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;

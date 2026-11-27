@@ -193,13 +193,13 @@ pub fn game_library_path_for_os(folder: &str, game_id: &str, os: &str) -> String
 pub fn format_load_game_error(why: &str) -> String {
     if why.starts_with("abi") {
         format!(
-            "This game folder was prepared for another version of ACNHRecomp. Open the ACNHRecomp \
+            "This game folder was prepared for another version of ACNH Universal. Open the ACNH Universal \
              launcher and choose Prepare again on its home page: the game's code is built again \
              for this version, the rest is kept.\n\n{why}"
         )
     } else {
         format!(
-            "This is not a game folder prepared for this computer. Open the ACNHRecomp launcher \
+            "This is not a game folder prepared for this computer. Open the ACNH Universal launcher \
              and prepare your game there, from the ExeFS and RomFS you extracted from your own \
              copy with your emulator (a folder prepared before: Prepare again, with this \
              computer ticked).\n\n{why}"

@@ -44,6 +44,7 @@ jobs:
           submodules: false
       - run: bash tools/check_pins.sh
       - run: bash tests/check_pins_test.sh
+      - run: bash tests/user_facing_name_test.sh
 
   deny:
     name: Dependencies (cargo deny)

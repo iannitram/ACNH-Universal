@@ -1677,19 +1677,9 @@ void report_section() {
 #endif
 }
 
-// The project's Discord server (also launcher/pages.cpp)
-const char* const kDiscordUrl = "https://discord.gg/VJW9Dtdu7a";
-
 void page_discord() {
 #if !defined(__ANDROID__)  // Rich Presence talks to the Discord desktop app (discord_presence.cpp)
-    row("discord.presence", "discord.presence.desc", [&](float w) { toggle("discord.enabled", true, w); });
-    ImGui::Dummy(ImVec2(0, 6 * g_scale));
-#endif
-    ImGui::TextWrapped("%s", tr("discord.server.desc"));
-#if !defined(__ANDROID__)
-    if (button(tr("discord.server"))) SDL_OpenURL(kDiscordUrl);
-#else
-    if (button(tr("discord.server"))) plat::open_url_in_app(kDiscordUrl, "com.discord");
+    row("discord.presence", "discord.presence.desc", [&](float w) { toggle("discord.enabled", false, w); });
 #endif
 }
 

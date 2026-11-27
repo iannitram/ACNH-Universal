@@ -352,7 +352,7 @@ bool oauth_listen(const std::string& expect_state, std::string& code_out, int ti
     const char* ok =
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n"
         "<!doctype html><html><body><p>Signed in to Nextendo. You can close this window and return to "
-        "ACNHRecomp.</p></body></html>";
+        "ACNH Universal.</p></body></html>";
     send(client, ok, int(std::strlen(ok)), MSG_NOSIGNAL);
     sock_close(client);
     std::string req(buf);

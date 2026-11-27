@@ -2,6 +2,7 @@
 
 Newest first. One line per change of stage, release or decision that the next session needs. Upstream's history is its git log.
 
+- 2026-11-26 The player-facing name is "ACNH Universal" (#401): launcher, settings, window titles, Android and iOS text; credits and the ACNHRecomp-Importer name stay. The Discord server button is gone (no community server of ours), and Discord Rich Presence is off by default (its application id is upstream's).
 - 2026-11-26 Docs and labels brought level with `main` (#330, partly): `AGENTS.fork.md`, `PIPELINE.md`, `GLOSSARY.md`, `docs/IOS.md` and the ADR status lines say what is true. The repo is public. The weekly peers review is overdue (last scan 2026-11-17) and stays with the Project Manager.
 - 2026-11-26 The Apple build day: Dropbox for the iPad's save sync (#361), the Apple packages staged outside the synced folder (#362), declining the iOS download says so (#355), build scripts (#369). Build 0.11.0-1101141 (a Mac app zip, SpeedFix on) is in my Dropbox; no new `.ipa`, since the Mac lacks the `aarch64-apple-ios` Rust target.
 - 2026-11-26 Housekeeping wave: Rust toolchain, `save-relay` revision, Actions and downloads pinned (#328); `cargo deny` in CI; releases carry every bundled project's licence (#329, the SpeedFix ruling still mine); dead scripts and upstream's Discord workflow removed (#327); `// SAFETY:` lines on every runtime `unsafe` block, with a lint, and the runtime split into submodules (#356).
