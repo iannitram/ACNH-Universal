@@ -495,50 +495,52 @@ impl crate::appgame::DownloadTransport for RemoteDownloadTransport {
 
 /// Download the prepared game for `os` from `acnh-universal-game/<os>` on `remote` into `dest`
 /// under `private_dir`.
+///
+/// `expected_build_id` and `expected_abi` are what this app requires; the manifest is fetched once,
+/// inside [`crate::appgame::download`], and checked against them (an empty string skips that check).
 pub fn download_game_from_remote(
     remote: Arc<dyn Remote>,
     private_dir: &Path,
     dest: &Path,
     free_bytes: u64,
     os: &str,
+    expected_build_id: &str,
+    expected_abi: &str,
 ) -> Result<std::path::PathBuf> {
-    use crate::appgame::{download, DownloadTransport, Manifest};
     let mut transport = RemoteDownloadTransport::new(remote, format!("acnh-universal-game/{os}"));
-    let manifest_bytes = transport.fetch_manifest()?;
-    let manifest = Manifest::from_json(&manifest_bytes)?;
-    download(
+    crate::appgame::download(
         private_dir,
         dest,
         free_bytes,
-        &manifest.build_id,
-        &manifest.nx_game_abi,
+        expected_build_id,
+        expected_abi,
         &mut transport,
     )
 }
 
 /// Download the prepared game for `os` from `acnh-universal-game/<os>` using streaming Dropbox
 /// HTTP transfers when connected to Dropbox (so large packs like `romfs.pak` never buffer in RAM),
-/// or [`download_game_from_remote`] otherwise.
+/// or [`download_game_from_remote`] otherwise. `expected_build_id` and `expected_abi` come from
+/// the caller, never from the manifest being checked.
 pub fn download_game_from_relay(
     relay: &SaveRelay,
     private_dir: &Path,
     dest: &Path,
     free_bytes: u64,
     os: &str,
+    expected_build_id: &str,
+    expected_abi: &str,
 ) -> Result<std::path::PathBuf> {
     #[cfg(feature = "cloud-stream")]
     if let Some(tokens) = relay.dropbox_tokens() {
-        use crate::appgame::{download, DownloadTransport, Manifest};
         let mut transport =
             DropboxStreamTransport::new(tokens, format!("acnh-universal-game/{os}"));
-        let manifest_bytes = transport.fetch_manifest()?;
-        let manifest = Manifest::from_json(&manifest_bytes)?;
-        return download(
+        return crate::appgame::download(
             private_dir,
             dest,
             free_bytes,
-            &manifest.build_id,
-            &manifest.nx_game_abi,
+            expected_build_id,
+            expected_abi,
             &mut transport,
         );
     }
@@ -548,6 +550,8 @@ pub fn download_game_from_relay(
         dest,
         free_bytes,
         os,
+        expected_build_id,
+        expected_abi,
     )
 }
 

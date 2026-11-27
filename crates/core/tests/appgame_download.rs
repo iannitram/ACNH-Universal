@@ -428,7 +428,8 @@ fn remote_download_transport_downloads_and_reports_missing_manifest() {
     let dest = private.join(GAME_DIR);
     let empty_remote: Arc<dyn Remote> = Arc::new(MemRemote(Mutex::new(BTreeMap::new())));
     let err =
-        download_game_from_remote(empty_remote, &private, &dest, 1024 * 1024, "linux").unwrap_err();
+        download_game_from_remote(empty_remote, &private, &dest, 1024 * 1024, "linux", "", "")
+            .unwrap_err();
     assert!(err.to_string().contains("No prepared game"));
 
     let mut map = BTreeMap::new();
@@ -459,8 +460,32 @@ fn remote_download_transport_downloads_and_reports_missing_manifest() {
         manifest.to_json().into_bytes(),
     );
     let remote: Arc<dyn Remote> = Arc::new(MemRemote(Mutex::new(map)));
-    let installed = download_game_from_remote(remote, &private, &dest, 1024 * 1024, "linux")
-        .expect("remote download should succeed");
+    // The caller's expectations are checked: a different build id is refused.
+    let err = download_game_from_remote(
+        Arc::clone(&remote),
+        &private,
+        &dest,
+        1024 * 1024,
+        "linux",
+        "other-build",
+        ABI,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("build id mismatch"));
+    let err = download_game_from_remote(
+        Arc::clone(&remote),
+        &private,
+        &dest,
+        1024 * 1024,
+        "linux",
+        BUILD_ID,
+        "other-abi",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("NX_GAME_ABI mismatch"));
+    let installed =
+        download_game_from_remote(remote, &private, &dest, 1024 * 1024, "linux", BUILD_ID, ABI)
+            .expect("remote download should succeed");
     assert_eq!(installed, dest);
     assert!(dest.join("analysis/main.bin").is_file());
     assert!(dest.join("libacnh_game.so").is_file());
@@ -476,4 +501,84 @@ fn manifest_allows_omitted_build_id_and_abi() {
     parsed
         .validate("", "")
         .expect("empty expected build_id/abi validates");
+}
+
+#[cfg(feature = "relay")]
+#[test]
+fn remote_download_fetches_the_manifest_once() {
+    use acnh_core::relay::download_game_from_remote;
+    use save_relay::remote::{Precondition, Remote, RemoteEntry};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct One {
+        manifest: Vec<u8>,
+        body: Vec<u8>,
+        manifest_gets: AtomicUsize,
+    }
+    impl Remote for One {
+        fn get(&self, path: &str) -> save_relay::Result<(Vec<u8>, String)> {
+            if path.ends_with("manifest.json") {
+                self.manifest_gets.fetch_add(1, Ordering::SeqCst);
+                Ok((self.manifest.clone(), "e".into()))
+            } else if path.ends_with("data.bin") {
+                Ok((self.body.clone(), "e".into()))
+            } else {
+                Err(save_relay::Error::NotFound(path.to_owned()))
+            }
+        }
+        fn put(&self, _: &str, _: &[u8], _: &Precondition) -> save_relay::Result<String> {
+            Ok("e".into())
+        }
+        fn list(&self, _: &str) -> save_relay::Result<Vec<RemoteEntry>> {
+            Ok(vec![])
+        }
+        fn delete(&self, _: &str) -> save_relay::Result<()> {
+            Ok(())
+        }
+        fn mkcol(&self, _: &str) -> save_relay::Result<()> {
+            Ok(())
+        }
+        fn copy(&self, _: &str, _: &str) -> save_relay::Result<()> {
+            Ok(())
+        }
+        fn move_to(&self, _: &str, _: &str) -> save_relay::Result<()> {
+            Ok(())
+        }
+    }
+
+    let body = b"decoy bytes".to_vec();
+    let sha: String = Sha256::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let manifest = Manifest {
+        version: 1,
+        build_id: BUILD_ID.into(),
+        nx_game_abi: ABI.into(),
+        files: vec![ManifestFile {
+            path: "data.bin".into(),
+            size: body.len() as u64,
+            sha256: sha,
+        }],
+    };
+    let remote = Arc::new(One {
+        manifest: manifest.to_json().into_bytes(),
+        body,
+        manifest_gets: AtomicUsize::new(0),
+    });
+    let tmp = TempDir::new().unwrap();
+    let private = tmp.path().join("private");
+    let dest = private.join(GAME_DIR);
+    download_game_from_remote(
+        Arc::clone(&remote) as Arc<dyn Remote>,
+        &private,
+        &dest,
+        1024 * 1024,
+        "linux",
+        BUILD_ID,
+        ABI,
+    )
+    .unwrap();
+    assert_eq!(remote.manifest_gets.load(Ordering::SeqCst), 1);
 }
