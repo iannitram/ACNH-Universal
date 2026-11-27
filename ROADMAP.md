@@ -34,20 +34,20 @@ This roadmap was audited against `main` on 2026-11-25 by reading the code (eight
   - **SPEC.** The desktop cloud download (PRs #315, #316) is not in `SPEC.md` and contradicts M18 and M11 as written (#321).
 - **Checked on a device so far:** the Pixel Fold (Mali-G710, not the 1.0 Adreno device) ran the game, made its first save, signed in to Dropbox and pulled an island, and ran the 60 fps SpeedFix build (#264; outdoors it holds 29–32 fps cold and 21–24 hot, so 30 fps with frame generation is its practical setting); these checks predate PRs #304 and #423. The iPad mini Simulator reaches frames at about 45 fps, then stops at a Metal limit only the Simulator has. **The Mac run of 2026-11-26**, on the Mac mini: build 0.11.0-1101159 (from `main` at `210dab9`, SpeedFix on), installed in `~/Applications`, not from a release. Save sync signed in to Dropbox from the launcher; the relay reported the island held by "android" since 2026-11-24 17:39 UTC (the phone's final push never released it: #354, PR #424 open). Play anyway first failed ("no save folder") on a Mac with no island (#429); PR #430 fixed it, and with the patched launcher the Mac pulled the phone's island (`main.dat`, `mainHeader.dat`, `landname.dat`, `Villager0`), the game reached the title screen and the island (Tom Nook's announcement, the player walking with WASD and Space as A) at a steady 28.6–30.0 fps with no errors, quitting from the app menu ran the exit push, and the launcher then showed the island up to date from this Mac. So Android to relay to Mac to relay has run once; the iPad leg and Mac to Android have not. Of PR #430's fixes only Play anyway was run live; the App Nap key, the missing-sign-in error and the name and time changes were not. The run filed #431, #432 and #433. The 1101159 `.ipa`s (the big one, about 10 GB, and the small one, 137,948,405 bytes, with its game folder) are staged in my Dropbox under `_transfers/ACNH-Universal/ios/` and not installed on any device; the small `.ipa`'s game folder still needs my upload to `Apps/save-relay/acnh-universal-game/ios/`.
 
-### Open pull requests (2026-11-27)
+### Open pull requests (2026-11-26)
 
-Eight are open against `main`; `gh pr list` is the live list. None of the Mac run's PRs is open: #430 (8.12) and #438 (8.12b) merged. The `by:hyperion` PRs (all but #415) are the Linux hub's.
+Nine are open against `main`: this docs PR (#442) and the eight below; `gh pr list` is the live list, and `gh pr checks <N>` the live CI. The CI column is as of the end of 2026-11-26. None of the Mac run's PRs is open: #430 (8.12) and #438 (8.12b) merged. The `by:hyperion` PRs (all but #415) are the Linux hub's.
 
 | PR | Issue | What | State |
 |---|---|---|---|
-| #437 | #358 (Refs) | 5.07: hubs serve the prepared game to paired Linux and Windows PCs | draft; waits on my ruling and re-approval of the changed M11, M18 and Won'ts wording, and a run between two real machines; CI pending |
+| #437 | #358 (Refs) | 5.07: hubs serve the prepared game to paired Linux and Windows PCs | draft; waits on my ruling and re-approval of the changed M11, M18 and Won'ts wording, and a run between two real machines; CI green |
 | #436 | #410 (Closes) | 1.38c: skip the host player on iOS/Android, walk the RomFS once, hash paks while copying | ready; CI green |
-| #435 | #368 (Closes) | 9.10: one manifest writer, the `acnh-universal` manifest, the real build id and ABI | ready; an earlier run failed Rust (Windows) and C++ and player (Windows), the rerun is pending. The ruling to merge past red Windows covers Apple PRs only |
-| #434 | #402 (Closes) | 4.17f: header drift check and poison-tolerant locks | ready; CI pending |
+| #435 | #368 (Closes) | 9.10: one manifest writer, the `acnh-universal` manifest, the real build id and ABI | ready; the run on an earlier commit failed Rust (Windows) only (C++ and player (Windows) passed), the other earlier runs were cancelled, and the run on the current commit is in progress. The ruling to merge past red Windows covers Apple PRs only |
+| #434 | #402 (Closes) | 4.17f: header drift check and poison-tolerant locks | ready; CI green |
 | #428 | #364 (Closes) | 9.06: Android `Home` takes no game folder from outside | ready; CI green |
-| #425 | #397 (Closes) | 4.17a: delete the `NX_RUST_RUNTIME` fallback prototype blocks | ready; CI green |
+| #425 | #397 (Closes) | 4.17a: delete the `NX_RUST_RUNTIME` fallback prototype blocks | ready; the last finished run was green, a new run is in progress |
 | #424 | #354 (Refs) | 4.15: Android final push bounded on destroy, audio reopen recoverable; the Bluetooth-output device check is owed | ready; CI green |
-| #415 | #324 (Refs) | 0.06: the build version from the workspace manifest, not from git tags (workspace version `0.12.0`, tags `v<version>`) | draft, `by:mac-mini`; Windows jobs red; needs my ruling on the scheme and the baseline |
+| #415 | #324 (Refs) | 0.06: the build version from the workspace manifest, not from git tags (workspace version `0.12.0`, tags `v<version>`) | draft, `by:mac-mini`; C++ and player (Windows) red, Rust (Windows) green, Rust (macOS) cancelled; needs my ruling on the scheme and the baseline |
 
 ## Decisions I owe
 
@@ -57,7 +57,7 @@ Each of these stops work until I answer. The issue holds the detail.
 |---|---|---|
 | May a PC download its prepared game from a cloud folder, from which services, and must the folder be encrypted? | The code does it (Dropbox, Google Drive, Nextcloud; not encrypted); SPEC M18 and M11 say no; my comment on #68 (2026-11-18) says Dropbox, encrypted | #321 |
 | Does the C++ left in `runtime/src` get ported for 1.0, or does M13 name it as staying? | Stage 4 was recorded as complete and is not | #352 |
-| Do hubs serve game data to PCs (M11 as written), or only the player? | First run cannot finish on a pull-only PC. PR #437 (draft) is built on "serve the prepared game" and needs my ruling and the SPEC re-approval before it can merge | #358, PR #437 |
+| Do hubs serve game data to PCs (M11 as written), or only the player? | First run cannot finish on a pull-only PC | #358 |
 | Which Adreno device is the 1.0 Android device, or does M9 change? | Every Android result is from the Mali Pixel Fold | #370 |
 | Where does the one Android signing key live? | Each checkout signs with its own; an APK from another machine cannot update the app | #366 |
 | How does the SpeedFix patch (CC BY-NC 4.0) ship, and what must `NOTICE` carry? | It is tracked in this public MIT repo and built into my apps | #329 |
@@ -198,7 +198,7 @@ Each stage names its platforms (R04). Stages overlap: anything not blocked can b
 
 Every row is merged and checked in CI on `macos-15` with synthetic inputs: clippy and tests with all features, the save-relay link check, the iOS Rust check and the runtime's iOS static library, the layout tests and `check_ios_compile.sh`, `build_ios.sh` for the Simulator and the device, the bundle checks, `prepare_runner`'s `ios_real` test, and `tests/package_mac_test.sh` (with the Info.plist keys) and `tests/package_ios_test.sh`. Since PR #392 CI also builds the Mac player (release, arm64) and runs `touch_input_test`; it does not run the player.
 
-The current build is 0.11.0-1101159, made on 2026-11-26 from merged `main` at `210dab9` (the merges of that day up to PR #421; not PR #408 or later, so not the 8.12 fixes; the pinned toolchain 1.100.0 has the `aarch64-apple-ios` and `-sim` targets), with SpeedFix on: the `ios` and `mac` targets each ran every Prepare stage and exited 0 and delivered the big `.ipa`, the small `.ipa` (137,948,405 bytes) with its game folder, and the Mac zip, into my Dropbox's `mac/`, `ios/` and `ios/small/`. The 1101029 and 1101141 files are still beside them. The build used about 13 GB of disk (73 GB free at the start, 60 GB at the end). The Mac app of this build was booted on the Mac on 2026-11-26 (in [Where things stand](#where-things-stand)); the `.ipa`s are not installed on a device.
+The current build is 0.11.0-1101159, made on 2026-11-26 from merged `main` at `210dab9` (the merges of that day up to PR #421; not PR #408 or later, so not the 8.12 fixes; the pinned toolchain 1.100.0 has the `aarch64-apple-ios` and `-sim` targets), with SpeedFix on: the `ios` and `mac` targets each ran every Prepare stage and exited 0 and delivered the big `.ipa`, the small `.ipa` (137,948,405 bytes) with its game folder, and the Mac zip, into my Dropbox's `mac/`, `ios/` and `ios/small/`. The build used about 13 GB of disk (73 GB free at the start, 60 GB at the end). The Mac app of this build was booted on the Mac on 2026-11-26 (in [Where things stand](#where-things-stand)); the `.ipa`s are not installed on a device.
 
 | Piece | Status | Still unverified |
 |---|---|---|
