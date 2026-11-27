@@ -484,7 +484,7 @@ fn scan_and_write_make_a_manifest_with_a_real_size_and_hash() {
     let root = dir.path();
     std::fs::create_dir_all(root.join("fonts")).unwrap();
     std::fs::write(root.join("romfs.pak"), b"romfs decoy").unwrap();
-    std::fs::write(root.join("fonts/a \"b\".ttf"), b"font").unwrap();
+    std::fs::write(root.join("fonts/a b\u{e9}.ttf"), b"font").unwrap();
     std::fs::write(root.join(".DS_Store"), b"junk").unwrap();
     std::fs::write(root.join("manifest.json"), b"old").unwrap();
 
@@ -496,7 +496,7 @@ fn scan_and_write_make_a_manifest_with_a_real_size_and_hash() {
     assert_eq!(parsed, manifest);
     parsed.validate(BUILD_ID, ABI).unwrap();
     let paths: Vec<_> = parsed.files.iter().map(|f| f.path.as_str()).collect();
-    assert_eq!(paths, ["fonts/a \"b\".ttf", "romfs.pak"]);
+    assert_eq!(paths, ["fonts/a b\u{e9}.ttf", "romfs.pak"]);
     let romfs = parsed.files.iter().find(|f| f.path == "romfs.pak").unwrap();
     assert_eq!(romfs.size, 11);
     assert_eq!(romfs.sha256, sha256_hex(b"romfs decoy"));
