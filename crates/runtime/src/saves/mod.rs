@@ -7,6 +7,7 @@
 //! registers `acc:u0` / `acc:u1` and `IStorage` / `IStorageAccessor` against the guest IPC
 //! dispatcher.
 
+use crate::ffi::{cstr_opt_lossy, host_log};
 #[allow(unused_imports)]
 use std::collections::BTreeSet;
 #[allow(unused_imports)]
@@ -167,23 +168,6 @@ pub(crate) fn host_data_root() -> String {
         }
     }
     String::from(".")
-}
-
-pub(crate) fn host_log(msg: &str) {
-    if let Some(log_fn) = current_host().log {
-        if let Ok(c) = CString::new(msg) {
-            log_fn(c.as_ptr());
-        }
-    }
-}
-
-pub(crate) fn cstr_opt(ptr: *const c_char) -> Option<String> {
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: caller guarantees `ptr` is a valid NUL-terminated C string when non-null.
-    let s = unsafe { CStr::from_ptr(ptr) };
-    Some(s.to_string_lossy().into_owned())
 }
 
 pub(crate) fn emit_string(

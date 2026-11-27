@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[allow(unused_imports)]
 use std::time::Instant;
 
+use crate::ffi::{cstr_lossy, cstr_opt, host_log};
 #[allow(unused_imports)]
 use crate::{config, saves};
 
@@ -204,24 +205,6 @@ pub(crate) fn current_host() -> AcnhFilesHost {
     *host_lock().lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub(crate) fn cstr_opt<'a>(ptr: *const c_char) -> Option<&'a str> {
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: caller guarantees `ptr` is a valid NUL-terminated C string when non-null.
-    unsafe { CStr::from_ptr(ptr) }.to_str().ok()
-}
-
-pub(crate) fn cstr_lossy(ptr: *const c_char) -> String {
-    if ptr.is_null() {
-        return String::new();
-    }
-    // SAFETY: caller guarantees `ptr` is a valid NUL-terminated C string when non-null.
-    unsafe { CStr::from_ptr(ptr) }
-        .to_string_lossy()
-        .into_owned()
-}
-
 pub(crate) fn emit_string(
     cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     ctx: *mut c_void,
@@ -281,15 +264,6 @@ pub(crate) fn game_root() -> PathBuf {
         }
     }
     data_root()
-}
-
-pub(crate) fn host_log(msg: &str) {
-    if let Some(log_fn) = current_host().log {
-        let sanitized = msg.replace('\0', " ");
-        if let Ok(c) = CString::new(sanitized) {
-            log_fn(c.as_ptr());
-        }
-    }
 }
 
 pub(crate) fn host_thread_id() -> i64 {

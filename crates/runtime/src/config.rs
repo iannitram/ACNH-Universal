@@ -6,8 +6,9 @@
 //! `NX_LANGUAGE` from a prepared game folder). Settings read live are queried via `config_get*`,
 //! and `config_save` rewrites `config.ini` preserving unknown keys.
 
+use crate::ffi::{cstr_opt, host_log};
 use std::collections::HashSet;
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -118,15 +119,6 @@ fn host_version_string() -> String {
         }
     }
     "dev".to_string()
-}
-
-fn host_log(msg: &str) {
-    let h = current_host();
-    if let Some(log_fn) = h.log {
-        if let Ok(cstr) = CString::new(msg.replace('\0', " ")) {
-            log_fn(cstr.as_ptr());
-        }
-    }
 }
 
 fn host_mods_fetch() {
@@ -1046,14 +1038,6 @@ pub fn config_save() -> bool {
 
 // ---- C FFI exports -----------------------------------------------------------------------------
 
-fn cstr_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: Caller guarantees `ptr` is a valid NUL-terminated C string.
-    unsafe { CStr::from_ptr(ptr) }.to_str().ok()
-}
-
 /// # Safety
 /// `host` must be null or point to a valid `AcnhConfigHost` for the duration of the call.
 #[no_mangle]
@@ -1063,6 +1047,7 @@ pub unsafe extern "C" fn acnh_config_set_host(host: *const AcnhConfigHost) {
     }
     // SAFETY: Caller guarantees `host` points to a valid `AcnhConfigHost`.
     let h = unsafe { *host };
+    crate::ffi::set_log(h.log);
     *host_lock().lock().unwrap_or_else(|e| e.into_inner()) = h;
 }
 
@@ -1088,40 +1073,40 @@ pub extern "C" fn acnh_config_get(
     cb: AcnhConfigStringCb,
     ctx: *mut c_void,
 ) {
-    let key = cstr_to_str(key).unwrap_or("");
-    let fallback = cstr_to_str(fallback).unwrap_or("");
+    let key = cstr_opt(key).unwrap_or("");
+    let fallback = cstr_opt(fallback).unwrap_or("");
     let val = config_get(key, fallback);
     cb(val.as_ptr().cast::<c_char>(), val.len(), ctx);
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_config_get_int(key: *const c_char, fallback: c_int) -> c_int {
-    let key = cstr_to_str(key).unwrap_or("");
+    let key = cstr_opt(key).unwrap_or("");
     config_get_int(key, fallback)
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_config_get_int64(key: *const c_char, fallback: i64) -> i64 {
-    let key = cstr_to_str(key).unwrap_or("");
+    let key = cstr_opt(key).unwrap_or("");
     config_get_int64(key, fallback)
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_config_get_float(key: *const c_char, fallback: f32) -> f32 {
-    let key = cstr_to_str(key).unwrap_or("");
+    let key = cstr_opt(key).unwrap_or("");
     config_get_float(key, fallback)
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_config_get_bool(key: *const c_char, fallback: bool) -> bool {
-    let key = cstr_to_str(key).unwrap_or("");
+    let key = cstr_opt(key).unwrap_or("");
     config_get_bool(key, fallback)
 }
 
 #[no_mangle]
 pub extern "C" fn acnh_config_set(key: *const c_char, value: *const c_char) {
-    let key = cstr_to_str(key).unwrap_or("");
-    let value = cstr_to_str(value).unwrap_or("");
+    let key = cstr_opt(key).unwrap_or("");
+    let value = cstr_opt(value).unwrap_or("");
     config_set(key, value);
 }
 
@@ -1145,7 +1130,7 @@ pub extern "C" fn acnh_config_generation() -> u64 {
 
 #[no_mangle]
 pub extern "C" fn acnh_config_is_env_from_config(name: *const c_char) -> bool {
-    let name = cstr_to_str(name).unwrap_or("");
+    let name = cstr_opt(name).unwrap_or("");
     config_is_env_from_config(name)
 }
 
@@ -1161,7 +1146,7 @@ pub extern "C" fn acnh_config_is_handheld() -> bool {
 
 #[no_mangle]
 pub extern "C" fn acnh_config_preset(name: *const c_char, cb: AcnhConfigEntryCb, ctx: *mut c_void) {
-    let name = cstr_to_str(name).unwrap_or("");
+    let name = cstr_opt(name).unwrap_or("");
     for &(k, v) in preset_named(name) {
         cb(
             k.as_ptr().cast::<c_char>(),
@@ -1175,7 +1160,7 @@ pub extern "C" fn acnh_config_preset(name: *const c_char, cb: AcnhConfigEntryCb,
 
 #[no_mangle]
 pub extern "C" fn acnh_config_needs_restart(key: *const c_char) -> bool {
-    let key = cstr_to_str(key).unwrap_or("");
+    let key = cstr_opt(key).unwrap_or("");
     config_needs_restart(key)
 }
 

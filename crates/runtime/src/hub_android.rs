@@ -8,7 +8,7 @@ use acnh_core::config::Config;
 use acnh_core::hub;
 use acnh_core::platform::{atomic_write, AppDirs, Os};
 use acnh_core::Result;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, CString};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -57,11 +57,9 @@ fn cstr(ptr: *const c_char) -> std::result::Result<String, String> {
     if ptr.is_null() {
         return Err("missing string argument".into());
     }
-    // SAFETY: caller provides a NUL-terminated UTF-8 string for the duration of the call.
-    unsafe { CStr::from_ptr(ptr) }
-        .to_str()
+    crate::ffi::cstr_opt(ptr)
         .map(str::to_owned)
-        .map_err(|_| "invalid UTF-8 string".into())
+        .ok_or_else(|| "invalid UTF-8 string".into())
 }
 
 fn into_c_string(text: String) -> *mut c_char {

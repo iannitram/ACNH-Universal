@@ -4,6 +4,7 @@
 //! `hle_web.cpp`, `hle_pl.cpp`, `hle_album.cpp`, `hle_jpeg.cpp`, `hle_nfp.cpp`, `hle_bcat.cpp`,
 //! `hle_movie.cpp`, `hle_friends.cpp`, `hle_ngc.cpp`, and `hle_ldn.cpp`.
 
+use crate::ffi::host_log;
 #[allow(unused_imports)]
 use std::collections::{BTreeMap, VecDeque};
 #[allow(unused_imports)]
@@ -81,7 +82,7 @@ pub struct AcnhFriendInfo {
 
 #[repr(C)]
 pub struct AcnhServicesHost {
-    pub log: Option<unsafe extern "C" fn(*const c_char)>,
+    pub log: Option<extern "C" fn(*const c_char)>,
     pub config_is_handheld: Option<unsafe extern "C" fn() -> bool>,
     pub config_get_bool: Option<unsafe extern "C" fn(*const c_char, bool) -> bool>,
     pub desired_language: Option<unsafe extern "C" fn() -> u64>,
@@ -211,22 +212,14 @@ pub unsafe extern "C" fn acnh_services_set_host(host: *const AcnhServicesHost) {
     if host.is_null() {
         return;
     }
-    let mut g = HOST.lock().unwrap();
-    *g = Some(std::ptr::read(host));
+    let h = std::ptr::read(host);
+    crate::ffi::set_log(h.log);
+    *HOST.lock().unwrap() = Some(h);
 }
 
 pub(crate) fn with_host<R>(f: impl FnOnce(&AcnhServicesHost) -> R) -> Option<R> {
     let g = HOST.lock().unwrap();
     g.as_ref().map(f)
-}
-
-pub(crate) fn host_log(msg: &str) {
-    if let Some(Some(f)) = with_host(|h| h.log) {
-        if let Ok(cstr) = CString::new(msg) {
-            // SAFETY: f is a host callback installed through acnh_services_set_host; the C++ host keeps it valid for the process lifetime, and every argument is a plain value or a live local buffer sized as passed.
-            unsafe { f(cstr.as_ptr()) };
-        }
-    }
 }
 
 pub(crate) fn host_is_handheld() -> bool {

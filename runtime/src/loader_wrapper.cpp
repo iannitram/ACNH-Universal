@@ -184,7 +184,7 @@ void acnh_loader_trace_sp(AcnhCpu* c, uint64_t pc);
 uint64_t acnh_loader_mrs(AcnhCpu* c, uint32_t sysreg);
 void acnh_loader_msr(AcnhCpu* c, uint32_t sysreg, uint64_t value);
 void acnh_loader_load_modules(const AcnhModuleInfo* const* mods, size_t count, const char* data_dir, bool dynamic);
-void acnh_loader_boot(bool dynamic);
+void acnh_loader_boot(bool dynamic, uint32_t expected_abi);
 }
 #endif
 
@@ -465,7 +465,7 @@ void boot() {
 #else
     constexpr bool kDynamic = false;
 #endif
-    acnh_loader_boot(kDynamic);
+    acnh_loader_boot(kDynamic, kRuntimeAbi);
 }
 
 }  // namespace nx

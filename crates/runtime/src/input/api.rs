@@ -18,6 +18,7 @@ pub unsafe extern "C" fn acnh_input_set_host(host: *const AcnhInputHost) {
         // SAFETY: Caller passes a valid pointer to `AcnhInputHost`.
         unsafe { *host }
     };
+    crate::ffi::set_log(new_host.log);
     let mu = HOST.get_or_init(|| Mutex::new(new_host));
     if let Ok(mut guard) = mu.lock() {
         *guard = new_host;

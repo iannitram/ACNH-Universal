@@ -17,6 +17,7 @@ pub unsafe extern "C" fn acnh_saves_set_host(host: *const AcnhSavesHost) {
     } else {
         // SAFETY: caller guarantees `host` points to a valid `AcnhSavesHost`.
         *guard = unsafe { *host };
+        crate::ffi::set_log(guard.log);
     }
 }
 
@@ -127,7 +128,7 @@ pub extern "C" fn acnh_saves_looks_like_acnh_save(
     why_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     why_ctx: *mut c_void,
 ) -> bool {
-    let Some(dir_str) = cstr_opt(dir) else {
+    let Some(dir_str) = cstr_opt_lossy(dir) else {
         emit_string(why_cb, why_ctx, "folder not found");
         return false;
     };
@@ -153,7 +154,7 @@ pub extern "C" fn acnh_saves_import_save(
     err_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     err_ctx: *mut c_void,
 ) -> bool {
-    let Some(from_str) = cstr_opt(from) else {
+    let Some(from_str) = cstr_opt_lossy(from) else {
         emit_string(err_cb, err_ctx, "invalid path");
         return false;
     };
@@ -176,7 +177,7 @@ pub extern "C" fn acnh_saves_export_save(
     err_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     err_ctx: *mut c_void,
 ) -> bool {
-    let Some(to_str) = cstr_opt(to) else {
+    let Some(to_str) = cstr_opt_lossy(to) else {
         emit_string(err_cb, err_ctx, "invalid path");
         return false;
     };
@@ -295,7 +296,7 @@ pub extern "C" fn acnh_saves_restore_backup(
     err_cb: Option<extern "C" fn(*const c_char, usize, *mut c_void)>,
     err_ctx: *mut c_void,
 ) -> bool {
-    let Some(name_str) = cstr_opt(name) else {
+    let Some(name_str) = cstr_opt_lossy(name) else {
         emit_string(err_cb, err_ctx, "invalid backup name");
         return false;
     };

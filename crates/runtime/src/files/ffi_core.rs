@@ -16,6 +16,7 @@ pub unsafe extern "C" fn acnh_files_set_host(host: *const AcnhFilesHost) {
     }
     // SAFETY: caller guarantees `host` is valid for reads.
     let h = unsafe { *host };
+    crate::ffi::set_log(h.log);
     *host_lock().lock().unwrap_or_else(|e| e.into_inner()) = h;
 }
 
