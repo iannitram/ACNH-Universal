@@ -125,4 +125,12 @@ for link in "$work/links/stage" "$work/links/deeper/stage"; do
     case "$out" in *usage:*) ;; *) die "run through $link with no arguments, it did not print the usage: $out" ;; esac
 done
 say "run through a symlink, it still finds tools/remove_tree.sh"
+# The cargo fallback ($ACNH_UNIVERSAL_CLI unset) cd's to the repo root: a relative folder must still be written where it is.
+rel=$work/rel
+mkdir -p "$rel/folder"
+printf 'rel decoy' > "$rel/folder/file.bin"
+(cd "$rel" && unset ACNH_UNIVERSAL_CLI && . "$root/tools/write_manifest.sh" && write_manifest folder "$build_id" "$abi") > "$work/rel.log" 2>&1 || { cat "$work/rel.log" >&2; die "a relative folder without ACNH_UNIVERSAL_CLI was not written"; }
+[ -f "$rel/folder/manifest.json" ] || die "no manifest.json in the relative folder"
+[ ! -e "$root/folder/manifest.json" ] || die "the manifest went to the repo root"
+say "a relative folder with ACNH_UNIVERSAL_CLI unset gets its manifest in place"
 echo "stage_dropbox_game tests passed"

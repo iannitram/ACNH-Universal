@@ -4,11 +4,14 @@
 # (acnh_core::appgame::Manifest, #368). It refuses an empty build id or ABI and checks the manifest against the files
 # before it renames it into place. $ACNH_UNIVERSAL_CLI names a built acnh-universal; without it, cargo builds one.
 write_manifest() {
+  local folder
+  folder=$(cd "$1" 2>/dev/null && pwd -P) || { echo "error: $1 is not a folder" >&2; return 1; }
   if [ -n "${ACNH_UNIVERSAL_CLI:-}" ]; then
-    "$ACNH_UNIVERSAL_CLI" manifest --out "$1" --build-id "$2" --abi "$3"
+    "$ACNH_UNIVERSAL_CLI" manifest --out "$folder" --build-id "$2" --abi "$3"
   else
+    # The folder is absolute before the cd: a relative one would resolve against the repo root.
     (cd "$(dirname "${BASH_SOURCE[0]}")/.." && cargo run -q --locked -p acnh-cli --bin acnh-universal -- \
-      manifest --out "$1" --build-id "$2" --abi "$3")
+      manifest --out "$folder" --build-id "$2" --abi "$3")
   fi
 }
 
